@@ -159,6 +159,7 @@ interface Backend {
   incrRate(userId: number): Promise<number>;
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
+  claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
   getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
@@ -185,6 +186,7 @@ class RedisBackend implements Backend {
   private pk = (hash: string) => `chuck:cli:pairing:${hash}`;
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
   private uk = (id: number) => `chuck:user:${id}:devices`;
+  private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
 
   async getSession(userId: number): Promise<UserSession> {
     const raw = await this.r.get(this.sk(userId));
@@ -210,6 +212,9 @@ class RedisBackend implements Backend {
   }
   async releaseLock(userId: number, token: string): Promise<void> {
     await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:lock:${userId}`, token);
+  }
+  async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
+    return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
   }
   async getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined> {
     const raw = await this.r.get(this.dk(userId));
@@ -326,6 +331,7 @@ class MemoryBackend implements Backend {
   private locks = new Map<number, { token: string; exp: number }>();
   private pairings = new Map<string, CliPairingRecord>();
   private devices = new Map<string, CliDeviceRecord>();
+  private telegramUpdates = new Map<number, number>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
@@ -349,6 +355,12 @@ class MemoryBackend implements Backend {
   }
   async releaseLock(userId: number, token: string): Promise<void> {
     if (this.locks.get(userId)?.token === token) this.locks.delete(userId);
+  }
+  async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
+    const expiresAt = this.telegramUpdates.get(updateId);
+    if (expiresAt && expiresAt > Date.now()) return false;
+    this.telegramUpdates.set(updateId, Date.now() + ttlSeconds * 1000);
+    return true;
   }
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
@@ -685,6 +697,11 @@ export async function acquireUserLock(uid: number, token: string, leaseSeconds =
 
 export async function releaseUserLock(uid: number, token: string): Promise<void> {
   return backend.releaseLock(uid, token);
+}
+
+export async function claimTelegramUpdate(updateId: number, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
+  if (!Number.isSafeInteger(updateId) || updateId < 0) return true;
+  return backend.claimTelegramUpdate(updateId, ttlSeconds);
 }
 
 export function hashCliSecret(value: string): string {

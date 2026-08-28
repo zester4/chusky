@@ -7,6 +7,7 @@ class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
   events = new Map<string, (ctx: any) => Promise<void>>();
   callbacks: { pattern: RegExp; handler: (ctx: any) => Promise<void> }[] = [];
+  use() { return this; }
   catch() { return this; }
   command(name: string, handler: (ctx: any) => Promise<void>) { this.commands.set(name, handler); }
   on(name: string, handler: (ctx: any) => Promise<void>) { this.events.set(name, handler); }

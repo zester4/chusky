@@ -10,6 +10,7 @@ import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash,
+  claimTelegramUpdate,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -123,6 +124,17 @@ function buildStatusBar(steps: string[]): string {
 // ── Register all handlers ─────────────────────────────────────────────────────
 
 export function registerHandlers(bot: Bot): void {
+
+  // Telegram retries a webhook update when a long agent turn has not completed.
+  // Claim the update ID durably so a retry cannot execute the same request twice.
+  bot.use(async (ctx, next) => {
+    const updateId = ctx.update.update_id;
+    if (!(await claimTelegramUpdate(updateId))) {
+      logger.warn({ updateId }, "Ignoring duplicate Telegram update");
+      return;
+    }
+    await next();
+  });
 
   // /start ───────────────────────────────────────────────────────────────────
   bot.command("start", async (ctx) => {

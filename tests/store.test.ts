@@ -5,6 +5,7 @@ import {
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
   listReminders, releaseUserLock, saveDaytonaWorkspace, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
+  claimTelegramUpdate,
   type DaytonaWorkspaceRecord,
 } from "../src/store.js";
 
@@ -98,6 +99,12 @@ test("trigger events are idempotent", async () => {
   const eventId = `event-${Date.now()}-${Math.random()}`;
   assert.equal(await claimTriggerEvent(eventId), true);
   assert.equal(await claimTriggerEvent(eventId), false);
+});
+
+test("Telegram update claims deduplicate retries", async () => {
+  assert.equal(await claimTelegramUpdate(991001), true);
+  assert.equal(await claimTelegramUpdate(991001), false);
+  assert.equal(await claimTelegramUpdate(991002), true);
 });
 
 test("CLI pairing is one-time and device tokens authenticate by hash", async () => {
