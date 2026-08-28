@@ -1,4 +1,4 @@
-import { Bot, InputFile, webhookCallback } from "grammy";
+import { Bot, InputFile } from "grammy";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -19,6 +19,7 @@ import { registerChannelRoutes } from "./channels/routes.js";
 import { SlackAdapter } from "./channels/slack.js";
 import { WhatsAppAdapter } from "./channels/whatsapp.js";
 import { TelegramAdapter } from "./channels/telegram.js";
+import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 
 function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown> }): string {
   const redacted = Object.entries(event.payload ?? {}).filter(([key, value]) => {
@@ -425,11 +426,24 @@ async function main(): Promise<void> {
       }
     });
 
-    // Telegram updates
-    const handleUpdate = webhookCallback(bot, "hono", {
-      secretToken: config.webhookSecret || undefined,
+    // Telegram updates. Telegram expects a webhook response within roughly
+    // ten seconds. Agent/tool work can take much longer, so acknowledge only
+    // after validation and dispatch grammY in the background. This prevents
+    // Telegram retries from turning slow tool calls into duplicate updates.
+    app.post("/webhook", async (c) => {
+      const secret = c.req.header("X-Telegram-Bot-Api-Secret-Token");
+      if (!verifyTelegramWebhookSecret(secret, config.webhookSecret)) {
+        return c.json({ ok: false, error: "invalid webhook secret" }, 401);
+      }
+      const rawBody = await c.req.text();
+      const update = parseTelegramWebhookUpdate(rawBody);
+      if (!update) return c.json({ ok: false, error: "invalid Telegram update" }, 400);
+      const updateId = update.update_id;
+      void bot.handleUpdate(update as Parameters<Bot["handleUpdate"]>[0]).catch((error) => {
+        logger.error({ err: error, updateId }, "Telegram update processing failed after webhook acknowledgement");
+      });
+      return c.json({ ok: true });
     });
-    app.post("/webhook", (c) => handleUpdate(c));
 
     // Composio trigger events
     app.post("/composio/triggers", async (c) => {
@@ -484,7 +498,9 @@ async function main(): Promise<void> {
     await bot.api.setWebhook(`${config.webhookUrl}/webhook`, {
       secret_token: config.webhookSecret || undefined,
       allowed_updates: ["message", "edited_message", "callback_query", "inline_query"],
-      drop_pending_updates: true,
+      // Keep queued messages across a normal process restart. Duplicates are
+      // handled by the durable Telegram update claim in the handlers.
+      drop_pending_updates: false,
     });
 
     logger.info({ url: `${config.webhookUrl}/webhook` }, "Chusky webhook registered");

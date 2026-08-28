@@ -10,6 +10,7 @@ import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSi
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
+import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
 import { acquireUserLock, getOutbox, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, OutboundMessage } from "../src/channels/contracts.js";
 
@@ -137,4 +138,15 @@ test("webhook routes return non-2xx for invalid provider signatures", async () =
   const whatsappResponse = await app.request("http://localhost/whatsapp/webhook", { method: "POST", body: "{}", headers: { "x-hub-signature-256": "sha256=bad" } });
   assert.equal(slackResponse.status, 401);
   assert.equal(whatsappResponse.status, 401);
+});
+
+test("Telegram webhook validation is strict and update parsing is bounded", () => {
+  assert.equal(verifyTelegramWebhookSecret("secret", "secret"), true);
+  assert.equal(verifyTelegramWebhookSecret("wrong", "secret"), false);
+  assert.equal(verifyTelegramWebhookSecret(undefined, "secret"), false);
+  assert.equal(verifyTelegramWebhookSecret(undefined, ""), true);
+  assert.deepEqual(parseTelegramWebhookUpdate('{"update_id":42,"message":{"text":"hi"}}')?.update_id, 42);
+  assert.equal(parseTelegramWebhookUpdate("[]"), undefined);
+  assert.equal(parseTelegramWebhookUpdate('{"update_id":1.5}'), undefined);
+  assert.equal(parseTelegramWebhookUpdate("not-json"), undefined);
 });
