@@ -41,6 +41,61 @@ For deep work, load only the references relevant to the task:
 - `src/markdown.ts`: Markdown-to-Telegram-HTML conversion and message splitting.
 - `tests/`: Node test-runner coverage for policy, native tool schemas, Markdown, memory ranking, and approval matching.
 
+## Channel architecture and operations
+
+Chusky has a provider-neutral channel boundary in `src/channels/`. It is inspired by
+the same adapter/coordinator/state separation used by Vercel Chat SDK, but it is
+Chusky's own implementation and must not be described as the `chat` package.
+
+| Provider | Status | Notes |
+|---|---|---|
+| Telegram | Active | Existing grammY handlers remain the primary inbound path; the adapter supplies the shared delivery boundary. |
+| CLI | Active | Authenticated remote client; it shares the user's private Redis-backed account session. |
+| Slack | Implemented | Signed Events API and interaction routes, DMs, mentions, threads, OAuth installation, and Block Kit approval buttons. |
+| WhatsApp | Implemented | Signed Cloud API webhook, text/media normalization, media hydration, debounce, receipts, and opt-in proactive notifications. |
+| SMS | Boundary only | A provider-neutral adapter and normalizer exist; no live sender/webhook is registered. |
+| Voice | Boundary only | Transcript and speech delivery contracts exist; no telephony/STT/TTS provider is registered. |
+
+The normalized contracts are in `src/channels/contracts.ts`. Adapters verify raw
+requests, normalize provider events, render outbound messages, and expose capability
+metadata. `ChannelGateway` resolves a verified external identity to the internal
+`account_<telegram-user-id>`, chooses private versus shared conversation scope,
+acquires the Redis account lock, invokes the shared agent handler, and sends through
+the durable Redis outbox.
+
+Channel invariants:
+
+- Never trust a provider display name or arbitrary provider ID as ownership. Require a
+  one-time link code or a verified provider OAuth result.
+- Never put an unlinked message into history, memory, tasks, approvals, or the agent
+  loop.
+- Private DMs use the account session. Public channel threads use a provider/thread
+  conversation record and must not inherit private history automatically.
+- Claim provider event IDs in Redis before processing and mark them complete only
+  after agent work and delivery succeed. Allow stale processing leases to recover.
+- Persist every outbound response in the idempotent, leased outbox before sending.
+  Provider receipts and retry state must be durable.
+- Verify Slack and WhatsApp signatures against the exact raw body, reject stale or
+  invalid requests with non-2xx responses, and acknowledge provider webhooks quickly.
+- Redact raw event payloads from user-facing messages and logs; send bounded safe
+  summaries for trigger notifications.
+
+Channel onboarding and commands:
+
+1. Configure Redis and the provider's HTTPS webhook credentials.
+2. Run `/channel link slack` or `/channel link whatsapp` from the owning Telegram
+   account.
+3. Complete Slack OAuth, or send the WhatsApp one-time code with `/link <code>`.
+4. Verify `/channel list`, then test a private message and an approval interaction.
+5. Use `/channel notify whatsapp on|off` to control proactive WhatsApp delivery.
+
+Slack routes are `/slack/events`, `/slack/interactions`, `/slack/install`, and
+`/slack/oauth/callback`. WhatsApp uses `GET` and `POST /whatsapp/webhook`. Polling
+mode is Telegram-only; external webhooks require `WEBHOOK_URL`, HTTPS, and Redis.
+Register a new provider in `routes.ts` and `index.ts`, add adapter tests for valid,
+invalid, duplicate, stale, and unauthorized events, and keep all provider-specific
+logic inside `src/channels/`.
+
 When a change crosses Telegram and CLI, keep business behavior in shared agent/store modules and keep transport-specific formatting or input handling in `handlers.ts` and `src/cli/`. Do not fork session, model, approval, or persistence semantics between transports.
 
 ## Agent and model behavior

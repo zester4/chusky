@@ -26,6 +26,7 @@ Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** v
 | **Shared channel gateway** | One account identity and durable conversation/outbox boundary for Telegram, CLI, Slack, and WhatsApp |
 | **Verified Slack adapter** | Signed Events API/interactions, DMs, mentions, threads, OAuth installation, and Block Kit approvals |
 | **Verified WhatsApp adapter** | Signed Cloud API webhooks, text/media normalization, and durable outbound receipts |
+| **Provider boundaries** | SMS and voice contracts are available for provider injection; live provider routes are not enabled yet |
 
 ---
 
@@ -205,6 +206,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli revoke <name>` | Revoke a linked terminal |
 | `/channel link slack|whatsapp` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
+| `/channel notify slack|whatsapp on|off` | Enable or disable proactive notifications for a linked channel |
 
 ## Natural-language reminders, jobs, and scratchpad
 
@@ -246,6 +248,23 @@ The channel gateway keeps the internal account identity (`account_<telegram-user
 Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease.
 
 Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
+
+### Channel support and operating model
+
+| Channel | Current status | Conversation behavior |
+|---|---|---|
+| Telegram | Active | Primary bot transport; private history is retained in the account session |
+| CLI | Active | Authenticated client of the deployed service; shares the user's private account session |
+| Slack | Implemented | DMs use private account history; channel threads are shared-scope conversations |
+| WhatsApp | Implemented | Linked private chats use the account session; proactive notifications require explicit opt-in |
+| SMS | Boundary only | Requires a provider sender, webhook route, signature scheme, and deployment wiring |
+| Voice | Boundary only | Requires a telephony/STT/TTS provider and deployment wiring |
+
+To connect Slack or WhatsApp, first run `/channel link slack` or `/channel link whatsapp` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky's history, memory, tasks, or approvals. Use `/channel list` to inspect links and `/channel notify whatsapp on` only when the user wants proactive WhatsApp delivery.
+
+In webhook mode, provider routes must be publicly reachable over HTTPS. Slack uses `/slack/events` and `/slack/interactions`; WhatsApp Cloud API uses `GET` and `POST /whatsapp/webhook`. Both routes verify the raw request signature, reject invalid requests with a non-2xx status, acknowledge provider webhooks quickly, and dispatch work asynchronously. Duplicate events are claimed in Redis, and every outbound reply is persisted in the Redis outbox before provider delivery.
+
+The channel gateway is intentionally provider-neutral. It resolves provider identity to `account_<telegram-user-id>`, applies private/shared conversation scope, obtains the distributed account lock, runs the shared agent handler, and recovers queued outbound messages after a process restart. Keep provider parsing, signature verification, and formatting inside `src/channels/`; do not add provider payload parsing to `agent.ts` or `handlers.ts`.
 
 ---
 
