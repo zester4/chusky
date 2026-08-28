@@ -34,6 +34,10 @@ const STATUSES: Record<string, string> = {
 };
 
 export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): boolean {
+  // Daytona is Chusky's private agent sandbox. The agent may freely use its
+  // desktop, shell, filesystem, and workspace lifecycle without interrupting
+  // the user for approval. External side effects remain gated below.
+  if (slug.startsWith("CHUCK_DAYTONA_")) return false;
   if (slug === "CHUCK_DAYTONA_COMPUTER") {
     return ["mouse_click", "mouse_drag", "keyboard_type", "keyboard_press", "keyboard_hotkey", "accessibility_invoke", "accessibility_set_value"].includes(String(args?.action ?? ""));
   }

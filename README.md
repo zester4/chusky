@@ -60,13 +60,68 @@ npm run cli -- auth link --server https://your-chusky-host --code 123456 --name 
 npm run cli
 ```
 
-The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access.
+The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
 
-CLI commands include `/history`, `/model` (interactive picker) or `/model <openrouter-model>`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Paste multiline text directly and press Enter to send; `Ctrl+J` inserts a newline while typing. Long Markdown responses and history use a keyboard pager (`Space`/Down, `b`/Up, `q`). Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram.
+CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/model` (interactive picker) or `/model <openrouter-model>`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, and task lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram.
+
+Email, publishing, deletion, payment, and direct externally visible actions require the approval picker before execution. Chusky's private Daytona computer and sandbox are agent-controlled and do not prompt for approval. `COMPOSIO_MULTI_EXECUTE_TOOL` itself is treated as an orchestration wrapper and does not prompt. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
+`/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
+`/cli/collection/jobs`. Each accepts `page`, `pageSize` (capped server-side), and an optional
+`query`, and returns `total`/`totalPages`; `/cli/session?page=&pageSize=` provides the same
+pagination metadata for session history while returning only bounded summaries and counts.
 
 ---
 
 ## Deploy
+
+### Stop, start, and restart Chusky on Oracle
+
+When Chusky is running under PM2, control only the `chusky` process. This leaves the
+other applications (`hubtel-gateway`, `selit-pay`, and `verifo`) and Nginx running.
+
+```bash
+cd ~/chusky
+pm2 status
+pm2 stop chusky
+```
+
+Use these commands to manage it:
+
+```bash
+pm2 start chusky                 # resume a stopped Chusky process
+pm2 restart chusky --update-env  # restart after changing .env
+pm2 logs chusky --lines 100      # inspect Chusky logs; Ctrl+C exits the viewer
+pm2 save                         # persist the current PM2 state across reboot
+```
+
+To update Chusky safely while keeping the other services untouched:
+
+```bash
+cd ~/chusky
+pm2 stop chusky
+git pull --ff-only origin main
+npm install --no-audit --no-fund
+NODE_OPTIONS="--max-old-space-size=512" npm run build
+pm2 start chusky
+pm2 save
+```
+
+Verify that it is listening on the configured Chusky port and that Nginx can reach it:
+
+```bash
+pm2 status
+sudo ss -ltnp | grep :3003
+curl -i https://chusky.selithub.shop/health
+```
+
+If Chusky was started directly in the terminal with `npm start`, press `Ctrl+C` to stop
+that foreground process. Do not run `npm start` while `pm2 status` shows Chusky as online:
+both processes try to use port 3003 and the second one fails with `EADDRINUSE`.
+
+Do not use `pm2 stop all`, `pm2 delete all`, `pkill node`, or `sudo systemctl stop nginx`;
+those commands can stop the other applications or the reverse proxy. `pm2 delete chusky`
+removes Chusky from PM2 entirely and is only appropriate when intentionally uninstalling
+its PM2 registration, not for a normal temporary stop.
 
 ### Railway
 1. Push to GitHub → Railway → New Project → Deploy from repo
@@ -131,6 +186,12 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/clear session` | Wipe history and reset the Composio session |
 | `/triggers` | List your Composio triggers |
 | `/trigger create|enable|disable|delete` | Manage a Composio trigger |
+| `/tasks` | List durable tasks and their current status |
+| `/task <id>` | Inspect a task, checkpoint, next action, and audit events |
+| `/task retry|cancel <id>` | Retry or cancel an owned task |
+| `/attach "path" [instruction]` | Send an image, audio, video, PDF, text, or Markdown file to Chusky |
+| `/devices` | List linked terminal devices |
+| `/revoke <name>` | Revoke a linked terminal device |
 | `/image <description>` | Generate an image with OpenRouter |
 | `/export` | Download conversation as `.txt` |
 | `/usage` | Messages sent + model |

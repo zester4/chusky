@@ -61,6 +61,7 @@ Use an in-memory Hono app and mocked agent/store boundaries to verify:
 - `/cli/chat/stream` emits ordered `start`, `delta`, and `done` events
 - stream failures emit one terminal error and release the user lock
 - approval-required streams do not execute the external tool
+- Daytona computer and sandbox actions execute without an approval prompt
 - clear-history and clear-session preserve their distinct semantics
 - rate-limit, usage-cap, malformed JSON, oversized input, and lock-timeout responses
 

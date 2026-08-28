@@ -1,12 +1,13 @@
 import type { CliModel, ChuskyClient } from "./client.js";
-import { emitKeypressEvents } from "node:readline";
+import { clearScreenDown, emitKeypressEvents, moveCursor } from "node:readline";
+import { paint } from "./renderer.js";
 
-const ESC = "\u001b[";
-
-function clearScreen(): void { process.stdout.write(`${ESC}2J${ESC}H`); }
-function label(model: CliModel, current: string): string {
-  const marker = model.id === current ? "*" : " ";
-  return `${marker} ${model.name || model.id}  (${model.id})`;
+function label(model: CliModel, current: string, selected: boolean, number: number): string {
+  const marker = selected ? "❯" : " ";
+  const shortcut = number === 10 ? "0" : String(number);
+  const currentLabel = model.id === current ? "  (current)" : "";
+  const row = `${shortcut} ${model.name || model.id}  (${model.id})${currentLabel}`;
+  return selected ? `${paint(marker, "cyan")} ${paint(row, "white")}` : `  ${row}`;
 }
 
 export async function pickModel(client: ChuskyClient, current: string, pageSize = 10): Promise<string | undefined> {
@@ -16,6 +17,7 @@ export async function pickModel(client: ChuskyClient, current: string, pageSize 
   let models: CliModel[] = [];
   let totalPages = 1;
   let loading = false;
+  let renderedLines = 0;
 
   const load = async () => {
     loading = true;
@@ -34,16 +36,30 @@ export async function pickModel(client: ChuskyClient, current: string, pageSize 
       stdin.removeListener("keypress", onKeypress);
       stdin.setRawMode?.(false);
       stdin.pause();
-      clearScreen();
+      if (renderedLines > 0) {
+        moveCursor(process.stdout, 0, -renderedLines);
+        clearScreenDown(process.stdout);
+      }
+      process.stdout.write("\n");
       resolve(value);
     };
     const draw = () => {
-      clearScreen();
-      console.log(`Chusky model picker  •  page ${page}/${totalPages}`);
-      console.log("↑/↓/Tab navigate   Space/Enter select   n/p page   Esc cancel\n");
-      if (loading) { console.log("Loading…"); return; }
-      for (let i = 0; i < models.length; i++) console.log(`${i === index ? "❯" : " "} ${label(models[i], current)}`);
-      console.log(`\n${models.length} models shown. Use /model <id> to select directly.`);
+      if (renderedLines > 0) {
+        moveCursor(process.stdout, 0, -renderedLines);
+        clearScreenDown(process.stdout);
+      }
+      const lines = [
+        `${paint("Chusky model picker", "cyan")}  •  page ${page}/${totalPages}`,
+        "↑/↓ or Tab move   Space/Enter select   1-9/0 quick select   n/p page   Esc cancel",
+        "",
+      ];
+      if (loading) lines.push(paint("Loading…", "dim"));
+      else {
+        for (let i = 0; i < models.length; i++) lines.push(label(models[i], current, i === index, i + 1));
+        lines.push("", `${models.length} models shown. Enter selects the highlighted row.`);
+      }
+      process.stdout.write(`${lines.join("\n")}\n`);
+      renderedLines = lines.length;
     };
     const changePage = async (next: number) => {
       if (next < 1 || next > totalPages || loading) return;
@@ -57,7 +73,11 @@ export async function pickModel(client: ChuskyClient, current: string, pageSize 
       if (key.name === "down" || key.name === "tab") { index = (index + 1) % Math.max(1, models.length); draw(); return; }
       if (key.name === "n") { void changePage(page + 1); return; }
       if (key.name === "p") { void changePage(page - 1); return; }
-      if (key.name === "space" || key.name === "return") { finish(models[index]?.id); }
+      if (key.name === "space" || key.sequence === " " || key.name === "return" || key.sequence === "\r" || key.sequence === "\n") { finish(models[index]?.id); return; }
+      if (key.name && /^[0-9]$/.test(key.name)) {
+        const quickIndex = key.name === "0" ? 9 : Number(key.name) - 1;
+        if (models[quickIndex]) { index = quickIndex; draw(); }
+      }
     };
     emitKeypressEvents(stdin);
     stdin.setRawMode?.(true);

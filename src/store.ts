@@ -750,6 +750,12 @@ export async function listCliDevices(userId: number): Promise<CliDeviceRecord[]>
   return backend.listCliDevices(userId);
 }
 
+export async function revokeCliDeviceByName(userId: number, name: string): Promise<boolean> {
+  const wanted = name.trim().toLowerCase();
+  const device = (await backend.listCliDevices(userId)).find((item) => item.name.toLowerCase() === wanted && !item.revokedAt);
+  return device ? backend.revokeCliDevice(userId, device.tokenHash) : false;
+}
+
 const seenTriggerEvents = new Map<string, number>();
 export async function claimTriggerEvent(eventId: string, ttlSeconds = 86400): Promise<boolean> {
   const key = `chuck:event:${eventId}`;

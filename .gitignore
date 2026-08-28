@@ -3,6 +3,7 @@ dist/
 .env
 .env.local
 .env.*
+token.enc
 !.env.example
 *.log
 coverage/

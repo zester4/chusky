@@ -2,11 +2,13 @@ import { Bot, InputFile, webhookCallback } from "grammy";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore } from "./store.js";
-import { getTelegramChatId, claimTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession } from "./agent.js";
+import { getTelegramChatId, claimTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories } from "./store.js";
+import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio } from "./agent.js";
+import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { deliverJob, deliverReminder } from "./workflows.js";
@@ -59,11 +61,118 @@ async function main(): Promise<void> {
       } catch { return c.json({ ok: false, error: "invalid pairing request" }, 400); }
     });
 
+    app.get("/cli/devices", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const devices = (await listCliDevices(device.userId)).filter((item) => !item.revokedAt).map((item) => ({ name: item.name, createdAt: item.createdAt, lastSeenAt: item.lastSeenAt }));
+      return c.json({ ok: true, devices });
+    });
+
+    app.delete("/cli/devices/:name", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const name = decodeURIComponent(c.req.param("name")).trim();
+      if (!name || name.length > 80) return c.json({ ok: false, error: "invalid device name" }, 400);
+      if (!(await revokeCliDeviceByName(device.userId, name))) return c.json({ ok: false, error: "device not found" }, 404);
+      return c.json({ ok: true, revoked: name });
+    });
+
+    app.post("/cli/media", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const form = await c.req.formData();
+      const uploaded = form.get("file");
+      const message = String(form.get("message") ?? "").trim();
+      if (!(uploaded instanceof File)) return c.json({ ok: false, error: "file is required" }, 400);
+      const maxBytes = 12 * 1024 * 1024;
+      if (uploaded.size < 1 || uploaded.size > maxBytes) return c.json({ ok: false, error: "file must be between 1 byte and 12 MB" }, 413);
+      const mime = uploaded.type.toLowerCase();
+      const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "video/mp4", "video/webm", "application/pdf", "text/plain", "text/markdown"]);
+      if (!allowed.has(mime)) return c.json({ ok: false, error: `unsupported file type: ${mime || "unknown"}` }, 415);
+      if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      if (!(await canSpend(device.userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
+      const bytes = Buffer.from(await uploaded.arrayBuffer());
+      const dataUrl = `data:${mime};base64,${bytes.toString("base64")}`;
+      const filename = uploaded.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "attachment";
+      let parts: ContentPart[];
+      let historyLabel = `Attached ${filename}`;
+      if (mime.startsWith("image/")) parts = [{ type: "text", text: message || "Please analyze this image." }, { type: "image_url", image_url: { url: dataUrl } }];
+      else if (mime.startsWith("audio/")) {
+        const transcript = await transcribeAudio(bytes, mime.split("/")[1] === "mpeg" ? "mp3" : mime.split("/")[1]);
+        parts = [{ type: "text", text: `${message}\n\nTranscript of ${filename}:\n${transcript}`.trim() }];
+        historyLabel += `\nTranscript: ${transcript}`;
+      } else if (mime.startsWith("video/")) parts = [{ type: "text", text: message || "Please analyze this video." }, { type: "video_url", video_url: { url: dataUrl } }];
+      else parts = [{ type: "text", text: `${message}\n\nPlease read and analyze the attached file: ${filename}`.trim() }, { type: "file", file: { filename, file_data: dataUrl } }];
+      const s = await getSession(device.userId);
+      const result = await withCliLock(device.userId, c.req.raw.signal, () => runAgent(device.userId, parts, s.history, s.model, undefined, c.req.raw.signal));
+      await appendMessages(device.userId, [{ role: "user", content: historyLabel }, { role: "assistant", content: result.text }]);
+      if (result.cost) await addUsage(device.userId, result.cost);
+      return c.json({ ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })) });
+    });
+
     app.get("/cli/session", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const s = await getSession(device.userId);
-      return c.json({ ok: true, userId: device.userId, device: device.name, model: s.model, history: s.history.slice(-20), summaries: s.summaries.slice(-3), memories: s.memories.slice(-50), scratchpad: s.scratchpad, approvals: s.approvals.filter((a) => a.status === "pending" && a.expiresAt > Date.now()), reminders: s.reminders.filter((r) => r.status === "scheduled"), jobs: s.jobs.filter((j) => j.status === "active"), tasks: (await listTasks(device.userId)).slice(0, 50) });
+      const page = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
+      const pageSize = Math.min(100, Math.max(1, Number(c.req.query("pageSize") ?? "20") || 20));
+      const totalPages = Math.max(1, Math.ceil(s.history.length / pageSize));
+      const historyPage = Math.min(page, totalPages);
+      const start = (historyPage - 1) * pageSize;
+      return c.json({ ok: true, userId: device.userId, device: device.name, model: s.model, history: s.history.slice(start, start + pageSize), historyPage, historyPageSize: pageSize, historyCount: s.history.length, historyTotalPages: totalPages, summaries: s.summaries.slice(-3), memoryCount: s.memories.length, scratchpadCount: Object.keys(s.scratchpad).length, approvals: s.approvals.filter((a) => a.status === "pending" && a.expiresAt > Date.now()), reminders: s.reminders.filter((r) => r.status === "scheduled"), jobs: s.jobs.filter((j) => j.status === "active"), tasks: (await listTasks(device.userId)).slice(0, 50) });
+    });
+
+    app.get("/cli/collection/:kind", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const kind = c.req.param("kind");
+      const page = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
+      const pageSize = Math.min(100, Math.max(1, Number(c.req.query("pageSize") ?? "25") || 25));
+      const query = (c.req.query("query") ?? "").trim();
+      let items: unknown[];
+      if (kind === "history") items = (await getSession(device.userId)).history;
+      else if (kind === "memories") items = await searchMemories(device.userId, query);
+      else if (kind === "scratchpad") items = Object.entries(await readScratchpad(device.userId, query)).map(([key, value]) => ({ key, ...value }));
+      else if (kind === "reminders") items = await listReminders(device.userId);
+      else if (kind === "jobs") items = await listJobs(device.userId);
+      else return c.json({ ok: false, error: "unknown collection" }, 404);
+      const total = items.length;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const safePage = Math.min(page, totalPages);
+      return c.json({ ok: true, kind, page: safePage, pageSize, total, totalPages, items: items.slice((safePage - 1) * pageSize, safePage * pageSize) });
+    });
+
+    app.get("/cli/events", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const since = Math.max(0, Number(c.req.query("since") ?? "0") || 0);
+      const session = await getSession(device.userId);
+      const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > since).slice(0, 20);
+      const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > since).slice(-20);
+      const reminders = session.reminders.filter((reminder) => reminder.createdAt > since).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
+      const jobs = session.jobs.filter((job) => job.createdAt > since).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
+      return c.json({ ok: true, since, now: Date.now(), tasks, approvals, reminders, jobs });
+    });
+
+    app.get("/cli/events/stream", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      let cursor = Math.max(0, Number(c.req.query("since") ?? "0") || 0);
+      return streamSSE(c, async (stream) => {
+        for (let attempt = 0; attempt < 900 && !c.req.raw.signal.aborted; attempt++) {
+          const session = await getSession(device.userId);
+          const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > cursor).slice(0, 20);
+          const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > cursor).slice(-20);
+          const reminders = session.reminders.filter((reminder) => reminder.createdAt > cursor).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
+          const jobs = session.jobs.filter((job) => job.createdAt > cursor).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
+          const now = Date.now();
+          if (tasks.length || approvals.length || reminders.length || jobs.length) {
+            await stream.writeSSE({ event: "notification", data: JSON.stringify({ tasks, approvals, reminders, jobs, now }) });
+          } else await stream.writeSSE({ event: "keepalive", data: String(now) });
+          cursor = now;
+          await stream.sleep(2000);
+        }
+      });
     });
 
     app.get("/cli/tasks", async (c) => {

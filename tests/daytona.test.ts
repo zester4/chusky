@@ -27,11 +27,11 @@ test("Daytona tools are present and uniquely named", () => {
   ]) assert.equal(names.includes(name), true, name);
 });
 
-test("Daytona side-effect tools require approval", () => {
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_EXECUTE"), true);
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_WRITE_FILE"), true);
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_DELETE_WORKSPACE"), true);
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "keyboard_type", text: "hello" }), true);
+test("private Daytona computer and sandbox tools do not require approval", () => {
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_EXECUTE"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_WRITE_FILE"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_DELETE_WORKSPACE"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "keyboard_type", text: "hello" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "screenshot" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "accessibility_tree" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_LIST_FILES"), false);

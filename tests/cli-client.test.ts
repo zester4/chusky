@@ -80,3 +80,35 @@ test("CLI client URL-encodes model queries and exposes paginated results", async
     assert.match(url, /page=2&pageSize=25&query=vision%20model/);
   } finally { globalThis.fetch = original; }
 });
+
+test("CLI client supports device management and multipart media without JSON content headers", async () => {
+  const original = globalThis.fetch;
+  const requests: Request[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    requests.push(request);
+    return response(request.url.endsWith("/cli/devices") ? { ok: true, devices: [] } : { ok: true, text: "Analyzed" });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    await client.devices();
+    await client.revokeDevice("office laptop");
+    await client.media(new Blob(["hello"], { type: "text/plain" }), "note.txt", "summarize");
+    assert.equal(requests[0].url, "https://example.test/cli/devices");
+    assert.equal(requests[1].url, "https://example.test/cli/devices/office%20laptop");
+    assert.equal(requests[2].headers.get("authorization"), "Bearer token");
+    assert.match(requests[2].headers.get("content-type") || "", /multipart\/form-data/);
+    assert.equal((await requests[2].formData()).get("message"), "summarize");
+  } finally { globalThis.fetch = original; }
+});
+
+test("CLI client polls authenticated event snapshots with a monotonic cursor", async () => {
+  const original = globalThis.fetch;
+  let url = "";
+  globalThis.fetch = (async (input) => { url = String(input); return response({ ok: true, now: 1234, tasks: [], approvals: [], reminders: [], jobs: [] }); }) as typeof fetch;
+  try {
+    const result = await new ChuskyClient({ serverUrl: "https://example.test", token: "token" }).events(999.8);
+    assert.equal(result.now, 1234);
+    assert.match(url, /\/cli\/events\?since=999/);
+  } finally { globalThis.fetch = original; }
+});
