@@ -27,48 +27,27 @@ import { Composio } from "@composio/core";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
-import { getSession, saveSession, setComposioSessionId } from "./store.js";
+import { createApproval, getSession, saveSession, setApprovalStatus, setComposioSessionId } from "./store.js";
 import type { Message } from "./store.js";
 import { nativeTool } from "./nativeTools.js";
+import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
+import { chuckTools } from "./agentTools.js";
+import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 const composio = new Composio({ apiKey: config.composioApiKey });
 
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
-const LOCAL_TOOLS = [
-  { type: "function", function: { name: "CHUCK_GENERATE_IMAGE", description: "Generate an image and send it to the user.", parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] } } },
-  { type: "function", function: { name: "CHUCK_CREATE_TRIGGER", description: "Create a Composio trigger for the user.", parameters: { type: "object", properties: { slug: { type: "string" }, triggerConfig: { type: "object", additionalProperties: true } }, required: ["slug"] } } },
-  { type: "function", function: { name: "CHUCK_GENERATE_VIDEO", description: "Start an asynchronous video generation job.", parameters: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] } } },
-  { type: "function", function: { name: "CHUCK_SET_REMINDER", description: "Set a durable one-time reminder. Provide delaySeconds or a future ISO runAt.", parameters: { type: "object", properties: { text: { type: "string" }, delaySeconds: { type: "number" }, runAt: { type: "string", description: "Future ISO-8601 timestamp" } }, required: ["text"] } } },
-  { type: "function", function: { name: "CHUCK_LIST_REMINDERS", description: "List the user's active reminders.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "CHUCK_CANCEL_REMINDER", description: "Cancel one of the user's reminders by ID.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
-  { type: "function", function: { name: "CHUCK_SCHEDULE_JOB", description: "Schedule a recurring user notification using a 5-field CRON expression.", parameters: { type: "object", properties: { text: { type: "string" }, cron: { type: "string" } }, required: ["text", "cron"] } } },
-  { type: "function", function: { name: "CHUCK_LIST_JOBS", description: "List the user's active recurring jobs.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "CHUCK_CANCEL_JOB", description: "Cancel one of the user's recurring jobs by ID.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
-  { type: "function", function: { name: "CHUCK_SCRATCHPAD_WRITE", description: "Save a private per-user working note for later turns.", parameters: { type: "object", properties: { key: { type: "string" }, content: { type: "string" } }, required: ["key", "content"] } } },
-  { type: "function", function: { name: "CHUCK_SCRATCHPAD_READ", description: "Read private scratchpad notes, optionally filtered by a search query.", parameters: { type: "object", properties: { query: { type: "string" } } } } },
-  { type: "function", function: { name: "CHUCK_SCRATCHPAD_CLEAR", description: "Clear one private scratchpad note or the entire scratchpad.", parameters: { type: "object", properties: { key: { type: "string" } } } } },
-];
+/* native tool catalog lives in agentTools.ts */
+const LOCAL_TOOLS = chuckTools;
 
-interface ToolCall {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
+export class ApprovalRequiredError extends Error {
+  constructor(public readonly approvalId: string, public readonly toolSlug: string, public readonly args: Record<string, unknown>) {
+    super(`Approval required before executing ${toolSlug}. Approval ID: ${approvalId}`);
+    this.name = "ApprovalRequiredError";
+  }
 }
-
-interface ApiMessage {
-  role: "system" | "user" | "assistant" | "tool";
-  content: string | ContentPart[] | null;
-  tool_calls?: ToolCall[];
-  tool_call_id?: string;
-}
-
-export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
-  | { type: "file"; file: { filename: string; file_data: string } }
-  | { type: "video_url"; video_url: { url: string } };
 
 function requiredModality(message: string | ContentPart[]): string | undefined {
   if (typeof message === "string") return undefined;
@@ -128,7 +107,8 @@ async function orChat(
   messages: ApiMessage[],
   tools: unknown[],
   signal?: AbortSignal,
-  onDelta?: (text: string) => void | Promise<void>
+  onDelta?: (text: string) => void | Promise<void>,
+  approvedApprovalId?: string
 ): Promise<ChatResponse> {
   const body: Record<string, unknown> = {
     model,
@@ -173,21 +153,8 @@ async function orChat(
 
 // ── Tool status display ───────────────────────────────────────────────────────
 
-const TOOL_STATUS: Record<string, string> = {
-  COMPOSIO_MANAGE_CONNECTIONS: "🔗 Opening connection manager…",
-  COMPOSIO_REMOTE_BASH_TOOL: "🖥️ Running shell command…",
-  COMPOSIO_REMOTE_WORKBENCH: "🛠️ Working in remote environment…",
-  COMPOSIO_SEARCH_TOOL: "🔎 Searching available tools…",
-  COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ Batch executing tools…",
-};
-
 function toolStatus(slug: string): string {
-  if (TOOL_STATUS[slug]) return TOOL_STATUS[slug];
-  // Infer from slug pattern e.g. GITHUB_CREATE_ISSUE → GitHub
-  const parts = slug.split("_");
-  const toolkit = parts[0] ? (parts[0].charAt(0) + parts[0].slice(1).toLowerCase()) : slug;
-  const action = parts.slice(1).join(" ").toLowerCase();
-  return `⚙️ ${toolkit}: ${action}…`;
+  return humanToolStatus(slug);
 }
 
 // ── Composio session management ───────────────────────────────────────────────
@@ -205,7 +172,10 @@ const sessionCache = new Map<number, ComposioSession>();
 async function getOrCreateComposioSession(userId: number): Promise<ComposioSession> {
   // Check in-process cache first
   const cached = sessionCache.get(userId);
-  if (cached) return cached;
+  if (cached) {
+    logger.debug({ userId, sessionId: cached.sessionId }, "Reusing Chuck session");
+    return cached;
+  }
 
   // Check persistent store for an existing session ID
   const stored = await getSession(userId);
@@ -258,15 +228,18 @@ export async function runAgent(
   model: string,
   onStatus?: (msg: string) => void | Promise<void>,
   signal?: AbortSignal,
-  onDelta?: (text: string) => void | Promise<void>
+  onDelta?: (text: string) => void | Promise<void>,
+  approvedApprovalId?: string
 ): Promise<AgentResult> {
 
-  if (onStatus) await onStatus("🧠 Initialising Chuck…");
+  if (onStatus) await onStatus("👂 I’m listening to your message…");
+
+  let requestModel = model;
 
   // Get Composio session for this user
   const { sessionObj } = await getOrCreateComposioSession(userId);
 
-  if (onStatus) await onStatus("🔌 Loading tools…");
+  if (onStatus) await onStatus("🧭 I’m finding the right tools for you…");
 
   // Fetch the full tool list from Composio (1000+ tools + meta tools)
   // These are OpenAI-compatible function descriptors
@@ -286,7 +259,9 @@ export async function runAgent(
       const modality = requiredModality(userMessage);
       const inputs = architecture.input_modalities ?? [];
       if (modality && inputs.length && !inputs.includes(modality)) {
-        throw new Error(`Model ${model} does not support ${modality} input. Choose a compatible model with /model.`);
+        requestModel = config.visionModel;
+        if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
+        logger.info({ requestedModel: model, requestModel, modality }, "Using modality-capable model");
       }
       if (composioTools.length && Object.keys(supported).length && !supported.tools) {
         logger.warn({ model }, "Selected model metadata does not advertise tool calling");
@@ -300,8 +275,13 @@ export async function runAgent(
   logger.debug({ toolCount: composioTools.length }, "Composio tools loaded");
 
   // Build message array for OpenRouter
+  const durable = await getSession(userId);
+  const memoryContext = [
+    durable.summaries.length ? `Conversation summaries:\n${durable.summaries.slice(-3).join("\n")}` : "",
+    durable.memories.length ? `Saved user memory (use only when relevant):\n${durable.memories.slice(-50).map((m) => `- [${m.category}] ${m.key}: ${m.value}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
   const messages: ApiMessage[] = [
-    { role: "system", content: config.chuckSystemPrompt },
+    { role: "system", content: `${config.chuckSystemPrompt}${memoryContext ? `\n\n${memoryContext}` : ""}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
@@ -311,10 +291,24 @@ export async function runAgent(
   const generatedImages: AgentResult["generatedImages"] = [];
 
   for (let round = 0; round < config.maxToolRounds; round++) {
-    logger.debug({ round, model, messageCount: messages.length }, "Agent round");
+    logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const response = await orChat(model, messages, composioTools, signal, onDelta);
+    let response: ChatResponse;
+    try {
+      response = await orChat(requestModel, messages, composioTools, signal, onDelta);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      const modality = requiredModality(userMessage);
+      if (modality && requestModel !== config.visionModel && /no endpoints found that support/i.test(message)) {
+        requestModel = config.visionModel;
+        if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
+        logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
+        response = await orChat(requestModel, messages, composioTools, signal, onDelta);
+      } else {
+        throw e;
+      }
+    }
     if (response.usage?.cost) totalCost += response.usage.cost;
 
     const choice = response.choices[0];
@@ -326,7 +320,7 @@ export async function runAgent(
     // ── Done: no tool calls or explicit stop ──────────────────────────
     if (finish_reason === "stop" || toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
-      logger.info({ model, round, toolsUsed, cost: totalCost }, "Chuck done");
+      logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chuck done");
       return { text: typeof text === "string" ? text.trim() : "", toolsUsed, cost: totalCost, generatedImages };
     }
 
@@ -347,6 +341,14 @@ export async function runAgent(
       let result: string;
       try {
         const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+        if (isRiskyToolSlug(slug)) {
+          const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
+          const matches = approved && approved.toolSlug === slug && JSON.stringify(approved.args) === JSON.stringify(args);
+          if (!matches) {
+            const approval = await createApproval({ userId, toolSlug: slug, args, request: typeof userMessage === "string" ? userMessage : "User request with attachment", history, model });
+            throw new ApprovalRequiredError(approval.id, slug, args);
+          }
+        }
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
@@ -367,7 +369,9 @@ export async function runAgent(
         result = typeof execResult === "string"
           ? execResult
           : JSON.stringify(execResult);
+        if (isRiskyToolSlug(slug) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
+        if (e instanceof ApprovalRequiredError) throw e;
         logger.warn({ slug, err: e }, "Tool execution failed");
         result = `Error executing ${slug}: ${String(e)}`;
       }
@@ -382,9 +386,9 @@ export async function runAgent(
 
   // ── Max rounds exhausted — force final answer ─────────────────────────
   logger.warn({ model, toolsUsed }, "Max tool rounds reached");
-  if (onStatus) await onStatus("✍️ Composing final answer…");
+  if (onStatus) await onStatus("✍️ I’m putting everything together…");
 
-  const final = await orChat(model, messages, [], signal, onDelta);
+  const final = await orChat(requestModel, messages, [], signal, onDelta);
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 

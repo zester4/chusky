@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, listJobs, listReminders,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
+  forgetMemory, searchMemories, upsertMemory,
   type JobRecord, type ReminderRecord,
 } from "./store.js";
 
@@ -73,7 +74,7 @@ export async function scheduleJob(userId: number, args: Record<string, unknown>)
   await client.schedules.create({
     scheduleId: job.scheduleId,
     destination: requireUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL"),
-    body: { jobId: job.id, userId },
+    body: JSON.stringify({ jobId: job.id, userId }),
     headers: { "Content-Type": "application/json" },
     cron,
     retries: 3,
@@ -102,6 +103,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
     case "CHUCK_SCRATCHPAD_READ": return readScratchpad(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_SCRATCHPAD_CLEAR": await clearScratchpad(userId, args.key ? text(args.key) : undefined); return { cleared: true };
+    case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), confidence: Number(args.confidence ?? 1) });
+    case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined);
+    case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     default: throw new Error(`Unknown native tool: ${slug}`);
   }
 }

@@ -2,5 +2,12 @@ node_modules/
 dist/
 .env
 .env.local
+.env.*
+!.env.example
 *.log
+coverage/
+.nyc_output/
+.tmp/
+tmp/
 .DS_Store
+Thumbs.db

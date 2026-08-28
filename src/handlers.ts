@@ -1,15 +1,15 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
 import {
-  runAgent, fetchModels, getConnectionUrl, getToolkitStates, invalidateSession,
+  runAgent, fetchModels, getConnectionUrl, getToolkitStates, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage,
   listTriggers, createTrigger, setTriggerState, deleteTrigger,
-  searchTools,
-  type ContentPart
+  searchTools
 } from "./agent.js";
+import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
-  setTelegramChatId,
+  setTelegramChatId, getApproval, setApprovalStatus,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -80,7 +80,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const lockToken = randomUUID();
   activeRequests.set(userId, controller);
   await acquireQueuedLock(userId, lockToken, controller.signal);
-  const status = await ctx.reply("⚡ <b>Chuck is examining your file…</b>", { parse_mode: "HTML" });
+  const status = await ctx.reply("👀 <b>I’m looking at what you sent…</b>", { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);
     const result = await runAgent(userId, parts, s.history, s.model, undefined, controller.signal);
@@ -457,6 +457,31 @@ export function registerHandlers(bot: Bot): void {
     );
   });
 
+  bot.callbackQuery(/^appr:(approve|deny):(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const id = ctx.match[2];
+    const approval = await getApproval(ctx.from.id, id);
+    if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) {
+      await ctx.editMessageText("⚠️ This approval has expired or was already handled.");
+      return;
+    }
+    if (ctx.match[1] === "deny") {
+      await setApprovalStatus(ctx.from.id, id, "denied");
+      await ctx.editMessageText("🛑 Action denied. Nothing was executed.");
+      return;
+    }
+    await setApprovalStatus(ctx.from.id, id, "approved");
+    await ctx.editMessageText("✅ Approved. Chuck is executing the action…");
+    try {
+      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
+      await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
+      await replyHtml(ctx, mdToTelegramHtml(result.text));
+    } catch (e) {
+      await ctx.reply(`❌ Approval execution failed: ${String(e).slice(0, 400)}`);
+    }
+  });
+
   // ── Main message handler ───────────────────────────────────────────────────
   bot.on("message:text", async (ctx) => {
     if (!(await guard(ctx))) return;
@@ -482,7 +507,7 @@ export function registerHandlers(bot: Bot): void {
     await acquireQueuedLock(userId, lockToken, controller.signal);
 
     // Post the live status message
-    const statusMsg = await ctx.reply("⚡ <b>Chuck is on it…</b>", { parse_mode: "HTML" });
+    const statusMsg = await ctx.reply("👂 <b>I’m listening to you…</b>", { parse_mode: "HTML" });
 
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
@@ -536,6 +561,11 @@ export function registerHandlers(bot: Bot): void {
 
     } catch (e) {
       clearInterval(typingInterval);
+      if (e instanceof ApprovalRequiredError) {
+        const kb = new InlineKeyboard().text("✅ Approve", `appr:approve:${e.approvalId}`).text("🛑 Deny", `appr:deny:${e.approvalId}`);
+        await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `⚠️ <b>Approval required</b>\n\nChuck wants to execute <code>${e.toolSlug}</code>.\n\nReview the requested action and choose:`, { parse_mode: "HTML", reply_markup: kb });
+        return;
+      }
       logger.error({ err: e, userId, model }, "Chuck error");
       const msg = e instanceof Error ? e.message : String(e);
       try {
@@ -588,22 +618,32 @@ export function registerHandlers(bot: Bot): void {
   });
 
   bot.on("message:voice", async (ctx) => {
+    const status = await ctx.reply("🎙️ <b>Chuck received your voice message and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
     try {
+      logger.info({ userId: ctx.from?.id, duration: ctx.message.voice.duration, fileSize: ctx.message.voice.file_size }, "Voice message received");
       const file = await downloadTelegramFile(ctx, ctx.message.voice.file_id);
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chuck is processing your voice message…</b>", { parse_mode: "HTML" });
       const text = await transcribeAudio(file.data, audioFormat(file.path));
       await handleMedia(ctx, [{ type: "text", text: `The user sent this voice message:\n${text}` }], `[Voice message] ${text}`);
     } catch (e) {
-      await ctx.reply(`❌ Could not transcribe the voice message: ${String(e).slice(0, 300)}`);
+      logger.error({ err: e, userId: ctx.from?.id }, "Voice transcription failed");
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `❌ Could not transcribe the voice message: ${String(e).slice(0, 300)}`).catch(() => undefined);
+      else await ctx.reply(`❌ Could not transcribe the voice message: ${String(e).slice(0, 300)}`);
     }
   });
 
   bot.on("message:audio", async (ctx) => {
+    const status = await ctx.reply("🎙️ <b>Chuck received your audio and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
     try {
+      logger.info({ userId: ctx.from?.id, duration: ctx.message.audio.duration, fileSize: ctx.message.audio.file_size }, "Audio message received");
       const file = await downloadTelegramFile(ctx, ctx.message.audio.file_id);
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chuck is processing your audio…</b>", { parse_mode: "HTML" });
       const text = await transcribeAudio(file.data, audioFormat(file.path));
       await handleMedia(ctx, [{ type: "text", text: `The user sent this audio:\n${text}` }], `[Audio message] ${text}`);
     } catch (e) {
-      await ctx.reply(`❌ Could not transcribe the audio: ${String(e).slice(0, 300)}`);
+      logger.error({ err: e, userId: ctx.from?.id }, "Audio transcription failed");
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `❌ Could not transcribe the audio: ${String(e).slice(0, 300)}`).catch(() => undefined);
+      else await ctx.reply(`❌ Could not transcribe the audio: ${String(e).slice(0, 300)}`);
     }
   });
 

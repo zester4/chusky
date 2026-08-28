@@ -22,6 +22,9 @@ export interface UserSession {
   reminders: ReminderRecord[];
   jobs: JobRecord[];
   scratchpad: Record<string, ScratchpadEntry>;
+  memories: MemoryFact[];
+  summaries: string[];
+  approvals: ApprovalRecord[];
   createdAt: number;
   updatedAt: number;
 }
@@ -49,6 +52,28 @@ export interface JobRecord {
 export interface ScratchpadEntry {
   content: string;
   updatedAt: number;
+}
+
+export interface MemoryFact {
+  id: string;
+  category: "preference" | "profile" | "fact" | "instruction";
+  key: string;
+  value: string;
+  confidence: number;
+  updatedAt: number;
+}
+
+export interface ApprovalRecord {
+  id: string;
+  userId: number;
+  toolSlug: string;
+  args: Record<string, unknown>;
+  request: string;
+  history: Message[];
+  model: string;
+  status: "pending" | "approved" | "consumed" | "denied" | "expired";
+  createdAt: number;
+  expiresAt: number;
 }
 
 interface Backend {
@@ -125,7 +150,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -150,7 +175,7 @@ export async function initStore(): Promise<void> {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {} };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [] };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -163,7 +188,12 @@ export async function appendMessages(uid: number, msgs: Message[]): Promise<void
   s.history.push(...msgs);
   s.totalMessages += msgs.filter((m) => m.role === "user").length;
   const cap = config.maxHistory * 2;
-  if (s.history.length > cap) s.history = s.history.slice(s.history.length - cap);
+  if (s.history.length > cap) {
+    const overflow = s.history.slice(0, s.history.length - cap);
+    const compact = overflow.map((m) => `${m.role}: ${m.content}`).join(" ").slice(0, 1800);
+    s.summaries = [...s.summaries, compact].slice(-10);
+    s.history = s.history.slice(s.history.length - cap);
+  }
   await saveSession(uid, s);
 }
 
@@ -308,4 +338,57 @@ export async function clearScratchpad(uid: number, key?: string): Promise<void> 
   const s = await getSession(uid);
   if (key) delete s.scratchpad[key]; else s.scratchpad = {};
   await saveSession(uid, s);
+}
+
+export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | "updatedAt"> & { id?: string }): Promise<MemoryFact> {
+  const s = await getSession(uid);
+  const existing = s.memories.find((m) => (memory.id && m.id === memory.id) || (!memory.id && m.key === memory.key));
+  const value: MemoryFact = { id: existing?.id ?? memory.id ?? `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, category: memory.category, key: memory.key, value: memory.value, confidence: Math.max(0, Math.min(1, memory.confidence)), updatedAt: Date.now() };
+  s.memories = [...s.memories.filter((m) => m.id !== value.id && m.key !== value.key), value].slice(-200);
+  await saveSession(uid, s);
+  return value;
+}
+
+export async function searchMemories(uid: number, query?: string): Promise<MemoryFact[]> {
+  const memories = (await getSession(uid)).memories;
+  if (!query?.trim()) return memories;
+  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+  return memories.map((m) => ({ m, score: tokens.reduce((n, t) => n + (`${m.category} ${m.key} ${m.value}`.toLowerCase().includes(t) ? 1 : 0), 0) }))
+    .filter((x) => x.score > 0).sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt).map((x) => x.m);
+}
+
+export async function forgetMemory(uid: number, key: string): Promise<boolean> {
+  const s = await getSession(uid);
+  const before = s.memories.length;
+  s.memories = s.memories.filter((m) => m.key !== key && m.id !== key);
+  if (s.memories.length === before) return false;
+  await saveSession(uid, s);
+  return true;
+}
+
+export async function addHistorySummary(uid: number, summary: string): Promise<void> {
+  const s = await getSession(uid);
+  s.summaries = [...s.summaries, summary].slice(-10);
+  await saveSession(uid, s);
+}
+
+export async function createApproval(record: Omit<ApprovalRecord, "id" | "status" | "createdAt" | "expiresAt">, ttlMs = 15 * 60 * 1000): Promise<ApprovalRecord> {
+  const s = await getSession(record.userId);
+  const approval: ApprovalRecord = { ...record, id: `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, status: "pending", createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
+  s.approvals = [...s.approvals.filter((a) => a.status === "pending" ? a.expiresAt > Date.now() : true), approval].slice(-20);
+  await saveSession(record.userId, s);
+  return approval;
+}
+
+export async function getApproval(uid: number, id: string): Promise<ApprovalRecord | undefined> {
+  return (await getSession(uid)).approvals.find((a) => a.id === id);
+}
+
+export async function setApprovalStatus(uid: number, id: string, status: ApprovalRecord["status"]): Promise<boolean> {
+  const s = await getSession(uid);
+  const approval = s.approvals.find((a) => a.id === id);
+  if (!approval || (status === "approved" && (approval.status !== "pending" || approval.expiresAt <= Date.now()))) return false;
+  approval.status = status;
+  await saveSession(uid, s);
+  return true;
 }

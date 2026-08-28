@@ -16,6 +16,8 @@ Chuck is a production-ready Telegram AI agent with access to **1,000+ tools** vi
 | **Real-time triggers** | Composio webhook → Chuck notifies you on Slack messages, GitHub commits, emails, etc. |
 | **Any LLM** | Switch model per-user at runtime via `/model` |
 | **Redis persistence** | Sessions survive restarts; falls back to memory |
+| **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
+| **Private scratchpad** | Chuck can save and retrieve per-user working notes across turns |
 | **Rate limiting** | Per-user throttling |
 | **Export** | `/export` downloads full conversation as `.txt` |
 | **Inline mode** | `@chuck query` in any chat |
@@ -29,6 +31,7 @@ git clone <repo> && cd tg-agent
 npm install
 cp .env.example .env
 # Fill in: TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, COMPOSIO_API_KEY
+# For reminders/jobs, also set QSTASH_TOKEN and the two public workflow URLs.
 # Leave WEBHOOK_URL blank — uses polling
 
 npm run dev
@@ -96,12 +99,30 @@ Chuck will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then s
 | `/connect [app]` | Connect an app (e.g. `/connect github`) |
 | `/apps` | See connected apps + available apps |
 | `/model` | Switch AI model (per-session, no restart) |
-| `/clear` | Wipe history + reset Composio session |
+| `/clear` | Show clear-session help |
 | `/clear history` | Wipe conversation history while keeping the Composio session |
 | `/clear session` | Wipe history and reset the Composio session |
 | `/triggers` | List your Composio triggers |
 | `/trigger create|enable|disable|delete` | Manage a Composio trigger |
 | `/image <description>` | Generate an image with OpenRouter |
+| `/export` | Download conversation as `.txt` |
+| `/usage` | Messages sent + model |
+| `/info` | Full session details |
+| `/help` | Help |
+
+## Natural-language reminders, jobs, and scratchpad
+
+Chuck's native tools are callable directly from ordinary messages:
+
+- “Remind me in 20 minutes to check the deployment.”
+- “Every weekday at 9, remind me to review the inbox.” (Chuck asks for or uses a CRON expression when needed.)
+- “Save this as a scratchpad note called deploy: use the staging API.”
+- “What did I save in my deploy notes?”
+
+Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/reminder`, and
+`JOB_WORKFLOW_URL=https://your-domain/workflows/job`. One-time reminders are delayed durable
+Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
+Chuck checks ownership and cancellation state before delivering a notification.
 
 Chuck also accepts these requests naturally, without slash commands:
 
@@ -112,10 +133,6 @@ Enable a trigger whenever I receive a new GitHub issue.
 ```
 
 Natural-language image and trigger requests are exposed to the model as Chuck tools. Video requests are submitted to the Upstash Workflow endpoint and delivered to Telegram when generation completes.
-| `/export` | Download conversation as `.txt` |
-| `/usage` | Messages sent + model |
-| `/info` | Full session details |
-| `/help` | Help |
 
 ---
 
@@ -130,6 +147,9 @@ Natural-language image and trigger requests are exposed to the model as Chuck to
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `~deepseek/deepseek-v4-flash-latest` | Any OpenRouter model ID |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
+| `QSTASH_TOKEN` | reminders/jobs | — | Upstash QStash token |
+| `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
+| `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
 | `SYSTEM_PROMPT` | — | Chuck's default | Agent personality |
 | `ENABLE_MANAGE_CONNECTIONS` | — | `true` | OAuth link tool |
 | `COMPOSIO_CALLBACK_URL` | — | — | Post-connect redirect URL |
@@ -156,6 +176,10 @@ src/
 ├── logger.ts     pino — pretty in dev, JSON in prod
 ├── store.ts      Redis + memory — sessions, rate limits, Composio session IDs
 ├── agent.ts      Chuck's brain — Composio session + OpenRouter agentic loop
+├── agentTools.ts Native tool schemas exposed to the model
+├── types.ts      Shared API, media, and tool-call types
+├── policy.ts     Risk detection and human progress messages
+├── nativeTools.ts Native reminders, CRON jobs, and scratchpad tools
 ├── handlers.ts   grammY commands, live status bar, /connect, /apps, inline mode
 └── markdown.ts   LLM markdown → Telegram HTML
 ```
