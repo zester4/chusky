@@ -6,22 +6,40 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore } from "./store.js";
-import { getTelegramChatId, claimTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio } from "./agent.js";
+import { getTelegramChatId, claimTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities } from "./store.js";
+import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { deliverJob, deliverReminder } from "./workflows.js";
 import { executeDurableTask } from "./taskRunner.js";
+import { ChannelGateway } from "./channels/gateway.js";
+import { createAgentChannelHandler } from "./channels/agentHandler.js";
+import { registerChannelRoutes } from "./channels/routes.js";
+import { SlackAdapter } from "./channels/slack.js";
+import { WhatsAppAdapter } from "./channels/whatsapp.js";
+import { TelegramAdapter } from "./channels/telegram.js";
+
+function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown> }): string {
+  const redacted = Object.entries(event.payload ?? {}).filter(([key, value]) => {
+    if (/(token|secret|password|authorization|cookie|private[_-]?key)/i.test(key)) return false;
+    return value === null || ["string", "number", "boolean"].includes(typeof value);
+  }).slice(0, 20).map(([key, value]) => `${key}: ${String(value).slice(0, 180)}`);
+  return [`Trigger: ${event.triggerSlug || "event"}`, ...redacted].join("\n").slice(0, 3500);
+}
+import { registerSdkApi } from "./sdkApi.js";
 
 async function main(): Promise<void> {
   await initStore();
 
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
+  const channelGateway = new ChannelGateway(createAgentChannelHandler());
+  channelGateway.register(new TelegramAdapter(bot));
 
   const shutdown = async (sig: string) => {
     logger.info({ sig }, "Chusky shutting down…");
+    channelGateway?.stopRecovery();
     await bot.stop();
     process.exit(0);
   };
@@ -31,6 +49,19 @@ async function main(): Promise<void> {
   if (config.webhookUrl) {
     // ── WEBHOOK MODE (production) ────────────────────────────────────
     const app = new Hono();
+    const slackAdapter = new SlackAdapter(
+      config.slackBotToken || (async (workspaceId) => workspaceId ? (await getChannelInstallation("slack", workspaceId))?.botToken : undefined)
+    );
+    const whatsappAdapter = new WhatsAppAdapter(config.whatsappAccessToken, config.whatsappPhoneNumberId, config.whatsappGraphVersion);
+    if (config.slackEnabled) channelGateway.register(slackAdapter);
+    if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
+    registerChannelRoutes(app, {
+      gateway: channelGateway,
+      ...(config.slackEnabled ? { slack: { adapter: slackAdapter, signingSecret: config.slackSigningSecret } } : {}),
+      ...(config.whatsappEnabled ? { whatsapp: { adapter: whatsappAdapter, appSecret: config.whatsappAppSecret, verifyToken: config.whatsappVerifyToken } } : {}),
+    });
+    channelGateway.startRecovery();
+    if (config.apiKey) registerSdkApi(app);
 
     const cliAuth = async (c: any) => {
       const auth = c.req.header("Authorization") ?? "";
@@ -388,7 +419,7 @@ async function main(): Promise<void> {
     app.get("/health", async (c) => {
       try {
         const me = await bot.api.getMe();
-        return c.json({ ok: true, bot: me.username, agent: "Chusky", persistence: isDurableStore() ? "redis" : "memory" });
+        return c.json({ ok: true, bot: me.username, agent: "Chusky", persistence: isDurableStore() ? "redis" : "memory", channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled } });
       } catch (e) {
         return c.json({ ok: false, error: String(e) }, 503);
       }
@@ -417,19 +448,36 @@ async function main(): Promise<void> {
             ? await getTelegramChatId(numericUserId)
             : undefined;
           if (chatId) {
-            const summary = JSON.stringify(event.payload, null, 2).slice(0, 3500);
+            const summary = safeTriggerSummary(event);
             await bot.api.sendMessage(
               chatId,
               `🔔 <b>Chusky trigger</b>\n\n<b>${event.triggerSlug}</b>\n<pre>${summary.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`,
               { parse_mode: "HTML" }
             );
           }
-        }
+          if (Number.isSafeInteger(numericUserId) && numericUserId > 0) {
+            const linked = await listChannelIdentities(numericUserId);
+            await Promise.allSettled(linked.filter((identity) => identity.provider !== "telegram" && (identity.provider !== "whatsapp" || identity.proactiveOptIn === true)).map((identity) => {
+              const adapter = channelGateway.adapter(identity.provider);
+              if (!adapter) return Promise.resolve();
+              return channelGateway.send({
+                accountId: identity.accountId,
+                userId: numericUserId,
+                target: { provider: identity.provider, conversationId: identity.externalUserId, workspaceId: identity.workspaceId },
+                text: `🔔 Chusky trigger\n\n${safeTriggerSummary(event)}`,
+                idempotencyKey: `trigger:${event.eventId}:${identity.provider}:${identity.externalUserId}`,
+                correlationId: event.eventId,
+                kind: "notification",
+              }).catch((error) => logger.warn({ err: error, provider: identity.provider }, "Trigger channel delivery failed"));
+            }));
+          }
+        } else if (config.composioWebhookSecret) return c.json({ ok: false, error: "unsupported trigger webhook" }, 400);
         return c.json({ ok: true });
       } catch (e) {
         logger.error({ err: e }, "Trigger webhook error");
         const message = String(e);
-        return c.json({ ok: false, error: "invalid trigger webhook" }, config.composioWebhookSecret && /signature|verify|secret|webhook/i.test(message) ? 401 : 400);
+        const status = e instanceof TriggerWebhookVerificationError || Boolean(config.composioWebhookSecret && /signature|verify|secret|webhook/i.test(message)) ? 401 : 400;
+        return c.json({ ok: false, error: "invalid trigger webhook" }, status);
       }
     });
 

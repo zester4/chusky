@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "build:sdk": "tsc -p sdk/tsconfig.json",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",
     "chat": "tsx src/cli.ts chat",
@@ -16,7 +17,8 @@
     "setup": "tsx src/cli.ts setup",
     "doctor": "tsx src/cli.ts doctor",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --test-concurrency=1 tests/*.test.ts"
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts"
   },
   "dependencies": {
     "@composio/core": "^0.18.0",

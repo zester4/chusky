@@ -73,6 +73,14 @@ REDIS_URL
 QSTASH_TOKEN
 WEBHOOK_SECRET
 COMPOSIO_WEBHOOK_SECRET
+SLACK_SIGNING_SECRET
+SLACK_CLIENT_ID
+SLACK_CLIENT_SECRET
+SLACK_REDIRECT_URI
+WHATSAPP_ACCESS_TOKEN
+WHATSAPP_PHONE_NUMBER_ID
+WHATSAPP_VERIFY_TOKEN
+WHATSAPP_APP_SECRET
 ```
 
 Attach the **Secret Manager Secret Accessor** role to the Cloud Run runtime service account. `DAYTONA_API_KEY` is optional.
@@ -130,6 +138,13 @@ https://chusky-abcdefg-ew.a.run.app/webhook
 ```
 
 Wait for the new revision to become ready before testing Telegram.
+
+Optional channels use the same Cloud Run HTTPS URL. Set `SLACK_ENABLED=true` and
+`SLACK_REDIRECT_URI=https://YOUR_PUBLIC_URL/slack/oauth/callback`, then configure Slack Event
+Subscriptions at `/slack/events` and Interactivity at `/slack/interactions`. Set
+`WHATSAPP_ENABLED=true` and configure Meta’s webhook at `/whatsapp/webhook`. In Telegram,
+use `/channel link slack` or `/channel link whatsapp` to bind a verified external identity;
+never map a channel by display name or an unauthenticated user ID.
 
 ## 6. Optional custom domain
 

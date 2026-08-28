@@ -225,6 +225,12 @@ export interface AgentResult {
   generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
 }
 
+export interface AgentChannelContext {
+  accountId: string;
+  provider: string;
+  conversationId: string;
+}
+
 // ── Core agentic loop ─────────────────────────────────────────────────────────
 
 export async function runAgent(
@@ -235,7 +241,8 @@ export async function runAgent(
   onStatus?: (msg: string) => void | Promise<void>,
   signal?: AbortSignal,
   onDelta?: (text: string) => void | Promise<void>,
-  approvedApprovalId?: string
+  approvedApprovalId?: string,
+  channelContext?: AgentChannelContext
 ): Promise<AgentResult> {
 
   if (onStatus) await onStatus("👂 I’m listening to your message…");
@@ -351,7 +358,15 @@ export async function runAgent(
           const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
           const matches = approved && approved.toolSlug === slug && JSON.stringify(approved.args) === JSON.stringify(args);
           if (!matches) {
-            const approval = await createApproval({ userId, toolSlug: slug, args, request: typeof userMessage === "string" ? userMessage : "User request with attachment", history, model });
+            const approval = await createApproval({
+              userId,
+              ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId } : {}),
+              toolSlug: slug,
+              args,
+              request: typeof userMessage === "string" ? userMessage : "User request with attachment",
+              history,
+              model,
+            });
             throw new ApprovalRequiredError(approval.id, slug, args);
           }
         }
@@ -540,6 +555,11 @@ export interface TriggerEvent {
   rawPayload: unknown;
 }
 
+export class TriggerWebhookVerificationError extends Error {
+  readonly statusCode = 401 as const;
+  constructor(message = "Invalid Composio trigger webhook signature") { super(message); this.name = "TriggerWebhookVerificationError"; }
+}
+
 export async function parseTriggerWebhook(
   body: Buffer,
   headers: Record<string, string>,
@@ -551,7 +571,11 @@ export async function parseTriggerWebhook(
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const r = result as any;
-    if (r?.rawPayload?.type !== "composio.trigger.message") return null;
+    if (!r?.rawPayload) {
+      if (secret) throw new TriggerWebhookVerificationError();
+      return null;
+    }
+    if (r.rawPayload.type !== "composio.trigger.message") return null;
     const eventId = String(r.rawPayload?.id ?? r.rawPayload?.eventId ?? r.payload?.eventId ?? "");
     if (!eventId) throw new Error("Composio trigger event has no event ID");
     return {

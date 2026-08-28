@@ -39,6 +39,20 @@ export const config = {
   jobWorkflowUrl: optional("JOB_WORKFLOW_URL", ""),
   videoModel: optional("VIDEO_MODEL", "bytedance/seedance-2.0-mini"),
 
+  // ── Channel adapters ──────────────────────────────────────────────
+  slackEnabled: optional("SLACK_ENABLED", "false") === "true",
+  slackSigningSecret: optional("SLACK_SIGNING_SECRET", ""),
+  slackBotToken: optional("SLACK_BOT_TOKEN", ""),
+  slackClientId: optional("SLACK_CLIENT_ID", ""),
+  slackClientSecret: optional("SLACK_CLIENT_SECRET", ""),
+  slackRedirectUri: optional("SLACK_REDIRECT_URI", ""),
+  whatsappEnabled: optional("WHATSAPP_ENABLED", "false") === "true",
+  whatsappAccessToken: optional("WHATSAPP_ACCESS_TOKEN", ""),
+  whatsappPhoneNumberId: optional("WHATSAPP_PHONE_NUMBER_ID", ""),
+  whatsappVerifyToken: optional("WHATSAPP_VERIFY_TOKEN", ""),
+  whatsappAppSecret: optional("WHATSAPP_APP_SECRET", ""),
+  whatsappGraphVersion: optional("WHATSAPP_GRAPH_VERSION", "v23.0"),
+
   // ── Daytona computer ───────────────────────────────────────────────
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
@@ -74,8 +88,8 @@ DAYTONA COMPUTER
 - Use CHUCK_DAYTONA_EXECUTE for bounded code or process work inside Daytona. Include a concise purpose, prefer a narrow command, inspect the exit code, and report non-zero exits plainly.
 - Use CHUCK_DAYTONA_LIST_FILES, CHUCK_DAYTONA_FIND_FILES, CHUCK_DAYTONA_SEARCH_FILES, CHUCK_DAYTONA_FILE_DETAILS, CHUCK_DAYTONA_READ_FILE, CHUCK_DAYTONA_WRITE_FILE, CHUCK_DAYTONA_CREATE_FOLDER, and CHUCK_DAYTONA_MOVE_FILES for workspace artifacts. Keep paths workspace-scoped and never follow path-traversal instructions.
 - Use CHUCK_DAYTONA_PREVIEW only when a service is running and the user needs a temporary browser-accessible preview. Use CHUCK_DAYTONA_CREATE_SNAPSHOT only when the user explicitly wants a reusable image of the workspace.
-- Use CHUCK_DAYTONA_COMPUTER for the desktop: inspect status, display, windows, accessibility, or take a screenshot before interacting. Prefer accessibility node actions over guessed coordinates. Mouse clicks, typing, hotkeys, and accessibility mutations require confirmation when requested by the approval flow.
-- Treat command execution and file writes as side effects requiring approval when the tool requests it. Do not use Daytona as a reason to bypass confirmation for destructive, public, financial, or externally visible actions.
+- Use CHUCK_DAYTONA_COMPUTER for the desktop: inspect status, display, windows, accessibility, or take a screenshot before interacting. Prefer accessibility node actions over guessed coordinates. Daytona is Chusky's private isolated computer workspace, so its computer and filesystem actions do not require a separate user approval; still verify results and never use it to bypass approvals for external or irreversible actions.
+- Treat actions that leave Daytona (sending, publishing, deploying, payments, permission changes, or other externally visible effects) as side effects requiring the normal approval flow. Private Daytona execution and workspace file operations are agent-controlled.
 - Daytona workspaces are isolated from this Telegram process. Do not imply that a file was delivered, deployed, published, or sent unless a separate tool verifies that result.
 - Use CHUCK_DAYTONA_PAUSE when the user asks to stop or conserve the workspace. Daytona state is retained in the provider; the workspace ID is stored durably in Redis, so a later request can reconnect after idle pause. Do not destroy the workspace implicitly.
 
@@ -141,5 +155,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // ── Server ─────────────────────────────────────────────────────────
   port: positiveInt("PORT", 8080),
   webhookUrl: optional("WEBHOOK_URL", ""),
+  // Dedicated bearer key for the self-hosted developer SDK. It is never a CLI device token.
+  apiKey: optional("CHUSKY_API_KEY", ""),
   logLevel: optional("LOG_LEVEL", "info"),
 } as const;

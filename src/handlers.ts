@@ -16,6 +16,7 @@ import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
+import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 
 const activeRequests = new Map<number, AbortController>();
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
@@ -33,7 +34,10 @@ function isAllowed(ctx: Context): boolean {
 }
 
 async function guard(ctx: Context): Promise<boolean> {
-  if (ctx.from && ctx.chat && isAllowed(ctx)) await setTelegramChatId(ctx.from.id, ctx.chat.id);
+  if (ctx.from && ctx.chat && isAllowed(ctx)) {
+    await setTelegramChatId(ctx.from.id, ctx.chat.id);
+    await linkChannelIdentity(ctx.from.id, { provider: "telegram", externalUserId: String(ctx.from.id), displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") });
+  }
   if (isAllowed(ctx)) return true;
   await ctx.reply("⛔ You are not authorised to use Chusky.");
   return false;
@@ -165,6 +169,7 @@ export function registerHandlers(bot: Bot): void {
       `  /clear session — clear history and reset session\n` +
       `  /export — download conversation\n` +
       `  /usage — session stats\n` +
+      `  /channel link slack|whatsapp — link another channel\n` +
       `  /help — show this\n\n` +
       `What do you want to do?`
     );
@@ -185,6 +190,8 @@ export function registerHandlers(bot: Bot): void {
       `/export — download conversation as .txt\n` +
       `/usage — messages sent, model, turns\n` +
       `/cancel — cancel the active request\n` +
+      `/channel link slack|whatsapp — link another channel securely\n` +
+      `/channel list — show linked channel identities\n` +
       `/image <description> — generate an image\n` +
       `/info — full session details\n` +
       `/help — this message\n\n` +
@@ -232,6 +239,33 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await ctx.reply("Usage: /cli link | /cli devices | /cli revoke <terminal name>");
+  });
+
+  bot.command("channel", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const [action, provider] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+    if (action === "link" && (provider === "slack" || provider === "whatsapp")) {
+      const code = await createLinkCode(ctx.from!.id, provider);
+      if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
+        const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
+        await replyHtml(ctx, `<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`);
+      } else {
+        await replyHtml(ctx, `<b>Link ${provider}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${provider} account you want to link. It expires in 10 minutes.`);
+      }
+      return;
+    }
+    if (action === "list") {
+      const linked = await listLinkedChannels(ctx.from!.id);
+      await replyHtml(ctx, linked.length ? `<b>Linked channels</b>\n\n${linked.map((item) => `• ${item.provider} — <code>${item.externalUserId}</code>${item.workspaceId ? ` (${item.workspaceId})` : ""}`).join("\n")}` : "No external channels are linked yet.");
+      return;
+    }
+    if (action === "notify" && (provider === "slack" || provider === "whatsapp")) {
+      const enabled = String((ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean)[2] ?? "").toLowerCase() === "on";
+      const count = await setProactivePreference(ctx.from!.id, provider, enabled);
+      await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
+      return;
+    }
+    await ctx.reply("Usage: /channel link slack|whatsapp | /channel list | /channel notify slack|whatsapp on|off");
   });
 
   bot.command("image", async (ctx) => {

@@ -6,6 +6,7 @@ import Redis from "ioredis";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
+import type { ChannelProvider, InboundMessage } from "./channels/contracts.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -27,6 +28,28 @@ export interface UserSession {
   memories: MemoryFact[];
   summaries: string[];
   approvals: ApprovalRecord[];
+  sdkThreads?: SdkThreadRecord[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SdkRunRecord {
+  id: string;
+  status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
+  input: string;
+  output?: string;
+  approvalId?: string;
+  error?: { code: string; message: string };
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SdkThreadRecord {
+  id: string;
+  externalId: string;
+  metadata: Record<string, unknown>;
+  history: Message[];
+  runs: SdkRunRecord[];
   createdAt: number;
   updatedAt: number;
 }
@@ -127,6 +150,9 @@ export interface MemoryFact {
 export interface ApprovalRecord {
   id: string;
   userId: number;
+  accountId?: string;
+  channelProvider?: ChannelProvider;
+  channelConversationId?: string;
   toolSlug: string;
   args: Record<string, unknown>;
   request: string;
@@ -153,11 +179,97 @@ export interface CliDeviceRecord {
   revokedAt?: number;
 }
 
+export interface ChannelIdentityRecord {
+  accountId: string;
+  userId: number;
+  provider: ChannelProvider;
+  externalUserId: string;
+  workspaceId?: string;
+  displayName?: string;
+  verifiedAt: number;
+  createdAt: number;
+  updatedAt: number;
+  disabledAt?: number;
+  /** WhatsApp proactive delivery is opt-in; legacy/Slack identities default on. */
+  proactiveOptIn?: boolean;
+  quietHoursUtc?: { startMinute: number; endMinute: number };
+}
+
+export interface ChannelInstallationRecord {
+  provider: "slack" | "whatsapp";
+  workspaceId: string;
+  botToken?: string;
+  appId?: string;
+  teamName?: string;
+  installedByUserId?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChannelOAuthStateRecord {
+  provider: "slack";
+  stateHash: string;
+  userId: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+export interface ChannelLinkCodeRecord {
+  codeHash: string;
+  userId: number;
+  provider: ChannelProvider;
+  expiresAt: number;
+  used: boolean;
+}
+
+export interface OutboxRecord {
+  id: string;
+  idempotencyKey: string;
+  accountId: string;
+  userId: number;
+  provider: ChannelProvider;
+  conversationId: string;
+  threadId?: string;
+  workspaceId?: string;
+  text?: string;
+  blocks?: unknown[];
+  interactive?: {
+    kind: "buttons";
+    body: string;
+    buttons: Array<{ id: string; title: string }>;
+  };
+  correlationId?: string;
+  kind: "message" | "approval" | "notification" | "receipt";
+  status: "queued" | "delivering" | "delivered" | "failed";
+  attempts: number;
+  leaseToken?: string;
+  leaseExpiresAt?: number;
+  providerMessageId?: string;
+  providerStatus?: string;
+  lastError?: string;
+  createdAt: number;
+  updatedAt: number;
+  deliveredAt?: number;
+}
+
+export interface ChannelConversationRecord {
+  id: string;
+  accountId: string;
+  userId: number;
+  provider: ChannelProvider;
+  scope: "private" | "shared";
+  history: Message[];
+  summaries: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   incrRate(userId: number): Promise<number>;
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
+  renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
   getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
@@ -174,6 +286,28 @@ interface Backend {
   revokeCliDevice(userId: number, tokenHash: string): Promise<boolean>;
   listCliDevices(userId: number): Promise<CliDeviceRecord[]>;
   claimApproval(userId: number, id: string): Promise<ApprovalRecord | undefined>;
+  getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined>;
+  listChannelIdentities(userId: number): Promise<ChannelIdentityRecord[]>;
+  saveChannelIdentity(record: ChannelIdentityRecord): Promise<boolean>;
+  getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined>;
+  saveChannelInstallation(record: ChannelInstallationRecord): Promise<void>;
+  createChannelOAuthState(record: ChannelOAuthStateRecord): Promise<void>;
+  consumeChannelOAuthState(stateHash: string): Promise<ChannelOAuthStateRecord | undefined>;
+  createChannelLinkCode(record: ChannelLinkCodeRecord): Promise<void>;
+  consumeChannelLinkCode(provider: ChannelProvider, codeHash: string): Promise<ChannelLinkCodeRecord | undefined>;
+  claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
+  completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void>;
+  releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void>;
+  createOutbox(record: OutboxRecord): Promise<OutboxRecord>;
+  getOutbox(id: string): Promise<OutboxRecord | undefined>;
+  claimOutbox(id: string, leaseMs: number): Promise<OutboxRecord | undefined>;
+  updateOutbox(id: string, patch: Partial<OutboxRecord>): Promise<OutboxRecord | undefined>;
+  getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string): Promise<OutboxRecord | undefined>;
+  listOutbox(statuses?: OutboxRecord["status"][], limit?: number): Promise<OutboxRecord[]>;
+  getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined>;
+  saveChannelConversation(record: ChannelConversationRecord): Promise<void>;
+  enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void>;
+  takeChannelDebounce(key: string): Promise<InboundMessage[]>;
 }
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
@@ -187,6 +321,18 @@ class RedisBackend implements Backend {
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
   private uk = (id: number) => `chuck:user:${id}:devices`;
   private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
+  private channelIdentityKey = (provider: ChannelProvider, externalUserId: string, workspaceId?: string) => `chuck:channel:identity:${provider}:${createHash("sha256").update(`${workspaceId ?? "-"}:${externalUserId}`).digest("hex")}`;
+  private channelIdentityUserKey = (userId: number) => `chuck:user:${userId}:channel-identities`;
+  private channelInstallationKey = (provider: ChannelInstallationRecord["provider"], workspaceId: string) => `chuck:channel:installation:${provider}:${workspaceId}`;
+  private channelOAuthKey = (stateHash: string) => `chuck:channel:oauth:${stateHash}`;
+  private channelLinkKey = (provider: ChannelProvider, codeHash: string) => `chuck:channel:link:${provider}:${codeHash}`;
+  private channelEventKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
+  private channelEventDoneKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:done:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
+  private outboxKey = (id: string) => `chuck:outbox:${id}`;
+  private outboxIdempotencyKey = (key: string) => `chuck:outbox:idempotency:${createHash("sha256").update(key).digest("hex")}`;
+  private outboxProviderKey = (provider: ChannelProvider, providerMessageId: string) => `chuck:outbox:provider:${provider}:${createHash("sha256").update(providerMessageId).digest("hex")}`;
+  private channelConversationKey = (id: string) => `chuck:channel:conversation:${createHash("sha256").update(id).digest("hex")}`;
+  private channelDebounceKey = (id: string) => `chuck:channel:debounce:${createHash("sha256").update(id).digest("hex")}`;
 
   async getSession(userId: number): Promise<UserSession> {
     const raw = await this.r.get(this.sk(userId));
@@ -209,6 +355,10 @@ class RedisBackend implements Backend {
 
   async acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean> {
     return (await this.r.set(`chuck:lock:${userId}`, token, "EX", leaseSeconds, "NX")) === "OK";
+  }
+  async renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean> {
+    const result = await this.r.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end", 1, `chuck:lock:${userId}`, token, leaseSeconds);
+    return Number(result) === 1;
   }
   async releaseLock(userId: number, token: string): Promise<void> {
     await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:lock:${userId}`, token);
@@ -322,6 +472,176 @@ class RedisBackend implements Backend {
     }
     return undefined;
   }
+
+  async getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined> {
+    const raw = await this.r.get(this.channelIdentityKey(provider, externalUserId, workspaceId));
+    if (!raw) return undefined;
+    try {
+      const record = JSON.parse(raw) as ChannelIdentityRecord;
+      return record.disabledAt ? undefined : record;
+    } catch { return undefined; }
+  }
+  async listChannelIdentities(userId: number): Promise<ChannelIdentityRecord[]> {
+    const keys = await this.r.smembers(this.channelIdentityUserKey(userId));
+    const records = await Promise.all(keys.map(async (key) => {
+      const raw = await this.r.get(key);
+      if (!raw) return undefined;
+      try { return JSON.parse(raw) as ChannelIdentityRecord; } catch { return undefined; }
+    }));
+    return records.filter((record): record is ChannelIdentityRecord => Boolean(record && !record.disabledAt));
+  }
+  async saveChannelIdentity(record: ChannelIdentityRecord): Promise<boolean> {
+    const key = this.channelIdentityKey(record.provider, record.externalUserId, record.workspaceId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const existingRaw = await this.r.get(key);
+      if (existingRaw) {
+        try {
+          const existing = JSON.parse(existingRaw) as ChannelIdentityRecord;
+          if (existing.userId !== record.userId || existing.accountId !== record.accountId) { await this.r.unwatch(); return false; }
+        } catch { /* replace corrupt record */ }
+      }
+      const result = await this.r.multi().set(key, JSON.stringify(record)).sadd(this.channelIdentityUserKey(record.userId), key).exec();
+      if (result) return true;
+    }
+    return false;
+  }
+  async getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined> {
+    const raw = await this.r.get(this.channelInstallationKey(provider, workspaceId));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as ChannelInstallationRecord; } catch { return undefined; }
+  }
+  async saveChannelInstallation(record: ChannelInstallationRecord): Promise<void> {
+    await this.r.set(this.channelInstallationKey(record.provider, record.workspaceId), JSON.stringify(record));
+  }
+  async createChannelOAuthState(record: ChannelOAuthStateRecord): Promise<void> {
+    const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    await this.r.set(this.channelOAuthKey(record.stateHash), JSON.stringify(record), "EX", ttl, "NX");
+  }
+  async consumeChannelOAuthState(stateHash: string): Promise<ChannelOAuthStateRecord | undefined> {
+    const key = this.channelOAuthKey(stateHash);
+    const raw = await this.r.get(key);
+    if (!raw) return undefined;
+    const record = JSON.parse(raw) as ChannelOAuthStateRecord;
+    if (record.used || record.expiresAt <= Date.now()) { await this.r.del(key); return undefined; }
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
+    return claimed ? JSON.parse(claimed) as ChannelOAuthStateRecord : undefined;
+  }
+  async createChannelLinkCode(record: ChannelLinkCodeRecord): Promise<void> {
+    const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    await this.r.set(this.channelLinkKey(record.provider, record.codeHash), JSON.stringify(record), "EX", ttl, "NX");
+  }
+  async consumeChannelLinkCode(provider: ChannelProvider, codeHash: string): Promise<ChannelLinkCodeRecord | undefined> {
+    const key = this.channelLinkKey(provider, codeHash);
+    const raw = await this.r.get(key);
+    if (!raw) return undefined;
+    const record = JSON.parse(raw) as ChannelLinkCodeRecord;
+    if (record.used || record.expiresAt <= Date.now()) { await this.r.del(key); return undefined; }
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
+    return claimed ? JSON.parse(claimed) as ChannelLinkCodeRecord : undefined;
+  }
+  async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean> {
+    if (await this.r.exists(this.channelEventDoneKey(provider, eventId))) return false;
+    return (await this.r.set(this.channelEventKey(provider, eventId), "1", "EX", Math.max(30, Math.min(15 * 60, ttlSeconds)), "NX")) === "OK";
+  }
+  async completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void> {
+    await this.r.multi().set(this.channelEventDoneKey(provider, eventId), "1", "EX", ttlSeconds).del(this.channelEventKey(provider, eventId)).exec();
+  }
+  async releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void> {
+    await this.r.del(this.channelEventKey(provider, eventId));
+  }
+  async createOutbox(record: OutboxRecord): Promise<OutboxRecord> {
+    const idempotencyKey = this.outboxIdempotencyKey(record.idempotencyKey);
+    const existingId = await this.r.get(idempotencyKey);
+    if (existingId) {
+      const existing = await this.getOutbox(existingId);
+      if (existing) return existing;
+      await this.r.del(idempotencyKey);
+    }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(idempotencyKey);
+      const existingIdNow = await this.r.get(idempotencyKey);
+      if (existingIdNow) {
+        await this.r.unwatch();
+        const existing = await this.getOutbox(existingIdNow);
+        if (existing) return existing;
+        continue;
+      }
+      const result = await this.r.multi()
+        .set(this.outboxKey(record.id), JSON.stringify(record), "EX", 30 * 24 * 60 * 60)
+        .set(idempotencyKey, record.id, "EX", 30 * 24 * 60 * 60)
+        .exec();
+      if (result) return record;
+    }
+    throw new Error("Could not reserve outbound delivery idempotency key");
+  }
+  async getOutbox(id: string): Promise<OutboxRecord | undefined> {
+    const raw = await this.r.get(this.outboxKey(id));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as OutboxRecord; } catch { return undefined; }
+  }
+  async claimOutbox(id: string, leaseMs: number): Promise<OutboxRecord | undefined> {
+    const key = this.outboxKey(id);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.unwatch(); return undefined; }
+      const record = JSON.parse(raw) as OutboxRecord;
+      const now = Date.now();
+      if (record.status === "delivered" || (record.status === "delivering" && (record.leaseExpiresAt ?? 0) > now)) { await this.r.unwatch(); return undefined; }
+      const next = { ...record, status: "delivering" as const, attempts: record.attempts + 1, leaseToken: randomUUID(), leaseExpiresAt: now + leaseMs, updatedAt: now };
+      const result = await this.r.multi().set(key, JSON.stringify(next), "EX", 30 * 24 * 60 * 60).exec();
+      if (result) return next;
+    }
+    return undefined;
+  }
+  async updateOutbox(id: string, patch: Partial<OutboxRecord>): Promise<OutboxRecord | undefined> {
+    const current = await this.getOutbox(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, id: current.id, idempotencyKey: current.idempotencyKey, updatedAt: Date.now() };
+    await this.r.set(this.outboxKey(id), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    if (next.providerMessageId) await this.r.set(this.outboxProviderKey(next.provider, next.providerMessageId), id, "EX", 30 * 24 * 60 * 60);
+    return next;
+  }
+  async getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string) {
+    const id = await this.r.get(this.outboxProviderKey(provider, providerMessageId));
+    return id ? this.getOutbox(id) : undefined;
+  }
+  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
+    const records: OutboxRecord[] = [];
+    let cursor = "0";
+    do {
+      const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:outbox:out_*", "COUNT", Math.min(200, limit));
+      cursor = next;
+      for (const key of keys.slice(0, Math.max(0, limit - records.length))) {
+        const raw = await this.r.get(key);
+        if (!raw) continue;
+        try {
+          const record = JSON.parse(raw) as OutboxRecord;
+          if (!statuses?.length || statuses.includes(record.status)) records.push(record);
+        } catch { /* corrupt records cannot be delivered safely */ }
+      }
+    } while (cursor !== "0" && records.length < limit);
+    return records.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+  }
+  async getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined> {
+    const raw = await this.r.get(this.channelConversationKey(id));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as ChannelConversationRecord; } catch { return undefined; }
+  }
+  async saveChannelConversation(record: ChannelConversationRecord): Promise<void> {
+    await this.r.set(this.channelConversationKey(record.id), JSON.stringify(record), "EX", 365 * 24 * 60 * 60);
+  }
+  async enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void> {
+    const redisKey = this.channelDebounceKey(key);
+    await this.r.rpush(redisKey, JSON.stringify(message));
+    await this.r.expire(redisKey, ttlSeconds);
+  }
+  async takeChannelDebounce(key: string): Promise<InboundMessage[]> {
+    const redisKey = this.channelDebounceKey(key);
+    const values = await this.r.eval("local values=redis.call('lrange',KEYS[1],0,-1); redis.call('del',KEYS[1]); return values", 1, redisKey) as string[];
+    return (values ?? []).flatMap((value) => { try { return [JSON.parse(value) as InboundMessage]; } catch { return []; } });
+  }
 }
 
 // ── Memory ────────────────────────────────────────────────────────────────────
@@ -332,6 +652,18 @@ class MemoryBackend implements Backend {
   private pairings = new Map<string, CliPairingRecord>();
   private devices = new Map<string, CliDeviceRecord>();
   private telegramUpdates = new Map<number, number>();
+  private channelIdentities = new Map<string, ChannelIdentityRecord>();
+  private channelIdentityUsers = new Map<number, Set<string>>();
+  private channelInstallations = new Map<string, ChannelInstallationRecord>();
+  private channelOAuthStates = new Map<string, ChannelOAuthStateRecord>();
+  private channelLinkCodes = new Map<string, ChannelLinkCodeRecord>();
+  private channelEvents = new Map<string, number>();
+  private completedChannelEvents = new Map<string, number>();
+  private outbox = new Map<string, OutboxRecord>();
+  private outboxByIdempotency = new Map<string, string>();
+  private channelConversations = new Map<string, ChannelConversationRecord>();
+  private outboxByProvider = new Map<string, string>();
+  private channelDebounce = new Map<string, InboundMessage[]>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
@@ -351,6 +683,12 @@ class MemoryBackend implements Backend {
     const lock = this.locks.get(userId);
     if (lock && lock.exp > Date.now()) return false;
     this.locks.set(userId, { token, exp: Date.now() + leaseSeconds * 1000 });
+    return true;
+  }
+  async renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean> {
+    const lock = this.locks.get(userId);
+    if (!lock || lock.token !== token || lock.exp <= Date.now()) return false;
+    lock.exp = Date.now() + leaseSeconds * 1000;
     return true;
   }
   async releaseLock(userId: number, token: string): Promise<void> {
@@ -414,6 +752,99 @@ class MemoryBackend implements Backend {
     approval.status = "approved";
     return approval;
   }
+
+  private identityKey(provider: ChannelProvider, externalUserId: string, workspaceId?: string): string { return `${provider}:${workspaceId ?? "-"}:${externalUserId}`; }
+  async getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string) {
+    const record = this.channelIdentities.get(this.identityKey(provider, externalUserId, workspaceId));
+    return record?.disabledAt ? undefined : record;
+  }
+  async listChannelIdentities(userId: number) {
+    const keys = this.channelIdentityUsers.get(userId) ?? new Set<string>();
+    return [...keys].map((key) => this.channelIdentities.get(key)).filter((record): record is ChannelIdentityRecord => Boolean(record && !record.disabledAt));
+  }
+  async saveChannelIdentity(record: ChannelIdentityRecord) {
+    const key = this.identityKey(record.provider, record.externalUserId, record.workspaceId);
+    const existing = this.channelIdentities.get(key);
+    if (existing && (existing.userId !== record.userId || existing.accountId !== record.accountId)) return false;
+    this.channelIdentities.set(key, record);
+    const userKeys = this.channelIdentityUsers.get(record.userId) ?? new Set<string>();
+    userKeys.add(key);
+    this.channelIdentityUsers.set(record.userId, userKeys);
+    return true;
+  }
+  private installationKey(provider: ChannelInstallationRecord["provider"], workspaceId: string): string { return `${provider}:${workspaceId}`; }
+  async getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string) { return this.channelInstallations.get(this.installationKey(provider, workspaceId)); }
+  async saveChannelInstallation(record: ChannelInstallationRecord) { this.channelInstallations.set(this.installationKey(record.provider, record.workspaceId), record); }
+  async createChannelOAuthState(record: ChannelOAuthStateRecord) { this.channelOAuthStates.set(record.stateHash, record); }
+  async consumeChannelOAuthState(stateHash: string) {
+    const record = this.channelOAuthStates.get(stateHash);
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.channelOAuthStates.delete(stateHash); return undefined; }
+    record.used = true;
+    this.channelOAuthStates.delete(stateHash);
+    return record;
+  }
+  async createChannelLinkCode(record: ChannelLinkCodeRecord) { this.channelLinkCodes.set(`${record.provider}:${record.codeHash}`, record); }
+  async consumeChannelLinkCode(provider: ChannelProvider, codeHash: string) {
+    const key = `${provider}:${codeHash}`;
+    const record = this.channelLinkCodes.get(key);
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.channelLinkCodes.delete(key); return undefined; }
+    record.used = true;
+    this.channelLinkCodes.delete(key);
+    return record;
+  }
+  async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number) {
+    const key = `${provider}:${eventId}`;
+    const completed = this.completedChannelEvents.get(key);
+    if (completed && completed > Date.now()) return false;
+    const expires = this.channelEvents.get(key);
+    if (expires && expires > Date.now()) return false;
+    this.channelEvents.set(key, Date.now() + Math.max(30, Math.min(15 * 60, ttlSeconds)) * 1000);
+    return true;
+  }
+  async completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number) {
+    const key = `${provider}:${eventId}`;
+    this.channelEvents.delete(key);
+    this.completedChannelEvents.set(key, Date.now() + ttlSeconds * 1000);
+  }
+  async releaseChannelEvent(provider: ChannelProvider, eventId: string) { this.channelEvents.delete(`${provider}:${eventId}`); }
+  async createOutbox(record: OutboxRecord) {
+    const existingId = this.outboxByIdempotency.get(record.idempotencyKey);
+    if (existingId) {
+      const existing = this.outbox.get(existingId);
+      if (existing) return existing;
+    }
+    this.outbox.set(record.id, record);
+    this.outboxByIdempotency.set(record.idempotencyKey, record.id);
+    return record;
+  }
+  async getOutbox(id: string) { return this.outbox.get(id); }
+  async claimOutbox(id: string, leaseMs: number) {
+    const record = this.outbox.get(id);
+    const now = Date.now();
+    if (!record || record.status === "delivered" || (record.status === "delivering" && (record.leaseExpiresAt ?? 0) > now)) return undefined;
+    const next = { ...record, status: "delivering" as const, attempts: record.attempts + 1, leaseToken: randomUUID(), leaseExpiresAt: now + leaseMs, updatedAt: now };
+    this.outbox.set(id, next);
+    return next;
+  }
+  async updateOutbox(id: string, patch: Partial<OutboxRecord>) {
+    const current = this.outbox.get(id);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, id: current.id, idempotencyKey: current.idempotencyKey, updatedAt: Date.now() };
+    this.outbox.set(id, next);
+    if (next.providerMessageId) this.outboxByProvider.set(`${next.provider}:${next.providerMessageId}`, id);
+    return next;
+  }
+  async getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string) {
+    const id = this.outboxByProvider.get(`${provider}:${providerMessageId}`);
+    return id ? this.outbox.get(id) : undefined;
+  }
+  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
+    return [...this.outbox.values()].filter((record) => !statuses?.length || statuses.includes(record.status)).sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+  }
+  async getChannelConversation(id: string) { return this.channelConversations.get(id); }
+  async saveChannelConversation(record: ChannelConversationRecord) { this.channelConversations.set(record.id, record); }
+  async enqueueChannelDebounce(key: string, message: InboundMessage, _ttlSeconds: number) { this.channelDebounce.set(key, [...(this.channelDebounce.get(key) ?? []), message].slice(-20)); }
+  async takeChannelDebounce(key: string) { const messages = this.channelDebounce.get(key) ?? []; this.channelDebounce.delete(key); return messages; }
 }
 
 function fresh(): UserSession {
@@ -451,7 +882,7 @@ export function isDurableStore(): boolean {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [] };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkThreads: s.sdkThreads ?? [] };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -695,6 +1126,10 @@ export async function acquireUserLock(uid: number, token: string, leaseSeconds =
   return backend.acquireLock(uid, token, leaseSeconds);
 }
 
+export async function renewUserLock(uid: number, token: string, leaseSeconds = 180): Promise<boolean> {
+  return backend.renewLock(uid, token, leaseSeconds);
+}
+
 export async function releaseUserLock(uid: number, token: string): Promise<void> {
   return backend.releaseLock(uid, token);
 }
@@ -892,4 +1327,121 @@ export async function setApprovalStatus(uid: number, id: string, status: Approva
 
 export async function claimApproval(uid: number, id: string): Promise<ApprovalRecord | undefined> {
   return backend.claimApproval(uid, id);
+}
+
+export async function getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined> {
+  return backend.getChannelIdentity(provider, externalUserId, workspaceId);
+}
+
+export async function listChannelIdentities(userId: number): Promise<ChannelIdentityRecord[]> {
+  return backend.listChannelIdentities(userId);
+}
+
+export async function saveChannelIdentity(record: ChannelIdentityRecord): Promise<boolean> {
+  if (!record.externalUserId.trim() || !record.accountId.trim()) throw new Error("Channel identity requires an account and external user ID");
+  return backend.saveChannelIdentity({ ...record, externalUserId: record.externalUserId.trim(), workspaceId: record.workspaceId?.trim() || undefined });
+}
+
+export async function getChannelInstallation(provider: ChannelInstallationRecord["provider"], workspaceId: string): Promise<ChannelInstallationRecord | undefined> {
+  return backend.getChannelInstallation(provider, workspaceId);
+}
+
+export async function saveChannelInstallation(record: ChannelInstallationRecord): Promise<void> {
+  if (!record.workspaceId.trim()) throw new Error("Channel installation requires a workspace ID");
+  await backend.saveChannelInstallation(record);
+}
+
+export async function createChannelOAuthState(userId: number, stateHash: string, ttlMs = 10 * 60 * 1000): Promise<void> {
+  await backend.createChannelOAuthState({ provider: "slack", stateHash, userId, expiresAt: Date.now() + ttlMs, used: false });
+}
+
+export async function consumeChannelOAuthState(stateHash: string): Promise<ChannelOAuthStateRecord | undefined> {
+  return backend.consumeChannelOAuthState(stateHash);
+}
+
+export async function createChannelLinkCode(userId: number, provider: ChannelProvider, ttlMs = 10 * 60 * 1000): Promise<string> {
+  const code = createPairingCode();
+  await backend.createChannelLinkCode({ codeHash: hashCliSecret(code), userId, provider, expiresAt: Date.now() + ttlMs, used: false });
+  return code;
+}
+
+export async function consumeChannelLinkCode(provider: ChannelProvider, code: string): Promise<ChannelLinkCodeRecord | undefined> {
+  return backend.consumeChannelLinkCode(provider, hashCliSecret(code.trim()));
+}
+
+export async function claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
+  const clean = eventId.trim();
+  if (!clean || clean.length > 500) return false;
+  return backend.claimChannelEvent(provider, clean, ttlSeconds);
+}
+
+export async function completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds = 24 * 60 * 60): Promise<void> {
+  if (!eventId.trim()) return;
+  await backend.completeChannelEvent(provider, eventId.trim(), ttlSeconds);
+}
+
+export async function releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void> {
+  if (!eventId.trim()) return;
+  await backend.releaseChannelEvent(provider, eventId.trim());
+}
+
+export async function enqueueOutbox(record: Omit<OutboxRecord, "id" | "status" | "attempts" | "createdAt" | "updatedAt">): Promise<OutboxRecord> {
+  const now = Date.now();
+  const value: OutboxRecord = { ...record, id: `out_${randomUUID()}`, status: "queued", attempts: 0, createdAt: now, updatedAt: now };
+  return backend.createOutbox(value);
+}
+
+export async function getOutbox(id: string): Promise<OutboxRecord | undefined> {
+  return backend.getOutbox(id);
+}
+
+export async function claimOutbox(id: string, leaseMs = 30_000): Promise<OutboxRecord | undefined> {
+  return backend.claimOutbox(id, Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
+}
+
+export async function updateOutbox(id: string, patch: Partial<OutboxRecord>): Promise<OutboxRecord | undefined> {
+  return backend.updateOutbox(id, patch);
+}
+
+export async function getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string): Promise<OutboxRecord | undefined> {
+  return backend.getOutboxByProviderMessageId(provider, providerMessageId);
+}
+
+export async function listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
+  return backend.listOutbox(statuses, Math.max(1, Math.min(500, limit)));
+}
+
+export async function getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined> {
+  return backend.getChannelConversation(id);
+}
+
+export async function appendChannelConversationMessages(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt"> & { messages: Message[] }): Promise<ChannelConversationRecord> {
+  const current = await backend.getChannelConversation(input.id);
+  const now = Date.now();
+  const history = [...(current?.history ?? []), ...input.messages];
+  const cap = config.maxHistory * 2;
+  const overflow = history.length > cap ? history.slice(0, history.length - cap) : [];
+  const summaries = [...(current?.summaries ?? []), ...(overflow.length ? [overflow.map((m) => `${m.role}: ${m.content}`).join(" ").slice(0, 1800)] : [])].slice(-10);
+  const record: ChannelConversationRecord = {
+    id: input.id,
+    accountId: input.accountId,
+    userId: input.userId,
+    provider: input.provider,
+    scope: input.scope,
+    history: history.slice(-cap),
+    summaries,
+    createdAt: current?.createdAt ?? now,
+    updatedAt: now,
+  };
+  await backend.saveChannelConversation(record);
+  return record;
+}
+
+export async function enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds = 30): Promise<void> {
+  if (!key.trim()) throw new Error("Debounce key is required");
+  await backend.enqueueChannelDebounce(key, message, Math.max(5, Math.min(300, ttlSeconds)));
+}
+
+export async function takeChannelDebounce(key: string): Promise<InboundMessage[]> {
+  return backend.takeChannelDebounce(key);
 }

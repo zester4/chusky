@@ -126,6 +126,31 @@ REMINDER_WORKFLOW_URL=https://chusky.selithub.shop/workflows/reminder
 JOB_WORKFLOW_URL=https://chusky.selithub.shop/workflows/job
 ```
 
+Optional multi-channel adapters (keep these in `.env`, never in Git):
+
+```env
+SLACK_ENABLED=false
+SLACK_SIGNING_SECRET=
+SLACK_BOT_TOKEN=
+SLACK_CLIENT_ID=
+SLACK_CLIENT_SECRET=
+SLACK_REDIRECT_URI=https://chusky.selithub.shop/slack/oauth/callback
+WHATSAPP_ENABLED=false
+WHATSAPP_ACCESS_TOKEN=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+WHATSAPP_GRAPH_VERSION=v23.0
+```
+
+Slack Event Subscriptions should target `https://chusky.selithub.shop/slack/events` and
+Interactivity should target `https://chusky.selithub.shop/slack/interactions`. In Telegram,
+run `/channel link slack`; open the generated installation link to bind the installing Slack
+user. WhatsApp Cloud API webhook verification and events both use
+`https://chusky.selithub.shop/whatsapp/webhook`; run `/channel link whatsapp` in Telegram and
+send the one-time code from the WhatsApp account. The gateway rejects invalid signatures,
+isolates unlinked users, deduplicates provider events in Redis, and persists outbound receipts.
+
 Never place real keys in this guide, GitHub, or chat.
 
 Run the configuration report:

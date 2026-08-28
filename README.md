@@ -23,6 +23,9 @@ Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** v
 | **Export** | `/export` downloads full conversation as `.txt` |
 | **Inline mode** | `@chusky query` in any chat |
 | **Linked CLI** | Continue the same Redis-backed session from a terminal |
+| **Shared channel gateway** | One account identity and durable conversation/outbox boundary for Telegram, CLI, Slack, and WhatsApp |
+| **Verified Slack adapter** | Signed Events API/interactions, DMs, mentions, threads, OAuth installation, and Block Kit approvals |
+| **Verified WhatsApp adapter** | Signed Cloud API webhooks, text/media normalization, and durable outbound receipts |
 
 ---
 
@@ -200,6 +203,8 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli link` | Create a one-time terminal pairing code |
 | `/cli devices` | List linked terminals |
 | `/cli revoke <name>` | Revoke a linked terminal |
+| `/channel link slack|whatsapp` | Create a one-time verified external-channel link |
+| `/channel list` | List channels linked to your Chusky account |
 
 ## Natural-language reminders, jobs, and scratchpad
 
@@ -233,6 +238,14 @@ Enable a trigger whenever I receive a new GitHub issue.
 ```
 
 Natural-language image and trigger requests are exposed to the model as Chusky tools. Video requests are submitted to the Upstash Workflow endpoint and delivered to Telegram when generation completes.
+
+### Slack and WhatsApp channels
+
+The channel gateway keeps the internal account identity (`account_<telegram-user-id>`) separate from provider IDs. A Slack or WhatsApp user is never trusted by display name alone: link it from the owning Telegram account with `/channel link slack` or `/channel link whatsapp`. Slack OAuth links the installer’s verified Slack user; WhatsApp uses the one-time code with `/link <code>`. Unlinked messages receive instructions only and never enter an account’s history, memory, tasks, or approvals.
+
+Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease.
+
+Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
 
 ---
 
@@ -268,6 +281,19 @@ Natural-language image and trigger requests are exposed to the model as Chusky t
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |
+| `SLACK_ENABLED` | — | `false` | Enable the verified Slack adapter |
+| `SLACK_SIGNING_SECRET` | Slack | — | Slack app Signing Secret |
+| `SLACK_BOT_TOKEN` | — | — | Optional single-workspace token; OAuth installations are preferred |
+| `SLACK_CLIENT_ID` | Slack OAuth | — | Slack app client ID |
+| `SLACK_CLIENT_SECRET` | Slack OAuth | — | Slack app client secret |
+| `SLACK_REDIRECT_URI` | Slack OAuth | — | Public `/slack/oauth/callback` URL |
+| `WHATSAPP_ENABLED` | — | `false` | Enable WhatsApp Cloud API adapter |
+| `WHATSAPP_ACCESS_TOKEN` | WhatsApp | — | Cloud API access token |
+| `WHATSAPP_PHONE_NUMBER_ID` | WhatsApp | — | Sending phone number ID |
+| `WHATSAPP_VERIFY_TOKEN` | WhatsApp | — | Webhook verification token |
+| `WHATSAPP_APP_SECRET` | WhatsApp | — | Meta app secret for `X-Hub-Signature-256` |
+| `WHATSAPP_GRAPH_VERSION` | — | `v23.0` | Graph API version |
+| `CHUSKY_API_KEY` | — | — | Optional self-hosted developer SDK bearer key; enables `/v1` |
 
 ---
 
@@ -284,6 +310,7 @@ src/
 ├── types.ts      Shared API, media, and tool-call types
 ├── policy.ts     Risk detection and human progress messages
 ├── nativeTools.ts Native reminders, CRON, scratchpad, and Daytona dispatch
+├── channels/     Provider-neutral gateway, identity, scopes, outbox, and channel adapters
 ├── lib/daytona/  Daytona SDK client, workspace lifecycle, files, and process engine
 ├── handlers.ts   grammY commands, live status bar, /connect, /apps, inline mode
 └── markdown.ts   LLM markdown → Telegram HTML
