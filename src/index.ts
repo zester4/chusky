@@ -35,6 +35,10 @@ async function main(): Promise<void> {
 
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
+  // Webhook updates are dispatched in the background, so initialize grammY
+  // before the HTTP server can accept one. Without this, handleUpdate throws
+  // because bot.me has not been loaded yet.
+  await bot.init();
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
 
