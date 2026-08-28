@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: tg-agent
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      # Set these in the Render dashboard → Environment:
+      # TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY
+      # WEBHOOK_URL  ← set AFTER first deploy, then redeploy
+      # WEBHOOK_SECRET, DEFAULT_MODEL, ALLOWED_USERS
