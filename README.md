@@ -1,10 +1,10 @@
-# Chuck AI Agent
+# Chusky AI Agent
 
-Chuck is a production-ready Telegram AI agent with access to **1,000+ tools** via Composio managed auth, powered by any OpenRouter model. He can connect apps, run shell commands, browse the web, handle real-time trigger events, and execute across every major SaaS platform — all from a Telegram chat.
+Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** via Composio managed auth, powered by any OpenRouter model. Chusky can connect apps, run shell commands, browse the web, handle real-time trigger events, and execute across every major SaaS platform — from Telegram or a linked terminal.
 
 ---
 
-## What Chuck can do
+## What Chusky can do
 
 | Capability | How |
 |---|---|
@@ -13,14 +13,16 @@ Chuck is a production-ready Telegram AI agent with access to **1,000+ tools** vi
 | **Run shell commands** | `COMPOSIO_REMOTE_BASH_TOOL` — sandboxed bash in a remote environment |
 | **Persistent workspace** | `COMPOSIO_REMOTE_WORKBENCH` — stateful remote environment per session |
 | **Tool discovery** | `COMPOSIO_SEARCH_TOOL` — finds the right tool by intent |
-| **Real-time triggers** | Composio webhook → Chuck notifies you on Slack messages, GitHub commits, emails, etc. |
+| **Real-time triggers** | Composio webhook → Chusky notifies you on Slack messages, GitHub commits, emails, etc. |
 | **Any LLM** | Switch model per-user at runtime via `/model` |
 | **Redis persistence** | Sessions survive restarts; falls back to memory |
 | **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
-| **Private scratchpad** | Chuck can save and retrieve per-user working notes across turns |
+| **Private scratchpad** | Chusky can save and retrieve per-user working notes across turns |
+| **Daytona computer** | Optional isolated per-user workspace for code, files, and commands |
 | **Rate limiting** | Per-user throttling |
 | **Export** | `/export` downloads full conversation as `.txt` |
-| **Inline mode** | `@chuck query` in any chat |
+| **Inline mode** | `@chusky query` in any chat |
+| **Linked CLI** | Continue the same Redis-backed session from a terminal |
 
 ---
 
@@ -30,12 +32,37 @@ Chuck is a production-ready Telegram AI agent with access to **1,000+ tools** vi
 git clone <repo> && cd tg-agent
 npm install
 cp .env.example .env
-# Fill in: TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, COMPOSIO_API_KEY
-# For reminders/jobs, also set QSTASH_TOKEN and the two public workflow URLs.
+chusky setup
+# Or: npm run setup
+# For reminders/jobs and durable scheduled tasks, also set QSTASH_TOKEN and the two public workflow URLs.
 # Leave WEBHOOK_URL blank — uses polling
 
-npm run dev
+npm run telegram
+
+# From a linked terminal, after deploying Chusky:
+npm run cli
 ```
+
+`chusky setup` is safe to rerun: it preserves existing `.env` values, hides secret input, generates missing webhook secrets, and lets you skip optional Redis, QStash, and Daytona integrations. `chusky doctor` reports configured or missing settings and checks the deployed `/health` endpoint when webhook mode is enabled. The development aliases are `npm run setup` and `npm run doctor`.
+
+Use `chusky chat` for terminal chat and `chusky telegram` to run the Telegram service. `chusky start` is an alias for the service. `npm run dev` remains available for TypeScript watch-mode development.
+
+### Terminal CLI
+
+The CLI is a secure client of the running Chusky service. It does not create a second conversation or a second Composio session. CLI API routes are enabled in production webhook mode; configure a public `WEBHOOK_URL` and Redis before pairing. Local polling mode remains Telegram-only unless the service is deployed.
+
+1. Deploy Chusky with `WEBHOOK_URL` and `REDIS_URL` configured.
+2. In Telegram, run `/cli link`.
+3. In the terminal, run:
+
+```bash
+npm run cli -- auth link --server https://your-chusky-host --code 123456 --name joe-laptop
+npm run cli
+```
+
+The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access.
+
+CLI commands include `/history`, `/model` (interactive picker) or `/model <openrouter-model>`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Paste multiline text directly and press Enter to send; `Ctrl+J` inserts a newline while typing. Long Markdown responses and history use a keyboard pager (`Space`/Down, `b`/Up, `q`). Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram.
 
 ---
 
@@ -77,17 +104,17 @@ gcloud run deploy chuck \
 
 ## Setting up Composio triggers
 
-Chuck can receive real-time events from connected apps (new Slack message, GitHub commit, incoming email, etc.).
+Chusky can receive real-time events from connected apps (new Slack message, GitHub commit, incoming email, etc.).
 
-1. Deploy Chuck and note your public URL
+1. Deploy Chusky and note your public URL
 2. In the [Composio dashboard](https://app.composio.dev) → **Triggers** → set webhook URL to:
    `https://your-domain.com/composio/triggers`
-3. Chuck will receive events at `/composio/triggers` and can notify you via Telegram
+3. Chusky will receive events at `/composio/triggers` and can notify you via Telegram
 
-To create a trigger programmatically, tell Chuck:
+To create a trigger programmatically, tell Chusky:
 > *"Create a trigger for new GitHub commits on my repo my-org/my-repo"*
 
-Chuck will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then set up the trigger.
+Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then set up the trigger.
 
 ---
 
@@ -109,22 +136,34 @@ Chuck will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then s
 | `/usage` | Messages sent + model |
 | `/info` | Full session details |
 | `/help` | Help |
+| `/cli link` | Create a one-time terminal pairing code |
+| `/cli devices` | List linked terminals |
+| `/cli revoke <name>` | Revoke a linked terminal |
 
 ## Natural-language reminders, jobs, and scratchpad
 
-Chuck's native tools are callable directly from ordinary messages:
+Chusky's native tools are callable directly from ordinary messages:
 
 - “Remind me in 20 minutes to check the deployment.”
-- “Every weekday at 9, remind me to review the inbox.” (Chuck asks for or uses a CRON expression when needed.)
+- “Every weekday at 9, remind me to review the inbox.” (Chusky asks for or uses a CRON expression when needed.)
 - “Save this as a scratchpad note called deploy: use the staging API.”
 - “What did I save in my deploy notes?”
 
 Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/reminder`, and
 `JOB_WORKFLOW_URL=https://your-domain/workflows/job`. One-time reminders are delayed durable
 Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
-Chuck checks ownership and cancellation state before delivering a notification.
+Chusky checks ownership and cancellation state before delivering a notification.
 
-Chuck also accepts these requests naturally, without slash commands:
+### Daytona persistence
+
+When `DAYTONA_API_KEY` is configured, Chusky keeps a per-user Daytona workspace and stores its
+provider ID in the durable Redis store under the existing `chuck:*` persistence contract. On a
+later request, Chusky reconnects to that workspace, refreshes its state, recovers it when Daytona
+reports a recoverable error, and starts it again after an idle pause or stop. The workspace's
+filesystem is retained by Daytona across those lifecycle states; a provider-side deletion or
+wall-clock TTL is permanent and causes Chusky to require a new workspace.
+
+Chusky also accepts these requests naturally, without slash commands:
 
 ```text
 Generate an image of a moonlit mountain lake.
@@ -132,7 +171,7 @@ Make a short video of a red panda surfing.
 Enable a trigger whenever I receive a new GitHub issue.
 ```
 
-Natural-language image and trigger requests are exposed to the model as Chuck tools. Video requests are submitted to the Upstash Workflow endpoint and delivered to Telegram when generation completes.
+Natural-language image and trigger requests are exposed to the model as Chusky tools. Video requests are submitted to the Upstash Workflow endpoint and delivered to Telegram when generation completes.
 
 ---
 
@@ -150,11 +189,15 @@ Natural-language image and trigger requests are exposed to the model as Chuck to
 | `QSTASH_TOKEN` | reminders/jobs | — | Upstash QStash token |
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
-| `SYSTEM_PROMPT` | — | Chuck's default | Agent personality |
+| `SYSTEM_PROMPT` | — | Chusky's default | Agent personality |
 | `ENABLE_MANAGE_CONNECTIONS` | — | `true` | OAuth link tool |
 | `COMPOSIO_CALLBACK_URL` | — | — | Post-connect redirect URL |
 | `ENABLE_SANDBOX` | — | `true` | Bash + workbench tools |
 | `SANDBOX_SIZE` | — | `standard` | `standard`/`medium`/`large`/`xlarge` |
+| `DAYTONA_API_KEY` | Daytona | — | Enables an isolated per-user Daytona workspace |
+| `DAYTONA_API_URL` | — | `https://app.daytona.io/api` | Daytona API endpoint |
+| `DAYTONA_TARGET` | — | provider default | Optional Daytona execution target |
+| `DAYTONA_SNAPSHOT` | — | provider default | Optional reusable snapshot |
 | `MAX_TOOL_ROUNDS` | — | `10` | Max agentic loop iterations |
 | `RATE_LIMIT` | — | `10` | Messages per window |
 | `RATE_WINDOW_SECONDS` | — | `60` | Rate window |
@@ -175,13 +218,15 @@ src/
 ├── config.ts     All env vars, typed + validated at startup
 ├── logger.ts     pino — pretty in dev, JSON in prod
 ├── store.ts      Redis + memory — sessions, rate limits, Composio session IDs
-├── agent.ts      Chuck's brain — Composio session + OpenRouter agentic loop
+├── agent.ts      Chusky's brain — Composio session + OpenRouter agentic loop
 ├── agentTools.ts Native tool schemas exposed to the model
 ├── types.ts      Shared API, media, and tool-call types
 ├── policy.ts     Risk detection and human progress messages
-├── nativeTools.ts Native reminders, CRON jobs, and scratchpad tools
+├── nativeTools.ts Native reminders, CRON, scratchpad, and Daytona dispatch
+├── lib/daytona/  Daytona SDK client, workspace lifecycle, files, and process engine
 ├── handlers.ts   grammY commands, live status bar, /connect, /apps, inline mode
 └── markdown.ts   LLM markdown → Telegram HTML
+└── cli/           Authenticated terminal client, API client, and Markdown renderer
 ```
 
 ### Agentic loop

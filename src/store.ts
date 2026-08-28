@@ -3,6 +3,7 @@
  * Handles: message history, model selection, rate limiting, composio session IDs.
  */
 import Redis from "ioredis";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 
@@ -17,6 +18,7 @@ export interface UserSession {
   totalMessages: number;
   totalCost: number;
   composioSessionId?: string; // persisted Composio ToolRouter session ID
+  daytonaWorkspaceId?: string;
   telegramChatId?: number;
   triggerIds: string[];
   reminders: ReminderRecord[];
@@ -25,6 +27,65 @@ export interface UserSession {
   memories: MemoryFact[];
   summaries: string[];
   approvals: ApprovalRecord[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DaytonaWorkspaceRecord {
+  sandboxId: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  lastKnownState?: string;
+}
+
+export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+
+export interface TaskStep {
+  id: string;
+  title: string;
+  status: "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+  result?: string;
+  updatedAt: number;
+}
+
+export interface TaskLease {
+  token: string;
+  workerId: string;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
+export interface TaskEvent {
+  id: string;
+  type: "created" | "scheduled" | "claimed" | "checkpointed" | "blocked" | "completed" | "failed" | "cancelled" | "retried";
+  message: string;
+  at: number;
+  attempt: number;
+}
+
+/**
+ * A task lives outside the expiring chat session so a paused Daytona workspace
+ * and its recovery instructions remain available after session/history TTL.
+ */
+export interface TaskRecord {
+  id: string;
+  userId: number;
+  title: string;
+  objective: string;
+  status: TaskStatus;
+  steps: TaskStep[];
+  checkpoint?: string;
+  nextAction?: string;
+  workspaceId?: string;
+  result?: string;
+  error?: string;
+  attempt: number;
+  maxAttempts: number;
+  runAt?: number;
+  workflowRunId?: string;
+  lease?: TaskLease;
+  events: TaskEvent[];
   createdAt: number;
   updatedAt: number;
 }
@@ -76,12 +137,42 @@ export interface ApprovalRecord {
   expiresAt: number;
 }
 
+export interface CliPairingRecord {
+  codeHash: string;
+  userId: number;
+  expiresAt: number;
+  used: boolean;
+}
+
+export interface CliDeviceRecord {
+  tokenHash: string;
+  userId: number;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
+  revokedAt?: number;
+}
+
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   incrRate(userId: number): Promise<number>;
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
+  getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
+  saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
+  clearDaytonaWorkspace(userId: number): Promise<void>;
+  getTasks(userId: number): Promise<TaskRecord[]>;
+  saveTasks(userId: number, tasks: TaskRecord[]): Promise<void>;
+  claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined>;
+  settleTask(userId: number, id: string, leaseToken: string, patch: Partial<TaskRecord>, event: TaskEvent): Promise<TaskRecord | undefined>;
+  createCliPairing(record: CliPairingRecord): Promise<void>;
+  consumeCliPairing(codeHash: string): Promise<CliPairingRecord | undefined>;
+  saveCliDevice(record: CliDeviceRecord): Promise<void>;
+  getCliDevice(tokenHash: string): Promise<CliDeviceRecord | undefined>;
+  revokeCliDevice(userId: number, tokenHash: string): Promise<boolean>;
+  listCliDevices(userId: number): Promise<CliDeviceRecord[]>;
+  claimApproval(userId: number, id: string): Promise<ApprovalRecord | undefined>;
 }
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
@@ -89,6 +180,11 @@ class RedisBackend implements Backend {
   constructor(private r: Redis) {}
   private sk = (id: number) => `chuck:session:${id}`;
   private rk = (id: number) => `chuck:rate:${id}`;
+  private dk = (id: number) => `chuck:daytona:${id}`;
+  private taskk = (id: number) => `chuck:tasks:${id}`;
+  private pk = (hash: string) => `chuck:cli:pairing:${hash}`;
+  private tk = (hash: string) => `chuck:cli:device:${hash}`;
+  private uk = (id: number) => `chuck:user:${id}:devices`;
 
   async getSession(userId: number): Promise<UserSession> {
     const raw = await this.r.get(this.sk(userId));
@@ -115,6 +211,112 @@ class RedisBackend implements Backend {
   async releaseLock(userId: number, token: string): Promise<void> {
     await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:lock:${userId}`, token);
   }
+  async getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined> {
+    const raw = await this.r.get(this.dk(userId));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as DaytonaWorkspaceRecord; } catch { return undefined; }
+  }
+  async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void> {
+    await this.r.set(this.dk(userId), JSON.stringify(workspace));
+  }
+  async clearDaytonaWorkspace(userId: number): Promise<void> {
+    await this.r.del(this.dk(userId));
+  }
+  async getTasks(userId: number): Promise<TaskRecord[]> {
+    const raw = await this.r.get(this.taskk(userId));
+    if (!raw) return [];
+    try { return JSON.parse(raw) as TaskRecord[]; } catch { return []; }
+  }
+  async saveTasks(userId: number, tasks: TaskRecord[]): Promise<void> {
+    // Intentionally no expiry: task recovery must outlive conversational context.
+    await this.r.set(this.taskk(userId), JSON.stringify(tasks));
+  }
+  async claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined> {
+    const key = this.taskk(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
+      const index = tasks.findIndex((task) => task.id === id);
+      const task = index < 0 ? undefined : normalizeTask(tasks[index]);
+      const now = Date.now();
+      if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
+      const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
+      const next = normalizeTask({ ...task, status: "running", lease, attempt: task.attempt + 1, updatedAt: now, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, task.attempt + 1, now)].slice(-100) });
+      tasks[index] = next;
+      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
+      if (result) return next;
+    }
+    return undefined;
+  }
+  async settleTask(userId: number, id: string, leaseToken: string, patch: Partial<TaskRecord>, event: TaskEvent): Promise<TaskRecord | undefined> {
+    const key = this.taskk(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
+      const index = tasks.findIndex((task) => task.id === id);
+      const task = index < 0 ? undefined : normalizeTask(tasks[index]);
+      if (!task || task.lease?.token !== leaseToken) { await this.r.unwatch(); return undefined; }
+      const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), events: [...task.events, event].slice(-100) });
+      tasks[index] = next;
+      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
+      if (result) return next;
+    }
+    return undefined;
+  }
+  async createCliPairing(record: CliPairingRecord): Promise<void> {
+    const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    await this.r.set(this.pk(record.codeHash), JSON.stringify(record), "EX", ttl, "NX");
+  }
+  async consumeCliPairing(codeHash: string): Promise<CliPairingRecord | undefined> {
+    const key = this.pk(codeHash);
+    const raw = await this.r.get(key);
+    if (!raw) return undefined;
+    const record = JSON.parse(raw) as CliPairingRecord;
+    if (record.used || record.expiresAt <= Date.now()) { await this.r.del(key); return undefined; }
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
+    return claimed ? JSON.parse(claimed) as CliPairingRecord : undefined;
+  }
+  async saveCliDevice(record: CliDeviceRecord): Promise<void> {
+    await this.r.set(this.tk(record.tokenHash), JSON.stringify(record));
+    await this.r.sadd(this.uk(record.userId), record.tokenHash);
+  }
+  async getCliDevice(tokenHash: string): Promise<CliDeviceRecord | undefined> {
+    const raw = await this.r.get(this.tk(tokenHash));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as CliDeviceRecord; } catch { return undefined; }
+  }
+  async revokeCliDevice(userId: number, tokenHash: string): Promise<boolean> {
+    const key = this.tk(tokenHash);
+    const raw = await this.r.get(key);
+    if (!raw) return false;
+    const record = JSON.parse(raw) as CliDeviceRecord;
+    if (record.userId !== userId) return false;
+    record.revokedAt = Date.now();
+    await this.r.set(key, JSON.stringify(record));
+    return true;
+  }
+  async listCliDevices(userId: number): Promise<CliDeviceRecord[]> {
+    const hashes = await this.r.smembers(this.uk(userId));
+    const records = await Promise.all(hashes.map((hash) => this.getCliDevice(hash)));
+    return records.filter((r): r is CliDeviceRecord => Boolean(r));
+  }
+  async claimApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
+    const key = this.sk(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      if (!raw) { await this.r.unwatch(); return undefined; }
+      const s = JSON.parse(raw) as UserSession;
+      const approval = s.approvals?.find((a) => a.id === id);
+      if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
+      approval.status = "approved";
+      const result = await this.r.multi().setex(key, config.sessionTtl, JSON.stringify(s)).exec();
+      if (result) return approval;
+    }
+    return undefined;
+  }
 }
 
 // ── Memory ────────────────────────────────────────────────────────────────────
@@ -122,6 +324,8 @@ class MemoryBackend implements Backend {
   private sessions = new Map<number, UserSession>();
   private rates = new Map<number, { n: number; exp: number }>();
   private locks = new Map<number, { token: string; exp: number }>();
+  private pairings = new Map<string, CliPairingRecord>();
+  private devices = new Map<string, CliDeviceRecord>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
@@ -146,6 +350,58 @@ class MemoryBackend implements Backend {
   async releaseLock(userId: number, token: string): Promise<void> {
     if (this.locks.get(userId)?.token === token) this.locks.delete(userId);
   }
+  private daytona = new Map<number, DaytonaWorkspaceRecord>();
+  private tasks = new Map<number, TaskRecord[]>();
+  async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
+  async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
+  async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
+  async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
+  async saveTasks(userId: number, tasks: TaskRecord[]) { this.tasks.set(userId, tasks); }
+  async claimTask(userId: number, id: string, workerId: string, leaseMs: number) {
+    const tasks = this.tasks.get(userId) ?? [];
+    const index = tasks.findIndex((task) => task.id === id);
+    const task = index < 0 ? undefined : normalizeTask(tasks[index]);
+    const now = Date.now();
+    if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
+    const next = normalizeTask({ ...task, status: "running", lease: { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs }, attempt: task.attempt + 1, updatedAt: now, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, task.attempt + 1, now)].slice(-100) });
+    tasks[index] = next;
+    this.tasks.set(userId, tasks);
+    return next;
+  }
+  async settleTask(userId: number, id: string, leaseToken: string, patch: Partial<TaskRecord>, event: TaskEvent) {
+    const tasks = this.tasks.get(userId) ?? [];
+    const index = tasks.findIndex((task) => task.id === id);
+    const task = index < 0 ? undefined : normalizeTask(tasks[index]);
+    if (!task || task.lease?.token !== leaseToken) return undefined;
+    const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), events: [...task.events, event].slice(-100) });
+    tasks[index] = next;
+    this.tasks.set(userId, tasks);
+    return next;
+  }
+  async createCliPairing(record: CliPairingRecord) { this.pairings.set(record.codeHash, record); }
+  async consumeCliPairing(codeHash: string) {
+    const record = this.pairings.get(codeHash);
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.pairings.delete(codeHash); return undefined; }
+    record.used = true;
+    this.pairings.delete(codeHash);
+    return record;
+  }
+  async saveCliDevice(record: CliDeviceRecord) { this.devices.set(record.tokenHash, record); }
+  async getCliDevice(tokenHash: string) { return this.devices.get(tokenHash); }
+  async revokeCliDevice(userId: number, tokenHash: string) {
+    const record = this.devices.get(tokenHash);
+    if (!record || record.userId !== userId) return false;
+    record.revokedAt = Date.now();
+    return true;
+  }
+  async listCliDevices(userId: number) { return [...this.devices.values()].filter((d) => d.userId === userId); }
+  async claimApproval(userId: number, id: string) {
+    const s = this.sessions.get(userId);
+    const approval = s?.approvals?.find((a) => a.id === id);
+    if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) return undefined;
+    approval.status = "approved";
+    return approval;
+  }
 }
 
 function fresh(): UserSession {
@@ -155,8 +411,11 @@ function fresh(): UserSession {
 
 let backend: Backend;
 
-export async function initStore(): Promise<void> {
-  if (config.redisUrl) {
+export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
+  if (config.webhookUrl && !config.redisUrl && !options.memoryOnly) {
+    throw new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
+  }
+  if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
       await r.connect();
@@ -165,12 +424,17 @@ export async function initStore(): Promise<void> {
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
+      if (config.webhookUrl) throw new Error("Redis is unavailable in webhook/production mode; refusing in-memory persistence");
       logger.warn({ err: e }, "Store: Redis failed, using memory");
     }
   } else {
     logger.info("Store: using in-memory (set REDIS_URL for persistence)");
   }
   backend = new MemoryBackend();
+}
+
+export function isDurableStore(): boolean {
+  return backend instanceof RedisBackend;
 }
 
 export async function getSession(uid: number): Promise<UserSession> {
@@ -238,6 +502,168 @@ export async function setComposioSessionId(uid: number, id: string): Promise<voi
   await saveSession(uid, s);
 }
 
+export async function setDaytonaWorkspaceId(uid: number, id: string): Promise<void> {
+  const s = await getSession(uid);
+  s.daytonaWorkspaceId = id;
+  await saveSession(uid, s);
+}
+
+export async function clearDaytonaWorkspaceId(uid: number): Promise<void> {
+  const s = await getSession(uid);
+  delete s.daytonaWorkspaceId;
+  await saveSession(uid, s);
+}
+
+export async function getDaytonaWorkspace(uid: number): Promise<DaytonaWorkspaceRecord | undefined> {
+  const durable = await backend.getDaytonaWorkspace(uid);
+  if (durable) return durable;
+  const legacy = (await getSession(uid)).daytonaWorkspaceId;
+  return legacy ? { sandboxId: legacy, name: `chusky-${uid}`, createdAt: Date.now(), updatedAt: Date.now() } : undefined;
+}
+
+export async function saveDaytonaWorkspace(uid: number, workspace: DaytonaWorkspaceRecord): Promise<void> {
+  await backend.saveDaytonaWorkspace(uid, workspace);
+  const s = await getSession(uid);
+  s.daytonaWorkspaceId = workspace.sandboxId;
+  await saveSession(uid, s);
+}
+
+export async function clearDaytonaWorkspace(uid: number): Promise<void> {
+  await backend.clearDaytonaWorkspace(uid);
+  await clearDaytonaWorkspaceId(uid);
+}
+
+function normalizeTask(task: TaskRecord): TaskRecord {
+  return {
+    ...task,
+    steps: (task.steps ?? []).slice(0, 20).map((step) => ({ ...step, updatedAt: step.updatedAt ?? task.updatedAt })),
+    attempt: task.attempt ?? 0,
+    maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
+    events: (task.events ?? []).slice(-100),
+  };
+}
+
+function taskEvent(type: TaskEvent["type"], message: string, attempt: number, at = Date.now()): TaskEvent {
+  return { id: `taskevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, attempt };
+}
+
+export async function createTask(userId: number, input: Pick<TaskRecord, "title" | "objective"> & Partial<Pick<TaskRecord, "steps" | "workspaceId" | "runAt" | "maxAttempts">>): Promise<TaskRecord> {
+  const now = Date.now();
+  const task: TaskRecord = normalizeTask({
+    id: `task_${randomUUID()}`,
+    userId,
+    title: input.title,
+    objective: input.objective,
+    status: "queued",
+    steps: input.steps ?? [],
+    workspaceId: input.workspaceId,
+    attempt: 0,
+    maxAttempts: input.maxAttempts ?? 3,
+    runAt: input.runAt,
+    events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
+    createdAt: now,
+    updatedAt: now,
+  });
+  const tasks = await backend.getTasks(userId);
+  await backend.saveTasks(userId, [...tasks.filter((item) => item.id !== task.id), task].slice(-100));
+  return task;
+}
+
+export async function listTasks(userId: number, statuses?: TaskStatus[]): Promise<TaskRecord[]> {
+  const tasks = (await backend.getTasks(userId)).map(normalizeTask);
+  return tasks.filter((task) => !statuses?.length || statuses.includes(task.status)).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function getTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+  return (await backend.getTasks(userId)).map(normalizeTask).find((task) => task.id === id);
+}
+
+export async function updateTask(userId: number, id: string, patch: Partial<Omit<TaskRecord, "id" | "userId" | "createdAt">>): Promise<TaskRecord | undefined> {
+  const tasks = (await backend.getTasks(userId)).map(normalizeTask);
+  const index = tasks.findIndex((task) => task.id === id);
+  if (index < 0) return undefined;
+  const current = tasks[index];
+  const next = normalizeTask({ ...current, ...patch, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: Date.now() });
+  tasks[index] = next;
+  await backend.saveTasks(userId, tasks);
+  return next;
+}
+
+export async function scheduleTask(userId: number, id: string, runAt: number): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || ["completed", "running"].includes(task.status)) return undefined;
+  const next = await updateTask(userId, id, { status: "queued", runAt, error: undefined, nextAction: undefined });
+  if (!next) return undefined;
+  const tasks = await backend.getTasks(userId);
+  const index = tasks.findIndex((item) => item.id === id);
+  next.events = [...next.events, taskEvent("scheduled", `Scheduled for ${new Date(runAt).toISOString()}`, next.attempt)].slice(-100);
+  tasks[index] = next;
+  await backend.saveTasks(userId, tasks);
+  return next;
+}
+
+export async function setTaskWorkflowRunId(userId: number, id: string, workflowRunId: string): Promise<TaskRecord | undefined> {
+  return updateTask(userId, id, { workflowRunId: workflowRunId.slice(0, 200) });
+}
+
+export async function checkpointTask(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
+  return updateTask(userId, id, { status: "running", checkpoint, nextAction, error: undefined });
+}
+
+export async function blockTask(userId: number, id: string, error: string, nextAction?: string): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
+  return updateTask(userId, id, { status: "blocked", error, nextAction });
+}
+
+export async function completeTask(userId: number, id: string, result: string): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || task.status === "cancelled") return undefined;
+  return updateTask(userId, id, { status: "completed", result, nextAction: undefined, error: undefined });
+}
+
+export async function cancelTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
+  return updateTask(userId, id, { status: "cancelled", nextAction: undefined });
+}
+
+export async function retryTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || !["failed", "blocked", "cancelled"].includes(task.status)) return undefined;
+  const next = await updateTask(userId, id, { status: "queued", error: undefined, result: undefined, runAt: Date.now() });
+  if (!next) return undefined;
+  next.events = [...next.events, taskEvent("retried", "Task requeued", next.attempt)].slice(-100);
+  const tasks = await backend.getTasks(userId);
+  const index = tasks.findIndex((item) => item.id === id);
+  tasks[index] = next;
+  await backend.saveTasks(userId, tasks);
+  return next;
+}
+
+export async function claimTask(userId: number, id: string, workerId: string, leaseMs = 120_000): Promise<TaskRecord | undefined> {
+  return backend.claimTask(userId, id, workerId.slice(0, 120), Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
+}
+
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued"; message: string; checkpoint?: string; nextAction?: string; result?: string }): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || task.lease?.token !== leaseToken) return undefined;
+  const retryable = outcome.status === "failed" && task.attempt < task.maxAttempts;
+  const status = retryable ? "queued" : outcome.status;
+  const delayMs = retryable ? Math.min(15 * 60_000, 5_000 * 2 ** Math.max(0, task.attempt - 1)) : undefined;
+  const eventType: TaskEvent["type"] = retryable ? "failed" : outcome.status === "queued" ? "retried" : outcome.status;
+  return backend.settleTask(userId, id, leaseToken, {
+    status,
+    checkpoint: outcome.checkpoint ?? task.checkpoint,
+    nextAction: outcome.nextAction,
+    result: outcome.result,
+    error: outcome.status === "failed" ? outcome.message : undefined,
+    runAt: retryable ? Date.now() + (delayMs ?? 0) : undefined,
+  }, taskEvent(eventType, outcome.message, task.attempt));
+}
+
 export async function setTelegramChatId(uid: number, chatId: number): Promise<void> {
   const s = await getSession(uid);
   s.telegramChatId = chatId;
@@ -259,6 +685,52 @@ export async function acquireUserLock(uid: number, token: string, leaseSeconds =
 
 export async function releaseUserLock(uid: number, token: string): Promise<void> {
   return backend.releaseLock(uid, token);
+}
+
+export function hashCliSecret(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function createPairingCode(): string {
+  return String(100000 + (randomBytes(4).readUInt32BE(0) % 900000));
+}
+
+export async function createCliPairing(userId: number, ttlMs = 10 * 60 * 1000): Promise<string> {
+  const code = createPairingCode();
+  await backend.createCliPairing({ codeHash: hashCliSecret(code), userId, expiresAt: Date.now() + ttlMs, used: false });
+  return code;
+}
+
+export async function consumeCliPairing(code: string): Promise<CliPairingRecord | undefined> {
+  return backend.consumeCliPairing(hashCliSecret(code.trim()));
+}
+
+export async function createCliDevice(userId: number, name: string): Promise<{ token: string; device: CliDeviceRecord }> {
+  const token = `chusky_${randomBytes(32).toString("base64url")}`;
+  const device: CliDeviceRecord = { tokenHash: hashCliSecret(token), userId, name: name.trim().slice(0, 80) || "terminal", createdAt: Date.now(), lastSeenAt: Date.now() };
+  await backend.saveCliDevice(device);
+  return { token, device };
+}
+
+export async function authenticateCliToken(token: string): Promise<CliDeviceRecord | undefined> {
+  if (!token.trim()) return undefined;
+  const device = await backend.getCliDevice(hashCliSecret(token));
+  if (!device || device.revokedAt) return undefined;
+  device.lastSeenAt = Date.now();
+  await backend.saveCliDevice(device);
+  return device;
+}
+
+export async function revokeCliDevice(userId: number, token: string): Promise<boolean> {
+  return backend.revokeCliDevice(userId, hashCliSecret(token));
+}
+
+export async function revokeCliDeviceHash(userId: number, tokenHash: string): Promise<boolean> {
+  return backend.revokeCliDevice(userId, tokenHash);
+}
+
+export async function listCliDevices(userId: number): Promise<CliDeviceRecord[]> {
+  return backend.listCliDevices(userId);
 }
 
 const seenTriggerEvents = new Map<string, number>();
@@ -387,8 +859,14 @@ export async function getApproval(uid: number, id: string): Promise<ApprovalReco
 export async function setApprovalStatus(uid: number, id: string, status: ApprovalRecord["status"]): Promise<boolean> {
   const s = await getSession(uid);
   const approval = s.approvals.find((a) => a.id === id);
-  if (!approval || (status === "approved" && (approval.status !== "pending" || approval.expiresAt <= Date.now()))) return false;
+  if (!approval) return false;
+  if ((status === "approved" || status === "denied") && (approval.status !== "pending" || approval.expiresAt <= Date.now())) return false;
+  if (status === "consumed" && approval.status !== "approved") return false;
   approval.status = status;
   await saveSession(uid, s);
   return true;
+}
+
+export async function claimApproval(uid: number, id: string): Promise<ApprovalRecord | undefined> {
+  return backend.claimApproval(uid, id);
 }

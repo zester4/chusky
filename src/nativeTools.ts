@@ -6,8 +6,11 @@ import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, listJobs, listReminders,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, upsertMemory,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId,
+  type TaskStatus,
   type JobRecord, type ReminderRecord,
 } from "./store.js";
+import { daytonaEngine } from "./lib/daytona/index.js";
 
 const MAX_TEXT = 1000;
 
@@ -15,6 +18,22 @@ function text(value: unknown): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > MAX_TEXT) throw new Error(`Text must be 1-${MAX_TEXT} characters`);
   return result;
+}
+
+function fileContent(value: unknown): string {
+  const result = String(value ?? "");
+  const max = 48000;
+  if (result.length > max) throw new Error(`File content must be at most ${max} characters`);
+  return result;
+}
+
+function taskStatuses(value: unknown): TaskStatus[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("statuses must be an array");
+  const allowed: TaskStatus[] = ["queued", "running", "blocked", "completed", "failed", "cancelled"];
+  const statuses = value.map((item) => String(item));
+  if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as TaskStatus))) throw new Error("Invalid task status filter");
+  return [...new Set(statuses)] as TaskStatus[];
 }
 
 function requireUrl(url: string, label: string): string {
@@ -35,6 +54,11 @@ function futureTimestamp(args: Record<string, unknown>): number {
   if (!Number.isFinite(runAt) || runAt <= now) throw new Error("Reminder time must be in the future (use runAt ISO or delaySeconds)");
   if (runAt > now + 365 * 24 * 60 * 60 * 1000) throw new Error("Reminder cannot be more than one year ahead");
   return runAt;
+}
+
+function taskWorkflowUrl(): string {
+  if (!config.webhookUrl) throw new Error("Task scheduling requires WEBHOOK_URL and QStash configuration");
+  return `${config.webhookUrl.replace(/\/$/, "")}/workflows/task`;
 }
 
 export async function setReminder(userId: number, args: Record<string, unknown>): Promise<ReminderRecord> {
@@ -106,6 +130,73 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), confidence: Number(args.confidence ?? 1) });
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
+    case "CHUCK_TASK_CREATE": return createTask(userId, { title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
+    case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));
+    case "CHUCK_TASK_GET": {
+      const task = await getTask(userId, text(args.id));
+      if (!task) throw new Error("Task not found or not owned by you");
+      return task;
+    }
+    case "CHUCK_TASK_CHECKPOINT": {
+      const task = await checkpointTask(userId, text(args.id), text(args.checkpoint), args.nextAction ? text(args.nextAction) : undefined);
+      if (!task) throw new Error("Only unfinished tasks you own can be checkpointed");
+      return task;
+    }
+    case "CHUCK_TASK_BLOCK": {
+      const task = await blockTask(userId, text(args.id), text(args.reason), args.nextAction ? text(args.nextAction) : undefined);
+      if (!task) throw new Error("Only unfinished tasks you own can be blocked");
+      return task;
+    }
+    case "CHUCK_TASK_COMPLETE": {
+      const task = await completeTask(userId, text(args.id), text(args.result));
+      if (!task) throw new Error("Only unfinished tasks you own can be completed");
+      return task;
+    }
+    case "CHUCK_TASK_CANCEL": {
+      const task = await cancelTask(userId, text(args.id));
+      if (!task) throw new Error("Only unfinished tasks you own can be cancelled");
+      return task;
+    }
+    case "CHUCK_TASK_RETRY": {
+      const task = await retryTask(userId, text(args.id));
+      if (!task) throw new Error("Only failed, blocked, or cancelled tasks you own can be retried");
+      return task;
+    }
+    case "CHUCK_TASK_SCHEDULE": {
+      const id = text(args.id);
+      const task = await getTask(userId, id);
+      if (!task) throw new Error("Task not found or not owned by you");
+      const runAt = futureTimestamp(args);
+      await scheduleTask(userId, id, runAt);
+      const client = new WorkflowClient({ token: requireQStash() });
+      const workflow = await client.trigger({
+        url: taskWorkflowUrl(),
+        body: { taskId: id, userId },
+        delay: Math.max(1, Math.ceil((runAt - Date.now()) / 1000)),
+        workflowRunId: `task-${id}-${runAt}`,
+        retries: 3,
+        retryDelay: "1000 * (1 + retried)",
+        flowControl: { key: `chusky-task-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
+      });
+      await setTaskWorkflowRunId(userId, id, workflow.workflowRunId);
+      return await getTask(userId, id);
+    }
+    case "CHUCK_DAYTONA_WORKSPACE": return daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status");
+    case "CHUCK_DAYTONA_EXECUTE": return daytonaEngine.execute(userId, text(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds));
+    case "CHUCK_DAYTONA_LIST_FILES": return daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth));
+    case "CHUCK_DAYTONA_READ_FILE": return daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars));
+    case "CHUCK_DAYTONA_WRITE_FILE": return daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content));
+    case "CHUCK_DAYTONA_FIND_FILES": return daytonaEngine.findFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern));
+    case "CHUCK_DAYTONA_SEARCH_FILES": return daytonaEngine.searchFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern));
+    case "CHUCK_DAYTONA_FILE_DETAILS": return daytonaEngine.fileDetails(userId, text(args.path));
+    case "CHUCK_DAYTONA_CREATE_FOLDER": return daytonaEngine.createFolder(userId, text(args.path));
+    case "CHUCK_DAYTONA_MOVE_FILES": return daytonaEngine.moveFiles(userId, text(args.source), text(args.destination));
+    case "CHUCK_DAYTONA_DELETE_FILE": return daytonaEngine.deleteFile(userId, text(args.path), args.recursive === true);
+    case "CHUCK_DAYTONA_DELETE_WORKSPACE": return daytonaEngine.deleteWorkspace(userId);
+    case "CHUCK_DAYTONA_PREVIEW": return daytonaEngine.preview(userId, Number(args.port));
+    case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaEngine.createSnapshot(userId, text(args.name));
+    case "CHUCK_DAYTONA_COMPUTER": return daytonaEngine.computer(userId, args);
+    case "CHUCK_DAYTONA_PAUSE": return daytonaEngine.pause(userId);
     default: throw new Error(`Unknown native tool: ${slug}`);
   }
 }

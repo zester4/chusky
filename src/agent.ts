@@ -1,9 +1,9 @@
 /**
- * Chuck's brain — Composio ToolRouter session + OpenRouter inference.
+ * Chusky's brain — Composio ToolRouter session + OpenRouter inference.
  *
  * Architecture:
  *   1. On first message, create a Composio ToolRouter session for the user.
- *      The session gives Chuck access to 1000+ tools with Composio managed auth,
+ *      The session gives Chusky access to 1000+ tools with Composio managed auth,
  *      COMPOSIO_MANAGE_CONNECTIONS (OAuth flow links), COMPOSIO_REMOTE_BASH_TOOL,
  *      COMPOSIO_REMOTE_WORKBENCH, and our local calculator.
  *
@@ -35,7 +35,7 @@ import { chuckTools } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
-const composio = new Composio({ apiKey: config.composioApiKey });
+let composio: any = new Composio({ apiKey: config.composioApiKey });
 
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -130,8 +130,8 @@ async function orChat(
         headers: {
           Authorization: `Bearer ${config.openRouterApiKey}`,
           "Content-Type": "application/json",
-          "HTTP-Referer": "https://chuck-agent.example.com",
-          "X-OpenRouter-Title": "Chuck AI Agent",
+          "HTTP-Referer": "https://chusky-agent.example.com",
+          "X-OpenRouter-Title": "Chusky AI Agent",
         },
         body: JSON.stringify({ ...body, stream: Boolean(onDelta), ...(onDelta ? { stream_options: { include_usage: true } } : {}) }),
         signal,
@@ -169,11 +169,17 @@ interface ComposioSession {
 
 const sessionCache = new Map<number, ComposioSession>();
 
+/** Replace provider dependencies in contract tests without contacting Composio. */
+export function setAgentDependenciesForTests(dependencies: { composio: any }): void {
+  composio = dependencies.composio;
+  sessionCache.clear();
+}
+
 async function getOrCreateComposioSession(userId: number): Promise<ComposioSession> {
   // Check in-process cache first
   const cached = sessionCache.get(userId);
   if (cached) {
-    logger.debug({ userId, sessionId: cached.sessionId }, "Reusing Chuck session");
+    logger.debug({ userId, sessionId: cached.sessionId }, "Reusing Chusky session");
     return cached;
   }
 
@@ -320,7 +326,7 @@ export async function runAgent(
     // ── Done: no tool calls or explicit stop ──────────────────────────
     if (finish_reason === "stop" || toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
-      logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chuck done");
+      logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
       return { text: typeof text === "string" ? text.trim() : "", toolsUsed, cost: totalCost, generatedImages };
     }
 
@@ -341,7 +347,7 @@ export async function runAgent(
       let result: string;
       try {
         const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
-        if (isRiskyToolSlug(slug)) {
+        if (isRiskyToolSlug(slug, args)) {
           const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
           const matches = approved && approved.toolSlug === slug && JSON.stringify(approved.args) === JSON.stringify(args);
           if (!matches) {
@@ -363,13 +369,18 @@ export async function runAgent(
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""));
         } else if (slug.startsWith("CHUCK_")) {
           execResult = await nativeTool(userId, slug, args);
+          if (slug === "CHUCK_DAYTONA_COMPUTER" && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
+            const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number };
+            generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
+            execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The screenshot was sent to the user. Use accessibility or display tools for structured follow-up." };
+          }
         } else {
           execResult = await sessionObj.execute(slug, args);
         }
         result = typeof execResult === "string"
           ? execResult
           : JSON.stringify(execResult);
-        if (isRiskyToolSlug(slug) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
+        if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;
         logger.warn({ slug, err: e }, "Tool execution failed");

@@ -9,7 +9,7 @@ import {
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
-  setTelegramChatId, getApproval, setApprovalStatus,
+  setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -34,7 +34,7 @@ function isAllowed(ctx: Context): boolean {
 async function guard(ctx: Context): Promise<boolean> {
   if (ctx.from && ctx.chat && isAllowed(ctx)) await setTelegramChatId(ctx.from.id, ctx.chat.id);
   if (isAllowed(ctx)) return true;
-  await ctx.reply("⛔ You are not authorised to use Chuck.");
+  await ctx.reply("⛔ You are not authorised to use Chusky.");
   return false;
 }
 
@@ -64,7 +64,7 @@ async function downloadTelegramFile(ctx: Context, fileId: string): Promise<{ dat
   return { data: Buffer.from(await res.arrayBuffer()), path: file.file_path };
 }
 
-function audioFormat(path: string): string {
+export function audioFormat(path: string): string {
   const ext = path.split(".").pop()?.toLowerCase();
   return ext === "oga" ? "ogg" : ext || "ogg";
 }
@@ -91,11 +91,11 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
     if (result.cost) await addUsage(userId, result.cost);
     await editHtml(ctx, status.message_id, mdToTelegramHtml(result.text));
     for (const image of result.generatedImages ?? []) {
-      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chuck.jpg" : "chuck.png"));
+      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
     }
   } catch (e) {
-    logger.error({ err: e, userId }, "Chuck media error");
+    logger.error({ err: e, userId }, "Chusky media error");
     await ctx.api.editMessageText(ctx.chat!.id, status.message_id, e instanceof DOMException && e.name === "AbortError" ? "🛑 Request cancelled." : `❌ ${String(e).slice(0, 500)}`);
   } finally {
     await releaseUserLock(userId, lockToken);
@@ -104,11 +104,11 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
 }
 
 // ── Live status bar ───────────────────────────────────────────────────────────
-// Edits a single "status" message in-place as Chuck works,
+// Edits a single "status" message in-place as Chusky works,
 // giving users real-time feedback on every step.
 
 function buildStatusBar(steps: string[]): string {
-  if (steps.length === 0) return "⏳ Chuck is thinking…";
+  if (steps.length === 0) return "⏳ I’m thinking…";
   const lines: string[] = [];
   for (let i = 0; i < steps.length; i++) {
     const isLast = i === steps.length - 1;
@@ -129,7 +129,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     const model = await getModel(ctx.from!.id);
     await replyHtml(ctx,
-      `⚡ <b>Hey, I'm Chuck — your AI agent.</b>\n\n` +
+      `⚡ <b>Hey, I'm Chusky — your AI agent.</b>\n\n` +
       `I have access to <b>1,000+ tools</b> across every major platform — GitHub, Gmail, Slack, Notion, Linear, Stripe, and more. Just tell me what you need.\n\n` +
       `<b>Active model:</b> <code>${model}</code>\n\n` +
       `<b>Commands:</b>\n` +
@@ -149,7 +149,7 @@ export function registerHandlers(bot: Bot): void {
   bot.command("help", async (ctx) => {
     if (!(await guard(ctx))) return;
     await replyHtml(ctx,
-      `<b>Chuck — Commands</b>\n\n` +
+      `<b>Chusky — Commands</b>\n\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -163,13 +163,13 @@ export function registerHandlers(bot: Bot): void {
       `/image <description> — generate an image\n` +
       `/info — full session details\n` +
       `/help — this message\n\n` +
-      `<b>Chuck's built-in capabilities:</b>\n` +
+      `<b>Chusky's built-in capabilities:</b>\n` +
       `• 1,000+ Composio tools (GitHub, Gmail, Slack, Notion…)\n` +
       `• <code>COMPOSIO_MANAGE_CONNECTIONS</code> — surfaces OAuth links inline\n` +
       `• <code>COMPOSIO_REMOTE_BASH_TOOL</code> — runs shell commands\n` +
       `• <code>COMPOSIO_REMOTE_WORKBENCH</code> — persistent remote environment\n` +
       `• <code>COMPOSIO_SEARCH_TOOL</code> — discovers tools by intent\n\n` +
-      `Just describe what you need — Chuck figures out the tools.`
+      `Just describe what you need — Chusky figures out the tools.`
     );
   });
 
@@ -181,13 +181,41 @@ export function registerHandlers(bot: Bot): void {
     await ctx.reply("🛑 Cancellation requested.");
   });
 
+  bot.command("cli", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const uid = ctx.from!.id;
+    const [action, ...rest] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+    if (action === "link") {
+      const code = await createCliPairing(uid);
+      await ctx.reply(`🔐 <b>Terminal pairing code</b>\n\n<code>${code}</code>\n\nThis code expires in 10 minutes and can be used once. In your terminal run:\n\n<code>npm run cli -- auth link</code>`, { parse_mode: "HTML" });
+      return;
+    }
+    if (action === "devices") {
+      const devices = await listCliDevices(uid);
+      if (!devices.length) { await ctx.reply("No linked terminals."); return; }
+      const lines = devices.map((d) => `<code>${d.name.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code> — ${d.revokedAt ? "revoked" : "active"}`);
+      await replyHtml(ctx, `<b>Linked terminals</b>\n\n${lines.join("\n")}`);
+      return;
+    }
+    if (action === "revoke") {
+      const name = rest.join(" ").trim();
+      if (!name) { await ctx.reply("Usage: /cli revoke &lt;terminal name&gt;", { parse_mode: "HTML" }); return; }
+      const device = (await listCliDevices(uid)).find((d) => d.name === name && !d.revokedAt);
+      if (!device) { await ctx.reply("I couldn't find that active terminal."); return; }
+      await revokeCliDeviceHash(uid, device.tokenHash);
+      await ctx.reply(`✅ Revoked terminal: ${name}`);
+      return;
+    }
+    await ctx.reply("Usage: /cli link | /cli devices | /cli revoke <terminal name>");
+  });
+
   bot.command("image", async (ctx) => {
     if (!(await guard(ctx))) return;
     const prompt = ctx.match?.trim();
     if (!prompt) { await ctx.reply("Usage: /image <description>"); return; }
     try {
       const image = await generateImage(prompt);
-      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chuck.jpg" : "chuck.png"), { caption: "Generated by Chuck" });
+      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"), { caption: "Generated by Chusky" });
       if (image.cost) await addUsage(ctx.from!.id, image.cost);
     } catch (e) { await ctx.reply(`❌ Image generation failed: ${String(e).slice(0, 500)}`); }
   });
@@ -199,7 +227,7 @@ export function registerHandlers(bot: Bot): void {
     if (!toolkit) {
       await replyHtml(ctx,
         `<b>Connect an app</b>\n\nUsage: <code>/connect github</code>\n\n` +
-        `Or just tell Chuck what you need and he'll surface the connection link automatically.`
+        `Or just tell Chusky what you need and he'll surface the connection link automatically.`
       );
       return;
     }
@@ -211,7 +239,7 @@ export function registerHandlers(bot: Bot): void {
         ctx.chat!.id,
         statusMsg.message_id,
         `🔗 <b>Connect ${toolkit}</b>\n\n` +
-        `Click the link below to authorise Chuck to use your <b>${toolkit}</b> account:\n\n` +
+        `Click the link below to authorise Chusky to use your <b>${toolkit}</b> account:\n\n` +
         `<a href="${url}">→ Connect ${toolkit}</a>\n\n` +
         `<i>The link expires after a short time. Run the command again if needed.</i>`,
         { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
@@ -324,7 +352,7 @@ export function registerHandlers(bot: Bot): void {
     const turns = Math.floor(s.history.length / 2);
     const age = Math.floor((Date.now() - s.createdAt) / 60000);
     await replyHtml(ctx,
-      `<b>Chuck Session Info</b>\n\n` +
+      `<b>Chusky Session Info</b>\n\n` +
       `👤 User ID: <code>${uid}</code>\n` +
       `🤖 Model: <code>${s.model}</code>\n` +
       `💬 History: <b>${turns}</b>/${config.maxHistory} turns\n` +
@@ -375,7 +403,7 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     const lines = [
-      `Chuck AI Agent`,
+      `Chusky AI Agent`,
       `Model: ${s.model}`,
       `Exported: ${new Date().toISOString()}`,
       `Turns: ${Math.floor(s.history.length / 2)}`,
@@ -383,12 +411,12 @@ export function registerHandlers(bot: Bot): void {
       "",
     ];
     for (const m of s.history) {
-      lines.push(`[${m.role === "user" ? "You" : "Chuck"}]`);
+      lines.push(`[${m.role === "user" ? "You" : "Chusky"}]`);
       lines.push(m.content);
       lines.push("");
     }
     await ctx.replyWithDocument(
-      new InputFile(Buffer.from(lines.join("\n"), "utf-8"), `chuck-${uid}-${Date.now()}.txt`),
+      new InputFile(Buffer.from(lines.join("\n"), "utf-8"), `chusky-${uid}-${Date.now()}.txt`),
       { caption: `📄 Conversation export — ${Math.floor(s.history.length / 2)} turns` }
     );
   });
@@ -467,12 +495,18 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     if (ctx.match[1] === "deny") {
-      await setApprovalStatus(ctx.from.id, id, "denied");
+      if (!(await setApprovalStatus(ctx.from.id, id, "denied"))) {
+        await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
+        return;
+      }
       await ctx.editMessageText("🛑 Action denied. Nothing was executed.");
       return;
     }
-    await setApprovalStatus(ctx.from.id, id, "approved");
-    await ctx.editMessageText("✅ Approved. Chuck is executing the action…");
+    if (!(await claimApproval(ctx.from.id, id))) {
+      await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
+      return;
+    }
+    await ctx.editMessageText("✅ Approved. Chusky is executing the action…");
     try {
       const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
@@ -555,7 +589,7 @@ export function registerHandlers(bot: Bot): void {
 
       await editHtml(ctx, statusMsg.message_id, html);
       for (const image of result.generatedImages ?? []) {
-        await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chuck.jpg" : "chuck.png"));
+      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);
       }
 
@@ -563,15 +597,15 @@ export function registerHandlers(bot: Bot): void {
       clearInterval(typingInterval);
       if (e instanceof ApprovalRequiredError) {
         const kb = new InlineKeyboard().text("✅ Approve", `appr:approve:${e.approvalId}`).text("🛑 Deny", `appr:deny:${e.approvalId}`);
-        await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `⚠️ <b>Approval required</b>\n\nChuck wants to execute <code>${e.toolSlug}</code>.\n\nReview the requested action and choose:`, { parse_mode: "HTML", reply_markup: kb });
+        await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `⚠️ <b>Approval required</b>\n\nChusky wants to execute <code>${e.toolSlug}</code>.\n\nReview the requested action and choose:`, { parse_mode: "HTML", reply_markup: kb });
         return;
       }
-      logger.error({ err: e, userId, model }, "Chuck error");
+      logger.error({ err: e, userId, model }, "Chusky error");
       const msg = e instanceof Error ? e.message : String(e);
       try {
         await ctx.api.editMessageText(
           ctx.chat!.id, statusMsg.message_id,
-          e instanceof DOMException && e.name === "AbortError" ? "🛑 <b>Request cancelled.</b>" : `❌ <b>Chuck hit an error</b>\n\n<code>${mdToTelegramHtml(msg).slice(0, 400)}</code>\n\nTry /clear history or /model to retry.`,
+          e instanceof DOMException && e.name === "AbortError" ? "🛑 <b>Request cancelled.</b>" : `❌ <b>Chusky hit an error</b>\n\n<code>${mdToTelegramHtml(msg).slice(0, 400)}</code>\n\nTry /clear history or /model to retry.`,
           { parse_mode: "HTML" }
         );
       } catch {
@@ -618,11 +652,11 @@ export function registerHandlers(bot: Bot): void {
   });
 
   bot.on("message:voice", async (ctx) => {
-    const status = await ctx.reply("🎙️ <b>Chuck received your voice message and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
+    const status = await ctx.reply("🎙️ <b>Chusky received your voice message and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
     try {
       logger.info({ userId: ctx.from?.id, duration: ctx.message.voice.duration, fileSize: ctx.message.voice.file_size }, "Voice message received");
       const file = await downloadTelegramFile(ctx, ctx.message.voice.file_id);
-      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chuck is processing your voice message…</b>", { parse_mode: "HTML" });
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chusky is processing your voice message…</b>", { parse_mode: "HTML" });
       const text = await transcribeAudio(file.data, audioFormat(file.path));
       await handleMedia(ctx, [{ type: "text", text: `The user sent this voice message:\n${text}` }], `[Voice message] ${text}`);
     } catch (e) {
@@ -633,11 +667,11 @@ export function registerHandlers(bot: Bot): void {
   });
 
   bot.on("message:audio", async (ctx) => {
-    const status = await ctx.reply("🎙️ <b>Chuck received your audio and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
+    const status = await ctx.reply("🎙️ <b>Chusky received your audio and is transcribing it…</b>", { parse_mode: "HTML" }).catch(() => undefined);
     try {
       logger.info({ userId: ctx.from?.id, duration: ctx.message.audio.duration, fileSize: ctx.message.audio.file_size }, "Audio message received");
       const file = await downloadTelegramFile(ctx, ctx.message.audio.file_id);
-      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chuck is processing your audio…</b>", { parse_mode: "HTML" });
+      if (status) await ctx.api.editMessageText(ctx.chat!.id, status.message_id, "🧠 <b>Chusky is processing your audio…</b>", { parse_mode: "HTML" });
       const text = await transcribeAudio(file.data, audioFormat(file.path));
       await handleMedia(ctx, [{ type: "text", text: `The user sent this audio:\n${text}` }], `[Audio message] ${text}`);
     } catch (e) {
