@@ -81,7 +81,20 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const lockToken = randomUUID();
   activeRequests.set(userId, controller);
   await acquireQueuedLock(userId, lockToken, controller.signal);
-  const status = await ctx.reply("👀 <b>I’m looking at what you sent…</b>", { parse_mode: "HTML" });
+  const statusText = historyLabel.startsWith("[Voice message]")
+    ? "🎙️ <b>I’m listening to your voice message…</b>"
+    : historyLabel.startsWith("[Audio message]")
+      ? "🎙️ <b>I’m listening to your audio…</b>"
+      : historyLabel.startsWith("[Image attached]")
+        ? "👀 <b>I’m looking at your image…</b>"
+        : historyLabel.startsWith("[Document attached:")
+          ? "📄 <b>I’m reading your document…</b>"
+          : historyLabel.startsWith("[Video attached]")
+            ? "🎬 <b>I’m reviewing your video…</b>"
+            : parts.some((part) => part.type !== "text")
+              ? "👀 <b>I’m looking at what you sent…</b>"
+              : "👂 <b>I’m listening to your message…</b>";
+  const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);
     const result = await runAgent(userId, parts, s.history, s.model, undefined, controller.signal);
