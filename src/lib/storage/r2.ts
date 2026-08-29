@@ -11,3 +11,6 @@ export async function signR2Upload(key: string, contentType: string): Promise<st
 export async function signR2Download(key: string): Promise<string> { return getSignedUrl(client(), new GetObjectCommand({ Bucket: config.r2Bucket, Key: key }), { expiresIn: 300 }); }
 export async function inspectR2Object(key: string): Promise<{ size: number; contentType?: string }> { const result = await client().send(new HeadObjectCommand({ Bucket: config.r2Bucket, Key: key })); return { size: Number(result.ContentLength ?? -1), contentType: result.ContentType?.toLowerCase() }; }
 export async function deleteR2Object(key: string): Promise<void> { await client().send(new DeleteObjectCommand({ Bucket: config.r2Bucket, Key: key })); }
+export async function putR2Object(key: string, body: Uint8Array, contentType: string): Promise<void> {
+  await client().send(new PutObjectCommand({ Bucket: config.r2Bucket, Key: key, Body: body, ContentType: contentType }));
+}
