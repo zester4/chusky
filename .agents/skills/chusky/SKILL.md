@@ -173,7 +173,7 @@ Use natural first-person progress text:
 
 - `I’m listening to your message…`
 - `I’m finding the right tools for you…`
-- `I’m looking at what you sent…`
+- `I’m taking a careful look at that for you…`
 - `I’m putting everything together…`
 
 Keep status updates useful and brief. A user should receive an acknowledgement for slow media downloads or transcription. Escape dynamic content before inserting it into Telegram HTML. Do not split inside HTML tags, code blocks, or links; improve `src/markdown.ts` if changing message-length behavior.
