@@ -14,3 +14,4 @@ tmp/
 data/
 .DS_Store
 Thumbs.db
+.pnpm-store/
