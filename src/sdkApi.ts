@@ -1,51 +1,105 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Hono } from "hono";
 import { config } from "./config.js";
 import { ApprovalRequiredError, runAgent } from "./agent.js";
-import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getSession, getTask, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { deleteR2Object, inspectR2Object, r2Configured, signR2Download, signR2Upload } from "./lib/storage/r2.js";
+import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
+import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
+import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getSession, getTask, listOutbox, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+
+const activeRuns = new Map<string, AbortController>();
+const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
 
 function apiError(c: any, status: number, code: string, message: string) {
-  const requestId = randomUUID();
+  const requestId = (c.get("sdkRequestId") as string | undefined) ?? randomUUID();
   c.header("X-Request-Id", requestId);
   return c.json({ error: { code, message, requestId } }, status);
 }
+async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> { const session = await getSession(userId); session.sdkAudit!.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() }); session.sdkAudit = session.sdkAudit!.slice(-500); await saveSession(userId, session); }
+async function notifyWebhooks(userId: number, hooks: Array<{ id: string; url: string; secretCiphertext: string; disabledAt?: number }>, type: string, data: unknown): Promise<void> { await Promise.all(hooks.filter((hook) => !hook.disabledAt).map((hook) => enqueueSdkWebhook(userId, hook, type, data))); }
 
-function userIdFor(externalId: string): number {
+function userIdFor(externalId: string, projectId: string): number {
   // Session IDs are internal only; deterministic separation keeps SDK users isolated.
-  return Number.parseInt(createHash("sha256").update(`sdk:${externalId}`).digest("hex").slice(0, 12), 16);
+  return Number.parseInt(createHash("sha256").update(`sdk:${projectId}:${externalId}`).digest("hex").slice(0, 12), 16);
 }
 
-function authorized(c: any): boolean {
-  const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
-  if (!config.apiKey || token.length !== config.apiKey.length) return false;
-  return timingSafeEqual(Buffer.from(token), Buffer.from(config.apiKey));
+type SdkPrincipal = { projectId: string; scopes: string[]; root: boolean };
+function requiredScope(path: string, method: string): string {
+  const resource = path.split("/")[2] || "unknown";
+  return `${resource}:${method === "GET" || method === "HEAD" ? "read" : "write"}`;
+}
+function scopeAllowed(principal: SdkPrincipal, path: string, method: string): boolean {
+  const required = requiredScope(path, method);
+  return principal.scopes.includes("*") || principal.scopes.includes(required) || principal.scopes.includes(`${required.split(":")[0]}:*`);
+}
+const digestKey = (value: string) => createHash("sha256").update(value).digest("hex");
+async function authorized(token: string): Promise<SdkPrincipal | undefined> {
+  if (config.apiKey && token.length === config.apiKey.length && timingSafeEqual(Buffer.from(token), Buffer.from(config.apiKey))) return { projectId: "root", scopes: ["*"], root: true };
+  if (!token.startsWith("chsk_")) return undefined;
+  const project = (await getSession(0)).sdkProjects!.find((item) => !item.revokedAt && item.keyHash === digestKey(token));
+  return project ? { projectId: project.id, scopes: project.scopes, root: false } : undefined;
 }
 
-function sdkUser(c: any): { externalId: string; userId: number } | undefined {
+function sdkUser(c: any): { externalId: string; userId: number; projectId: string } | undefined {
   const externalId = (c.req.header("X-Chusky-User-Id") ?? "").trim();
   if (!externalId || externalId.length > 200) return undefined;
-  return { externalId, userId: userIdFor(externalId) };
+  const principal = c.get("sdkPrincipal") as SdkPrincipal | undefined;
+  return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId } : undefined;
+}
+
+function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
+  // Use the original request URL as the source of truth. Some adapters/proxies can
+  // expose a route-relative `req.path`, which must not downgrade a root-only route
+  // into a user-scoped developer request.
+  const pathname = new URL(c.req.url).pathname;
+  return pathname === "/v1/admin" || pathname.startsWith("/v1/admin/") || c.req.path === "/v1/admin" || c.req.path.startsWith("/v1/admin/");
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
 function runView(threadId: string, run: SdkRunRecord) { return { ...run, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }; }
+function page<T extends { id: string; updatedAt: number }>(items: T[], cursor: string | undefined, limit: string | undefined): { data: T[]; nextCursor?: string } { const size = Math.max(1, Math.min(100, Number(limit ?? 20) || 20)); const [at = "", id = ""] = Buffer.from(cursor ?? "", "base64url").toString("utf8").split(":"); const sorted = [...items].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id)); const filtered = at ? sorted.filter((item) => item.updatedAt < Number(at) || (item.updatedAt === Number(at) && item.id < id)) : sorted; const data = filtered.slice(0, size); const last = data.at(-1); return { data, ...(last && filtered.length > data.length ? { nextCursor: Buffer.from(`${last.updatedAt}:${last.id}`).toString("base64url") } : {}) }; }
+function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fingerprint: string): { replay?: unknown; key?: string; mismatch?: boolean } {
+  const now = Date.now(); const cutoff = now - 24 * 60 * 60 * 1000;
+  const entries = Object.entries(session.sdkIdempotency ?? {}).filter(([, record]) => record.createdAt >= cutoff).sort((a, b) => b[1].createdAt - a[1].createdAt).slice(0, 500);
+  session.sdkIdempotency = Object.fromEntries(entries);
+  const key = (c.req.header("Idempotency-Key") ?? "").trim().slice(0, 255); if (!key) return {};
+  const existing = session.sdkIdempotency?.[key]; if (!existing) return { key };
+  return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
+}
 
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
   app.use("/v1/*", async (c, next) => {
-    if (!authorized(c)) return apiError(c, 401, "invalid_api_key", "A valid Chusky SDK API key is required.");
+    const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, ""); const principal = await authorized(token);
+    if (!principal) return apiError(c, 401, "invalid_api_key", "A valid Chusky SDK API key is required.");
+    (c.set as (key: string, value: unknown) => void)("sdkPrincipal", principal);
+    if (isAdminRequest(c)) {
+      if (!principal.root) return apiError(c, 403, "insufficient_scope", "Root API key required.");
+      const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
+      if (c.req.method !== "GET") await audit(0, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+      return;
+    }
+    if (!scopeAllowed(principal, c.req.path, c.req.method)) return apiError(c, 403, "insufficient_scope", `This API key lacks ${requiredScope(c.req.path, c.req.method)}.`);
     if (!sdkUser(c)) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required.");
-    await next();
+    const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
+    const owner = sdkUser(c); if (owner && c.req.method !== "GET") await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
   });
+
+  app.post("/v1/admin/projects", async (c) => { const body = await c.req.json().catch(() => ({})) as { name?: string; scopes?: string[] }; const name = String(body.name ?? "").trim().slice(0, 100); const scopes = Array.isArray(body.scopes) && body.scopes.every((item) => typeof item === "string") ? [...new Set(body.scopes)].slice(0, 20) : ["*"]; if (!name) return apiError(c, 400, "invalid_project", "Project name is required."); const control = await getSession(0); const id = `proj_${randomUUID()}`; const secret = `chsk_${id}_${randomBytes(24).toString("base64url")}`; const record: SdkProjectRecord = { id, name, keyPrefix: secret.slice(0, 18), keyHash: digestKey(secret), scopes, createdAt: Date.now() }; control.sdkProjects!.push(record); await saveSession(0, control); return c.json({ id, name, key: secret, keyPrefix: record.keyPrefix, scopes, createdAt: new Date(record.createdAt).toISOString() }, 201); });
+  app.get("/v1/admin/projects", async (c) => c.json({ data: (await getSession(0)).sdkProjects!.map(({ keyHash: _keyHash, ...project }) => ({ ...project, createdAt: new Date(project.createdAt).toISOString(), revokedAt: project.revokedAt ? new Date(project.revokedAt).toISOString() : undefined })) }));
+  app.get("/v1/admin/audit-events", async (c) => { const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: (await getSession(0)).sdkAudit!.filter((item) => item.at > after) }); });
+  app.patch("/v1/admin/projects/:projectId", async (c) => { const body = await c.req.json().catch(() => ({})) as { scopes?: string[] }; if (!Array.isArray(body.scopes) || !body.scopes.length || !body.scopes.every((item) => typeof item === "string" && item.length <= 80)) return apiError(c, 400, "invalid_scopes", "scopes must be a non-empty array of short strings."); const control = await getSession(0); const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId")); if (!project || project.revokedAt) return apiError(c, 404, "not_found", "Active project not found."); project.scopes = [...new Set(body.scopes)].slice(0, 20); await saveSession(0, control); return c.json({ id: project.id, name: project.name, keyPrefix: project.keyPrefix, scopes: project.scopes, createdAt: new Date(project.createdAt).toISOString() }); });
+  app.post("/v1/admin/projects/:projectId/rotate-key", async (c) => { const control = await getSession(0); const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId")); if (!project || project.revokedAt) return apiError(c, 404, "not_found", "Active project not found."); const key = `chsk_${project.id}_${randomBytes(24).toString("base64url")}`; project.keyHash = digestKey(key); project.keyPrefix = key.slice(0, 18); await saveSession(0, control); return c.json({ id: project.id, key, keyPrefix: project.keyPrefix, rotatedAt: new Date().toISOString() }, 201); });
+  app.delete("/v1/admin/projects/:projectId", async (c) => { const control = await getSession(0); const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId")); if (!project) return apiError(c, 404, "not_found", "Project not found."); project.revokedAt = Date.now(); await saveSession(0, control); return c.body(null, 204); });
 
   app.post("/v1/threads", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { metadata?: Record<string, unknown> };
-    const session = await getSession(owner.userId); const now = Date.now();
+    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:/threads:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const now = Date.now();
     const thread: SdkThreadRecord = { id: `thr_${randomUUID()}`, externalId: owner.externalId, metadata: body.metadata && typeof body.metadata === "object" ? body.metadata : {}, history: [], runs: [], createdAt: now, updatedAt: now };
-    session.sdkThreads!.push(thread); await saveSession(owner.userId, session); return c.json(threadView(thread), 201);
+    const response = threadView(thread); session.sdkThreads!.push(thread); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: now }; await saveSession(owner.userId, session); return c.json(response, 201);
   });
   app.get("/v1/threads", async (c) => {
-    const owner = sdkUser(c)!; const data = (await getSession(owner.userId)).sdkThreads!.map(threadView); return c.json({ data });
+    const owner = sdkUser(c)!; const result = page((await getSession(owner.userId)).sdkThreads!, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map(threadView), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) });
   });
   app.get("/v1/threads/:threadId", async (c) => {
     const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
@@ -53,37 +107,52 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/threads/:threadId/runs", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { input?: string };
     const input = String(body.input ?? "").trim(); if (!input || input.length > 30_000) return apiError(c, 400, "invalid_input", "input must be between 1 and 30000 characters.");
-    if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limited", "Rate limit exceeded.");
+    if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
-    const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, createdAt: now, updatedAt: now }; thread.runs.push(run);
-    try { const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, c.req.raw.signal); run.status = "completed"; run.output = result.text; thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); }
-    catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; } }
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); return c.json(runView(thread.id, run), 201);
+    const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    try { const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, c.req.raw.signal); run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); }
+    catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { input?: string };
     const input = String(body.input ?? "").trim(); if (!input || input.length > 30_000) return apiError(c, 400, "invalid_input", "input must be between 1 and 30000 characters.");
-    if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limited", "Rate limit exceeded.");
+    if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, createdAt: now, updatedAt: now }; thread.runs.push(run);
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    const abort = new AbortController(); const abortOnDisconnect = () => abort.abort(); c.req.raw.signal.addEventListener("abort", abortOnDisconnect, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({ start: async (controller) => {
       const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
-        const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, c.req.raw.signal, (text) => send({ type: "run.delta", runId: run.id, text }));
-        run.status = "completed"; run.output = result.text; thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+        const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); });
+        run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
       } catch (error) {
-        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
-        else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
-      } finally { run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); controller.close(); }
+        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
+        else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
+        else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
+      } finally { c.req.raw.signal.removeEventListener("abort", abortOnDisconnect); activeRuns.delete(run.id); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); controller.close(); }
     } });
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
   });
+  app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
   app.get("/v1/threads/:threadId/runs/:runId", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); return thread && run ? c.json(runView(thread.id, run)) : apiError(c, 404, "not_found", "Run not found."); });
+  app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); const cursor = Number(c.req.query("after") ?? 0) || 0; return thread && run ? c.json({ data: run.events.filter((item) => item.at > cursor) }) : apiError(c, 404, "not_found", "Run not found."); });
+  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const session = await getSession(sdkUser(c)!.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (run.status !== "running") return apiError(c, 409, "run_not_cancellable", "Only a running run can be cancelled."); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(sdkUser(c)!.userId, session); return c.json(runView(thread.id, run)); });
   app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
+  app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
+  app.get("/v1/usage", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
+  app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
+  app.get("/v1/webhooks", async (c) => { const hooks = (await getSession(sdkUser(c)!.userId)).sdkWebhooks!.filter((item) => !item.disabledAt).map(({ secretCiphertext: _secretCiphertext, ...item }) => item); return c.json({ data: hooks }); });
+  app.get("/v1/webhooks/:webhookId/deliveries", async (c) => { const owner = sdkUser(c)!; const hook = (await getSession(owner.userId)).sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); const data = (await listOutbox(undefined, 500)).filter((item) => item.userId === owner.userId && item.webhook?.webhookId === hook.id).map((item) => ({ id: item.id, status: item.status, attempts: item.attempts, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ data }); });
+  app.delete("/v1/webhooks/:webhookId", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const hook = session.sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); hook.disabledAt = Date.now(); await saveSession(owner.userId, session); return c.body(null, 204); });
+  app.post("/v1/files", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { name?: string; contentType?: string; size?: number }; const name = String(body.name ?? "").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120); const contentType = String(body.contentType ?? "").toLowerCase(); const size = Number(body.size); const allowed = new Set(["image/jpeg", "image/png", "image/webp", "application/pdf", "text/plain", "audio/mpeg", "audio/ogg", "audio/wav", "video/mp4"]); if (!name || !allowed.has(contentType) || !Number.isFinite(size) || size < 1 || size > config.sdkMaxFileBytes) return apiError(c, 400, "invalid_file", "File name, type, or size is invalid."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const file = { id: `file_${randomUUID()}`, key: `sdk/${owner.userId}/${randomUUID()}-${name}`, name, contentType, size, status: "pending" as const, createdAt: Date.now() }; const expiresAt = new Date(Date.now() + 300_000).toISOString(); const response = { ...file, uploadUrl: await signR2Upload(file.key, file.contentType), expiresAt }; session.sdkFiles!.push(file); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
+  app.post("/v1/files/:fileId/complete", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const file = session.sdkFiles!.find((item) => item.id === c.req.param("fileId")); if (!file) return apiError(c, 404, "not_found", "File not found."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); try { const remote = await inspectR2Object(file.key); if (remote.size !== file.size || remote.contentType !== file.contentType) { file.status = "rejected"; await saveSession(owner.userId, session); return apiError(c, 409, "file_verification_failed", "R2 object size or content type did not match the upload intent."); } file.status = "available"; await saveSession(owner.userId, session); return c.json(file); } catch { return apiError(c, 409, "file_not_uploaded", "The upload is not available in R2 yet."); } });
+  app.get("/v1/files/:fileId", async (c) => { const owner = sdkUser(c)!; const file = (await getSession(owner.userId)).sdkFiles!.find((item) => item.id === c.req.param("fileId")); if (!file) return apiError(c, 404, "not_found", "File not found."); if (file.status !== "available") return apiError(c, 409, "file_not_available", "Only a verified upload can be downloaded."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); return c.json({ ...file, downloadUrl: await signR2Download(file.key), expiresAt: new Date(Date.now() + 300_000).toISOString() }); });
+  app.delete("/v1/files/:fileId", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const index = session.sdkFiles!.findIndex((item) => item.id === c.req.param("fileId")); if (index < 0) return apiError(c, 404, "not_found", "File not found."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); await deleteR2Object(session.sdkFiles![index].key); session.sdkFiles!.splice(index, 1); await saveSession(owner.userId, session); return c.body(null, 204); });
   app.get("/v1/tasks/:taskId", async (c) => { const task = await getTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 404, "not_found", "Task not found."); });
   app.get("/v1/approvals/:approvalId", async (c) => { const approval = await getApproval(sdkUser(c)!.userId, c.req.param("approvalId")); return approval ? c.json(approval) : apiError(c, 404, "not_found", "Approval not found."); });
   app.post("/v1/approvals/:approvalId", async (c) => {

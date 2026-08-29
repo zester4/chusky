@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { Approval, ChuskyClientOptions, CreateRunParams, CreateThreadParams, Page, RequestOptions, Run, RunStreamEvent, Task, Thread } from "./types.js";
+import type { Approval, AuditEvent, ChuskyClientOptions, CreateRunParams, CreateThreadParams, DeveloperProject, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Task, Thread, Usage, Webhook, WebhookDelivery } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -8,6 +8,11 @@ export class Chusky {
   readonly threads: ThreadsResource;
   readonly tasks: TasksResource;
   readonly approvals: ApprovalsResource;
+  readonly files: FilesResource;
+  readonly audit: AuditResource;
+  readonly webhooks: WebhooksResource;
+  readonly usage: UsageResource;
+  readonly projects: ProjectsResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly userId: string;
@@ -27,6 +32,11 @@ export class Chusky {
     this.threads = new ThreadsResource(this);
     this.tasks = new TasksResource(this);
     this.approvals = new ApprovalsResource(this);
+    this.files = new FilesResource(this);
+    this.audit = new AuditResource(this);
+    this.webhooks = new WebhooksResource(this);
+    this.usage = new UsageResource(this);
+    this.projects = new ProjectsResource(this);
   }
 
   async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
@@ -45,6 +55,7 @@ export class Chusky {
       for (const [key, value] of new Headers(options.headers)) headers.set(key, value);
       const response = await this.fetchImpl(`${this.baseUrl}/v1${path}`, { ...init, headers, signal: controller.signal });
       if (!response.ok) throw await toError(response);
+      if (response.status === 204) return undefined as T;
       return await response.json() as T;
     } finally {
       clearTimeout(timer);
@@ -93,7 +104,9 @@ export class RunsResource {
   constructor(private readonly client: Chusky, private readonly threadId: string) {}
   create(params: CreateRunParams, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs`, { method: "POST", body: JSON.stringify(params) }, options); }
   get(runId: string, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs/${encodeURIComponent(runId)}`, {}, options); }
+  list(params: { cursor?: string; limit?: number } = {}, options?: RequestOptions): Promise<Page<Run>> { const query = new URLSearchParams(); if (params.cursor) query.set("cursor", params.cursor); if (params.limit) query.set("limit", String(params.limit)); return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs${query.size ? `?${query}` : ""}`, {}, options); }
   cancel(runId: string, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", body: "{}" }, options); }
+  events(runId: string, after?: number, options?: RequestOptions): Promise<Page<RunEvent>> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs/${encodeURIComponent(runId)}/events${after ? `?after=${after}` : ""}`, {}, options); }
   async *stream(params: Omit<CreateRunParams, "wait">, options: RequestOptions = {}): AsyncIterable<RunStreamEvent> {
     const { response, dispose } = await this.client.streamRequest(
       `/threads/${encodeURIComponent(this.threadId)}/runs/stream`,
@@ -114,6 +127,38 @@ export class ApprovalsResource {
   constructor(private readonly client: Chusky) {}
   get(approvalId: string, options?: RequestOptions): Promise<Approval> { return this.client.request(`/approvals/${encodeURIComponent(approvalId)}`, {}, options); }
   decide(approvalId: string, decision: "approve" | "deny", options?: RequestOptions): Promise<Run> { return this.client.request(`/approvals/${encodeURIComponent(approvalId)}`, { method: "POST", body: JSON.stringify({ decision }) }, options); }
+}
+export class FilesResource {
+  constructor(private readonly client: Chusky) {}
+  create(params: { name: string; contentType: string; size: number }, options?: RequestOptions): Promise<FileUpload> { return this.client.request("/files", { method: "POST", body: JSON.stringify(params) }, options); }
+  complete(fileId: string, options?: RequestOptions): Promise<FileRecord> { return this.client.request(`/files/${encodeURIComponent(fileId)}/complete`, { method: "POST", body: "{}" }, options); }
+  get(fileId: string, options?: RequestOptions): Promise<FileDownload> { return this.client.request(`/files/${encodeURIComponent(fileId)}`, {}, options); }
+  delete(fileId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/files/${encodeURIComponent(fileId)}`, { method: "DELETE" }, options); }
+}
+export class AuditResource {
+  constructor(private readonly client: Chusky) {}
+  list(after?: number, options?: RequestOptions): Promise<Page<AuditEvent>> { return this.client.request(`/audit-events${after ? `?after=${after}` : ""}`, {}, options); }
+}
+export class WebhooksResource {
+  constructor(private readonly client: Chusky) {}
+  create(url: string, options?: RequestOptions): Promise<Webhook> { return this.client.request("/webhooks", { method: "POST", body: JSON.stringify({ url }) }, options); }
+  list(options?: RequestOptions): Promise<Page<Webhook>> { return this.client.request("/webhooks", {}, options); }
+  deliveries(webhookId: string, options?: RequestOptions): Promise<Page<WebhookDelivery>> { return this.client.request(`/webhooks/${encodeURIComponent(webhookId)}/deliveries`, {}, options); }
+  delete(webhookId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE" }, options); }
+}
+export class UsageResource {
+  constructor(private readonly client: Chusky) {}
+  get(options?: RequestOptions): Promise<Usage> { return this.client.request("/usage", {}, options); }
+}
+/** Root-key-only control plane for provisioning developer projects. */
+export class ProjectsResource {
+  constructor(private readonly client: Chusky) {}
+  create(params: { name: string; scopes?: string[] }, options?: RequestOptions): Promise<DeveloperProject> { return this.client.request("/admin/projects", { method: "POST", body: JSON.stringify(params) }, options); }
+  list(options?: RequestOptions): Promise<Page<DeveloperProject>> { return this.client.request("/admin/projects", {}, options); }
+  audit(after?: number, options?: RequestOptions): Promise<Page<AuditEvent>> { return this.client.request(`/admin/audit-events${after ? `?after=${after}` : ""}`, {}, options); }
+  updateScopes(projectId: string, scopes: string[], options?: RequestOptions): Promise<DeveloperProject> { return this.client.request(`/admin/projects/${encodeURIComponent(projectId)}`, { method: "PATCH", body: JSON.stringify({ scopes }) }, options); }
+  rotateKey(projectId: string, options?: RequestOptions): Promise<DeveloperProject> { return this.client.request(`/admin/projects/${encodeURIComponent(projectId)}/rotate-key`, { method: "POST", body: "{}" }, options); }
+  revoke(projectId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/admin/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }, options); }
 }
 
 async function toError(response: Response): Promise<ChuskyError> {

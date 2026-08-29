@@ -6,7 +6,7 @@
  * Slack/WhatsApp/Telegram payload directly.
  */
 
-export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sms" | "voice" | "cli";
+export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sms" | "voice" | "cli" | "webhook";
 
 export type AttachmentKind = "image" | "audio" | "video" | "document";
 

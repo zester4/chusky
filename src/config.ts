@@ -157,5 +157,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   webhookUrl: optional("WEBHOOK_URL", ""),
   // Dedicated bearer key for the self-hosted developer SDK. It is never a CLI device token.
   apiKey: optional("CHUSKY_API_KEY", ""),
+  r2AccountId: optional("R2_ACCOUNT_ID", ""),
+  r2AccessKeyId: optional("R2_ACCESS_KEY_ID", ""),
+  r2SecretAccessKey: optional("R2_SECRET_ACCESS_KEY", ""),
+  r2Bucket: optional("R2_BUCKET", ""),
+  sdkMaxFileBytes: positiveInt("SDK_MAX_FILE_BYTES", 25 * 1024 * 1024),
   logLevel: optional("LOG_LEVEL", "info"),
 } as const;

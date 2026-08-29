@@ -312,7 +312,7 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `WHATSAPP_VERIFY_TOKEN` | WhatsApp | — | Webhook verification token |
 | `WHATSAPP_APP_SECRET` | WhatsApp | — | Meta app secret for `X-Hub-Signature-256` |
 | `WHATSAPP_GRAPH_VERSION` | — | `v23.0` | Graph API version |
-| `CHUSKY_API_KEY` | — | — | Optional self-hosted developer SDK bearer key; enables `/v1` |
+| `CHUSKY_API_KEY` | — | — | Optional root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
 
 ---
 

@@ -29,9 +29,11 @@ function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string
   return [`Trigger: ${event.triggerSlug || "event"}`, ...redacted].join("\n").slice(0, 3500);
 }
 import { registerSdkApi } from "./sdkApi.js";
+import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 
 async function main(): Promise<void> {
   await initStore();
+  let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
 
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
@@ -45,6 +47,7 @@ async function main(): Promise<void> {
   const shutdown = async (sig: string) => {
     logger.info({ sig }, "Chusky shutting down…");
     channelGateway?.stopRecovery();
+    if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
     await bot.stop();
     process.exit(0);
   };
@@ -66,7 +69,12 @@ async function main(): Promise<void> {
       ...(config.whatsappEnabled ? { whatsapp: { adapter: whatsappAdapter, appSecret: config.whatsappAppSecret, verifyToken: config.whatsappVerifyToken } } : {}),
     });
     channelGateway.startRecovery();
-    if (config.apiKey) registerSdkApi(app);
+    if (config.apiKey) {
+      registerSdkApi(app);
+      void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed"));
+      sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 30_000);
+      if (typeof sdkWebhookRecovery === "object" && "unref" in sdkWebhookRecovery) sdkWebhookRecovery.unref();
+    }
 
     const cliAuth = async (c: any) => {
       const auth = c.req.header("Authorization") ?? "";

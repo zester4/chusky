@@ -1,0 +1,95 @@
+import assert from "node:assert/strict";
+import test, { beforeEach } from "node:test";
+import { Hono } from "hono";
+import { config } from "../src/config.js";
+import { registerSdkApi } from "../src/sdkApi.js";
+import { getSession, initStore } from "../src/store.js";
+
+beforeEach(async () => { (config as { apiKey: string }).apiKey = "sdk-test-key"; await initStore({ memoryOnly: true }); });
+
+function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
+function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
+
+test("SDK thread creation is authenticated, replay-safe, and rejects key/body mismatches", async () => {
+  const api = app();
+  const first = await api.fetch(request({ metadata: { source: "test" } }));
+  assert.equal(first.status, 201); const created = await first.json() as { id: string };
+  const replay = await api.fetch(request({ metadata: { source: "test" } }));
+  assert.equal(replay.status, 201); assert.equal((await replay.json() as { id: string }).id, created.id);
+  const mismatch = await api.fetch(request({ metadata: { source: "changed" } }));
+  assert.equal(mismatch.status, 409); const mismatchBody = await mismatch.json() as { error: { code: string; requestId: string } }; assert.equal(mismatchBody.error.code, "idempotency_mismatch"); assert.equal(mismatch.headers.get("x-request-id"), mismatchBody.error.requestId);
+  const forbidden = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { "X-Chusky-User-Id": "tenant-user" } }));
+  assert.equal(forbidden.status, 401);
+});
+
+test("SDK file intents enforce the configured allowlist and maximum size before storage access", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json" };
+  const response = await api.fetch(new Request("http://local/v1/files", { method: "POST", headers, body: JSON.stringify({ name: "unsafe.exe", contentType: "application/x-msdownload", size: 10 }) }));
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_file");
+});
+
+test("SDK webhook creation replays the same subscription on a lost response", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": "webhook_once" };
+  const create = () => new Request("http://local/v1/webhooks", { method: "POST", headers, body: JSON.stringify({ url: "https://hooks.example.test/chusky" }) });
+  const first = await api.fetch(create());
+  assert.equal(first.status, 201); const created = await first.json() as { id: string; secret: string };
+  const replay = await api.fetch(create());
+  assert.equal(replay.status, 201); const replayed = await replay.json() as { id: string; secret: string };
+  assert.deepEqual(replayed, created);
+  const list = await api.fetch(new Request("http://local/v1/webhooks", { headers }));
+  assert.equal((await list.json() as { data: unknown[] }).data.length, 1);
+  const remove = await api.fetch(new Request(`http://local/v1/webhooks/${created.id}`, { method: "DELETE", headers }));
+  assert.equal(remove.status, 204);
+  const empty = await api.fetch(new Request("http://local/v1/webhooks", { headers }));
+  assert.equal((await empty.json() as { data: unknown[] }).data.length, 0);
+});
+
+test("root key provisions hash-only project keys with isolated SDK users and revocation", async () => {
+  const api = app();
+  const root = { Authorization: "Bearer sdk-test-key", "Content-Type": "application/json" };
+  const provision = await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "Acme" }) }));
+  assert.equal(provision.status, 201); const project = await provision.json() as { id: string; key: string };
+  assert.equal((await getSession(0)).sdkAudit?.some((entry) => entry.action === "POST /v1/admin/projects" && entry.status === 201), true);
+  const adminAudit = await api.fetch(new Request("http://local/v1/admin/audit-events", { headers: root }));
+  assert.equal((await adminAudit.json() as { data: Array<{ action: string }> }).data.some((entry) => entry.action === "POST /v1/admin/projects"), true);
+  const headers = { Authorization: `Bearer ${project.key}`, "X-Chusky-User-Id": "shared-user", "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+  assert.equal(created.status, 201);
+  const restrict = await api.fetch(new Request(`http://local/v1/admin/projects/${project.id}`, { method: "PATCH", headers: root, body: JSON.stringify({ scopes: ["threads:read"] }) }));
+  assert.equal(restrict.status, 200);
+  const nowDenied = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+  assert.equal(nowDenied.status, 403);
+  const rotatedResponse = await api.fetch(new Request(`http://local/v1/admin/projects/${project.id}/rotate-key`, { method: "POST", headers: root, body: "{}" }));
+  assert.equal(rotatedResponse.status, 201); const rotated = await rotatedResponse.json() as { key: string };
+  const stale = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+  assert.equal(stale.status, 401);
+  const newHeaders = { ...headers, Authorization: `Bearer ${rotated.key}` };
+  const fresh = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: newHeaders, body: "{}" }));
+  assert.equal(fresh.status, 403);
+  const revoke = await api.fetch(new Request(`http://local/v1/admin/projects/${project.id}`, { method: "DELETE", headers: root }));
+  assert.equal(revoke.status, 204);
+  const denied = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: newHeaders, body: "{}" }));
+  assert.equal(denied.status, 401);
+  const projects = await api.fetch(new Request("http://local/v1/admin/projects", { headers: root }));
+  assert.equal(JSON.stringify(await projects.json()).includes(project.key), false);
+});
+
+test("root-only admin routes never require an SDK end-user header", async () => {
+  const api = app();
+  const response = await api.fetch(new Request("https://chusky.selithub.shop/v1/admin/projects", { headers: { Authorization: "Bearer sdk-test-key" } }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { data: [] });
+});
+
+test("project scopes are enforced at the v1 boundary", async () => {
+  const api = app(); const root = { Authorization: "Bearer sdk-test-key", "Content-Type": "application/json" };
+  const provision = await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "Read only", scopes: ["threads:read"] }) }));
+  const project = await provision.json() as { key: string };
+  const headers = { Authorization: `Bearer ${project.key}`, "X-Chusky-User-Id": "customer", "Content-Type": "application/json" };
+  const response = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
+  assert.equal(response.status, 403);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "insufficient_scope");
+});

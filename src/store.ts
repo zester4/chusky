@@ -29,9 +29,15 @@ export interface UserSession {
   summaries: string[];
   approvals: ApprovalRecord[];
   sdkThreads?: SdkThreadRecord[];
+  sdkFiles?: SdkFileRecord[];
+  sdkIdempotency?: Record<string, { fingerprint: string; response: unknown; createdAt: number }>;
+  sdkAudit?: Array<{ id: string; action: string; requestId: string; status: number; at: number }>;
+  sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
+  sdkProjects?: SdkProjectRecord[];
   createdAt: number;
   updatedAt: number;
 }
+export interface SdkProjectRecord { id: string; name: string; keyPrefix: string; keyHash: string; scopes: string[]; createdAt: number; revokedAt?: number; }
 
 export interface SdkRunRecord {
   id: string;
@@ -40,6 +46,7 @@ export interface SdkRunRecord {
   output?: string;
   approvalId?: string;
   error?: { code: string; message: string };
+  events: Array<{ id: string; type: string; at: number; text?: string }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -53,6 +60,7 @@ export interface SdkThreadRecord {
   createdAt: number;
   updatedAt: number;
 }
+export interface SdkFileRecord { id: string; key: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
 
 export interface DaytonaWorkspaceRecord {
   sandboxId: string;
@@ -250,6 +258,8 @@ export interface OutboxRecord {
   createdAt: number;
   updatedAt: number;
   deliveredAt?: number;
+  /** SDK webhooks reuse the durable outbox but are not channel messages. */
+  webhook?: { webhookId: string; url: string; secretCiphertext: string; payload: unknown };
 }
 
 export interface ChannelConversationRecord {
@@ -343,6 +353,9 @@ class RedisBackend implements Backend {
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
+    // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
+    // It must survive the normal chat-session TTL just like durable tasks and CLI devices.
+    if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(s)); return; }
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify(s));
   }
 
@@ -882,7 +895,7 @@ export function isDurableStore(): boolean {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkThreads: s.sdkThreads ?? [] };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {

@@ -1,0 +1,82 @@
+openapi: 3.1.0
+info:
+  title: Chusky Developer API
+  version: 1.0.0
+  description: Self-hosted Chusky SDK API. API keys are server-side only.
+servers:
+  - url: https://your-chusky.example/v1
+security:
+  - bearerAuth: []
+paths:
+  /admin/projects:
+    get: { summary: List root-managed developer projects, responses: { '200': { description: OK } } }
+    post: { summary: Create a developer project and return its key exactly once, responses: { '201': { description: Created } } }
+  /admin/audit-events:
+    get: { summary: List root control-plane audit events, responses: { '200': { description: OK } } }
+  /admin/projects/{projectId}:
+    patch: { summary: Replace scopes for an active project, responses: { '200': { description: Updated } } }
+    delete: { summary: Revoke a developer project key, responses: { '204': { description: Revoked } } }
+  /admin/projects/{projectId}/rotate-key:
+    post: { summary: Replace a project key and return the new value exactly once, responses: { '201': { description: Rotated } } }
+  /threads:
+    get:
+      summary: List a user's threads
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      responses: { '200': { description: OK } }
+    post:
+      summary: Create a thread
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { '201': { description: Created } }
+  /threads/{threadId}:
+    get: { summary: Get one thread, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /threads/{threadId}/runs:
+    get:
+      summary: List runs for a thread
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      responses: { '200': { description: Cursor page } }
+    post:
+      summary: Run Chusky synchronously
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { '201': { description: Created } }
+  /threads/{threadId}/runs/stream:
+    post:
+      summary: Stream an NDJSON agent run
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      responses: { '200': { description: NDJSON stream } }
+  /threads/{threadId}/runs/{runId}:
+    get: { summary: Get a run, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /threads/{threadId}/runs/{runId}/cancel:
+    post: { summary: Cancel a running run, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Cancelled } } }
+  /threads/{threadId}/runs/{runId}/events:
+    get: { summary: Recover persisted run events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /approvals/{approvalId}:
+    get: { summary: Get a pending approval, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Approve or deny then resume safely, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Run result } } }
+  /tasks:
+    get: { summary: List tasks for an SDK user, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /tasks/{taskId}:
+    get: { summary: Get one task, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /files:
+    post: { summary: Create a direct R2 upload URL, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Presigned URL } } }
+  /files/{fileId}:
+    get: { summary: Create a direct R2 download URL, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Presigned URL } } }
+    delete: { summary: Delete an owned R2 object and its file record, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
+  /files/{fileId}/complete:
+    post: { summary: Verify an uploaded R2 object before it becomes downloadable, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Verified file } } }
+  /audit-events:
+    get: { summary: List bounded SDK audit events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /usage:
+    get: { summary: Get current SDK-user usage totals, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /webhooks:
+    get: { summary: List webhook subscriptions, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create an HTTPS webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
+  /webhooks/{webhookId}:
+    delete: { summary: Disable a webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Disabled } } }
+  /webhooks/{webhookId}/deliveries:
+    get: { summary: List bounded delivery attempts for a subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    UserId: { name: X-Chusky-User-Id, in: header, required: true, schema: { type: string, maxLength: 200 } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 255 } }

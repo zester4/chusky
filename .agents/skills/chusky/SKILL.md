@@ -17,6 +17,7 @@ For deep work, load only the references relevant to the task:
 - [Security and trust boundaries](references/security.md) for authentication, ownership, approvals, prompt injection, webhooks, locks, and secrets.
 - [Operations and deployment](references/operations.md) for startup checks, logging, incident response, and release discipline.
 - [Testing strategy](references/testing.md) for the test matrix and evaluation cases.
+- [Developer API and SDK](references/sdk/developer-api.md) when changing the `/v1` API, `sdk/` package, project credentials, R2 files, or developer webhooks.
 
 ## Identity and compatibility
 
@@ -39,6 +40,8 @@ For deep work, load only the references relevant to the task:
 - `src/policy.ts`: risky-tool detection and human-readable progress messages.
 - `src/types.ts`: shared API-message, tool-call, and media types.
 - `src/markdown.ts`: Markdown-to-Telegram-HTML conversion and message splitting.
+- `src/sdkApi.ts`: authenticated `/v1` developer API for projects, threads, runs, approvals, tasks, files, audit events, and webhook subscriptions.
+- `sdk/`: standalone ESM TypeScript developer SDK, API contract, OpenAPI description, and client tests.
 - `tests/`: Node test-runner coverage for policy, native tool schemas, Markdown, memory ranking, and approval matching.
 
 ## Channel architecture and operations
@@ -211,6 +214,8 @@ For any implementation change:
 6. Confirm that `.env` and generated runtime files are ignored before committing.
 
 For documentation or skill changes, update the relevant reference and its link in this file, verify every referenced path exists, and avoid adding user-facing README-style material to the skill package.
+
+For Developer API or SDK changes, load [Developer API and SDK](references/sdk/developer-api.md). Do not expose the root `CHUSKY_API_KEY` to application clients, weaken project/user isolation, or make an unverified uploaded file downloadable.
 
 For CLI changes, additionally verify pairing-code expiry/replay, revoked-device rejection, Telegram-to-CLI and CLI-to-Telegram continuation, terminal Markdown output, approval parity, and behavior when the service or Redis is unavailable.
 

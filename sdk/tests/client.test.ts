@@ -35,3 +35,20 @@ test("SDK parses NDJSON run events in order", async () => {
   for await (const event of sdk.threads.runs("thr_1").stream({ input: "hi" })) events.push(event);
   assert.deepEqual(events.map((event) => event.type), ["run.started", "run.delta"]);
 });
+
+test("SDK exposes root project lifecycle endpoints", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  const sdk = new Chusky({ apiKey: "root", userId: "operator", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { calls.push({ url, method: init?.method, body: String(init?.body ?? "") }); return new Response(init?.method === "DELETE" ? null : JSON.stringify({ id: "proj_1", name: "Acme", keyPrefix: "chsk_proj", scopes: ["*"], createdAt: "2026-01-01T00:00:00.000Z" }), { status: init?.method === "DELETE" ? 204 : 200 }); }) });
+  await sdk.projects.create({ name: "Acme", scopes: ["threads:read"] });
+  await sdk.projects.updateScopes("proj_1", ["threads:write"]);
+  await sdk.projects.rotateKey("proj_1");
+  await sdk.projects.revoke("proj_1");
+  assert.deepEqual(calls.map((call) => `${call.method}:${call.url}`), ["POST:https://example.test/v1/admin/projects", "PATCH:https://example.test/v1/admin/projects/proj_1", "POST:https://example.test/v1/admin/projects/proj_1/rotate-key", "DELETE:https://example.test/v1/admin/projects/proj_1"]);
+});
+
+test("SDK file deletion accepts the no-content response", async () => {
+  let captured: { url: string; method?: string } | undefined;
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { captured = { url, method: init?.method }; return new Response(null, { status: 204 }); }) });
+  await sdk.files.delete("file_1");
+  assert.deepEqual(captured, { url: "https://example.test/v1/files/file_1", method: "DELETE" });
+});
