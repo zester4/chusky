@@ -89,6 +89,11 @@ export class Chusky {
   }
 }
 
+/** Trusted-server client for provisioning project keys. */
+export function createChuskyAdmin(options: Omit<ChuskyClientOptions, "userId"> & { userId?: string }): Chusky {
+  return new Chusky({ ...options, userId: options.userId ?? "operator" });
+}
+
 export class ThreadsResource {
   constructor(private readonly client: Chusky) {}
   create(params: CreateThreadParams = {}, options?: RequestOptions): Promise<Thread> { return this.client.request("/threads", { method: "POST", body: JSON.stringify(params) }, options); }

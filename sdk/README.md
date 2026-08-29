@@ -5,7 +5,7 @@ This package is the public developer boundary for Chusky. It is intentionally se
 ```ts
 import { Chusky } from "@chusky/sdk";
 
-const chusky = new Chusky({ apiKey: process.env.CHUSKY_PROJECT_KEY!, userId: "customer_123" });
+const chusky = new Chusky({ apiKey: process.env.CHUSKY_PROJECT_KEY!, baseUrl: process.env.CHUSKY_BASE_URL, userId: "customer_123" });
 const thread = await chusky.threads.create();
 
 for await (const event of chusky.threads.runs(thread.id).stream(
@@ -17,6 +17,18 @@ for await (const event of chusky.threads.runs(thread.id).stream(
     // Present the exact approval to an authenticated human.
   }
 }
+```
+
+## Provisioning a project key
+
+Run this only on a trusted backend or operator machine. Never expose the root
+`CHUSKY_API_KEY` to a browser or end user.
+
+```ts
+import { createChuskyAdmin } from "@chusky/sdk";
+const admin = createChuskyAdmin({ apiKey: process.env.CHUSKY_API_KEY!, baseUrl: process.env.CHUSKY_BASE_URL });
+const project = await admin.projects.create({ name: "My App", scopes: ["*"] });
+console.log(project.key); // save once; list() never returns it
 ```
 
 ## Contract and security

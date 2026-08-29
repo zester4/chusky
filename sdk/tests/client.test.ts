@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Chusky, ChuskyAuthenticationError, ChuskyRateLimitError } from "../src/index.js";
+import { Chusky, ChuskyAuthenticationError, ChuskyRateLimitError, createChuskyAdmin } from "../src/index.js";
 
 function mockFetch(responder: (url: string, init?: RequestInit) => Response | Promise<Response>): typeof fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => responder(String(input), init)) as typeof fetch;
 }
+
+test("admin factory supplies a server-only operator identity", async () => {
+  let userHeader = "";
+  const admin = createChuskyAdmin({ apiKey: "root_secret", baseUrl: "https://example.test", fetch: mockFetch((_url, init) => {
+    userHeader = new Headers(init?.headers).get("x-chusky-user-id") ?? "";
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+  await admin.projects.list();
+  assert.equal(userHeader, "operator");
+});
 
 test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   let captured: { url: string; headers: Headers; body: string | undefined } | undefined;
