@@ -31,6 +31,7 @@ export interface UserSession {
   approvals: ApprovalRecord[];
   sdkThreads?: SdkThreadRecord[];
   sdkFiles?: SdkFileRecord[];
+  artifacts?: ArtifactRecord[];
   sdkIdempotency?: Record<string, { fingerprint: string; response: unknown; createdAt: number }>;
   sdkAudit?: Array<{ id: string; action: string; requestId: string; status: number; at: number }>;
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
@@ -62,6 +63,8 @@ export interface SdkThreadRecord {
   updatedAt: number;
 }
 export interface SdkFileRecord { id: string; key: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
+export type ArtifactType = "website" | "report" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project";
+export interface ArtifactRecord { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; size: number; status: "available"; createdAt: number; updatedAt: number; }
 
 export interface DaytonaWorkspaceRecord {
   sandboxId: string;
@@ -164,6 +167,7 @@ export interface ApprovalRecord {
   accountId?: string;
   channelProvider?: ChannelProvider;
   channelConversationId?: string;
+  triggerEventId?: string;
   toolSlug: string;
   args: Record<string, unknown>;
   request: string;
@@ -172,6 +176,21 @@ export interface ApprovalRecord {
   status: "pending" | "approved" | "consumed" | "denied" | "expired";
   createdAt: number;
   expiresAt: number;
+}
+
+export interface TriggerEventRecord {
+  eventId: string;
+  userId: number;
+  triggerId?: string;
+  triggerSlug: string;
+  summary: string;
+  status: "queued" | "running" | "awaiting_approval" | "completed" | "failed";
+  workflowRunId?: string;
+  approvalId?: string;
+  result?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface CliPairingRecord {
@@ -285,6 +304,9 @@ interface Backend {
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
+  createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
+  getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
+  updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
   getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
@@ -334,6 +356,7 @@ class RedisBackend implements Backend {
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
   private uk = (id: number) => `chuck:user:${id}:devices`;
   private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
+  private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private channelIdentityKey = (provider: ChannelProvider, externalUserId: string, workspaceId?: string) => `chuck:channel:identity:${provider}:${createHash("sha256").update(`${workspaceId ?? "-"}:${externalUserId}`).digest("hex")}`;
   private channelIdentityUserKey = (userId: number) => `chuck:user:${userId}:channel-identities`;
   private channelInstallationKey = (provider: ChannelInstallationRecord["provider"], workspaceId: string) => `chuck:channel:installation:${provider}:${workspaceId}`;
@@ -360,6 +383,24 @@ class RedisBackend implements Backend {
     // It must survive the normal chat-session TTL just like durable tasks and CLI devices.
     if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(s)); return; }
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify(s));
+  }
+
+  async createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord> {
+    const key = this.triggerEventKey(record.eventId);
+    await this.r.set(key, JSON.stringify(record), "EX", 30 * 24 * 60 * 60, "NX");
+    return (await this.getTriggerEvent(record.eventId)) ?? record;
+  }
+  async getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
+    const raw = await this.r.get(this.triggerEventKey(eventId));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as TriggerEventRecord; } catch { return undefined; }
+  }
+  async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined> {
+    const current = await this.getTriggerEvent(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    await this.r.set(this.triggerEventKey(eventId), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    return next;
   }
 
   async incrRate(userId: number): Promise<number> {
@@ -676,6 +717,7 @@ class MemoryBackend implements Backend {
   private channelEvents = new Map<string, number>();
   private completedChannelEvents = new Map<string, number>();
   private outbox = new Map<string, OutboxRecord>();
+  private triggerEvents = new Map<string, TriggerEventRecord>();
   private outboxByIdempotency = new Map<string, string>();
   private channelConversations = new Map<string, ChannelConversationRecord>();
   private outboxByProvider = new Map<string, string>();
@@ -683,6 +725,15 @@ class MemoryBackend implements Backend {
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async createTriggerEvent(record: TriggerEventRecord) { return this.triggerEvents.get(record.eventId) ?? (this.triggerEvents.set(record.eventId, record), record); }
+  async getTriggerEvent(eventId: string) { return this.triggerEvents.get(eventId); }
+  async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>) {
+    const current = this.triggerEvents.get(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    this.triggerEvents.set(eventId, next);
+    return next;
+  }
 
   async incrRate(userId: number): Promise<number> {
     const now = Date.now();
@@ -865,7 +916,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], artifacts: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -898,7 +949,7 @@ export function isDurableStore(): boolean {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -1225,6 +1276,24 @@ export async function claimTriggerEvent(eventId: string, ttlSeconds = 86400): Pr
   if (seenTriggerEvents.has(eventId)) return false;
   seenTriggerEvents.set(eventId, now + ttlSeconds * 1000);
   return true;
+}
+export async function releaseTriggerEvent(eventId: string): Promise<void> {
+  const key = `chuck:event:${eventId}`;
+  if (config.redisUrl && backend instanceof RedisBackend) {
+    await (backend as any).r.del(key);
+    return;
+  }
+  seenTriggerEvents.delete(eventId);
+}
+
+export async function createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord> {
+  return backend.createTriggerEvent(record);
+}
+export async function getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
+  return backend.getTriggerEvent(eventId);
+}
+export async function updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined> {
+  return backend.updateTriggerEvent(eventId, patch);
 }
 
 export async function addReminder(uid: number, reminder: ReminderRecord): Promise<void> {

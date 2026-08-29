@@ -21,6 +21,7 @@ import { putR2Object, r2Configured } from "./lib/storage/r2.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
+import { notifyTriggerApproval } from "./triggerWorkflow.js";
 
 const activeRequests = new Map<number, AbortController>();
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
@@ -74,6 +75,17 @@ async function sendVoiceReply(ctx: Context, text: string, enabled: boolean): Pro
     // Text delivery has already succeeded; TTS is an optional enhancement and
     // must never turn a successful agent response into a failed request.
     logger.warn({ err: error, userId: ctx.from?.id }, "Voice reply generation failed");
+  }
+}
+
+async function sendGeneratedArtifacts(ctx: Context, files: Array<{ data: Buffer; name: string; contentType: string; artifactId: string; type: string }> | undefined): Promise<void> {
+  for (const file of files ?? []) {
+    try {
+      await ctx.replyWithDocument(new InputFile(file.data, file.name), { caption: `📦 ${file.name}\nArtifact ID: ${file.artifactId}` });
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from?.id, artifactId: file.artifactId }, "Artifact delivery failed");
+      await ctx.reply(`I created ${file.name}, but Telegram could not deliver the file. Artifact ID: ${file.artifactId}`);
+    }
   }
 }
 
@@ -612,6 +624,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
         return;
       }
+      if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
       await ctx.editMessageText("🛑 Action denied. Nothing was executed.");
       return;
     }
@@ -620,11 +633,16 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await ctx.editMessageText("✅ Approved. Chusky is executing the action…");
+    if (approval.triggerEventId) {
+      await notifyTriggerApproval(approval.id, true);
+      return;
+    }
     try {
       const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
       await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);
+      await sendGeneratedArtifacts(ctx, result.generatedFiles);
     } catch (e) {
       await ctx.reply(`❌ Approval execution failed: ${String(e).slice(0, 400)}`);
     }
@@ -703,6 +721,7 @@ export function registerHandlers(bot: Bot): void {
 
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
       await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
+      await sendGeneratedArtifacts(ctx, result.generatedFiles);
       for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);

@@ -70,7 +70,7 @@ export async function setReminder(userId: number, args: Record<string, unknown>)
     status: "scheduled",
     createdAt: Date.now(),
   };
-  const client = new WorkflowClient({ token: requireQStash() });
+  const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
   const workflow = await client.trigger({
     url: requireUrl(config.reminderWorkflowUrl, "REMINDER_WORKFLOW_URL"),
     body: { reminderId: reminder.id, userId },
@@ -168,7 +168,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!task) throw new Error("Task not found or not owned by you");
       const runAt = futureTimestamp(args);
       await scheduleTask(userId, id, runAt);
-      const client = new WorkflowClient({ token: requireQStash() });
+      const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
       const workflow = await client.trigger({
         url: taskWorkflowUrl(),
         body: { taskId: id, userId },
@@ -200,6 +200,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_PTY": return daytonaEngine.pty(userId, args);
     case "CHUCK_DAYTONA_GIT": return daytonaEngine.git(userId, args);
     case "CHUCK_DAYTONA_BROWSER": return daytonaEngine.browser(userId, args);
+    case "CHUCK_ARTIFACT": return daytonaEngine.artifact(userId, args);
     default: throw new Error(`Unknown native tool: ${slug}`);
   }
 }

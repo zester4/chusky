@@ -130,6 +130,7 @@ Current native capabilities include:
 - `CHUCK_SCHEDULE_JOB`, `CHUCK_LIST_JOBS`, `CHUCK_CANCEL_JOB`: recurring QStash CRON schedules.
 - `CHUCK_SCRATCHPAD_WRITE`, `CHUCK_SCRATCHPAD_READ`, `CHUCK_SCRATCHPAD_CLEAR`: private working notes.
 - `CHUCK_SAVE_MEMORY`, `CHUCK_SEARCH_MEMORY`, `CHUCK_FORGET_MEMORY`: explicit structured facts and preferences.
+- `CHUCK_ARTIFACT`: durable user-owned websites, reports, presentations, PDFs, spreadsheets, images, videos, projects, and ZIP deliverables. Text websites/reports can be created directly; binary files must be generated and verified in Daytona before registration and delivery.
 
 Require the agent to call a tool before claiming completion. Validate all tool arguments, enforce user ownership, keep responses bounded, and do not expose unrelated users' records.
 
@@ -203,6 +204,17 @@ Do not log raw media, base64 data, tokens, or full private document contents.
 ## Triggers and external apps
 
 Require verified Composio webhook signatures. Return authentication errors for invalid signatures rather than HTTP 200. Require an owned trigger ID before listing mutations or deletion. Persist event IDs for deduplication. Notify only the mapped Telegram owner and summarize payloads rather than exposing raw event bodies by default.
+
+For event-driven agent execution, the webhook must acknowledge only after verification, ownership
+validation, event persistence, and the durable Upstash Workflow enqueue. Use a deterministic
+`trigger-<event-id>` workflow ID and a small `{ eventId, userId }` workflow payload. The workflow
+must re-read the event from Redis, run the agent inside a named `workflow.run` step, persist
+`queued/running/awaiting_approval/completed/failed` state, and let QStash retry transient failures.
+If the agent requests approval, persist `triggerEventId` on the approval and wait with
+`waitForEvent("trigger-approval", "trigger-approval:<approval-id>", { timeout: "24h" })`; the
+approval callback must notify that waiter instead of starting a second agent run. Deliver the final
+Telegram response only after the agent step succeeds, and use the existing durable outbox for any
+additional channel delivery.
 
 ## Change workflow
 

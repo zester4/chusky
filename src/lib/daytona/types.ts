@@ -67,3 +67,13 @@ export interface DaytonaGitResult {
   action: string;
   result?: unknown;
 }
+
+export interface DaytonaArtifactDelivery {
+  id: string;
+  name: string;
+  type: string;
+  path: string;
+  contentType: string;
+  size: number;
+  data: Buffer;
+}

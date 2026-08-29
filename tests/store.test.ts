@@ -6,7 +6,8 @@ import {
   listReminders, releaseUserLock, saveDaytonaWorkspace, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
-  type DaytonaWorkspaceRecord,
+  type DaytonaWorkspaceRecord, type TriggerEventRecord,
+  createTriggerEvent, getTriggerEvent, updateTriggerEvent,
 } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
@@ -99,6 +100,14 @@ test("trigger events are idempotent", async () => {
   const eventId = `event-${Date.now()}-${Math.random()}`;
   assert.equal(await claimTriggerEvent(eventId), true);
   assert.equal(await claimTriggerEvent(eventId), false);
+});
+
+test("trigger event records are durable and stateful", async () => {
+  const record: TriggerEventRecord = { eventId: "evt-record-1", userId: 810099, triggerId: "trig-1", triggerSlug: "GITHUB_COMMIT_EVENT", summary: "Trigger: GITHUB_COMMIT_EVENT", status: "queued", createdAt: Date.now(), updatedAt: Date.now() };
+  assert.deepEqual(await createTriggerEvent(record), record);
+  assert.deepEqual(await createTriggerEvent({ ...record, status: "failed" }), record);
+  assert.equal((await updateTriggerEvent(record.eventId, { status: "running", workflowRunId: "wfr_evt-record-1" }))?.status, "running");
+  assert.equal((await getTriggerEvent(record.eventId))?.workflowRunId, "wfr_evt-record-1");
 });
 
 test("Telegram update claims deduplicate retries", async () => {

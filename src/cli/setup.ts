@@ -100,7 +100,7 @@ export async function runSetup(): Promise<void> {
   } else updates.WEBHOOK_URL = "";
   console.log("\nOptional production features (press Enter to skip):");
   for (const key of ["REDIS_URL", "QSTASH_TOKEN", "DAYTONA_API_KEY"] as const) updates[key] = await valueFor(key, current, true);
-  if (updates.QSTASH_TOKEN) for (const key of ["VIDEO_WORKFLOW_URL", "REMINDER_WORKFLOW_URL", "JOB_WORKFLOW_URL"]) updates[key] = await valueFor(key, current);
+  if (updates.QSTASH_TOKEN) for (const key of ["QSTASH_URL", "VIDEO_WORKFLOW_URL", "REMINDER_WORKFLOW_URL", "JOB_WORKFLOW_URL", "TRIGGER_WORKFLOW_URL"]) updates[key] = await valueFor(key, current);
   for (const [key, fallback] of Object.entries(DEFAULTS)) updates[key] = current.get(key) || fallback;
   await writeEnvFile(updates);
   const report = healthReport((await readEnvFile()).values);

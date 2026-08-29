@@ -28,6 +28,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_PTY: "⌨️ I’m working in your persistent terminal…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
   CHUCK_DAYTONA_BROWSER: "🌐 I’m using the browser in your computer workspace…",
+  CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",
   CHUCK_TASK_LIST: "📋 I’m checking your tasks…",
   CHUCK_TASK_GET: "📋 I’m checking that task…",

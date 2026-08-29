@@ -238,6 +238,17 @@ Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/r
 Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
 Chusky checks ownership and cancellation state before delivering a notification.
 
+### Event-driven Composio triggers
+
+Composio trigger events are verified, ownership-checked, deduplicated, stored as a bounded safe
+summary, and handed to the durable `/workflows/trigger-event` endpoint. The webhook returns `202`
+before the agent runs. Set `TRIGGER_WORKFLOW_URL` explicitly when the public workflow URL differs
+from `${WEBHOOK_URL}/workflows/trigger-event`; otherwise Chusky derives it from `WEBHOOK_URL`.
+Trigger workflow runs use `trigger-<event-id>` as their stable QStash workflow ID, so provider
+retries do not start a second agent run. If a triggered action needs approval, the workflow waits
+for the approval callback and resumes with the same event context. Only a bounded, redacted summary
+is persisted and shown to the model; raw provider payloads are not stored by default.
+
 ### Daytona persistence
 
 When `DAYTONA_API_KEY` is configured, Chusky keeps a per-user Daytona workspace and stores its
@@ -258,6 +269,17 @@ IDs are retained in the Redis-backed workspace record and can be reused with `wr
 status, branches, checkout, pull, add, commit, and push. Local operations stay private; push is
 approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
 tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
+
+### Artifact Studio
+
+`CHUCK_ARTIFACT` gives Chusky a durable, user-owned deliverable registry backed by Daytona and
+Redis metadata. Chusky can create Markdown reports and HTML websites directly, register verified
+files generated in Daytona (DOCX, PDF, PPTX, XLSX, images, and videos), list or retrieve prior
+artifacts, delete registry entries, and package verified workspace files into ZIP archives.
+Registered artifacts are downloaded from Daytona only after metadata validation and delivered to
+Telegram as documents. Large binary contents are never written into conversation history. Binary
+formats must be generated and checked in Daytona before registration; an artifact record is not
+created from a text claim alone.
 
 Chusky also accepts these requests naturally, without slash commands:
 
@@ -309,9 +331,11 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
 | `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |
-| `QSTASH_TOKEN` | reminders/jobs | — | Upstash QStash token |
+| `QSTASH_TOKEN` | reminders/jobs/triggers | — | Upstash QStash token |
+| `QSTASH_URL` | QStash client | `https://qstash-us-east-1.upstash.io` | Regional Upstash QStash API URL |
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
+| `TRIGGER_WORKFLOW_URL` | Composio triggers | — | Public `.../workflows/trigger-event` URL; defaults from `WEBHOOK_URL` |
 | `SYSTEM_PROMPT` | — | Chusky's default | Agent personality |
 | `ENABLE_MANAGE_CONNECTIONS` | — | `true` | OAuth link tool |
 | `COMPOSIO_CALLBACK_URL` | — | — | Post-connect redirect URL |

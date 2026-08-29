@@ -174,3 +174,15 @@ test("browser navigation persists safe URL state and rejects embedded credential
   assert.equal((await getDaytonaWorkspace(820010))?.browser?.lastUrl, "https://example.com/docs");
   await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
 });
+
+test("creates and persists a text artifact without placing bytes in session history", async () => {
+  const e = engine();
+  const result = await e.artifact(820011, { action: "create", type: "report", name: "findings.md", content: "# Findings\n\nVerified." }) as any;
+  assert.equal(result.__chuskyArtifactReady, true);
+  assert.equal(result.name, "findings.md");
+  const session = await (await import("../src/store.js")).getSession(820011);
+  assert.equal(session.artifacts?.length, 1);
+  assert.equal(session.history.length, 0);
+  const listed = await e.artifact(820011, { action: "list" }) as any[];
+  assert.equal(listed[0].id, result.id);
+});

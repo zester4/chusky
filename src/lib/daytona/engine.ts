@@ -1,9 +1,10 @@
 import { type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
+import { randomUUID } from "node:crypto";
 import { config } from "../../config.js";
-import { clearDaytonaWorkspace, getDaytonaWorkspace, saveDaytonaWorkspace } from "../../store.js";
+import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { getDaytonaClient } from "./client.js";
-import type { DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
+import type { DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
@@ -16,6 +17,7 @@ const DAYTONA_MAX_COMMAND_LENGTH = 8000;
 const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;
+const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
 
 function boundedInt(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
@@ -68,6 +70,25 @@ function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? "");
   if (!text || text.length > max) throw new DaytonaInputError(`${label} must be 1-${max} characters`);
   return text;
+}
+
+const ARTIFACT_TYPES = new Set<ArtifactType>(["website", "report", "presentation", "pdf", "spreadsheet", "image", "video", "zip", "project"]);
+const ARTIFACT_MIME: Record<ArtifactType, string> = {
+  website: "text/html", report: "text/markdown", presentation: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  pdf: "application/pdf", spreadsheet: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", image: "image/png",
+  video: "video/mp4", zip: "application/zip", project: "application/zip",
+};
+
+function artifactType(value: unknown): ArtifactType {
+  const type = String(value ?? "").trim() as ArtifactType;
+  if (!ARTIFACT_TYPES.has(type)) throw new DaytonaInputError("type must be a supported artifact type");
+  return type;
+}
+
+function artifactName(value: unknown): string {
+  const name = String(value ?? "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+  if (!name || name.length > 120) throw new DaytonaInputError("name must be 1-120 safe characters");
+  return name;
 }
 
 function boundedNumber(value: unknown, fallback: number, max: number): number {
@@ -413,6 +434,79 @@ export class DaytonaEngine {
       return this.computer(userId, { action: "keyboard_hotkey", keys: key });
     }
     throw new DaytonaInputError(`Unsupported browser action: ${action}`);
+  }
+
+  private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<void> {
+    const session = await getSession(userId);
+    session.artifacts = [...(session.artifacts ?? []).filter((item) => item.id !== artifact.id), artifact].slice(-100);
+    await saveSession(userId, session);
+  }
+
+  async artifact(userId: number, args: Record<string, unknown>): Promise<unknown> {
+    const action = boundedText(args.action, "action", 20);
+    const session = await getSession(userId);
+    const artifacts = session.artifacts ?? [];
+    if (action === "list") return artifacts.slice(-100).reverse();
+    if (action === "get" || action === "delete") {
+      const id = boundedText(args.id, "id", 120);
+      const existing = artifacts.find((item) => item.id === id);
+      if (!existing) throw new DaytonaInputError("Artifact not found or not owned by you");
+      if (action === "get") return existing;
+      if (args.removeFile === true) {
+        const sandbox = await this.getOrCreateWorkspace(userId);
+        await sandbox.fs.deleteFile(existing.path, false);
+      }
+      session.artifacts = artifacts.filter((item) => item.id !== id);
+      await saveSession(userId, session);
+      return { id, deleted: true, fileRemoved: args.removeFile === true };
+    }
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    if (action === "package") {
+      const files = Array.isArray(args.files) ? args.files.map((file) => safeDaytonaPath(file, "file")) : [];
+      if (!files.length || files.length > 100) throw new DaytonaInputError("files must contain 1-100 workspace-relative paths");
+      const name = artifactName(args.name ?? "chusky-project.zip");
+      const path = safeDaytonaPath(`artifacts/${name}`, "output path");
+      const script = `import zipfile\nz=zipfile.ZipFile(${JSON.stringify(path)},'w',zipfile.ZIP_DEFLATED)\n[z.write(p) for p in ${JSON.stringify(files)}]\nz.close()`;
+      const encoded = Buffer.from(script, "utf8").toString("base64");
+      const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 120);
+      if (result.exitCode !== 0) throw new DaytonaInputError(`ZIP creation failed: ${String(result.result ?? "unknown error").slice(0, 500)}`);
+      return this.registerArtifact(userId, sandbox, path, name, "zip", "application/zip");
+    }
+    const type = artifactType(args.type);
+    if (action === "create") {
+      if (args.path) return this.registerArtifact(userId, sandbox, safeDaytonaPath(args.path, "path"), artifactName(args.name), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      if (typeof args.content !== "string") throw new DaytonaInputError("create requires content for text artifacts or path for generated binary artifacts");
+      if (!["website", "report"].includes(type)) throw new DaytonaInputError("Binary artifacts must be generated in Daytona and passed by path; only website and report accept text content directly");
+      if (args.content.length > DAYTONA_MAX_FILE_CONTENT) throw new DaytonaInputError(`content must be at most ${DAYTONA_MAX_FILE_CONTENT} characters`);
+      const name = artifactName(args.name ?? (type === "website" ? "website.html" : "report.md"));
+      const path = safeDaytonaPath(`artifacts/${name}`, "output path");
+      await sandbox.fs.uploadFile(Buffer.from(args.content, "utf8"), path);
+      return this.registerArtifact(userId, sandbox, path, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+    }
+    if (action === "register") {
+      const path = safeDaytonaPath(args.path, "path");
+      return this.registerArtifact(userId, sandbox, path, artifactName(args.name ?? String(path).split(/[\\/]/).pop()), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+    }
+    throw new DaytonaInputError(`Unsupported artifact action: ${action}`);
+  }
+
+  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
+    const details = await sandbox.fs.getFileDetails(path) as { size?: number; isDir?: boolean };
+    const size = Number(details.size ?? 0);
+    if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
+    if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
+    const now = Date.now();
+    const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name, type, path, contentType, size, status: "available", createdAt: now, updatedAt: now };
+    await this.saveArtifact(userId, artifact);
+    return { ...artifact, __chuskyArtifactReady: true };
+  }
+
+  async downloadArtifact(userId: number, id: string): Promise<DaytonaArtifactDelivery> {
+    const artifact = (await getSession(userId)).artifacts?.find((item) => item.id === id);
+    if (!artifact) throw new DaytonaInputError("Artifact not found or not owned by you");
+    const bytes = await (await this.getOrCreateWorkspace(userId)).fs.downloadFile(artifact.path);
+    if (bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError("Artifact is too large to deliver through Telegram");
+    return { id: artifact.id, name: artifact.name, type: artifact.type, path: artifact.path, contentType: artifact.contentType, size: bytes.length, data: bytes };
   }
 
   async deleteWorkspace(userId: number): Promise<{ sandboxId: string; deleted: boolean }> {

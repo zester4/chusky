@@ -27,6 +27,7 @@ test("Daytona tools are present and uniquely named", () => {
     "CHUCK_DAYTONA_PTY",
     "CHUCK_DAYTONA_GIT",
     "CHUCK_DAYTONA_BROWSER",
+    "CHUCK_ARTIFACT",
   ]) assert.equal(names.includes(name), true, name);
 });
 

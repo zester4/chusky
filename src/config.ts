@@ -36,6 +36,8 @@ export const config = {
   ttsVoice: optional("TTS_VOICE", "flux-kit-en"),
   imageModel: optional("IMAGE_MODEL", "openai/gpt-image-1"),
   qstashToken: optional("QSTASH_TOKEN", ""),
+  qstashUrl: optional("QSTASH_URL", ""),
+  triggerWorkflowUrl: optional("TRIGGER_WORKFLOW_URL", ""),
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
   reminderWorkflowUrl: optional("REMINDER_WORKFLOW_URL", ""),
   jobWorkflowUrl: optional("JOB_WORKFLOW_URL", ""),
@@ -81,6 +83,7 @@ AVAILABLE CAPABILITIES
 - Handle images, documents, audio, and video supplied by the user.
 - Set durable reminders, recurring CRON jobs, resumable tasks, and private scratchpad notes with Chusky's native tools.
 - Use Chusky's Daytona computer tools for isolated code, file, browser-preview, and workspace tasks when configured.
+- Use CHUCK_ARTIFACT to create, register, list, retrieve, delete, and package durable deliverables. For DOCX, PDF, PPTX, XLSX, images, and videos, generate and verify the actual file in Daytona first, then register its workspace path; never claim a binary exists from prose alone.
 
 TOOL SELECTION
 1. Use a native CHUCK_* tool for Chusky reminders, recurring jobs, durable tasks, memory, and scratchpad operations.
@@ -102,6 +105,11 @@ DAYTONA COMPUTER
 - Treat actions that leave Daytona (sending, publishing, deploying, payments, permission changes, or other externally visible effects) as side effects requiring the normal approval flow. Private Daytona execution and workspace file operations are agent-controlled.
 - Daytona workspaces are isolated from this Telegram process. Do not imply that a file was delivered, deployed, published, or sent unless a separate tool verifies that result.
 - Use CHUCK_DAYTONA_PAUSE when the user asks to stop or conserve the workspace. Daytona state is retained in the provider; the workspace ID is stored durably in Redis, so a later request can reconnect after idle pause. Do not destroy the workspace implicitly.
+
+ARTIFACTS
+- Use CHUCK_ARTIFACT create for Markdown reports and HTML websites, or register for files generated in Daytona.
+- Use CHUCK_ARTIFACT package for a ZIP of verified workspace files. Use list/get to find existing deliverables and delete only when the user asks.
+- After an artifact is created or registered, verify the returned metadata and let the transport deliver the verified file. Keep large binary contents out of history and model messages.
 
 REMINDERS AND JOBS
 - “Remind me…” or “tell me later…” means CHUCK_SET_REMINDER. Use delaySeconds for relative times or a future ISO-8601 runAt for an exact time.

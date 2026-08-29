@@ -35,6 +35,7 @@ import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
 import { chuckTools } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
+import { daytonaEngine } from "./lib/daytona/index.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -275,12 +276,14 @@ export interface AgentResult {
   toolsUsed: string[];
   cost?: number;
   generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
+  generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
 }
 
 export interface AgentChannelContext {
   accountId: string;
   provider: string;
   conversationId: string;
+  triggerEventId?: string;
 }
 
 // ── Core agentic loop ─────────────────────────────────────────────────────────
@@ -364,6 +367,7 @@ export async function runAgent(
   const toolsUsed: string[] = [];
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
+  const generatedFiles: AgentResult["generatedFiles"] = [];
 
   for (let round = 0; round < config.maxToolRounds; round++) {
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
@@ -397,7 +401,7 @@ export async function runAgent(
     if (toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
-      return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages };
+      return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -423,7 +427,7 @@ export async function runAgent(
           if (!matches) {
             const approval = await createApproval({
               userId,
-              ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId } : {}),
+              ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
               toolSlug: slug,
               args,
               request: typeof userMessage === "string" ? userMessage : "User request with attachment",
@@ -447,6 +451,12 @@ export async function runAgent(
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""));
         } else if (slug.startsWith("CHUCK_")) {
           execResult = await nativeTool(userId, slug, args);
+          if (slug === "CHUCK_ARTIFACT" && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
+            const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
+            const delivered = await daytonaEngine.downloadArtifact(userId, artifact.id);
+            generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
+            execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact was delivered to the user." };
+          }
           if (slug === "CHUCK_DAYTONA_COMPUTER" && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number };
             generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
@@ -481,7 +491,7 @@ export async function runAgent(
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
-  return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages };
+  return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages, generatedFiles };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────
@@ -631,7 +641,7 @@ export async function queueVideoWorkflow(userId: number, prompt: string): Promis
   if (!config.qstashToken || !config.videoWorkflowUrl) {
     throw new Error("Video workflows are not configured. Set QSTASH_TOKEN and VIDEO_WORKFLOW_URL.");
   }
-  const client = new WorkflowClient({ token: config.qstashToken });
+  const client = new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
   const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt } });
   return `Video generation started. Workflow ID: ${result.workflowRunId}`;
 }
@@ -642,6 +652,7 @@ export interface TriggerEvent {
   eventId: string;
   triggerSlug: string;
   userId: string;
+  triggerId?: string;
   payload: Record<string, unknown>;
   rawPayload: unknown;
 }
@@ -671,8 +682,9 @@ export async function parseTriggerWebhook(
     if (!eventId) throw new Error("Composio trigger event has no event ID");
     return {
       eventId,
-      triggerSlug: r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? "",
-      userId: r.payload?.userId ?? r.payload?.user_id ?? "",
+      triggerSlug: String(r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? ""),
+      userId: String(r.payload?.userId ?? r.payload?.user_id ?? ""),
+      triggerId: (r.payload?.triggerId ?? r.payload?.trigger_id ?? r.rawPayload?.triggerId) ? String(r.payload?.triggerId ?? r.payload?.trigger_id ?? r.rawPayload?.triggerId) : undefined,
       payload: r.payload?.payload ?? {},
       rawPayload: r.rawPayload,
     };
