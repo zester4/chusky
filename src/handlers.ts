@@ -14,6 +14,7 @@ import {
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
+import { markdownToTelegramRichHtml } from "./telegramRich.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
@@ -59,6 +60,20 @@ async function editHtml(ctx: Context, msgId: number, html: string): Promise<void
     await ctx.api.editMessageText(ctx.chat!.id, msgId, chunks[0], { parse_mode: "HTML" });
   } catch { /* ignore */ }
   for (const chunk of chunks.slice(1)) await replyHtml(ctx, chunk);
+}
+
+async function editMarkdown(ctx: Context, msgId: number, markdown: string, suffix = ""): Promise<void> {
+  const rich = markdownToTelegramRichHtml(markdown);
+  if (rich.safe) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/editMessageText`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chat_id: ctx.chat!.id, message_id: msgId, rich_message: { html: rich.html + suffix } }),
+      });
+      if (response.ok) return;
+    } catch { /* stable formatter below */ }
+  }
+  await editHtml(ctx, msgId, mdToTelegramHtml(markdown) + suffix);
 }
 
 async function downloadTelegramFile(ctx: Context, fileId: string): Promise<{ data: Buffer; path: string }> {
@@ -107,7 +122,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
       { role: "assistant", content: result.text },
     ]);
     if (result.cost) await addUsage(userId, result.cost);
-    await editHtml(ctx, status.message_id, mdToTelegramHtml(result.text));
+    await editMarkdown(ctx, status.message_id, result.text);
     for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
@@ -638,7 +653,7 @@ export function registerHandlers(bot: Bot): void {
       ]);
       if (result.cost) await addUsage(userId, result.cost);
 
-      let html = mdToTelegramHtml(result.text);
+      let html = "";
 
       if (result.toolsUsed.length > 0) {
         const footer = result.toolsUsed.map(toolFooterLabel).join("  ");
@@ -646,7 +661,7 @@ export function registerHandlers(bot: Bot): void {
         html += `\n\n<i>${footer}${cost}</i>`;
       }
 
-      await editHtml(ctx, statusMsg.message_id, html);
+      await editMarkdown(ctx, statusMsg.message_id, result.text, html);
       for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);
