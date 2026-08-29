@@ -5,6 +5,7 @@ import { initStore, getDaytonaWorkspace } from "../src/store.js";
 
 let sandboxes: Map<string, any>;
 let creates: number;
+let lastCreateParams: Record<string, unknown> | undefined;
 
 function fakeSandbox(id: string, state = "started") {
   const sandbox: any = {
@@ -49,6 +50,7 @@ beforeEach(async () => {
   await initStore({ memoryOnly: true });
   sandboxes = new Map();
   creates = 0;
+  lastCreateParams = undefined;
 });
 
 function engine() {
@@ -58,7 +60,7 @@ function engine() {
       if (!sandbox) throw new Error("404 sandbox not found");
       return sandbox;
     },
-    create: async () => { creates++; return fakeSandbox(`sandbox-${creates}`); },
+    create: async (params: Record<string, unknown>) => { creates++; lastCreateParams = params; return fakeSandbox(`sandbox-${creates}`); },
   } as any));
 }
 
@@ -69,6 +71,12 @@ test("creates one workspace and persists its provider ID", async () => {
   assert.equal(first.id, second.id);
   assert.equal(creates, 1);
   assert.equal((await getDaytonaWorkspace(820001))?.sandboxId, first.id);
+  assert.equal(lastCreateParams?.autoPauseInterval, undefined);
+});
+
+test("reports an absent workspace without turning a normal status check into a tool failure", async () => {
+  const result = await engine().workspace(820000, "status");
+  assert.deepEqual(result, { exists: false, message: "No Daytona workspace exists yet. Use action=create, or use a file/computer tool and Chusky will create it automatically." });
 });
 
 test("reconnects after pause and refreshes activity", async () => {

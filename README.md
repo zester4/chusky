@@ -306,6 +306,7 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `DAYTONA_API_URL` | — | `https://app.daytona.io/api` | Daytona API endpoint |
 | `DAYTONA_TARGET` | — | provider default | Optional Daytona execution target |
 | `DAYTONA_SNAPSHOT` | — | provider default | Optional reusable snapshot |
+| `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
 | `MAX_TOOL_ROUNDS` | — | `10` | Max agentic loop iterations |
 | `RATE_LIMIT` | — | `10` | Messages per window |
 | `RATE_WINDOW_SECONDS` | — | `60` | Rate window |

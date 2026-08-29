@@ -6,7 +6,12 @@ import { getDaytonaClient } from "./client.js";
 import type { DaytonaCommandResult, DaytonaFileInfo, DaytonaPreviewResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
-const DAYTONA_AUTO_PAUSE_MINUTES = 60;
+const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
+// Daytona rejects autoPauseInterval for container sandboxes. Keep it disabled
+// by default and let deployments opt in after choosing a pausable target.
+const DAYTONA_AUTO_PAUSE_MINUTES = Number.isInteger(configuredAutoPauseMinutes) && configuredAutoPauseMinutes > 0
+  ? configuredAutoPauseMinutes
+  : 0;
 const DAYTONA_MAX_COMMAND_LENGTH = 8000;
 const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
@@ -97,14 +102,15 @@ export class DaytonaEngine {
 
     const creation = (async () => {
       const client = this.clientFactory();
-      const sandbox = await client.create({
+      const createParams = {
         ...(config.daytonaSnapshot ? { snapshot: config.daytonaSnapshot } : {}),
         name: `chusky-${userId}`,
         language: "typescript",
-        autoPauseInterval: DAYTONA_AUTO_PAUSE_MINUTES,
         networkBlockAll: true,
         labels: { agent: "chusky", user_id: String(userId) },
-      }, { timeout: 120 });
+        ...(DAYTONA_AUTO_PAUSE_MINUTES > 0 ? { autoPauseInterval: DAYTONA_AUTO_PAUSE_MINUTES } : {}),
+      };
+      const sandbox = await client.create(createParams, { timeout: 120 });
       await saveDaytonaWorkspace(userId, workspaceRecord(sandbox));
       return sandbox;
     })();
@@ -116,12 +122,14 @@ export class DaytonaEngine {
     }
   }
 
-  async workspace(userId: number, action: "get" | "create" | "status" | "pause" | "archive" | "delete"): Promise<DaytonaWorkspaceInfo | { paused: boolean; sandboxId: string } | { deleted: boolean; sandboxId: string }> {
+  async workspace(userId: number, action: "get" | "create" | "status" | "pause" | "archive" | "delete"): Promise<DaytonaWorkspaceInfo | { exists: false; message: string } | { paused: boolean; sandboxId: string } | { deleted: boolean; sandboxId: string }> {
     if (action === "delete") return this.deleteWorkspace(userId);
     if (action === "pause") return this.pause(userId);
     if (action === "create") return workspaceInfo(await this.getOrCreateWorkspace(userId));
     const sandbox = await this.getSandbox(userId);
-    if (!sandbox) throw new DaytonaInputError("No Daytona workspace exists yet. Use action=create first.");
+    if (!sandbox) {
+      return { exists: false, message: "No Daytona workspace exists yet. Use action=create, or use a file/computer tool and Chusky will create it automatically." };
+    }
     if (action === "status") await sandbox.refreshData();
     if (action === "archive") {
       await sandbox.stop(60);

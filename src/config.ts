@@ -58,6 +58,9 @@ export const config = {
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
   daytonaTarget: optional("DAYTONA_TARGET", ""),
   daytonaSnapshot: optional("DAYTONA_SNAPSHOT", ""),
+  // Container targets do not support auto-pause. Enable this only when the
+  // selected Daytona target uses a pausable sandbox class such as linux-vm.
+  daytonaAutoPauseInterval: optional("DAYTONA_AUTO_PAUSE_INTERVAL", "0"),
 
   // ── Chusky's identity & system prompt ─────────────────────────────
   chuckSystemPrompt: optional(
