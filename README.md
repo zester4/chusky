@@ -125,6 +125,9 @@ cd ~/chusky
 bash scripts/deploy-oracle.sh
 ```
 
+The Oracle-safe build heap defaults to `512 MB` and uses configured swap during compilation.
+Override it only when necessary with `CHUSKY_BUILD_HEAP_MB=640 bash scripts/deploy-oracle.sh`.
+
 Verify that it is listening on the configured Chusky port and that Nginx can reach it:
 
 ```bash

@@ -14,7 +14,16 @@ fi
 
 git pull --ff-only origin main
 npm ci --no-audit --no-fund
-NODE_OPTIONS="--max-old-space-size=384" npm run build
+
+# TypeScript compilation can temporarily use more memory as the repository
+# grows. The Oracle VM has configured swap, so give the build a larger heap
+# without changing the lower runtime limit used by PM2.
+BUILD_HEAP_MB="${CHUSKY_BUILD_HEAP_MB:-512}"
+if [[ ! "$BUILD_HEAP_MB" =~ ^[0-9]+$ ]] || (( BUILD_HEAP_MB < 384 )); then
+  echo "Deployment stopped: CHUSKY_BUILD_HEAP_MB must be a number >= 384."
+  exit 1
+fi
+NODE_OPTIONS="--max-old-space-size=${BUILD_HEAP_MB}" npm run build
 
 # A PM2 reload keeps the current worker online until the replacement reports
 # its full readiness contract. Never use `restart` for normal releases.
