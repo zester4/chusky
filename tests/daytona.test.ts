@@ -24,6 +24,9 @@ test("Daytona tools are present and uniquely named", () => {
     "CHUCK_DAYTONA_CREATE_SNAPSHOT",
     "CHUCK_DAYTONA_COMPUTER",
     "CHUCK_DAYTONA_PAUSE",
+    "CHUCK_DAYTONA_PTY",
+    "CHUCK_DAYTONA_GIT",
+    "CHUCK_DAYTONA_BROWSER",
   ]) assert.equal(names.includes(name), true, name);
 });
 
@@ -35,6 +38,10 @@ test("private Daytona computer and sandbox tools do not require approval", () =>
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "screenshot" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "accessibility_tree" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_LIST_FILES"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_PTY"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_BROWSER", { action: "click" }), false);
 });
 
 test("Daytona paths reject traversal and NUL bytes", () => {

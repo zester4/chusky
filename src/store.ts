@@ -21,6 +21,7 @@ export interface UserSession {
   composioSessionId?: string; // persisted Composio ToolRouter session ID
   daytonaWorkspaceId?: string;
   telegramChatId?: number;
+  voiceReplies?: boolean;
   triggerIds: string[];
   reminders: ReminderRecord[];
   jobs: JobRecord[];
@@ -68,6 +69,8 @@ export interface DaytonaWorkspaceRecord {
   createdAt: number;
   updatedAt: number;
   lastKnownState?: string;
+  ptySessions?: Array<{ id: string; createdAt: number }>;
+  browser?: { lastUrl?: string; updatedAt: number };
 }
 
 export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
@@ -950,6 +953,12 @@ export async function setModel(uid: number, model: string): Promise<void> {
 
 export async function getModel(uid: number): Promise<string> {
   return (await getSession(uid)).model;
+}
+
+export async function setVoiceReplies(uid: number, enabled: boolean): Promise<void> {
+  const s = await getSession(uid);
+  s.voiceReplies = enabled;
+  await saveSession(uid, s);
 }
 
 export async function setComposioSessionId(uid: number, id: string): Promise<void> {

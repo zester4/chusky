@@ -1,9 +1,9 @@
-import { type FileInfo, type Sandbox } from "@daytona/sdk";
+import { type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
 import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, saveDaytonaWorkspace } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { getDaytonaClient } from "./client.js";
-import type { DaytonaCommandResult, DaytonaFileInfo, DaytonaPreviewResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
+import type { DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
@@ -15,6 +15,7 @@ const DAYTONA_AUTO_PAUSE_MINUTES = Number.isInteger(configuredAutoPauseMinutes) 
 const DAYTONA_MAX_COMMAND_LENGTH = 8000;
 const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
+const DAYTONA_MAX_PTY_OUTPUT = 12000;
 
 function boundedInt(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
@@ -69,6 +70,23 @@ function boundedText(value: unknown, label: string, max: number): string {
   return text;
 }
 
+function boundedNumber(value: unknown, fallback: number, max: number): number {
+  const n = Number(value ?? fallback);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(Math.floor(n), max);
+}
+
+function collectPtyOutput(): { chunks: string[]; onData: (data: Uint8Array) => void } {
+  const chunks: string[] = [];
+  const decoder = new TextDecoder();
+  return { chunks, onData: (data) => { chunks.push(decoder.decode(data, { stream: true })); } };
+}
+
+async function brieflyCollect(handle: PtyHandle, milliseconds = 250): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+  if (!handle.isConnected()) return;
+}
+
 export class DaytonaEngine {
   constructor(private readonly clientFactory: typeof getDaytonaClient = getDaytonaClient) {}
 
@@ -106,7 +124,7 @@ export class DaytonaEngine {
         ...(config.daytonaSnapshot ? { snapshot: config.daytonaSnapshot } : {}),
         name: `chusky-${userId}`,
         language: "typescript",
-        networkBlockAll: true,
+        ...(config.daytonaDomainAllowList ? { domainAllowList: config.daytonaDomainAllowList } : { networkBlockAll: config.daytonaNetworkBlockAll }),
         labels: { agent: "chusky", user_id: String(userId) },
         ...(DAYTONA_AUTO_PAUSE_MINUTES > 0 ? { autoPauseInterval: DAYTONA_AUTO_PAUSE_MINUTES } : {}),
       };
@@ -269,6 +287,132 @@ export class DaytonaEngine {
       case "accessibility_set_value": await computer.accessibility.setNodeValue(boundedText(args.nodeId, "nodeId", 200), boundedText(args.value, "value", 4000)); return { updated: true };
       default: throw new DaytonaInputError(`Unsupported computer action: ${action}`);
     }
+  }
+
+  async pty(userId: number, args: Record<string, unknown>): Promise<DaytonaPtyResult> {
+    const action = boundedText(args.action, "action", 20);
+    const stored = await getDaytonaWorkspace(userId);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const known = new Set((stored?.ptySessions ?? []).map((session) => session.id));
+    const requestedId = args.id ? boundedText(args.id, "id", 120) : undefined;
+    const ensureOwned = () => {
+      if (!requestedId || !known.has(requestedId)) throw new DaytonaInputError("PTY session not found or not owned by you");
+      return requestedId;
+    };
+    const saveSessions = async (sessions: Array<{ id: string; createdAt: number }>) => {
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, { ...current, ptySessions: sessions, updatedAt: Date.now() });
+    };
+
+    if (action === "status") {
+      const sessions = await sandbox.process.listPtySessions();
+      return { sandboxId: sandbox.id, sessionId: "", sessions: sessions.filter((session) => known.has(session.id)) };
+    }
+    if (action === "create") {
+      const id = requestedId ?? `chusky-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      if (known.has(id)) throw new DaytonaInputError("A PTY session with that id already exists");
+      const output = collectPtyOutput();
+      const handle = await sandbox.process.createPty({ id, cwd: args.cwd ? safeDaytonaPath(args.cwd, "cwd") : undefined, cols: boundedNumber(args.cols, 120, 300), rows: boundedNumber(args.rows, 30, 200), onData: output.onData });
+      await handle.waitForConnection();
+      await brieflyCollect(handle);
+      await handle.disconnect();
+      await saveSessions([...((await getDaytonaWorkspace(userId))?.ptySessions ?? []), { id, createdAt: Date.now() }]);
+      return { sandboxId: sandbox.id, sessionId: id, output: output.chunks.join("").slice(-DAYTONA_MAX_PTY_OUTPUT), created: true };
+    }
+    const id = ensureOwned();
+    if (action === "resize") {
+      await sandbox.process.resizePtySession(id, boundedNumber(args.cols, 120, 300), boundedNumber(args.rows, 30, 200));
+      return { sandboxId: sandbox.id, sessionId: id };
+    }
+    if (action === "kill") {
+      await sandbox.process.killPtySession(id);
+      await saveSessions((await getDaytonaWorkspace(userId))?.ptySessions?.filter((session) => session.id !== id) ?? []);
+      return { sandboxId: sandbox.id, sessionId: id, killed: true };
+    }
+    if (action !== "read" && action !== "write") throw new DaytonaInputError(`Unsupported PTY action: ${action}`);
+    const output = collectPtyOutput();
+    const handle = await sandbox.process.connectPty(id, { onData: output.onData });
+    try {
+      await handle.waitForConnection();
+      if (action === "write") await handle.sendInput(boundedText(args.input, "input", 8000));
+      await brieflyCollect(handle, action === "write" ? 400 : 250);
+    } finally {
+      await handle.disconnect();
+    }
+    return { sandboxId: sandbox.id, sessionId: id, output: output.chunks.join("").slice(-DAYTONA_MAX_PTY_OUTPUT) };
+  }
+
+  async git(userId: number, args: Record<string, unknown>): Promise<DaytonaGitResult> {
+    const action = boundedText(args.action, "action", 30);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const path = safeDaytonaPath(args.path ?? "workspace/repo", "path");
+    const git = sandbox.git;
+    let result: unknown;
+    switch (action) {
+      case "clone": {
+        const url = boundedText(args.repoUrl, "repoUrl", 500);
+        if (!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?(?:\/)?$/i.test(url)) throw new DaytonaInputError("repoUrl must be an HTTPS GitHub repository URL without embedded credentials");
+        await git.clone(url, path, args.branch ? boundedText(args.branch, "branch", 200) : undefined, undefined, undefined, undefined, false, 50);
+        result = { cloned: true, url };
+        break;
+      }
+      case "status": result = await git.status(path); break;
+      case "branches": result = await git.branches(path); break;
+      case "create_branch": await git.createBranch(path, boundedText(args.branch, "branch", 200)); result = { created: true }; break;
+      case "checkout": await git.checkoutBranch(path, boundedText(args.branch, "branch", 200)); result = { checkedOut: true }; break;
+      case "pull": await git.pull(path, undefined, undefined, args.branch ? boundedText(args.branch, "branch", 200) : undefined, args.remote ? boundedText(args.remote, "remote", 100) : undefined); result = { pulled: true }; break;
+      case "add": {
+        const files = Array.isArray(args.files) && args.files.length ? args.files.map((file) => safeDaytonaPath(file, "file")) : ["."];
+        await git.add(path, files); result = { staged: files };
+        break;
+      }
+      case "commit": result = await git.commit(path, boundedText(args.message, "message", 500), boundedText(args.author ?? "Chusky", "author", 120), boundedText(args.email ?? "chusky@localhost", "email", 200)); break;
+      case "push": await git.push(path, undefined, undefined, args.branch ? boundedText(args.branch, "branch", 200) : undefined, args.remote ? boundedText(args.remote, "remote", 100) : undefined, true); result = { pushed: true }; break;
+      default: throw new DaytonaInputError(`Unsupported Git action: ${action}`);
+    }
+    return { sandboxId: sandbox.id, path, action, result };
+  }
+
+  async browser(userId: number, args: Record<string, unknown>): Promise<unknown> {
+    const action = boundedText(args.action, "action", 20);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    if (action === "status") {
+      const stored = await getDaytonaWorkspace(userId);
+      return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, computer: await this.computer(userId, { action: "status" }), windows: await this.computer(userId, { action: "windows" }) };
+    }
+    if (action === "open") {
+      const url = boundedText(args.url, "url", 2000);
+      let parsed: URL;
+      try { parsed = new URL(url); } catch { throw new DaytonaInputError("Browser URL must be a valid http(s) URL"); }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new DaytonaInputError("Browser URL must use http:// or https://");
+      if (parsed.username || parsed.password) throw new DaytonaInputError("Browser URLs cannot contain embedded credentials");
+      await this.computer(userId, { action: "keyboard_hotkey", keys: "CTRL+L" });
+      await this.computer(userId, { action: "keyboard_type", text: url });
+      await this.computer(userId, { action: "keyboard_press", key: "ENTER" });
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, { ...current, browser: { lastUrl: parsed.toString(), updatedAt: Date.now() }, updatedAt: Date.now() });
+      return { sandboxId: sandbox.id, opened: url };
+    }
+    if (action === "snapshot") {
+      return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }) };
+    }
+    if (action === "find") {
+      return { sandboxId: sandbox.id, matches: await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) }) };
+    }
+    if (action === "focus") return this.computer(userId, { action: "accessibility_focus", nodeId: args.nodeId });
+    if (action === "invoke") return this.computer(userId, { action: "accessibility_invoke", nodeId: args.nodeId, nodeAction: args.nodeAction });
+    if (action === "fill") return this.computer(userId, { action: "accessibility_set_value", nodeId: args.nodeId, value: args.value ?? args.text });
+    if (action === "windows") return this.computer(userId, { action: "windows" });
+    if (action === "screenshot") return this.computer(userId, { action: "screenshot", showCursor: false });
+    if (action === "click") return this.computer(userId, { action: "mouse_click", x: args.x, y: args.y, button: "left" });
+    if (action === "type") return this.computer(userId, { action: "keyboard_type", text: args.text, delayMs: 0 });
+    if (action === "press") return this.computer(userId, { action: "keyboard_press", key: args.key, modifiers: Array.isArray(args.modifiers) ? args.modifiers : [] });
+    if (action === "scroll") return this.computer(userId, { action: "mouse_scroll", x: args.x ?? 500, y: args.y ?? 400, direction: args.direction, amount: args.amount ?? 3 });
+    if (action === "back" || action === "forward" || action === "refresh") {
+      const key = action === "back" ? "ALT+LEFT" : action === "forward" ? "ALT+RIGHT" : "CTRL+R";
+      return this.computer(userId, { action: "keyboard_hotkey", keys: key });
+    }
+    throw new DaytonaInputError(`Unsupported browser action: ${action}`);
   }
 
   async deleteWorkspace(userId: number): Promise<{ sandboxId: string; deleted: boolean }> {

@@ -25,6 +25,9 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_CREATE_SNAPSHOT: "📦 I’m saving a restore point…",
   CHUCK_DAYTONA_COMPUTER: "🖥️ I’m using your computer…",
   CHUCK_DAYTONA_PAUSE: "⏸️ I’m putting your computer on standby…",
+  CHUCK_DAYTONA_PTY: "⌨️ I’m working in your persistent terminal…",
+  CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
+  CHUCK_DAYTONA_BROWSER: "🌐 I’m using the browser in your computer workspace…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",
   CHUCK_TASK_LIST: "📋 I’m checking your tasks…",
   CHUCK_TASK_GET: "📋 I’m checking that task…",
@@ -52,6 +55,7 @@ export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): b
   // Daytona is Chusky's private agent sandbox. The agent may freely use its
   // desktop, shell, filesystem, and workspace lifecycle without interrupting
   // the user for approval. External side effects remain gated below.
+  if (slug === "CHUCK_DAYTONA_GIT" && String(args?.action ?? "") === "push") return true;
   if (slug.startsWith("CHUCK_DAYTONA_")) return false;
   if (slug === "CHUCK_DAYTONA_COMPUTER") {
     return ["mouse_click", "mouse_drag", "keyboard_type", "keyboard_press", "keyboard_hotkey", "accessibility_invoke", "accessibility_set_value"].includes(String(args?.action ?? ""));

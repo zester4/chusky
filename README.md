@@ -17,6 +17,7 @@ Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** v
 | **Any LLM** | Switch model per-user at runtime via `/model` |
 | **Redis persistence** | Sessions survive restarts; falls back to memory |
 | **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
+| **Voice replies** | `/voice on` adds an OpenRouter TTS audio reply while retaining the readable text response |
 | **Private scratchpad** | Chusky can save and retrieve per-user working notes across turns |
 | **Daytona computer** | Optional isolated per-user workspace for code, files, and commands |
 | **Rate limiting** | Per-user throttling |
@@ -246,6 +247,18 @@ reports a recoverable error, and starts it again after an idle pause or stop. Th
 filesystem is retained by Daytona across those lifecycle states; a provider-side deletion or
 wall-clock TTL is permanent and causes Chusky to require a new workspace.
 
+Daytona also provides three coding surfaces. `CHUCK_DAYTONA_BROWSER` controls a browser in the
+Daytona desktop through the official Computer Use API (navigation, accessibility snapshots,
+screenshots, clicks, typing, key presses, and scrolling). It is desktop/browser control rather
+than a DOM selector API, so Chusky verifies results after interactions. The selected snapshot must
+include a browser, and internet access remains subject to Daytona network policy. `CHUCK_DAYTONA_PTY`
+creates durable interactive terminal sessions for shells, dev servers, and test watchers; session
+IDs are retained in the Redis-backed workspace record and can be reused with `write`, `read`,
+`resize`, `status`, and `kill`. `CHUCK_DAYTONA_GIT` uses Daytona's official Git API for clone,
+status, branches, checkout, pull, add, commit, and push. Local operations stay private; push is
+approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
+tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
+
 Chusky also accepts these requests naturally, without slash commands:
 
 ```text
@@ -294,6 +307,8 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `~deepseek/deepseek-v4-flash-latest` | Any OpenRouter model ID |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
+| `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
+| `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |
 | `QSTASH_TOKEN` | reminders/jobs | — | Upstash QStash token |
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
@@ -306,6 +321,8 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `DAYTONA_API_URL` | — | `https://app.daytona.io/api` | Daytona API endpoint |
 | `DAYTONA_TARGET` | — | provider default | Optional Daytona execution target |
 | `DAYTONA_SNAPSHOT` | — | provider default | Optional reusable snapshot |
+| `DAYTONA_NETWORK_BLOCK_ALL` | — | `true` | Blocks outbound sandbox network by default; set false only deliberately |
+| `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
 | `MAX_TOOL_ROUNDS` | — | `10` | Max agentic loop iterations |
 | `RATE_LIMIT` | — | `10` | Messages per window |

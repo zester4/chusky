@@ -50,3 +50,20 @@ export interface DaytonaScreenshotResult {
   base64: string;
   sizeBytes?: number;
 }
+
+export interface DaytonaPtyResult {
+  sandboxId: string;
+  sessionId: string;
+  output?: string;
+  sessions?: unknown[];
+  exitCode?: number;
+  created?: boolean;
+  killed?: boolean;
+}
+
+export interface DaytonaGitResult {
+  sandboxId: string;
+  path: string;
+  action: string;
+  result?: unknown;
+}

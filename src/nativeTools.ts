@@ -197,6 +197,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaEngine.createSnapshot(userId, text(args.name));
     case "CHUCK_DAYTONA_COMPUTER": return daytonaEngine.computer(userId, args);
     case "CHUCK_DAYTONA_PAUSE": return daytonaEngine.pause(userId);
+    case "CHUCK_DAYTONA_PTY": return daytonaEngine.pty(userId, args);
+    case "CHUCK_DAYTONA_GIT": return daytonaEngine.git(userId, args);
+    case "CHUCK_DAYTONA_BROWSER": return daytonaEngine.browser(userId, args);
     default: throw new Error(`Unknown native tool: ${slug}`);
   }
 }

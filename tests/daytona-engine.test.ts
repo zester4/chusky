@@ -8,6 +8,7 @@ let creates: number;
 let lastCreateParams: Record<string, unknown> | undefined;
 
 function fakeSandbox(id: string, state = "started") {
+  const ptyOutputs = new Map<string, (data: Uint8Array) => void>();
   const sandbox: any = {
     id, name: `chusky-${id}`, state, recoverable: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     refreshData: async () => undefined,
@@ -18,7 +19,19 @@ function fakeSandbox(id: string, state = "started") {
     stop: async () => { sandbox.state = "stopped"; },
     archive: async () => { sandbox.state = "archived"; },
     delete: async () => { sandbox.state = "destroyed"; sandboxes.delete(id); },
-    process: { executeCommand: async (command: string) => ({ exitCode: 0, result: `ran:${command}` }) },
+    process: {
+      executeCommand: async (command: string) => ({ exitCode: 0, result: `ran:${command}` }),
+      createPty: async ({ id: ptyId, onData }: any) => { ptyOutputs.set(ptyId, onData); onData(new TextEncoder().encode("$ ")); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
+      connectPty: async (ptyId: string, { onData }: any) => { ptyOutputs.set(ptyId, onData); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
+      listPtySessions: async () => [...ptyOutputs.keys()].map((ptyId) => ({ id: ptyId, active: true })),
+      resizePtySession: async () => undefined,
+      killPtySession: async (ptyId: string) => { ptyOutputs.delete(ptyId); },
+    },
+    git: {
+      clone: async () => undefined, status: async () => ({ currentBranch: "main", ahead: 0, behind: 0 }), branches: async () => ({ branches: ["main"] }),
+      createBranch: async () => undefined, checkoutBranch: async () => undefined, pull: async () => undefined, add: async () => undefined,
+      commit: async () => ({ sha: "abc123" }), push: async () => undefined,
+    },
     fs: {
       listFiles: async () => [],
       downloadFile: async () => Buffer.from("persisted content"),
@@ -131,4 +144,33 @@ test("computer-use rejects invalid coordinates and oversized keyboard input", as
   const e = engine();
   await assert.rejects(() => e.computer(820007, { action: "mouse_click", x: -1, y: 20 }), /coordinate/);
   await assert.rejects(() => e.computer(820007, { action: "keyboard_type", text: "x".repeat(4001) }), /1-4000/);
+});
+
+test("persists and reuses owned PTY sessions", async () => {
+  const e = engine();
+  const created = await e.pty(820008, { action: "create", id: "dev", cwd: "workspace" });
+  assert.equal(created.sessionId, "dev");
+  assert.equal((await getDaytonaWorkspace(820008))?.ptySessions?.[0]?.id, "dev");
+  const output = await e.pty(820008, { action: "write", id: "dev", input: "npm test\n" });
+  assert.match(output.output ?? "", /npm test/);
+  await assert.rejects(() => e.pty(820008, { action: "write", id: "other", input: "x" }), /not found or not owned/);
+  await e.pty(820008, { action: "kill", id: "dev" });
+  assert.equal((await getDaytonaWorkspace(820008))?.ptySessions?.length, 0);
+});
+
+test("uses Daytona Git operations and returns bounded workflow results", async () => {
+  const e = engine();
+  const cloned = await e.git(820009, { action: "clone", repoUrl: "https://github.com/example/repo.git", path: "workspace/repo" });
+  assert.equal(cloned.action, "clone");
+  const committed = await e.git(820009, { action: "commit", path: "workspace/repo", message: "test", author: "Chusky", email: "chusky@example.com" });
+  assert.deepEqual(committed.result, { sha: "abc123" });
+  await assert.rejects(() => e.git(820009, { action: "clone", repoUrl: "https://evil.example/repo.git", path: "workspace/repo" }), /HTTPS GitHub/);
+});
+
+test("browser navigation persists safe URL state and rejects embedded credentials", async () => {
+  const e = engine();
+  const opened = await e.browser(820010, { action: "open", url: "https://example.com/docs" }) as any;
+  assert.equal(opened.opened, "https://example.com/docs");
+  assert.equal((await getDaytonaWorkspace(820010))?.browser?.lastUrl, "https://example.com/docs");
+  await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
 });
