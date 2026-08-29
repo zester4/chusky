@@ -15,8 +15,9 @@ import {
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { markdownToTelegramRichHtml } from "./telegramRich.js";
-import { chunkText } from "./lib/knowledge/chunker.js";
-import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
+import { vectorConfigured } from "./lib/knowledge/vector.js";
+import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
+import { putR2Object, r2Configured } from "./lib/storage/r2.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
@@ -739,6 +740,10 @@ export function registerHandlers(bot: Bot): void {
       const file = await downloadTelegramFile(ctx, photo.file_id);
       const mime = file.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
       const caption = ctx.message.caption?.trim() || "Describe and analyze this image.";
+      if (vectorConfigured()) {
+        try { await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime), sourceType: "telegram_image" }); }
+        catch (error) { logger.warn({ err: error, userId: ctx.from?.id }, "Could not index Telegram image"); }
+      }
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "image_url", image_url: { url: `data:${mime};base64,${file.data.toString("base64")}` } },
@@ -756,15 +761,15 @@ export function registerHandlers(bot: Bot): void {
       const filename = doc.file_name || file.path.split("/").pop() || "document";
       const mime = doc.mime_type || "application/octet-stream";
       const prompt = ctx.message.caption?.trim() || "Read this document and summarize its key points.";
-      if (vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename))) {
+      const documentId = `telegram_${doc.file_id}`;
+      if (r2Configured()) {
+        try { await putR2Object(`telegram/${ctx.from!.id}/${documentId}/${filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120)}`, file.data, mime); }
+        catch (error) { logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not persist Telegram document in R2"); }
+      }
+      if (vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename) || mime === "application/pdf" || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) {
         try {
-          const documentId = `telegram_${doc.file_id}`;
-          const chunks = chunkText(file.data.toString("utf8")).map((chunk) => ({
-            id: `${documentId}:${chunk.id}`,
-            data: chunk.text,
-            metadata: { userId: String(ctx.from!.id), documentId, sourceType: "telegram_upload", contentType: mime, chunkIndex: chunk.chunkIndex, visibility: "private" as const },
-          }));
-          await new UpstashKnowledgeStore().upsert(chunks);
+          const extracted = mime === "application/pdf" || mime.includes("wordprocessingml") ? await extractMediaText(file.data, filename, mime) : file.data.toString("utf8");
+          await indexExtractedDocument({ userId: String(ctx.from!.id), documentId, filename, contentType: mime, text: extracted, sourceType: "telegram_upload" });
         } catch (error) {
           logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not index text document");
         }
