@@ -6,7 +6,7 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore } from "./store.js";
-import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities } from "./store.js";
+import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -18,6 +18,7 @@ import { createAgentChannelHandler } from "./channels/agentHandler.js";
 import { registerChannelRoutes } from "./channels/routes.js";
 import { SlackAdapter } from "./channels/slack.js";
 import { WhatsAppAdapter } from "./channels/whatsapp.js";
+import { SendblueAdapter } from "./channels/sendblue.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { triggerWorkflowUrl, workflowClient } from "./triggerWorkflow.js";
@@ -103,13 +104,44 @@ async function main(): Promise<void> {
       config.slackBotToken || (async (workspaceId) => workspaceId ? (await getChannelInstallation("slack", workspaceId))?.botToken : undefined)
     );
     const whatsappAdapter = new WhatsAppAdapter(config.whatsappAccessToken, config.whatsappPhoneNumberId, config.whatsappGraphVersion);
+    const sendblueAdapter = new SendblueAdapter(config.sendblueApiKey, config.sendblueApiSecret, config.sendblueNumber, `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/webhook`);
     if (config.slackEnabled) channelGateway.register(slackAdapter);
     if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
+    if (config.sendblueEnabled) channelGateway.register(sendblueAdapter);
     registerChannelRoutes(app, {
       gateway: channelGateway,
       ...(config.slackEnabled ? { slack: { adapter: slackAdapter, signingSecret: config.slackSigningSecret } } : {}),
       ...(config.whatsappEnabled ? { whatsapp: { adapter: whatsappAdapter, appSecret: config.whatsappAppSecret, verifyToken: config.whatsappVerifyToken } } : {}),
+      ...(config.sendblueEnabled ? { sendblue: {
+        adapter: sendblueAdapter,
+        webhookSecret: config.sendblueWebhookSecret,
+        enqueue: async (eventId: string) => {
+          if (!config.qstashToken) throw new Error("Sendblue workflows require QSTASH_TOKEN");
+          const url = config.sendblueWorkflowUrl || `${config.webhookUrl.replace(/\/+$/, "")}/workflows/sendblue-event`;
+          if (!/^https:\/\//i.test(url)) throw new Error("Sendblue workflows require an HTTPS workflow URL");
+          await workflowClient().trigger({ url, body: { eventId }, workflowRunId: `sendblue-${eventId}`, retries: 3 });
+        },
+      } } : {}),
     });
+    if (config.sendblueEnabled) {
+      app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
+        const payload = workflow.requestPayload as { eventId: string };
+        const event = await getChannelInboundEvent(payload.eventId);
+        if (!event || event.provider !== "sendblue") throw new Error("Sendblue event is missing or invalid");
+        if (event.status === "completed") return;
+        await updateChannelInboundEvent(event.eventId, { status: "running", workflowRunId: workflow.workflowRunId });
+        try {
+          await workflow.run("process-sendblue-message", async () => {
+            const hydrated = await sendblueAdapter.hydrateInbound(event.message);
+            await channelGateway.processInbound(hydrated);
+          });
+          await updateChannelInboundEvent(event.eventId, { status: "completed" });
+        } catch (error) {
+          await updateChannelInboundEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+          throw error;
+        }
+      }));
+    }
     channelGateway.startRecovery();
     if (config.apiKey || config.betterAuthEnabled) {
       registerSdkApi(app);

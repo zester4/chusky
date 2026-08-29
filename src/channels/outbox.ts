@@ -24,6 +24,7 @@ export class ChannelOutbox {
       text: message.text,
       blocks: message.blocks,
       interactive: message.interactive,
+      attachments: message.attachments,
       correlationId: message.correlationId,
       kind: message.kind ?? "message",
     });
@@ -48,6 +49,7 @@ export class ChannelOutbox {
         text: claimed.text,
         blocks: claimed.blocks,
         interactive: claimed.interactive,
+        attachments: claimed.attachments,
         idempotencyKey: claimed.idempotencyKey,
         correlationId: claimed.correlationId,
         kind: claimed.kind,

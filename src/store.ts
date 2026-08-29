@@ -268,6 +268,7 @@ export interface OutboxRecord {
     body: string;
     buttons: Array<{ id: string; title: string }>;
   };
+  attachments?: InboundMessage["attachments"];
   correlationId?: string;
   kind: "message" | "approval" | "notification" | "receipt";
   status: "queued" | "delivering" | "delivered" | "failed";
@@ -292,6 +293,17 @@ export interface ChannelConversationRecord {
   scope: "private" | "shared";
   history: Message[];
   summaries: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ChannelInboundEventRecord {
+  eventId: string;
+  provider: ChannelProvider;
+  message: InboundMessage;
+  status: "received" | "queued" | "running" | "completed" | "failed";
+  workflowRunId?: string;
+  error?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -333,6 +345,10 @@ interface Backend {
   claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
   completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void>;
   releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void>;
+  createChannelInboundEvent(record: ChannelInboundEventRecord): Promise<ChannelInboundEventRecord>;
+  getChannelInboundEvent(eventId: string): Promise<ChannelInboundEventRecord | undefined>;
+  claimChannelInboundEvent(eventId: string): Promise<boolean>;
+  updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined>;
   createOutbox(record: OutboxRecord): Promise<OutboxRecord>;
   getOutbox(id: string): Promise<OutboxRecord | undefined>;
   claimOutbox(id: string, leaseMs: number): Promise<OutboxRecord | undefined>;
@@ -364,6 +380,7 @@ class RedisBackend implements Backend {
   private channelLinkKey = (provider: ChannelProvider, codeHash: string) => `chuck:channel:link:${provider}:${codeHash}`;
   private channelEventKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
   private channelEventDoneKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:done:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
+  private channelInboundEventKey = (eventId: string) => `chuck:channel:inbound:${createHash("sha256").update(eventId).digest("hex")}`;
   private outboxKey = (id: string) => `chuck:outbox:${id}`;
   private outboxIdempotencyKey = (key: string) => `chuck:outbox:idempotency:${createHash("sha256").update(key).digest("hex")}`;
   private outboxProviderKey = (provider: ChannelProvider, providerMessageId: string) => `chuck:outbox:provider:${provider}:${createHash("sha256").update(providerMessageId).digest("hex")}`;
@@ -607,6 +624,28 @@ class RedisBackend implements Backend {
   async releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void> {
     await this.r.del(this.channelEventKey(provider, eventId));
   }
+  async createChannelInboundEvent(record: ChannelInboundEventRecord): Promise<ChannelInboundEventRecord> {
+    const existing = await this.getChannelInboundEvent(record.eventId);
+    if (existing) return existing;
+    await this.r.set(this.channelInboundEventKey(record.eventId), JSON.stringify(record), "EX", 24 * 60 * 60, "NX");
+    return (await this.getChannelInboundEvent(record.eventId)) ?? record;
+  }
+  async getChannelInboundEvent(eventId: string): Promise<ChannelInboundEventRecord | undefined> {
+    const raw = await this.r.get(this.channelInboundEventKey(eventId));
+    return raw ? JSON.parse(raw) as ChannelInboundEventRecord : undefined;
+  }
+  async claimChannelInboundEvent(eventId: string): Promise<boolean> {
+    const key = this.channelInboundEventKey(eventId);
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return 0 end; local r=cjson.decode(v); if r.status ~= 'received' then return 0 end; r.status='queued'; r.updatedAt=tonumber(ARGV[1]); redis.call('set',KEYS[1],cjson.encode(r),'EX',86400); return 1", 1, key, Date.now());
+    return Number(claimed) === 1;
+  }
+  async updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined> {
+    const current = await this.getChannelInboundEvent(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    await this.r.set(this.channelInboundEventKey(eventId), JSON.stringify(next), "EX", 24 * 60 * 60);
+    return next;
+  }
   async createOutbox(record: OutboxRecord): Promise<OutboxRecord> {
     const idempotencyKey = this.outboxIdempotencyKey(record.idempotencyKey);
     const existingId = await this.r.get(idempotencyKey);
@@ -716,6 +755,7 @@ class MemoryBackend implements Backend {
   private channelLinkCodes = new Map<string, ChannelLinkCodeRecord>();
   private channelEvents = new Map<string, number>();
   private completedChannelEvents = new Map<string, number>();
+  private channelInboundEvents = new Map<string, ChannelInboundEventRecord>();
   private outbox = new Map<string, OutboxRecord>();
   private triggerEvents = new Map<string, TriggerEventRecord>();
   private outboxByIdempotency = new Map<string, string>();
@@ -874,6 +914,22 @@ class MemoryBackend implements Backend {
     this.completedChannelEvents.set(key, Date.now() + ttlSeconds * 1000);
   }
   async releaseChannelEvent(provider: ChannelProvider, eventId: string) { this.channelEvents.delete(`${provider}:${eventId}`); }
+  async createChannelInboundEvent(record: ChannelInboundEventRecord) { return this.channelInboundEvents.get(record.eventId) ?? (this.channelInboundEvents.set(record.eventId, record), record); }
+  async getChannelInboundEvent(eventId: string) { return this.channelInboundEvents.get(eventId); }
+  async claimChannelInboundEvent(eventId: string) {
+    const current = this.channelInboundEvents.get(eventId);
+    if (!current || current.status !== "received") return false;
+    current.status = "queued";
+    current.updatedAt = Date.now();
+    return true;
+  }
+  async updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>) {
+    const current = this.channelInboundEvents.get(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    this.channelInboundEvents.set(eventId, next);
+    return next;
+  }
   async createOutbox(record: OutboxRecord) {
     const existingId = this.outboxByIdempotency.get(record.idempotencyKey);
     if (existingId) {
@@ -1474,6 +1530,23 @@ export async function completeChannelEvent(provider: ChannelProvider, eventId: s
 export async function releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void> {
   if (!eventId.trim()) return;
   await backend.releaseChannelEvent(provider, eventId.trim());
+}
+
+export async function createChannelInboundEvent(message: InboundMessage): Promise<ChannelInboundEventRecord> {
+  const now = Date.now();
+  return backend.createChannelInboundEvent({ eventId: `${message.provider}:${message.providerEventId}`, provider: message.provider, message, status: "received", createdAt: now, updatedAt: now });
+}
+
+export async function getChannelInboundEvent(eventId: string): Promise<ChannelInboundEventRecord | undefined> {
+  return backend.getChannelInboundEvent(eventId);
+}
+
+export async function claimChannelInboundEvent(eventId: string): Promise<boolean> {
+  return backend.claimChannelInboundEvent(eventId);
+}
+
+export async function updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined> {
+  return backend.updateChannelInboundEvent(eventId, patch);
 }
 
 export async function enqueueOutbox(record: Omit<OutboxRecord, "id" | "status" | "attempts" | "createdAt" | "updatedAt">): Promise<OutboxRecord> {

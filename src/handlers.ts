@@ -138,7 +138,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
           : historyLabel.startsWith("[Video attached]")
             ? "🎬 <b>I’m reviewing your video…</b>"
             : parts.some((part) => part.type !== "text")
-              ? "👀 <b>I’m looking at what you sent…</b>"
+              ? "👀 <b>I’m taking a careful look at that for you…</b>"
               : "👂 <b>I’m listening to your message…</b>";
   const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
@@ -213,7 +213,7 @@ export function registerHandlers(bot: Bot): void {
       `  /export — download conversation\n` +
       `  /usage — session stats\n` +
       `  /voice on|off — enable or disable spoken replies\n` +
-      `  /channel link slack|whatsapp — link another channel\n` +
+      `  /channel link slack|whatsapp|sendblue — link another channel\n` +
       `  /help — show this\n\n` +
       `What do you want to do?`
     );
@@ -235,7 +235,7 @@ export function registerHandlers(bot: Bot): void {
       `/usage — messages sent, model, turns\n` +
       `/voice on|off|status — control spoken replies\n` +
       `/cancel — cancel the active request\n` +
-      `/channel link slack|whatsapp — link another channel securely\n` +
+      `/channel link slack|whatsapp|sendblue — link another channel securely\n` +
       `/channel list — show linked channel identities\n` +
       `/image <description> — generate an image\n` +
       `/info — full session details\n` +
@@ -310,7 +310,7 @@ export function registerHandlers(bot: Bot): void {
   bot.command("channel", async (ctx) => {
     if (!(await guard(ctx))) return;
     const [action, provider] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
-    if (action === "link" && (provider === "slack" || provider === "whatsapp")) {
+    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
       const code = await createLinkCode(ctx.from!.id, provider);
       if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
         const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
@@ -325,13 +325,13 @@ export function registerHandlers(bot: Bot): void {
       await replyHtml(ctx, linked.length ? `<b>Linked channels</b>\n\n${linked.map((item) => `• ${item.provider} — <code>${item.externalUserId}</code>${item.workspaceId ? ` (${item.workspaceId})` : ""}`).join("\n")}` : "No external channels are linked yet.");
       return;
     }
-    if (action === "notify" && (provider === "slack" || provider === "whatsapp")) {
+    if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
       const enabled = String((ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean)[2] ?? "").toLowerCase() === "on";
       const count = await setProactivePreference(ctx.from!.id, provider, enabled);
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
       return;
     }
-    await ctx.reply("Usage: /channel link slack|whatsapp | /channel list | /channel notify slack|whatsapp on|off");
+    await ctx.reply("Usage: /channel link slack|whatsapp|sendblue | /channel list | /channel notify slack|whatsapp|sendblue on|off");
   });
 
   bot.command("image", async (ctx) => {

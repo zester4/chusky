@@ -56,6 +56,12 @@ export const config = {
   whatsappVerifyToken: optional("WHATSAPP_VERIFY_TOKEN", ""),
   whatsappAppSecret: optional("WHATSAPP_APP_SECRET", ""),
   whatsappGraphVersion: optional("WHATSAPP_GRAPH_VERSION", "v23.0"),
+  sendblueEnabled: optional("SENDBLUE_ENABLED", "false") === "true",
+  sendblueApiKey: optional("SENDBLUE_API_KEY", ""),
+  sendblueApiSecret: optional("SENDBLUE_API_SECRET", ""),
+  sendblueNumber: optional("SENDBLUE_NUMBER", ""),
+  sendblueWebhookSecret: optional("SENDBLUE_WEBHOOK_SECRET", ""),
+  sendblueWorkflowUrl: optional("SENDBLUE_WORKFLOW_URL", ""),
 
   // ── Daytona computer ───────────────────────────────────────────────
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),

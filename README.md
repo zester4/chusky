@@ -223,7 +223,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli link` | Create a one-time terminal pairing code |
 | `/cli devices` | List linked terminals |
 | `/cli revoke <name>` | Revoke a linked terminal |
-| `/channel link slack|whatsapp` | Create a one-time verified external-channel link |
+| `/channel link slack|whatsapp|sendblue` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
 | `/channel notify slack|whatsapp on|off` | Enable or disable proactive notifications for a linked channel |
 
@@ -296,7 +296,7 @@ Natural-language image and trigger requests are exposed to the model as Chusky t
 
 ### Slack and WhatsApp channels
 
-The channel gateway keeps the internal account identity (`account_<telegram-user-id>`) separate from provider IDs. A Slack or WhatsApp user is never trusted by display name alone: link it from the owning Telegram account with `/channel link slack` or `/channel link whatsapp`. Slack OAuth links the installer’s verified Slack user; WhatsApp uses the one-time code with `/link <code>`. Unlinked messages receive instructions only and never enter an account’s history, memory, tasks, or approvals.
+The channel gateway keeps the internal account identity (`account_<telegram-user-id>`) separate from provider IDs. A Slack, WhatsApp, or Sendblue user is never trusted by display name alone: link it from the owning Telegram account with `/channel link <provider>`. Slack OAuth links the installer’s verified Slack user; WhatsApp and Sendblue use the one-time code with `/link <code>`. Unlinked messages receive instructions only and never enter an account’s history, memory, tasks, or approvals.
 
 Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease.
 
@@ -313,7 +313,7 @@ Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions fo
 | SMS | Boundary only | Requires a provider sender, webhook route, signature scheme, and deployment wiring |
 | Voice | Boundary only | Requires a telephony/STT/TTS provider and deployment wiring |
 
-To connect Slack or WhatsApp, first run `/channel link slack` or `/channel link whatsapp` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky's history, memory, tasks, or approvals. Use `/channel list` to inspect links and `/channel notify whatsapp on` only when the user wants proactive WhatsApp delivery.
+To connect Slack, WhatsApp, or Sendblue, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
 
 In webhook mode, provider routes must be publicly reachable over HTTPS. Slack uses `/slack/events` and `/slack/interactions`; WhatsApp Cloud API uses `GET` and `POST /whatsapp/webhook`. Both routes verify the raw request signature, reject invalid requests with a non-2xx status, acknowledge provider webhooks quickly, and dispatch work asynchronously. Duplicate events are claimed in Redis, and every outbound reply is persisted in the Redis outbox before provider delivery.
 

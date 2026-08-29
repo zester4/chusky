@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import type { Hono } from "hono";
 import { config } from "../config.js";
-import { consumeChannelLinkCode, consumeChannelOAuthState, createChannelOAuthState, getOutboxByProviderMessageId, hashCliSecret, saveChannelInstallation, updateOutbox } from "../store.js";
+import { claimChannelInboundEvent, consumeChannelLinkCode, consumeChannelOAuthState, createChannelInboundEvent, createChannelOAuthState, getOutboxByProviderMessageId, hashCliSecret, saveChannelInstallation, updateChannelInboundEvent, updateOutbox } from "../store.js";
 import { linkChannelIdentity } from "./identity.js";
 import { ChannelGateway } from "./gateway.js";
 import { ChannelVerificationError } from "./contracts.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "./slack.js";
 import { normalizeWhatsAppMessages, normalizeWhatsAppStatuses, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "./whatsapp.js";
+import { normalizeSendblueMessage, normalizeSendblueStatus, SendblueAdapter, verifySendblueSignature } from "./sendblue.js";
 import { ChannelDebouncer } from "./debounce.js";
 import { logger } from "../logger.js";
 
@@ -14,6 +15,7 @@ interface ChannelRouteOptions {
   gateway: ChannelGateway;
   slack?: { adapter: SlackAdapter; signingSecret: string };
   whatsapp?: { adapter: WhatsAppAdapter; appSecret: string; verifyToken: string };
+  sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void> };
 }
 
 function errorStatus(error: unknown): 400 | 401 | 403 | 500 | 503 {
@@ -128,6 +130,41 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
       } catch (error) {
         logger.warn({ err: error }, "Rejected WhatsApp webhook");
         return c.json({ ok: false, error: error instanceof ChannelVerificationError ? error.message : "invalid WhatsApp event" }, errorStatus(error));
+      }
+    });
+  }
+
+  if (options.sendblue) {
+    const sendblue = options.sendblue;
+    app.post("/sendblue/webhook", async (c) => {
+      const raw = await c.req.text();
+      try {
+        verifySendblueSignature(raw, c.req.header(), sendblue.webhookSecret);
+        const payload = JSON.parse(raw) as any;
+        const status = normalizeSendblueStatus(payload);
+        if (status) {
+          const record = await getOutboxByProviderMessageId("sendblue", status.providerMessageId);
+          if (record) await updateOutbox(record.id, { providerStatus: status.status });
+          return c.json({ ok: true, status: true });
+        }
+        const message = normalizeSendblueMessage(payload);
+        if (!message) return c.json({ ok: true, ignored: true });
+        const record = await createChannelInboundEvent(message);
+        if (sendblue.enqueue && await claimChannelInboundEvent(record.eventId)) {
+          const eventId = record.eventId;
+          try {
+            await sendblue.enqueue(eventId);
+          } catch (error) {
+            await updateChannelInboundEvent(eventId, { status: "received", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+            throw error;
+          }
+          return c.json({ ok: true, queued: true }, 202);
+        }
+        if (!sendblue.enqueue) void sendblue.adapter.hydrateInbound(message).then((hydrated) => gateway.processInbound(hydrated)).catch((error) => logger.error({ err: error, eventId: message.providerEventId }, "Sendblue message processing failed"));
+        return c.json({ ok: true, duplicate: record.status !== "received" });
+      } catch (error) {
+        logger.warn({ err: error }, "Rejected Sendblue webhook");
+        return c.json({ ok: false, error: error instanceof ChannelVerificationError ? error.message : error instanceof SyntaxError ? "invalid Sendblue JSON" : "invalid Sendblue event" }, error instanceof SyntaxError ? 400 : errorStatus(error));
       }
     });
   }

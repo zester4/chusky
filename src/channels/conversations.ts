@@ -16,6 +16,12 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
     conversationId: message.providerConversationId,
     threadId: message.providerThreadId,
     workspaceId: message.providerWorkspaceId,
+    ...(message.provider === "sendblue" ? {
+      metadata: {
+        ...(message.scope === "shared" ? { groupId: message.providerConversationId } : {}),
+        messageHandle: message.providerEventId,
+      },
+    } : {}),
   };
 }
 
@@ -36,4 +42,3 @@ export function buildConversation(userId: number, message: InboundMessage): Chus
 export function sharedConversationId(provider: string, workspaceId: string, conversationId: string): string {
   return `shared_${createHash("sha256").update(`${provider}:${workspaceId}:${conversationId}`).digest("hex").slice(0, 32)}`;
 }
-

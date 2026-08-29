@@ -8,6 +8,7 @@ import { ChannelOutbox } from "../src/channels/outbox.js";
 import { ChannelDebouncer } from "../src/channels/debounce.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "../src/channels/slack.js";
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
+import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
@@ -59,6 +60,28 @@ test("WhatsApp normalization accepts text and media without persisting raw paylo
   assert.equal(message?.providerWorkspaceId, "P1");
   assert.equal(message?.attachments[0].id, "media.1");
   assert.equal(message?.displayName, "Joe");
+});
+
+test("Sendblue verifies its webhook secret and normalizes direct and group iMessages", () => {
+  const raw = '{"message_handle":"sb-1"}';
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = createHmac("sha256", "secret").update(`${timestamp}.${raw}`).digest("hex");
+  assert.doesNotThrow(() => verifySendblueSignature(raw, { "X-Sendblue-Signature": `t=${timestamp},v1=${signature}` }, "secret"));
+  assert.throws(() => verifySendblueSignature(raw, { "X-Sendblue-Signature": `t=${timestamp},v1=bad` }, "secret"), /Sendblue webhook signature/);
+  assert.throws(() => verifySendblueSignature(raw, { "X-Sendblue-Signature": `t=${Number(timestamp) - 301},v1=${signature}` }, "secret"), /stale/);
+  const direct = normalizeSendblueMessage({ message_handle: "sb-1", from_number: "+15550001", sendblue_number: "+15550002", content: "hello", service: "iMessage" });
+  assert.equal(direct?.provider, "sendblue");
+  assert.equal(direct?.providerConversationId, "+15550001");
+  assert.equal(direct?.scope, "private");
+  const group = normalizeSendblueMessage({ message_handle: "sb-2", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "plan this", participants: ["+15550001", "+15550002"] });
+  assert.equal(group?.providerConversationId, "group-1");
+  assert.equal(group?.scope, "shared");
+});
+
+test("Sendblue hydrates bounded media for the shared agent handler", async () => {
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/png", "content-length": "3" } })) as typeof fetch);
+  const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-media", providerUserId: "+15550001", providerConversationId: "+15550001", text: "edit this", attachments: [{ id: "m1", kind: "image", url: "https://cdn.example/image.png" }], receivedAt: Date.now(), scope: "private" });
+  assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
 });
 
 test("WhatsApp bursts are merged by a Redis-backed debounce queue", async () => {
@@ -125,19 +148,25 @@ test("provider adapters use channel-specific delivery APIs", async () => {
   }) as typeof fetch;
   await new SlackAdapter("xoxb-token", fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "slack", conversationId: "D1", workspaceId: "T1" }, text: "hi", idempotencyKey: "s1" });
   await new WhatsAppAdapter("token", "P1", "v23.0", fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "whatsapp", conversationId: "1555" }, text: "hi", idempotencyKey: "w1" });
+  await new SendblueAdapter("key", "secret", "+15550002", undefined, fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "sendblue", conversationId: "+15550001", metadata: { messageHandle: "sb-in-1" } }, text: "hi", idempotencyKey: "b1" });
   assert.equal(requests[0].url.endsWith("/chat.postMessage"), true);
   assert.equal(requests[1].url.includes("/P1/messages"), true);
+  assert.equal(requests[2].url.endsWith("/send-message"), true);
+  assert.equal(requests[2].body.from_number, "+15550002");
 });
 
 test("webhook routes return non-2xx for invalid provider signatures", async () => {
   const app = new Hono();
   const slack = new SlackAdapter("token", (async () => new Response(JSON.stringify({ ok: true, ts: "1" }), { status: 200 })) as typeof fetch);
   const whatsapp = new WhatsAppAdapter("token", "P1", "v23.0", (async () => new Response(JSON.stringify({ messages: [{ id: "1" }] }), { status: 200 })) as typeof fetch);
-  registerChannelRoutes(app, { gateway: new ChannelGateway(async () => undefined), slack: { adapter: slack, signingSecret: "secret" }, whatsapp: { adapter: whatsapp, appSecret: "app-secret", verifyToken: "verify" } });
+  const sendblue = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(JSON.stringify({ message_handle: "sb-1" }), { status: 200 })) as typeof fetch);
+  registerChannelRoutes(app, { gateway: new ChannelGateway(async () => undefined), slack: { adapter: slack, signingSecret: "secret" }, whatsapp: { adapter: whatsapp, appSecret: "app-secret", verifyToken: "verify" }, sendblue: { adapter: sendblue, webhookSecret: "secret" } });
   const slackResponse = await app.request("http://localhost/slack/events", { method: "POST", body: "{}", headers: { "x-slack-request-timestamp": String(Math.floor(Date.now() / 1000)), "x-slack-signature": "v0=bad" } });
   const whatsappResponse = await app.request("http://localhost/whatsapp/webhook", { method: "POST", body: "{}", headers: { "x-hub-signature-256": "sha256=bad" } });
+  const sendblueResponse = await app.request("http://localhost/sendblue/webhook", { method: "POST", body: "{}", headers: { "sb-signing-secret": "bad" } });
   assert.equal(slackResponse.status, 401);
   assert.equal(whatsappResponse.status, 401);
+  assert.equal(sendblueResponse.status, 401);
 });
 
 test("Telegram webhook validation is strict and update parsing is bounded", () => {
