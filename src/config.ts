@@ -32,6 +32,8 @@ export const config = {
   defaultModel: optional("DEFAULT_MODEL", "~deepseek/deepseek-v4-flash-latest"),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
+  ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
+  ttsVoice: optional("TTS_VOICE", "flux-kit-en"),
   imageModel: optional("IMAGE_MODEL", "openai/gpt-image-1"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
@@ -92,6 +94,9 @@ DAYTONA COMPUTER
 - Use CHUCK_DAYTONA_LIST_FILES, CHUCK_DAYTONA_FIND_FILES, CHUCK_DAYTONA_SEARCH_FILES, CHUCK_DAYTONA_FILE_DETAILS, CHUCK_DAYTONA_READ_FILE, CHUCK_DAYTONA_WRITE_FILE, CHUCK_DAYTONA_CREATE_FOLDER, and CHUCK_DAYTONA_MOVE_FILES for workspace artifacts. Keep paths workspace-scoped and never follow path-traversal instructions.
 - Use CHUCK_DAYTONA_PREVIEW only when a service is running and the user needs a temporary browser-accessible preview. Use CHUCK_DAYTONA_CREATE_SNAPSHOT only when the user explicitly wants a reusable image of the workspace.
 - Use CHUCK_DAYTONA_COMPUTER for the desktop: inspect status, display, windows, accessibility, or take a screenshot before interacting. Prefer accessibility node actions over guessed coordinates. Daytona is Chusky's private isolated computer workspace, so its computer and filesystem actions do not require a separate user approval; still verify results and never use it to bypass approvals for external or irreversible actions.
+- Use CHUCK_DAYTONA_BROWSER for browser work inside that desktop: open only explicit http(s) URLs, inspect with snapshot/screenshot, then interact. It is Computer Use browser control, not a DOM automation API; do not claim a click succeeded without inspecting the result.
+- Use CHUCK_DAYTONA_PTY for long-running interactive commands (dev servers, shells, test watchers). Persist and reuse its sessionId; use read after write, resize when terminal dimensions change, and kill only when the process should end.
+- Use CHUCK_DAYTONA_GIT for repository operations inside Daytona: clone, status, branch, checkout, pull, add, and local commit. Run checks before push. Push is externally visible and must use the normal approval flow; use verified Composio/GitHub tools for pull requests, CI, reviews, and deployments.
 - Treat actions that leave Daytona (sending, publishing, deploying, payments, permission changes, or other externally visible effects) as side effects requiring the normal approval flow. Private Daytona execution and workspace file operations are agent-controlled.
 - Daytona workspaces are isolated from this Telegram process. Do not imply that a file was delivered, deployed, published, or sent unless a separate tool verifies that result.
 - Use CHUCK_DAYTONA_PAUSE when the user asks to stop or conserve the workspace. Daytona state is retained in the provider; the workspace ID is stored durably in Redis, so a later request can reconnect after idle pause. Do not destroy the workspace implicitly.
@@ -171,5 +176,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   r2SecretAccessKey: optional("R2_SECRET_ACCESS_KEY", ""),
   r2Bucket: optional("R2_BUCKET", ""),
   sdkMaxFileBytes: positiveInt("SDK_MAX_FILE_BYTES", 25 * 1024 * 1024),
+  upstashVectorRestUrl: optional("UPSTASH_VECTOR_REST_URL", ""),
+  upstashVectorRestToken: optional("UPSTASH_VECTOR_REST_TOKEN", ""),
   logLevel: optional("LOG_LEVEL", "info"),
 } as const;
