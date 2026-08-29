@@ -2,19 +2,21 @@ import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
 import {
   runAgent, fetchModels, getConnectionUrl, getToolkitStates, invalidateSession, ApprovalRequiredError,
-  transcribeAudio, generateImage,
+  transcribeAudio, generateImage, generateSpeech,
   listTriggers, createTrigger, setTriggerState, deleteTrigger,
   searchTools
 } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
-  setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash,
+  setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies,
   claimTelegramUpdate,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { markdownToTelegramRichHtml } from "./telegramRich.js";
+import { chunkText } from "./lib/knowledge/chunker.js";
+import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
@@ -60,6 +62,18 @@ async function editHtml(ctx: Context, msgId: number, html: string): Promise<void
     await ctx.api.editMessageText(ctx.chat!.id, msgId, chunks[0], { parse_mode: "HTML" });
   } catch { /* ignore */ }
   for (const chunk of chunks.slice(1)) await replyHtml(ctx, chunk);
+}
+
+async function sendVoiceReply(ctx: Context, text: string, enabled: boolean): Promise<void> {
+  if (!enabled || !text.trim()) return;
+  try {
+    const audio = await generateSpeech(text);
+    await ctx.replyWithAudio(new InputFile(audio.data, "chusky.mp3"), { title: "Chusky voice reply", performer: "Chusky" });
+  } catch (error) {
+    // Text delivery has already succeeded; TTS is an optional enhancement and
+    // must never turn a successful agent response into a failed request.
+    logger.warn({ err: error, userId: ctx.from?.id }, "Voice reply generation failed");
+  }
 }
 
 async function editMarkdown(ctx: Context, msgId: number, markdown: string, suffix = ""): Promise<void> {
@@ -123,6 +137,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
     ]);
     if (result.cost) await addUsage(userId, result.cost);
     await editMarkdown(ctx, status.message_id, result.text);
+    await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
     for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
@@ -184,6 +199,7 @@ export function registerHandlers(bot: Bot): void {
       `  /clear session — clear history and reset session\n` +
       `  /export — download conversation\n` +
       `  /usage — session stats\n` +
+      `  /voice on|off — enable or disable spoken replies\n` +
       `  /channel link slack|whatsapp — link another channel\n` +
       `  /help — show this\n\n` +
       `What do you want to do?`
@@ -204,6 +220,7 @@ export function registerHandlers(bot: Bot): void {
       `/trigger create|enable|disable|delete — manage triggers\n` +
       `/export — download conversation as .txt\n` +
       `/usage — messages sent, model, turns\n` +
+      `/voice on|off|status — control spoken replies\n` +
       `/cancel — cancel the active request\n` +
       `/channel link slack|whatsapp — link another channel securely\n` +
       `/channel list — show linked channel identities\n` +
@@ -226,6 +243,27 @@ export function registerHandlers(bot: Bot): void {
     if (!controller) { await ctx.reply("There is no active request to cancel."); return; }
     controller.abort();
     await ctx.reply("🛑 Cancellation requested.");
+  });
+
+  bot.command("voice", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const action = (ctx.match?.trim() ?? "status").toLowerCase();
+    const current = (await getSession(ctx.from!.id)).voiceReplies === true;
+    if (action === "on" || action === "enable") {
+      await setVoiceReplies(ctx.from!.id, true);
+      await ctx.reply("🔊 Voice replies are on. I’ll send text and an audio reply after each response.");
+      return;
+    }
+    if (action === "off" || action === "disable") {
+      await setVoiceReplies(ctx.from!.id, false);
+      await ctx.reply("🔇 Voice replies are off. I’ll continue replying with text.");
+      return;
+    }
+    if (action === "status") {
+      await ctx.reply(current ? "🔊 Voice replies are on." : "🔇 Voice replies are off.");
+      return;
+    }
+    await ctx.reply("Usage: /voice on, /voice off, or /voice status");
   });
 
   bot.command("cli", async (ctx) => {
@@ -585,6 +623,7 @@ export function registerHandlers(bot: Bot): void {
       const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
+      await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);
     } catch (e) {
       await ctx.reply(`❌ Approval execution failed: ${String(e).slice(0, 400)}`);
     }
@@ -662,6 +701,7 @@ export function registerHandlers(bot: Bot): void {
       }
 
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
+      await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
       for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);
@@ -716,6 +756,19 @@ export function registerHandlers(bot: Bot): void {
       const filename = doc.file_name || file.path.split("/").pop() || "document";
       const mime = doc.mime_type || "application/octet-stream";
       const prompt = ctx.message.caption?.trim() || "Read this document and summarize its key points.";
+      if (vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename))) {
+        try {
+          const documentId = `telegram_${doc.file_id}`;
+          const chunks = chunkText(file.data.toString("utf8")).map((chunk) => ({
+            id: `${documentId}:${chunk.id}`,
+            data: chunk.text,
+            metadata: { userId: String(ctx.from!.id), documentId, sourceType: "telegram_upload", contentType: mime, chunkIndex: chunk.chunkIndex, visibility: "private" as const },
+          }));
+          await new UpstashKnowledgeStore().upsert(chunks);
+        } catch (error) {
+          logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not index text document");
+        }
+      }
       await handleMedia(ctx, [
         { type: "text", text: prompt },
         { type: "file", file: { filename, file_data: `data:${mime};base64,${file.data.toString("base64")}` } },

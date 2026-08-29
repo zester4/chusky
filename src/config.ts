@@ -60,6 +60,8 @@ export const config = {
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
   daytonaTarget: optional("DAYTONA_TARGET", ""),
   daytonaSnapshot: optional("DAYTONA_SNAPSHOT", ""),
+  daytonaNetworkBlockAll: optional("DAYTONA_NETWORK_BLOCK_ALL", "true") === "true",
+  daytonaDomainAllowList: optional("DAYTONA_DOMAIN_ALLOW_LIST", ""),
   // Container targets do not support auto-pause. Enable this only when the
   // selected Daytona target uses a pausable sandbox class such as linux-vm.
   daytonaAutoPauseInterval: optional("DAYTONA_AUTO_PAUSE_INTERVAL", "0"),

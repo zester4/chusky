@@ -154,7 +154,7 @@ The foundation is production-oriented, but the following are the meaningful rema
 
 5. Project-wide limits and billing hooks. Current rate behavior is request/run oriented. Add project-wide concurrency, token/spend, file, webhook, and monthly quota controls, usage aggregation, and metering/billing integration if the API will be commercial.
 
-6. Public API release process. Decide the npm registry and package scope, license, semantic-versioning and changelog policy, provenance/publishing workflow, support/deprecation policy, and release the SDK package. It is currently scaffolded as `@chusky/sdk` with `UNLICENSED`, so it is not yet ready to publish publicly without those product decisions.
+6. Public API release process. The SDK is published as `@chusky/sdk` with MIT metadata and a prepublish verification hook. Continue maintaining semantic versioning, changelog, provenance, support, and deprecation policy.
 
 7. Contract validation and compatibility. Validate all API request/response payloads against a shared schema, add OpenAPI contract tests/generated client checks, document pagination and error-code stability, and establish a version-deprecation policy.
 
