@@ -12,6 +12,13 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The test suite imports src/config.ts. These are non-secret placeholders;
+    # provider calls are mocked by the contract tests and no real credentials
+    # belong in CI.
+    env:
+      TELEGRAM_BOT_TOKEN: ci-test-telegram-token
+      COMPOSIO_API_KEY: ci-test-composio-key
+      OPENROUTER_API_KEY: ci-test-openrouter-key
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
