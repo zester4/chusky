@@ -98,6 +98,18 @@ Composio, Redis, internal native-tool, and operator-secret dependencies.
 - Public package publication needs an explicit registry/scope, license, semantic
   version, changelog, provenance, and deprecation policy. `UNLICENSED` means the
   current scaffold must not be represented as publicly publishable.
+- The SDK exports `createChuskyAdmin({ apiKey, baseUrl, userId? })` as a convenience
+  for trusted operator backends. It supplies the non-user `operator` identity when
+  omitted; it does not weaken the server requirement for `X-Chusky-User-Id`.
+- The admin client may create, list, scope, rotate, and revoke projects. Raw project
+  keys are returned only by create/rotate and must be shown once and stored by the
+  operator; list responses contain only the safe prefix. The root key must never be
+  bundled into browser code or a public npm example.
+- Self-hosted consumers should pass `CHUSKY_BASE_URL` (for example,
+  `https://chusky.selithub.shop`) rather than relying on the hosted default.
+- The npm package uses MIT metadata, includes `dist`, public docs, and `LICENSE`,
+  and runs typecheck/build/tests through `prepublishOnly`. If generated `dist` is
+  committed, update it together with the TypeScript source.
 
 ## Verification
 

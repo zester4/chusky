@@ -40,6 +40,8 @@ For deep work, load only the references relevant to the task:
 - `src/policy.ts`: risky-tool detection and human-readable progress messages.
 - `src/types.ts`: shared API-message, tool-call, and media types.
 - `src/markdown.ts`: Markdown-to-Telegram-HTML conversion and message splitting.
+- `src/telegramRich.ts`: opt-in Telegram Rich HTML rendering for valid Markdown
+  tables; ordinary Markdown remains on the legacy formatter path with fallback.
 - `src/sdkApi.ts`: authenticated `/v1` developer API for projects, threads, runs, approvals, tasks, files, audit events, and webhook subscriptions.
 - `sdk/`: standalone ESM TypeScript developer SDK, API contract, OpenAPI description, and client tests.
 - `tests/`: Node test-runner coverage for policy, native tool schemas, Markdown, memory ranking, and approval matching.
