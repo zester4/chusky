@@ -281,7 +281,7 @@ Stop the foreground process with `Ctrl+C`, then use PM2:
 
 ```bash
 sudo npm install -g pm2
-pm2 start dist/index.js --name chusky
+pm2 start ecosystem.config.cjs --only chusky --update-env
 pm2 save
 pm2 startup
 ```
@@ -293,14 +293,37 @@ pm2 status
 pm2 logs chusky
 ```
 
+Rotate PM2 logs so an otherwise healthy VM cannot eventually run out of disk space:
+
+```bash
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 7
+```
+
 After future releases:
 
 ```bash
 cd /home/ubuntu/chusky
-git pull --ff-only origin main
-npm install
-npm run build
-pm2 restart chusky --update-env
+bash scripts/deploy-oracle.sh
+```
+
+Chusky's PM2 configuration is intentionally in one-worker cluster mode. `pm2 reload`
+starts a replacement, waits for Chusky's Redis/Telegram/HTTP/webhook readiness signal, then
+lets the old worker drain accepted Telegram updates for up to 30 seconds. Do not use
+`pm2 restart chusky`, `pm2 stop chusky`, or `npm start` for routine releases; they create a
+window where Telegram cannot reach a healthy worker.
+
+### Migrating an existing PM2 process
+
+If Chusky was originally launched with `pm2 start dist/index.js --name chusky`, run this
+once after building the current release. It replaces only Chusky; it does not touch the
+other PM2 applications or Nginx.
+
+```bash
+cd /home/ubuntu/chusky
+pm2 delete chusky
+pm2 start ecosystem.config.cjs --only chusky --update-env
 pm2 save
 ```
 

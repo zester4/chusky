@@ -86,28 +86,42 @@ other applications (`hubtel-gateway`, `selit-pay`, and `verifo`) and Nginx runni
 ```bash
 cd ~/chusky
 pm2 status
-pm2 stop chusky
 ```
 
 Use these commands to manage it:
 
 ```bash
-pm2 start chusky                 # resume a stopped Chusky process
-pm2 restart chusky --update-env  # restart after changing .env
+pm2 reload ecosystem.config.cjs --only chusky --update-env  # safe production reload
 pm2 logs chusky --lines 100      # inspect Chusky logs; Ctrl+C exits the viewer
 pm2 save                         # persist the current PM2 state across reboot
 ```
 
-To update Chusky safely while keeping the other services untouched:
+Chusky uses a readiness-gated PM2 cluster worker. During a normal `reload`, PM2 starts
+the replacement, waits for Chusky to verify Redis, Telegram, its HTTP listener, and the
+Telegram webhook, then lets the old process drain active updates. Do not use `pm2 restart`
+or `pm2 stop` for normal releases: both create avoidable Telegram downtime.
+
+#### One-time PM2 migration
+
+After pulling a release that contains `ecosystem.config.cjs`, migrate the existing fork-mode
+process once. This briefly restarts only Chusky; run it after a successful build.
 
 ```bash
 cd ~/chusky
-pm2 stop chusky
-git pull --ff-only origin main
-npm install --no-audit --no-fund
-NODE_OPTIONS="--max-old-space-size=512" npm run build
-pm2 start chusky
+pm2 delete chusky
+pm2 start ecosystem.config.cjs --only chusky --update-env
 pm2 save
+```
+
+#### Every future Oracle release
+
+Use the checked-in deploy script. It refuses to deploy over tracked local changes, installs
+from the lockfile, builds before touching PM2, performs the safe reload, and verifies local
+liveness:
+
+```bash
+cd ~/chusky
+bash scripts/deploy-oracle.sh
 ```
 
 Verify that it is listening on the configured Chusky port and that Nginx can reach it:
@@ -118,9 +132,10 @@ sudo ss -ltnp | grep :3003
 curl -i https://chusky.selithub.shop/health
 ```
 
-If Chusky was started directly in the terminal with `npm start`, press `Ctrl+C` to stop
-that foreground process. Do not run `npm start` while `pm2 status` shows Chusky as online:
-both processes try to use port 3003 and the second one fails with `EADDRINUSE`.
+Do not run `npm start` while `pm2 status` shows Chusky as online: both processes try to
+use port 3003 and the second one fails with `EADDRINUSE`. If a foreground process was
+started before PM2, stop only that foreground process with `Ctrl+C` before the one-time
+PM2 migration.
 
 Do not use `pm2 stop all`, `pm2 delete all`, `pkill node`, or `sudo systemctl stop nginx`;
 those commands can stop the other applications or the reverse proxy. `pm2 delete chusky`

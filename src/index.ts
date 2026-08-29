@@ -1,6 +1,6 @@
 import { Bot, InputFile } from "grammy";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
-import { serve } from "@hono/node-server";
+import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
@@ -34,6 +34,10 @@ import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 async function main(): Promise<void> {
   await initStore();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
+  let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
+  let httpServer: ServerType | undefined;
+  let shuttingDown = false;
+  const inFlightTelegramUpdates = new Set<Promise<unknown>>();
 
   const bot = new Bot(config.telegramToken);
   registerHandlers(bot);
@@ -43,13 +47,46 @@ async function main(): Promise<void> {
   await bot.init();
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
+  const telegramWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/webhook`;
+  const registerTelegramWebhook = async () => {
+    await bot.api.setWebhook(telegramWebhookUrl, {
+      secret_token: config.webhookSecret || undefined,
+      allowed_updates: ["message", "edited_message", "callback_query", "inline_query"],
+      // Keep queued messages across a normal process restart. Duplicates are
+      // handled by the durable Telegram update claim in the handlers.
+      drop_pending_updates: false,
+    });
+    logger.info({ url: telegramWebhookUrl }, "Chusky webhook registered");
+  };
+  const reconcileTelegramWebhook = async () => {
+    const current = await bot.api.getWebhookInfo();
+    if (current.url === telegramWebhookUrl) return;
+    logger.warn({ expectedUrl: telegramWebhookUrl, currentUrl: current.url || undefined }, "Telegram webhook drift detected; repairing it");
+    await registerTelegramWebhook();
+  };
 
   const shutdown = async (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ sig }, "Chusky shutting down…");
     channelGateway?.stopRecovery();
     if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
-    await bot.stop();
-    process.exit(0);
+    if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
+    // Stop accepting HTTP work first. During a PM2 cluster reload, the ready
+    // replacement worker is already serving this port before this worker gets
+    // SIGINT. Give an update already accepted by this worker a bounded chance
+    // to finish instead of cutting it off mid-response.
+    if (httpServer) await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
+    try {
+      await Promise.race([
+        Promise.allSettled([...inFlightTelegramUpdates]),
+        new Promise<void>((resolve) => setTimeout(resolve, 30_000)),
+      ]);
+      if (inFlightTelegramUpdates.size) logger.warn({ pending: inFlightTelegramUpdates.size }, "Stopping with Telegram updates still in flight");
+      await bot.stop();
+    } finally {
+      process.exit(0);
+    }
   };
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));
@@ -428,6 +465,11 @@ async function main(): Promise<void> {
 
     app.get("/", (c) => c.json({ ok: true, agent: "Chusky", mode: "webhook", ts: Date.now() }));
 
+    // Liveness is intentionally dependency-free. Deployment automation uses
+    // it to confirm the replacement worker owns the local port; /health below
+    // remains the deeper Telegram-token and persistence diagnostic.
+    app.get("/health/live", (c) => c.json({ ok: true, agent: "Chusky", mode: "webhook" }));
+
     // Deep health check — validates bot token live
     app.get("/health", async (c) => {
       try {
@@ -451,9 +493,11 @@ async function main(): Promise<void> {
       const update = parseTelegramWebhookUpdate(rawBody);
       if (!update) return c.json({ ok: false, error: "invalid Telegram update" }, 400);
       const updateId = update.update_id;
-      void bot.handleUpdate(update as Parameters<Bot["handleUpdate"]>[0]).catch((error) => {
+      const processing = bot.handleUpdate(update as Parameters<Bot["handleUpdate"]>[0]);
+      inFlightTelegramUpdates.add(processing);
+      void processing.catch((error) => {
         logger.error({ err: error, updateId }, "Telegram update processing failed after webhook acknowledgement");
-      });
+      }).finally(() => inFlightTelegramUpdates.delete(processing));
       return c.json({ ok: true });
     });
 
@@ -507,19 +551,36 @@ async function main(): Promise<void> {
       }
     });
 
-    await bot.api.setWebhook(`${config.webhookUrl}/webhook`, {
-      secret_token: config.webhookSecret || undefined,
-      allowed_updates: ["message", "edited_message", "callback_query", "inline_query"],
-      // Keep queued messages across a normal process restart. Duplicates are
-      // handled by the durable Telegram update claim in the handlers.
-      drop_pending_updates: false,
+    // Bind before changing Telegram's route. On a reload the old worker keeps
+    // serving until this worker has both bound the port and registered a valid
+    // webhook, preventing a bad deploy from becoming a silent outage.
+    await new Promise<void>((resolve, reject) => {
+      httpServer = serve({ fetch: app.fetch, port: config.port }, (info) => {
+        logger.info({ port: info.port }, "Chusky listening");
+        resolve();
+      });
+      httpServer.once("error", reject);
     });
 
-    logger.info({ url: `${config.webhookUrl}/webhook` }, "Chusky webhook registered");
+    try {
+      await registerTelegramWebhook();
+    } catch (error) {
+      await new Promise<void>((resolve) => httpServer?.close(() => resolve()));
+      throw error;
+    }
 
-    serve({ fetch: app.fetch, port: config.port }, (info) => {
-      logger.info({ port: info.port }, "Chusky listening");
-    });
+    // Telegram webhooks can be detached by a manual Bot API call or a previous
+    // failed deploy. Check periodically and restore the expected endpoint
+    // without dropping pending updates. A failure here is logged and retried;
+    // it must not take a healthy running worker offline.
+    telegramWebhookRecovery = setInterval(() => {
+      void reconcileTelegramWebhook().catch((error) => logger.warn({ error }, "Telegram webhook reconciliation failed"));
+    }, 5 * 60_000);
+    if (typeof telegramWebhookRecovery === "object" && "unref" in telegramWebhookRecovery) telegramWebhookRecovery.unref();
+    // PM2's wait_ready gate leaves the old worker online until the full
+    // startup contract (Redis, Telegram identity, HTTP listener, webhook) is
+    // healthy. This is deliberately after setWebhook rather than just listen.
+    if (typeof process.send === "function") process.send("ready");
 
   } else {
     // ── POLLING MODE (local dev) ─────────────────────────────────────

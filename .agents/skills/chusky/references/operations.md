@@ -60,3 +60,11 @@ Inspect QStash delivery state, workflow run ID, record status, Telegram chat map
 ## Release discipline
 
 Use a focused commit. Include source, tests, `.env.example`, README changes, and lockfile changes together. Review `git diff --check`, verify ignored secrets with `git status --ignored`, then deploy and smoke-test the exact commit.
+
+On an Oracle-style VM, use the checked-in `ecosystem.config.cjs` and
+`bash scripts/deploy-oracle.sh`. The PM2 process must run in one-worker cluster mode with
+`wait_ready`; a normal release uses `pm2 reload`, never a stop-then-start or plain restart.
+The application sends readiness only after Redis, Telegram identity, its local listener, and
+the Telegram webhook have all initialized. Retain bounded in-flight Telegram work during
+SIGINT, configure PM2 log rotation, and keep the periodic Telegram webhook reconciliation
+enabled so a detached webhook repairs itself without a manual Bot API call.
