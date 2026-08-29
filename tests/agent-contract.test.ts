@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getSession, initStore } from "../src/store.js";
-import { invalidateSession, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -93,6 +93,24 @@ test("malformed tool JSON becomes a controlled tool error and the loop continues
   ], async () => undefined, async () => {
     const result = await runAgent(830004, "recover", [], "test/model");
     assert.equal(result.text, "recovered");
+  });
+});
+
+test("legacy DSML tool markup is converted to a tool call and never shown to the user", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830007);
+  const markup = `<|DSML|tool_calls><|DSML|invoke name="CHUCK_DAYTONA_WORKSPACE"><|DSML|parameter name="action" string="true">status</|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`;
+  const parsed = parseLegacyDsmlToolCalls(markup);
+  assert.equal(parsed[0]?.function.name, "CHUCK_DAYTONA_WORKSPACE");
+  assert.deepEqual(JSON.parse(parsed[0]?.function.arguments ?? "{}"), { action: "status" });
+  assert.equal(cleanModelText(markup), "");
+  await withAgentMocks([
+    chatResponse({ role: "assistant", content: markup }),
+    chatResponse({ role: "assistant", content: "workspace ready" }),
+  ], async (slug, args) => ({ slug, args, status: "ready" }), async () => {
+    const result = await runAgent(830007, "check my workspace", [], "test/model");
+    assert.equal(result.text, "workspace ready");
+    assert.deepEqual(result.toolsUsed, ["CHUCK_DAYTONA_WORKSPACE"]);
   });
 });
 

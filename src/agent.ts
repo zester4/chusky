@@ -33,6 +33,7 @@ import { nativeTool } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
 import { chuckTools } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
+import { randomUUID } from "node:crypto";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -67,12 +68,43 @@ interface ChatResponse {
   usage?: { cost?: number };
 }
 
+// A few OpenAI-compatible providers emit their tool call in legacy DSML text
+// instead of the structured `tool_calls` field. Treat that text as a protocol
+// fallback, never as assistant-visible content. This also protects Telegram's
+// streaming status message from displaying provider-internal markup.
+const LEGACY_DSML_MARKER = /<\s*\/?\s*\|\s*DSML\s*\|/i;
+const LEGACY_DSML_BLOCK = /<\s*\|\s*DSML\s*\|\s*tool_calls\s*>([\s\S]*?)<\s*\/\s*\|\s*DSML\s*\|\s*tool_calls\s*>/i;
+const LEGACY_DSML_INVOKE = /<\s*\|\s*DSML\s*\|\s*invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\s*\/\s*\|\s*DSML\s*\|\s*invoke\s*>/gi;
+const LEGACY_DSML_PARAMETER = /<\s*\|\s*DSML\s*\|\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\s*\/\s*\|\s*DSML\s*\|\s*parameter\s*>/gi;
+
+function decodeLegacyDsml(value: string): string {
+  return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
+}
+
+export function parseLegacyDsmlToolCalls(content: string): ToolCall[] {
+  const block = content.match(LEGACY_DSML_BLOCK)?.[1];
+  if (!block) return [];
+  const calls: ToolCall[] = [];
+  for (const invoke of block.matchAll(LEGACY_DSML_INVOKE)) {
+    const args: Record<string, string> = {};
+    for (const parameter of invoke[2].matchAll(LEGACY_DSML_PARAMETER)) args[parameter[1]] = decodeLegacyDsml(parameter[2]);
+    calls.push({ id: `legacy_${randomUUID()}`, type: "function", function: { name: invoke[1], arguments: JSON.stringify(args) } });
+  }
+  return calls;
+}
+
+export function cleanModelText(text: string): string {
+  const marker = LEGACY_DSML_MARKER.exec(text);
+  return (marker ? text.slice(0, marker.index) : text).trim();
+}
+
 async function readStreamingChat(res: Response, onDelta?: (text: string) => void | Promise<void>): Promise<ChatResponse> {
   if (!res.body) throw new Error("OpenRouter returned an empty stream");
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
+  let emittedContent = "";
   const calls = new Map<number, ToolCall>();
   let usage: { cost?: number } | undefined;
   const consume = async (line: string) => {
@@ -81,7 +113,18 @@ async function readStreamingChat(res: Response, onDelta?: (text: string) => void
     if (!raw || raw === "[DONE]") return;
     const chunk = JSON.parse(raw) as any;
     const delta = chunk.choices?.[0]?.delta;
-    if (typeof delta?.content === "string") { content += delta.content; if (onDelta) await onDelta(delta.content); }
+    if (typeof delta?.content === "string") {
+      content += delta.content;
+      if (onDelta) {
+        const visible = cleanModelText(content);
+        // Only emit a suffix that is still a prefix of the final clean text.
+        // Once a DSML marker begins, all subsequent protocol text is withheld.
+        if (visible.startsWith(emittedContent) && visible.length > emittedContent.length) {
+          await onDelta(visible.slice(emittedContent.length));
+          emittedContent = visible;
+        }
+      }
+    }
     for (const call of delta?.tool_calls ?? []) {
       const index = call.index ?? 0;
       const existing = calls.get(index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
@@ -328,19 +371,20 @@ export async function runAgent(
     if (!choice) throw new Error("No choices in OpenRouter response");
 
     const { finish_reason, message: assistantMsg } = choice;
-    const toolCalls = assistantMsg.tool_calls ?? [];
+    const legacyToolCalls = typeof assistantMsg.content === "string" ? parseLegacyDsmlToolCalls(assistantMsg.content) : [];
+    const toolCalls = assistantMsg.tool_calls ?? legacyToolCalls;
 
     // ── Done: no tool calls or explicit stop ──────────────────────────
-    if (finish_reason === "stop" || toolCalls.length === 0) {
+    if (toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
-      return { text: typeof text === "string" ? text.trim() : "", toolsUsed, cost: totalCost, generatedImages };
+      return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
     messages.push({
       role: "assistant",
-      content: assistantMsg.content ?? null,
+      content: typeof assistantMsg.content === "string" ? cleanModelText(assistantMsg.content) || null : assistantMsg.content ?? null,
       tool_calls: toolCalls,
     });
 
@@ -418,7 +462,7 @@ export async function runAgent(
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
-  return { text: typeof text === "string" ? text.trim() : "", toolsUsed, cost: totalCost, generatedImages };
+  return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────
