@@ -11,5 +11,6 @@ coverage/
 .nyc_output/
 .tmp/
 tmp/
+data/
 .DS_Store
 Thumbs.db

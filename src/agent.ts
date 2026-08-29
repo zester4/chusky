@@ -77,12 +77,20 @@ const LEGACY_DSML_BLOCK = /<\s*\|\s*DSML\s*\|\s*tool_calls\s*>([\s\S]*?)<\s*\/\s
 const LEGACY_DSML_INVOKE = /<\s*\|\s*DSML\s*\|\s*invoke\s+name\s*=\s*"([^"]+)"\s*>([\s\S]*?)<\s*\/\s*\|\s*DSML\s*\|\s*invoke\s*>/gi;
 const LEGACY_DSML_PARAMETER = /<\s*\|\s*DSML\s*\|\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\s*\/\s*\|\s*DSML\s*\|\s*parameter\s*>/gi;
 
+function normalizeLegacyDsml(value: string): string {
+  // Some OpenAI-compatible providers emit the DSML fence with full-width
+  // vertical bars (｜) instead of ASCII pipes. Normalize protocol syntax only;
+  // argument values are decoded later and remain otherwise untouched.
+  return value.replace(/｜/g, "|");
+}
+
 function decodeLegacyDsml(value: string): string {
   return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
 }
 
 export function parseLegacyDsmlToolCalls(content: string): ToolCall[] {
-  const block = content.match(LEGACY_DSML_BLOCK)?.[1];
+  const normalized = normalizeLegacyDsml(content);
+  const block = normalized.match(LEGACY_DSML_BLOCK)?.[1];
   if (!block) return [];
   const calls: ToolCall[] = [];
   for (const invoke of block.matchAll(LEGACY_DSML_INVOKE)) {
@@ -94,7 +102,7 @@ export function parseLegacyDsmlToolCalls(content: string): ToolCall[] {
 }
 
 export function cleanModelText(text: string): string {
-  const marker = LEGACY_DSML_MARKER.exec(text);
+  const marker = LEGACY_DSML_MARKER.exec(normalizeLegacyDsml(text));
   return (marker ? text.slice(0, marker.index) : text).trim();
 }
 

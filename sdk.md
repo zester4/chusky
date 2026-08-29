@@ -121,7 +121,7 @@ The normal Chusky provider configuration is still required. For the developer AP
 | `R2_BUCKET` | R2 bucket for SDK uploads. |
 | `SDK_MAX_FILE_BYTES` | Optional upload limit; defaults to 25 MiB. |
 
-Application developers should receive a project key beginning with `chsk_...`, not the root `CHUSKY_API_KEY`, and send it as `Authorization: Bearer ...` along with `X-Chusky-User-Id`.
+Application developers should receive a project key beginning with `chsk_...`, not the root `CHUSKY_API_KEY`, and send it as `Authorization: Bearer ...` along with `X-Chusky-User-Id`. The first-party web dashboard is also allowed to call the user-scoped `/v1` resources with its Better Auth session cookie; browser code must never receive either kind of API key.
 
 For browser-direct R2 uploads, configure bucket CORS separately for the application origins and the required upload headers. That configuration lives in Cloudflare, not in this repository.
 

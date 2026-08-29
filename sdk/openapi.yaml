@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Chusky Developer API
   version: 1.0.0
-  description: Self-hosted Chusky SDK API. API keys are server-side only.
+  description: Self-hosted Chusky SDK API. Project/root API keys are server-side only. The first-party web dashboard may authenticate user-scoped resources with its Better Auth session cookie.
 servers:
   - url: https://your-chusky.example/v1
 security:

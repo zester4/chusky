@@ -1,6 +1,8 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Hono } from "hono";
+import { cors } from "hono/cors";
 import { config } from "./config.js";
+import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, runAgent } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
@@ -41,7 +43,7 @@ async function authorized(token: string): Promise<SdkPrincipal | undefined> {
 }
 
 function sdkUser(c: any): { externalId: string; userId: number; projectId: string } | undefined {
-  const externalId = (c.req.header("X-Chusky-User-Id") ?? "").trim();
+  const externalId = (c.req.header("X-Chusky-User-Id") ?? c.get("webAuthUserId") ?? "").trim();
   if (!externalId || externalId.length > 200) return undefined;
   const principal = c.get("sdkPrincipal") as SdkPrincipal | undefined;
   return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId } : undefined;
@@ -69,8 +71,19 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
 
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
+  app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id"], allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
-    const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, ""); const principal = await authorized(token);
+    const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
+    let principal = await authorized(token);
+    if (!principal && config.betterAuthEnabled && !token) {
+      try {
+        const session = await getAuth().api.getSession({ headers: c.req.raw.headers });
+        if (session?.user?.id) {
+          principal = { projectId: "web", scopes: ["*"], root: false };
+          (c.set as (key: string, value: unknown) => void)("webAuthUserId", session.user.id);
+        }
+      } catch { /* Treat an unavailable/invalid auth cookie as unauthenticated. */ }
+    }
     if (!principal) return apiError(c, 401, "invalid_api_key", "A valid Chusky SDK API key is required.");
     (c.set as (key: string, value: unknown) => void)("sdkPrincipal", principal);
     if (isAdminRequest(c)) {

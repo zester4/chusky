@@ -114,6 +114,26 @@ test("legacy DSML tool markup is converted to a tool call and never shown to the
   });
 });
 
+test("full-width DSML from Composio multi-execute output is converted and hidden", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830008);
+  const markup = `<｜DSML｜tool_calls><｜DSML｜invoke name="COMPOSIO_MULTI_EXECUTE_TOOL"><｜DSML｜parameter name="current_step" string="true">VERIFYING_LINKEDIN_POST</｜DSML｜parameter><｜DSML｜parameter name="current_step_metric" string="true">3/3</｜DSML｜parameter><｜DSML｜parameter name="session_id" string="true">both</｜DSML｜parameter><｜DSML｜parameter name="sync_response_to_workbench" string="false">false</｜DSML｜parameter><｜DSML｜parameter name="thought" string="true">Get the final result.</｜DSML｜parameter><｜DSML｜parameter name="tools" string="false">[{"arguments":{"taskId":"task-1","lastStepSeen":7},"tool_slug":"BROWSER_TOOL_WATCH_TASK"}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`;
+  const parsed = parseLegacyDsmlToolCalls(markup);
+  assert.equal(parsed[0]?.function.name, "COMPOSIO_MULTI_EXECUTE_TOOL");
+  const args = JSON.parse(parsed[0]?.function.arguments ?? "{}");
+  assert.equal(args.current_step, "VERIFYING_LINKEDIN_POST");
+  assert.match(args.tools, /BROWSER_TOOL_WATCH_TASK/);
+  assert.equal(cleanModelText(markup), "");
+  await withAgentMocks([
+    chatResponse({ role: "assistant", content: markup }),
+    chatResponse({ role: "assistant", content: "LinkedIn verification completed." }),
+  ], async (slug, receivedArgs) => ({ slug, args: receivedArgs, status: "completed" }), async () => {
+    const result = await runAgent(830008, "verify the LinkedIn post", [], "test/model");
+    assert.equal(result.text, "LinkedIn verification completed.");
+    assert.deepEqual(result.toolsUsed, ["COMPOSIO_MULTI_EXECUTE_TOOL"]);
+  });
+});
+
 test("agent retries transient OpenRouter responses with a bounded retry", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830005);

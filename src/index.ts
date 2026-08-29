@@ -30,9 +30,12 @@ function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string
 }
 import { registerSdkApi } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
+import { registerAuthRoutes } from "./authRoutes.js";
+import { initAuth } from "./auth.js";
 
 async function main(): Promise<void> {
   await initStore();
+  if (config.betterAuthEnabled) await initAuth();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
@@ -47,6 +50,8 @@ async function main(): Promise<void> {
   await bot.init();
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
+  const app = new Hono();
+  if (config.betterAuthEnabled) registerAuthRoutes(app);
   const telegramWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/webhook`;
   const registerTelegramWebhook = async () => {
     await bot.api.setWebhook(telegramWebhookUrl, {
@@ -93,7 +98,6 @@ async function main(): Promise<void> {
 
   if (config.webhookUrl) {
     // ── WEBHOOK MODE (production) ────────────────────────────────────
-    const app = new Hono();
     const slackAdapter = new SlackAdapter(
       config.slackBotToken || (async (workspaceId) => workspaceId ? (await getChannelInstallation("slack", workspaceId))?.botToken : undefined)
     );
@@ -106,7 +110,7 @@ async function main(): Promise<void> {
       ...(config.whatsappEnabled ? { whatsapp: { adapter: whatsappAdapter, appSecret: config.whatsappAppSecret, verifyToken: config.whatsappVerifyToken } } : {}),
     });
     channelGateway.startRecovery();
-    if (config.apiKey) {
+    if (config.apiKey || config.betterAuthEnabled) {
       registerSdkApi(app);
       void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed"));
       sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 30_000);
@@ -584,6 +588,16 @@ async function main(): Promise<void> {
 
   } else {
     // ── POLLING MODE (local dev) ─────────────────────────────────────
+    if (config.betterAuthEnabled) {
+      registerSdkApi(app);
+      await new Promise<void>((resolve, reject) => {
+        httpServer = serve({ fetch: app.fetch, port: config.port }, (info) => {
+          logger.info({ port: info.port }, "Chusky auth API listening (polling mode)");
+          resolve();
+        });
+        httpServer.once("error", reject);
+      });
+    }
     await bot.api.deleteWebhook({ drop_pending_updates: true });
     await bot.start({
       allowed_updates: ["message", "edited_message", "callback_query", "inline_query"],

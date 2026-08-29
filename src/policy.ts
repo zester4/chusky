@@ -6,22 +6,25 @@ const STATUSES: Record<string, string> = {
   COMPOSIO_REMOTE_WORKBENCH: "🛠️ I’m working in your remote workspace…",
   COMPOSIO_SEARCH_TOOL: "🔎 I’m looking for the best tool…",
   COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ I’m carrying out those steps…",
-  CHUCK_DAYTONA_WORKSPACE: "🖥️ I’m opening your isolated workspace…",
-  CHUCK_DAYTONA_EXECUTE: "🖥️ I’m running that in your isolated workspace…",
-  CHUCK_DAYTONA_LIST_FILES: "📁 I’m listing workspace files…",
-  CHUCK_DAYTONA_READ_FILE: "📄 I’m reading a workspace file…",
-  CHUCK_DAYTONA_WRITE_FILE: "📝 I’m writing to your workspace…",
-  CHUCK_DAYTONA_FIND_FILES: "🔍 I’m searching workspace contents…",
-  CHUCK_DAYTONA_SEARCH_FILES: "🔍 I’m finding workspace files…",
-  CHUCK_DAYTONA_FILE_DETAILS: "📄 I’m checking workspace metadata…",
-  CHUCK_DAYTONA_CREATE_FOLDER: "📁 I’m creating a workspace folder…",
-  CHUCK_DAYTONA_MOVE_FILES: "↔️ I’m moving workspace files…",
-  CHUCK_DAYTONA_DELETE_FILE: "🗑️ I’m deleting from your workspace…",
-  CHUCK_DAYTONA_DELETE_WORKSPACE: "🗑️ I’m permanently deleting your workspace…",
-  CHUCK_DAYTONA_PREVIEW: "🌐 I’m opening a workspace preview…",
-  CHUCK_DAYTONA_CREATE_SNAPSHOT: "📦 I’m saving a workspace snapshot…",
-  CHUCK_DAYTONA_COMPUTER: "🖥️ I’m operating your Daytona desktop…",
-  CHUCK_DAYTONA_PAUSE: "⏸️ I’m pausing your workspace…",
+  CHUCK_GENERATE_IMAGE: "🎨 I’m creating your image…",
+  CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
+  CHUCK_CREATE_TRIGGER: "🔔 I’m setting up that automation…",
+  CHUCK_DAYTONA_WORKSPACE: "🖥️ I’m connecting to your computer…",
+  CHUCK_DAYTONA_EXECUTE: "🖥️ I’m working on your computer…",
+  CHUCK_DAYTONA_LIST_FILES: "📁 I’m checking your files…",
+  CHUCK_DAYTONA_READ_FILE: "📄 I’m opening that file…",
+  CHUCK_DAYTONA_WRITE_FILE: "📝 I’m saving that to your computer…",
+  CHUCK_DAYTONA_FIND_FILES: "🔍 I’m finding that file…",
+  CHUCK_DAYTONA_SEARCH_FILES: "🔍 I’m searching your files…",
+  CHUCK_DAYTONA_FILE_DETAILS: "📄 I’m checking that file…",
+  CHUCK_DAYTONA_CREATE_FOLDER: "📁 I’m organizing your files…",
+  CHUCK_DAYTONA_MOVE_FILES: "↔️ I’m organizing your files…",
+  CHUCK_DAYTONA_DELETE_FILE: "🗑️ I’m removing that file…",
+  CHUCK_DAYTONA_DELETE_WORKSPACE: "🗑️ I’m removing your computer workspace…",
+  CHUCK_DAYTONA_PREVIEW: "🌐 I’m opening the preview…",
+  CHUCK_DAYTONA_CREATE_SNAPSHOT: "📦 I’m saving a restore point…",
+  CHUCK_DAYTONA_COMPUTER: "🖥️ I’m using your computer…",
+  CHUCK_DAYTONA_PAUSE: "⏸️ I’m putting your computer on standby…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",
   CHUCK_TASK_LIST: "📋 I’m checking your tasks…",
   CHUCK_TASK_GET: "📋 I’m checking that task…",
@@ -31,6 +34,18 @@ const STATUSES: Record<string, string> = {
   CHUCK_TASK_CANCEL: "⏹️ I’m cancelling that task…",
   CHUCK_TASK_RETRY: "🔄 I’m re-queuing that task…",
   CHUCK_TASK_SCHEDULE: "🗓️ I’m scheduling that task…",
+  CHUCK_SAVE_MEMORY: "🧠 I’m remembering that for you…",
+  CHUCK_SEARCH_MEMORY: "🧠 I’m checking what I remember…",
+  CHUCK_FORGET_MEMORY: "🧠 I’m removing that from memory…",
+  CHUCK_SCRATCHPAD_WRITE: "📝 I’m noting that down…",
+  CHUCK_SCRATCHPAD_READ: "📝 I’m checking your notes…",
+  CHUCK_SCRATCHPAD_CLEAR: "📝 I’m clearing that note…",
+  CHUCK_SET_REMINDER: "⏰ I’m setting that reminder…",
+  CHUCK_LIST_REMINDERS: "⏰ I’m checking your reminders…",
+  CHUCK_CANCEL_REMINDER: "⏰ I’m cancelling that reminder…",
+  CHUCK_SCHEDULE_JOB: "🗓️ I’m scheduling that recurring task…",
+  CHUCK_LIST_JOBS: "🗓️ I’m checking your scheduled tasks…",
+  CHUCK_CANCEL_JOB: "🗓️ I’m cancelling that scheduled task…",
 };
 
 export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): boolean {
@@ -49,6 +64,9 @@ export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): b
 
 export function humanToolStatus(slug: string): string {
   if (STATUSES[slug]) return STATUSES[slug];
+  // Internal tools must never become part of the product's voice when a new
+  // capability is added before its user-facing copy is mapped above.
+  if (slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_")) return "⚙️ I’m taking care of that…";
   const parts = slug.split("_");
   const toolkit = parts[0] ? parts[0].charAt(0) + parts[0].slice(1).toLowerCase() : slug;
   const action = parts.slice(1).join(" ").toLowerCase() || "that task";
