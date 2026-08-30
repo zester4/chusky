@@ -13,6 +13,21 @@ import type { ContentPart } from "./types.js";
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
+const SELF_SERVICE_PROJECT_LIMIT = 10;
+const SELF_SERVICE_SCOPES = new Set([
+  "*", "threads:read", "threads:write", "tasks:read", "tasks:write",
+  "approvals:read", "approvals:write", "files:read", "files:write",
+  "webhooks:read", "webhooks:write", "audit-events:read", "usage:read",
+]);
+
+type WebAuthSession = { user?: { id?: string; emailVerified?: boolean } } | null;
+const defaultWebAuthSessionResolver = (headers: Headers): Promise<WebAuthSession> => getAuth().api.getSession({ headers }) as Promise<WebAuthSession>;
+let webAuthSessionResolver = defaultWebAuthSessionResolver;
+
+/** Test-only seam; production always validates the Better Auth session cookie. */
+export function setWebAuthSessionResolverForTests(resolver?: (headers: Headers) => Promise<WebAuthSession>): void {
+  webAuthSessionResolver = resolver ?? defaultWebAuthSessionResolver;
+}
 
 function apiError(c: any, status: number, code: string, message: string) {
   const requestId = (c.get("sdkRequestId") as string | undefined) ?? randomUUID();
@@ -68,6 +83,30 @@ function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
   return pathname === "/v1/admin" || pathname.startsWith("/v1/admin/") || c.req.path === "/v1/admin" || c.req.path.startsWith("/v1/admin/");
 }
 
+function accountProjectScopes(value: unknown): string[] | undefined {
+  if (value === undefined) return ["*"];
+  if (!Array.isArray(value) || !value.length || value.length > SELF_SERVICE_SCOPES.size || !value.every((scope) => typeof scope === "string" && SELF_SERVICE_SCOPES.has(scope))) return undefined;
+  const scopes = [...new Set(value)];
+  return scopes.includes("*") && scopes.length !== 1 ? undefined : scopes;
+}
+
+function accountProjectView(project: SdkProjectRecord) {
+  return {
+    id: project.id,
+    name: project.name,
+    keyPrefix: project.keyPrefix,
+    scopes: project.scopes,
+    createdAt: new Date(project.createdAt).toISOString(),
+    rotatedAt: project.rotatedAt ? new Date(project.rotatedAt).toISOString() : undefined,
+    revokedAt: project.revokedAt ? new Date(project.revokedAt).toISOString() : undefined,
+  };
+}
+
+function webProjectOwner(c: any): { id: string; verified: boolean } | undefined {
+  const id = c.get("webAuthUserId") as string | undefined;
+  return id ? { id, verified: c.get("webAuthEmailVerified") === true } : undefined;
+}
+
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
 function runView(threadId: string, run: SdkRunRecord) { return { ...run, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }; }
 type RunBody = { input?: string; attachments?: string[] };
@@ -119,10 +158,11 @@ export function registerSdkApi(app: Hono): void {
     let principal = await authorized(token);
     if (!principal && config.betterAuthEnabled && !token) {
       try {
-        const session = await getAuth().api.getSession({ headers: c.req.raw.headers });
+        const session = await webAuthSessionResolver(c.req.raw.headers);
         if (session?.user?.id) {
           principal = { projectId: "web", scopes: ["*"], root: false };
           (c.set as (key: string, value: unknown) => void)("webAuthUserId", session.user.id);
+          (c.set as (key: string, value: unknown) => void)("webAuthEmailVerified", session.user.emailVerified === true);
         }
       } catch { /* Treat an unavailable/invalid auth cookie as unauthenticated. */ }
     }
@@ -249,6 +289,74 @@ export function registerSdkApi(app: Hono): void {
     if (await getTelegramUserIdForWebAuth(webAuthUserId)) return apiError(c, 409, "already_linked", "This web account is already linked to Telegram.");
     const link = await createWebTelegramLinkCode(webAuthUserId);
     return c.json({ code: link.code, expiresAt: new Date(link.expiresAt).toISOString() }, 201);
+  });
+
+  app.get("/v1/account/projects", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before creating or managing API keys.");
+    const control = await getSession(0);
+    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id).map(accountProjectView) });
+  });
+
+  app.post("/v1/account/projects", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before creating an API key.");
+    const body = await c.req.json().catch(() => ({})) as { name?: unknown; scopes?: unknown };
+    const name = typeof body.name === "string" ? body.name.trim().slice(0, 100) : "";
+    const scopes = accountProjectScopes(body.scopes);
+    if (!name) return apiError(c, 400, "invalid_project", "Project name is required.");
+    if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
+    const control = await getSession(0);
+    if (control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.revokedAt).length >= SELF_SERVICE_PROJECT_LIMIT) return apiError(c, 409, "project_limit_reached", `You can have up to ${SELF_SERVICE_PROJECT_LIMIT} active API keys.`);
+    const id = `proj_${randomUUID()}`;
+    const key = `chsk_${id}_${randomBytes(24).toString("base64url")}`;
+    const project: SdkProjectRecord = { id, name, keyPrefix: key.slice(0, 18), keyHash: digestKey(key), scopes, createdAt: Date.now(), ownerWebAuthUserId: owner.id };
+    control.sdkProjects!.push(project);
+    await saveSession(0, control);
+    return c.json({ ...accountProjectView(project), key }, 201);
+  });
+
+  app.patch("/v1/account/projects/:projectId", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before managing API keys.");
+    const scopes = accountProjectScopes((await c.req.json().catch(() => ({})) as { scopes?: unknown }).scopes);
+    if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
+    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    project.scopes = scopes;
+    await saveSession(0, control);
+    return c.json(accountProjectView(project));
+  });
+
+  app.post("/v1/account/projects/:projectId/rotate-key", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before managing API keys.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
+    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    const key = `chsk_${project.id}_${randomBytes(24).toString("base64url")}`;
+    project.keyHash = digestKey(key);
+    project.keyPrefix = key.slice(0, 18);
+    project.rotatedAt = Date.now();
+    await saveSession(0, control);
+    return c.json({ ...accountProjectView(project), key }, 201);
+  });
+
+  app.delete("/v1/account/projects/:projectId", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before managing API keys.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
+    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    project.revokedAt = Date.now();
+    await saveSession(0, control);
+    return c.body(null, 204);
   });
 
   app.post("/v1/admin/projects", async (c) => { const body = await c.req.json().catch(() => ({})) as { name?: string; scopes?: string[] }; const name = String(body.name ?? "").trim().slice(0, 100); const scopes = Array.isArray(body.scopes) && body.scopes.every((item) => typeof item === "string") ? [...new Set(body.scopes)].slice(0, 20) : ["*"]; if (!name) return apiError(c, 400, "invalid_project", "Project name is required."); const control = await getSession(0); const id = `proj_${randomUUID()}`; const secret = `chsk_${id}_${randomBytes(24).toString("base64url")}`; const record: SdkProjectRecord = { id, name, keyPrefix: secret.slice(0, 18), keyHash: digestKey(secret), scopes, createdAt: Date.now() }; control.sdkProjects!.push(record); await saveSession(0, control); return c.json({ id, name, key: secret, keyPrefix: record.keyPrefix, scopes, createdAt: new Date(record.createdAt).toISOString() }, 201); });

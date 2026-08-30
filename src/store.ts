@@ -40,7 +40,18 @@ export interface UserSession {
   createdAt: number;
   updatedAt: number;
 }
-export interface SdkProjectRecord { id: string; name: string; keyPrefix: string; keyHash: string; scopes: string[]; createdAt: number; revokedAt?: number; }
+export interface SdkProjectRecord {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  keyHash: string;
+  scopes: string[];
+  createdAt: number;
+  /** Better Auth user that owns a self-service dashboard project. Root-created projects have no owner. */
+  ownerWebAuthUserId?: string;
+  rotatedAt?: number;
+  revokedAt?: number;
+}
 
 export interface SdkRunRecord {
   id: string;

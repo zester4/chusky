@@ -11,12 +11,22 @@ This document is the implementation contract for the SDK. It prevents the existi
 5. Every response has `X-Request-Id`. Errors use `{ "error": { "code", "message", "requestId" } }`.
 6. Runs may require approval. The server persists the exact pending action and binds a decision to its end user; neither the SDK nor a webhook payload is authorization.
 
+## Dashboard API-key management
+
+Verified Better Auth users may manage only their own projects through
+`/v1/account/projects`. These cookie-authenticated routes create, list, update
+scopes, rotate, and revoke project keys. They never accept or return
+`CHUSKY_PROJECT_KEY`; raw `chsk_` keys are returned only by create and rotation.
+Each verified account may have at most 10 active projects. Root-created projects
+remain ownerless operator records and are not visible through account routes.
+
 ## Resources
 
 | Resource | Endpoint | Notes |
 | --- | --- | --- |
 | Threads | `POST /v1/threads`, `GET /v1/threads/:threadId` | Conversation/memory boundary for one explicit SDK end user. |
 | Projects | `GET/POST /v1/admin/projects`, `DELETE /v1/admin/projects/:id` | Root-key-only project provisioning and key revocation. |
+| Dashboard projects | `GET/POST /v1/account/projects`, `PATCH /v1/account/projects/:id`, `POST .../rotate-key`, `DELETE .../:id` | Better-Auth-cookie-only, verified-user project management. |
 | Runs | `POST /v1/threads/:threadId/runs` | Executes durable Chusky work. `wait` is bounded. |
 | Run stream | `POST /v1/threads/:threadId/runs/stream` | `application/x-ndjson`; emits typed run events. |
 | Runs | `GET /v1/threads/:threadId/runs/:runId`, `POST .../cancel` | Cancellation is request-specific; durable task results stay queryable. |

@@ -31,6 +31,20 @@ const project = await admin.projects.create({ name: "My App", scopes: ["*"] });
 console.log(project.key); // save once; list() never returns it
 ```
 
+## Dashboard self-service keys
+
+A verified Chusky dashboard user can create up to 10 project keys from
+**Developer API** in the dashboard. The raw `chsk_` secret appears only when a
+key is created or rotated. Put that scoped value in the application's trusted
+server environment:
+
+```env
+CHUSKY_API_KEY=chsk_...
+```
+
+The dashboard never exposes `CHUSKY_PROJECT_KEY`; that Oracle-only root secret
+remains solely for trusted operator `/v1/admin/*` provisioning.
+
 ## Contract and security
 
 - The SDK targets the versioned `/v1` Developer API described in [`docs/api-contract.md`](docs/api-contract.md). Do not point it at private `/cli/*` endpoints or use CLI device tokens as developer API keys.

@@ -18,6 +18,14 @@ paths:
     delete: { summary: Revoke a developer project key, responses: { '204': { description: Revoked } } }
   /admin/projects/{projectId}/rotate-key:
     post: { summary: Replace a project key and return the new value exactly once, responses: { '201': { description: Rotated } } }
+  /account/projects:
+    get: { summary: List the verified dashboard user's project keys without raw secrets, responses: { '200': { description: OK } } }
+    post: { summary: Create a verified dashboard user's project key and return it exactly once, responses: { '201': { description: Created }, '403': { description: Dashboard session or verified email required }, '409': { description: Active key limit reached } } }
+  /account/projects/{projectId}:
+    patch: { summary: Replace scopes for the authenticated owner's active project key, responses: { '200': { description: Updated }, '404': { description: Not found } } }
+    delete: { summary: Revoke the authenticated owner's project key, responses: { '204': { description: Revoked }, '404': { description: Not found } } }
+  /account/projects/{projectId}/rotate-key:
+    post: { summary: Rotate the authenticated owner's project key and return it exactly once, responses: { '201': { description: Rotated }, '404': { description: Not found } } }
   /threads:
     get:
       summary: List a user's threads
