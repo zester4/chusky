@@ -165,6 +165,11 @@ From the repository root, run `npm run dashboard` to start the existing
 `chusky-web` Next.js app. Visit `http://localhost:3000/app/operations` after
 signing in; `/app/delivery` is the focused delivery view.
 
+To use the same workspace on web and Telegram, sign in to the dashboard, open
+**Settings**, create a Telegram link code, then send the copied `/link web_…`
+command from the Telegram account that already uses Chusky. The high-entropy
+code expires in 10 minutes, is one-time, and cannot rebind either account.
+
 ### Fly.io
 ```bash
 fly launch --name chuck-agent --no-deploy
@@ -240,6 +245,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/channel link slack|whatsapp|sendblue` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
 | `/channel notify slack|whatsapp|sendblue on|off` | Enable or disable proactive notifications for a linked channel |
+| `/link web_<one-time-code>` | Link the authenticated dashboard workspace to this verified Telegram account |
 | `/dashboard` | Open the authenticated Chusky web dashboard |
 
 ## Natural-language reminders, jobs, and scratchpad
@@ -411,6 +417,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `REDIS_URL` | — | (memory) | Redis for persistence |
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |
+| `BETTER_AUTH_MIGRATION_DATABASE_URL` | Neon | — | Direct PostgreSQL connection used only by `npm run auth:migrate` for Better Auth schema migrations |
 | `BETTER_AUTH_DATABASE` | — | `./data/better-auth.sqlite` | Local-development Better Auth SQLite fallback only |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |

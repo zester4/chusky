@@ -21,6 +21,7 @@ import { putR2Object, r2Configured } from "./lib/storage/r2.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
+import { redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 
 const activeRequests = new Map<number, AbortController>();
@@ -339,6 +340,28 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await ctx.reply("Usage: /channel link slack|whatsapp|sendblue | /channel list | /channel notify slack|whatsapp|sendblue on|off");
+  });
+
+  // A web account proves possession of its Better Auth session by generating a
+  // one-time `web_…` code. Telegram remains the ownership authority: only the
+  // verified Telegram user who sends this command can attach that workspace.
+  bot.command("link", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const code = (ctx.match?.trim() ?? "");
+    const result = await redeemWebTelegramLinkCode(code, ctx.from!.id);
+    if (result === "linked") {
+      await ctx.reply("✅ Your Chusky web dashboard is now linked to this Telegram account. Refresh the dashboard to see the same workspace.");
+      return;
+    }
+    if (result === "already_linked") {
+      await ctx.reply("✅ That web dashboard is already linked to this Telegram account.");
+      return;
+    }
+    if (result === "conflict") {
+      await ctx.reply("That web dashboard or Telegram account is already linked elsewhere. For safety, Chusky did not change either connection.");
+      return;
+    }
+    await ctx.reply("That web link code is invalid or expired. Create a fresh one from Dashboard → Settings, then send /link <code> here within 10 minutes.");
   });
 
   bot.command("image", async (ctx) => {

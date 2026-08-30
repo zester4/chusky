@@ -255,6 +255,16 @@ export interface ChannelLinkCodeRecord {
   used: boolean;
 }
 
+/** A one-time proof that an authenticated web account may join a Telegram account. */
+export interface WebTelegramLinkCodeRecord {
+  codeHash: string;
+  webAuthUserId: string;
+  expiresAt: number;
+  used: boolean;
+}
+
+export type WebTelegramLinkResult = "linked" | "already_linked" | "conflict" | "invalid";
+
 export interface OutboxRecord {
   id: string;
   idempotencyKey: string;
@@ -345,6 +355,9 @@ interface Backend {
   consumeChannelOAuthState(stateHash: string): Promise<ChannelOAuthStateRecord | undefined>;
   createChannelLinkCode(record: ChannelLinkCodeRecord): Promise<void>;
   consumeChannelLinkCode(provider: ChannelProvider, codeHash: string): Promise<ChannelLinkCodeRecord | undefined>;
+  createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void>;
+  redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult>;
+  getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined>;
   claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
   completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void>;
   releaseChannelEvent(provider: ChannelProvider, eventId: string): Promise<void>;
@@ -381,6 +394,9 @@ class RedisBackend implements Backend {
   private channelInstallationKey = (provider: ChannelInstallationRecord["provider"], workspaceId: string) => `chuck:channel:installation:${provider}:${workspaceId}`;
   private channelOAuthKey = (stateHash: string) => `chuck:channel:oauth:${stateHash}`;
   private channelLinkKey = (provider: ChannelProvider, codeHash: string) => `chuck:channel:link:${provider}:${codeHash}`;
+  private webTelegramLinkKey = (codeHash: string) => `chuck:web-telegram:code:${codeHash}`;
+  private webTelegramUserKey = (webAuthUserId: string) => `chuck:web-telegram:web:${createHash("sha1").update(webAuthUserId).digest("hex")}`;
+  private telegramWebUserKey = (telegramUserId: number) => `chuck:web-telegram:telegram:${telegramUserId}`;
   private channelEventKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
   private channelEventDoneKey = (provider: ChannelProvider, eventId: string) => `chuck:channel:event:done:${provider}:${createHash("sha256").update(eventId).digest("hex")}`;
   private channelInboundEventKey = (eventId: string) => `chuck:channel:inbound:${createHash("sha256").update(eventId).digest("hex")}`;
@@ -617,6 +633,27 @@ class RedisBackend implements Backend {
     const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
     return claimed ? JSON.parse(claimed) as ChannelLinkCodeRecord : undefined;
   }
+  async createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void> {
+    const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    await this.r.set(this.webTelegramLinkKey(record.codeHash), JSON.stringify(record), "EX", ttl, "NX");
+  }
+  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
+    const codeKey = this.webTelegramLinkKey(codeHash);
+    const result = await this.r.eval(
+      "local raw=redis.call('get',KEYS[1]); if not raw then return 'invalid' end; local record=cjson.decode(raw); if record.used or record.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return 'invalid' end; redis.call('del',KEYS[1]); local webKey='chuck:web-telegram:web:' .. redis.sha1hex(record.webAuthUserId); local currentTelegram=redis.call('get',webKey); local currentWeb=redis.call('get',KEYS[2]); if (currentTelegram and currentTelegram ~= ARGV[2]) or (currentWeb and currentWeb ~= record.webAuthUserId) then return 'conflict' end; if currentTelegram and currentWeb then return 'already_linked' end; redis.call('set',webKey,ARGV[2]); redis.call('set',KEYS[2],record.webAuthUserId); return 'linked'",
+      2,
+      codeKey,
+      this.telegramWebUserKey(telegramUserId),
+      Date.now(),
+      String(telegramUserId),
+    ) as WebTelegramLinkResult;
+    return result;
+  }
+  async getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
+    const raw = await this.r.get(this.webTelegramUserKey(webAuthUserId));
+    const userId = Number(raw);
+    return Number.isSafeInteger(userId) && userId > 0 ? userId : undefined;
+  }
   async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean> {
     if (await this.r.exists(this.channelEventDoneKey(provider, eventId))) return false;
     return (await this.r.set(this.channelEventKey(provider, eventId), "1", "EX", Math.max(30, Math.min(15 * 60, ttlSeconds)), "NX")) === "OK";
@@ -756,6 +793,9 @@ class MemoryBackend implements Backend {
   private channelInstallations = new Map<string, ChannelInstallationRecord>();
   private channelOAuthStates = new Map<string, ChannelOAuthStateRecord>();
   private channelLinkCodes = new Map<string, ChannelLinkCodeRecord>();
+  private webTelegramLinkCodes = new Map<string, WebTelegramLinkCodeRecord>();
+  private telegramUserByWebAuth = new Map<string, number>();
+  private webAuthByTelegramUser = new Map<number, string>();
   private channelEvents = new Map<string, number>();
   private completedChannelEvents = new Map<string, number>();
   private channelInboundEvents = new Map<string, ChannelInboundEventRecord>();
@@ -902,6 +942,20 @@ class MemoryBackend implements Backend {
     this.channelLinkCodes.delete(key);
     return record;
   }
+  async createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord) { this.webTelegramLinkCodes.set(record.codeHash, record); }
+  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
+    const record = this.webTelegramLinkCodes.get(codeHash);
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.webTelegramLinkCodes.delete(codeHash); return "invalid"; }
+    this.webTelegramLinkCodes.delete(codeHash);
+    const linkedTelegram = this.telegramUserByWebAuth.get(record.webAuthUserId);
+    const linkedWeb = this.webAuthByTelegramUser.get(telegramUserId);
+    if ((linkedTelegram && linkedTelegram !== telegramUserId) || (linkedWeb && linkedWeb !== record.webAuthUserId)) return "conflict";
+    if (linkedTelegram && linkedWeb) return "already_linked";
+    this.telegramUserByWebAuth.set(record.webAuthUserId, telegramUserId);
+    this.webAuthByTelegramUser.set(telegramUserId, record.webAuthUserId);
+    return "linked";
+  }
+  async getTelegramUserIdForWebAuth(webAuthUserId: string) { return this.telegramUserByWebAuth.get(webAuthUserId); }
   async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number) {
     const key = `${provider}:${eventId}`;
     const completed = this.completedChannelEvents.get(key);
@@ -1524,6 +1578,30 @@ export async function createChannelLinkCode(userId: number, provider: ChannelPro
 
 export async function consumeChannelLinkCode(provider: ChannelProvider, code: string): Promise<ChannelLinkCodeRecord | undefined> {
   return backend.consumeChannelLinkCode(provider, hashCliSecret(code.trim()));
+}
+
+const webTelegramCodePattern = /^web_[A-Za-z0-9_-]{20,}$/;
+
+/** Creates a short-lived proof for a signed-in dashboard user. The raw code is returned once. */
+export async function createWebTelegramLinkCode(webAuthUserId: string, ttlMs = 10 * 60 * 1000): Promise<{ code: string; expiresAt: number }> {
+  const owner = webAuthUserId.trim();
+  if (!owner || owner.length > 200) throw new Error("A valid web account is required");
+  const code = `web_${randomBytes(18).toString("base64url")}`;
+  const expiresAt = Date.now() + ttlMs;
+  await backend.createWebTelegramLinkCode({ codeHash: hashCliSecret(code), webAuthUserId: owner, expiresAt, used: false });
+  return { code, expiresAt };
+}
+
+/** Redeems a dashboard link proof from the already verified Telegram account. */
+export async function redeemWebTelegramLinkCode(code: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
+  const clean = code.trim();
+  if (!webTelegramCodePattern.test(clean) || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return "invalid";
+  return backend.redeemWebTelegramLinkCode(hashCliSecret(clean), telegramUserId);
+}
+
+export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
+  const owner = webAuthUserId.trim();
+  return owner && owner.length <= 200 ? backend.getTelegramUserIdForWebAuth(owner) : undefined;
 }
 
 export async function claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds = 24 * 60 * 60): Promise<boolean> {

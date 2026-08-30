@@ -7,7 +7,7 @@ import { ApprovalRequiredError, runAgent, transcribeAudio } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
-import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getDaytonaWorkspace, getSession, getTask, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, canSpend, checkRateLimit, claimApproval, createWebTelegramLinkCode, getApproval, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import type { ContentPart } from "./types.js";
 
@@ -44,11 +44,20 @@ async function authorized(token: string): Promise<SdkPrincipal | undefined> {
   return project ? { projectId: project.id, scopes: project.scopes, root: false } : undefined;
 }
 
-function sdkUser(c: any): { externalId: string; userId: number; projectId: string } | undefined {
+type SdkOwner = { externalId: string; userId: number; projectId: string };
+function sdkUserFromRequest(c: any): SdkOwner | undefined {
   const externalId = (c.req.header("X-Chusky-User-Id") ?? c.get("webAuthUserId") ?? "").trim();
   if (!externalId || externalId.length > 200) return undefined;
   const principal = c.get("sdkPrincipal") as SdkPrincipal | undefined;
   return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId } : undefined;
+}
+function sdkUser(c: any): SdkOwner | undefined { return c.get("sdkOwner") as SdkOwner | undefined; }
+async function resolveSdkUser(c: any): Promise<SdkOwner | undefined> {
+  const owner = sdkUserFromRequest(c);
+  if (!owner) return undefined;
+  const webAuthUserId = c.get("webAuthUserId") as string | undefined;
+  const telegramUserId = webAuthUserId ? await getTelegramUserIdForWebAuth(webAuthUserId) : undefined;
+  return telegramUserId ? { ...owner, userId: telegramUserId } : owner;
 }
 
 function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
@@ -126,9 +135,11 @@ export function registerSdkApi(app: Hono): void {
       return;
     }
     if (!scopeAllowed(principal, c.req.path, c.req.method)) return apiError(c, 403, "insufficient_scope", `This API key lacks ${requiredScope(c.req.path, c.req.method)}.`);
-    if (!sdkUser(c)) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required.");
+    const owner = await resolveSdkUser(c);
+    if (!owner) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required.");
+    (c.set as (key: string, value: unknown) => void)("sdkOwner", owner);
     const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
-    const owner = sdkUser(c); if (owner && c.req.method !== "GET") await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+    if (c.req.method !== "GET") await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
   });
 
   app.get("/v1/ops/health", async (c) => {
@@ -147,6 +158,7 @@ export function registerSdkApi(app: Hono): void {
 
   app.get("/v1/account/overview", async (c) => {
     const owner = sdkUser(c)!;
+    const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
     const session = await getSession(owner.userId);
     const [channels, devices, reminders, jobs, workspace, deliveries] = await Promise.all([
       listChannelIdentities(owner.userId),
@@ -169,8 +181,17 @@ export function registerSdkApi(app: Hono): void {
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash: _tokenHash, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
     });
+  });
+
+  app.post("/v1/account/telegram-link", async (c) => {
+    const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
+    if (!webAuthUserId) return apiError(c, 403, "web_session_required", "Sign in to the Chusky dashboard before linking Telegram.");
+    if (await getTelegramUserIdForWebAuth(webAuthUserId)) return apiError(c, 409, "already_linked", "This web account is already linked to Telegram.");
+    const link = await createWebTelegramLinkCode(webAuthUserId);
+    return c.json({ code: link.code, expiresAt: new Date(link.expiresAt).toISOString() }, 201);
   });
 
   app.post("/v1/admin/projects", async (c) => { const body = await c.req.json().catch(() => ({})) as { name?: string; scopes?: string[] }; const name = String(body.name ?? "").trim().slice(0, 100); const scopes = Array.isArray(body.scopes) && body.scopes.every((item) => typeof item === "string") ? [...new Set(body.scopes)].slice(0, 20) : ["*"]; if (!name) return apiError(c, 400, "invalid_project", "Project name is required."); const control = await getSession(0); const id = `proj_${randomUUID()}`; const secret = `chsk_${id}_${randomBytes(24).toString("base64url")}`; const record: SdkProjectRecord = { id, name, keyPrefix: secret.slice(0, 18), keyHash: digestKey(secret), scopes, createdAt: Date.now() }; control.sdkProjects!.push(record); await saveSession(0, control); return c.json({ id, name, key: secret, keyPrefix: record.keyPrefix, scopes, createdAt: new Date(record.createdAt).toISOString() }, 201); });

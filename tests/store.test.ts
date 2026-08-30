@@ -8,6 +8,7 @@ import {
   claimTelegramUpdate,
   type DaytonaWorkspaceRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
+  createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
 } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
@@ -126,4 +127,18 @@ test("CLI pairing is one-time and device tokens authenticate by hash", async () 
   const auth = await import("../src/store.js").then(({ authenticateCliToken }) => authenticateCliToken(created.token));
   assert.equal(auth?.userId, userId);
   assert.equal(await import("../src/store.js").then(({ authenticateCliToken }) => authenticateCliToken("not-a-token")), undefined);
+});
+
+test("web-to-Telegram links are high-entropy, one-time, and cannot be rebound", async () => {
+  const webAccount = `web-user-${Date.now()}`;
+  const { code } = await createWebTelegramLinkCode(webAccount);
+  assert.match(code, /^web_[A-Za-z0-9_-]{20,}$/);
+  assert.equal(await redeemWebTelegramLinkCode(code, 810012), "linked");
+  assert.equal(await getTelegramUserIdForWebAuth(webAccount), 810012);
+  assert.equal(await redeemWebTelegramLinkCode(code, 810012), "invalid");
+
+  const second = await createWebTelegramLinkCode(webAccount);
+  assert.equal(await redeemWebTelegramLinkCode(second.code, 810013), "conflict");
+  const otherWeb = await createWebTelegramLinkCode(`other-${Date.now()}`);
+  assert.equal(await redeemWebTelegramLinkCode(otherWeb.code, 810012), "conflict");
 });
