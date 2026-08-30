@@ -18,20 +18,25 @@ let postgres: Pool | undefined;
 let sqlite: Database.Database | undefined;
 let migration: Promise<void> | undefined;
 
-function authConfig() {
+type AuthDatabase = Database.Database | Pool;
+
+function createDatabase(): AuthDatabase {
+  const databaseUrl = config.betterAuthDatabaseUrl;
+  if (process.env.NODE_ENV === "production" && !databaseUrl) {
+    throw new Error("BETTER_AUTH_DATABASE_URL must be configured in production; use Neon Postgres instead of local SQLite.");
+  }
+  if (databaseUrl) return postgres = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+  mkdirSync(dirname(resolve(config.betterAuthDatabasePath)), { recursive: true });
+  return sqlite = new Database(config.betterAuthDatabasePath);
+}
+
+function authConfig(database: AuthDatabase) {
   if (process.env.BETTER_AUTH_ENABLED !== "true") throw new Error("Better Auth is disabled; set BETTER_AUTH_ENABLED=true");
   const secret = process.env.BETTER_AUTH_SECRET?.trim() ?? "";
   if (secret.length < 32) throw new Error("BETTER_AUTH_SECRET must be at least 32 characters");
   const baseURL = (process.env.BETTER_AUTH_URL?.trim() || "http://localhost:8080").replace(/\/+$/, "");
   const trustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS || "http://localhost:3000,http://localhost:3010")
     .split(",").map((origin) => origin.trim()).filter(Boolean);
-  const databaseUrl = config.betterAuthDatabaseUrl;
-  if (process.env.NODE_ENV === "production" && !databaseUrl) {
-    throw new Error("BETTER_AUTH_DATABASE_URL must be configured in production; use Neon Postgres instead of local SQLite.");
-  }
-  const database = databaseUrl
-    ? (postgres = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 }))
-    : (() => { mkdirSync(dirname(resolve(config.betterAuthDatabasePath)), { recursive: true }); return sqlite = new Database(config.betterAuthDatabasePath); })();
   const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
 
@@ -83,16 +88,33 @@ function authConfig() {
 }
 
 export function getAuth() {
-  if (!instance) instance = betterAuth(authConfig());
+  if (!instance) instance = betterAuth(authConfig(createDatabase()));
   return instance;
 }
 
 export async function initAuth(): Promise<void> {
+  // Neon pooled application connections should not run DDL migrations. Use the
+  // explicit auth:migrate command with BETTER_AUTH_MIGRATION_DATABASE_URL.
+  if (postgres) { await postgres.query("SELECT 1"); return; }
   if (!migration) {
     const configured = getAuth();
     migration = getMigrations(configured.options).then(({ runMigrations }) => runMigrations());
   }
   await migration;
+}
+
+/** Run Better Auth migrations against Neon's direct, non-pooler connection. */
+export async function migrateAuthDatabase(): Promise<void> {
+  const migrationUrl = config.betterAuthMigrationDatabaseUrl;
+  if (!migrationUrl) throw new Error("BETTER_AUTH_MIGRATION_DATABASE_URL must be set to Neon's direct connection string before running auth migrations.");
+  const migrationPool = new Pool({ connectionString: migrationUrl, max: 1, connectionTimeoutMillis: 10_000 });
+  try {
+    const migrationAuth = betterAuth(authConfig(migrationPool));
+    const { runMigrations } = await getMigrations(migrationAuth.options);
+    await runMigrations();
+  } finally {
+    await migrationPool.end();
+  }
 }
 
 // Better Auth's CLI discovers a named `auth` export. Keep the export lazy for

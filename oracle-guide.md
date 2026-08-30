@@ -134,13 +134,15 @@ connection string. Add it on Oracle only—never in Vercel or Git:
 ```env
 BETTER_AUTH_ENABLED=true
 BETTER_AUTH_DATABASE_URL=postgresql://<role>:<password>@<endpoint>-pooler.<region>.aws.neon.tech/neondb?sslmode=require
+BETTER_AUTH_MIGRATION_DATABASE_URL=postgresql://<role>:<password>@<endpoint>.<region>.aws.neon.tech/neondb?sslmode=require
 ```
 
 Keep `REDIS_URL`: Neon stores Better Auth's relational records, while Redis
 continues to hold Chusky's locks, agent state, workflow state, and delivery
 outbox. Do not set `BETTER_AUTH_DATABASE` in production; SQLite is local-only.
-On startup, Chusky applies Better Auth's built-in migration to the configured
-Postgres database. Deploy first to a Neon staging branch, test sign-up,
+Before the first deployment (and after a Better Auth schema upgrade), run
+`npm run auth:migrate`. It uses the direct URL for DDL; the running application
+uses the pooled URL. Deploy first to a Neon staging branch, test sign-up,
 verification, sign-in, sign-out, and `/api/auth/ok`, then switch the production
 Oracle environment to the production branch connection string.
 

@@ -16,6 +16,7 @@
     "chat": "tsx src/cli.ts chat",
     "telegram": "tsx src/index.ts",
     "setup": "tsx src/cli.ts setup",
+    "auth:migrate": "tsx src/migrate-auth.ts",
     "doctor": "tsx src/cli.ts doctor",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",

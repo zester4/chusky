@@ -188,6 +188,8 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Neon/Postgres is the production source of truth for Better Auth. The
   // SQLite path remains available only for local development.
   betterAuthDatabaseUrl: optional("BETTER_AUTH_DATABASE_URL", ""),
+  // Use Neon's direct (non-pooler) URL only for explicit schema migrations.
+  betterAuthMigrationDatabaseUrl: optional("BETTER_AUTH_MIGRATION_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
   // Dedicated bearer key for the self-hosted developer SDK. It is never a CLI device token.
   apiKey: optional("CHUSKY_API_KEY", ""),
