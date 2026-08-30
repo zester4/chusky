@@ -35,6 +35,7 @@ import { registerSdkApi } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import { registerAuthRoutes } from "./authRoutes.js";
 import { initAuth } from "./auth.js";
+import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -105,7 +106,7 @@ async function main(): Promise<void> {
       config.slackBotToken || (async (workspaceId) => workspaceId ? (await getChannelInstallation("slack", workspaceId))?.botToken : undefined)
     );
     const whatsappAdapter = new WhatsAppAdapter(config.whatsappAccessToken, config.whatsappPhoneNumberId, config.whatsappGraphVersion);
-    const sendblueAdapter = new SendblueAdapter(config.sendblueApiKey, config.sendblueApiSecret, config.sendblueNumber, `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/webhook`);
+    const sendblueAdapter = new SendblueAdapter(config.sendblueApiKey, config.sendblueApiSecret, config.sendblueNumber, `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/status`);
     if (config.slackEnabled) channelGateway.register(slackAdapter);
     if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
     if (config.sendblueEnabled) channelGateway.register(sendblueAdapter);
@@ -139,6 +140,7 @@ async function main(): Promise<void> {
           await updateChannelInboundEvent(event.eventId, { status: "completed" });
         } catch (error) {
           await updateChannelInboundEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+          recordFailure("workflow_failure", error, { workflow: "sendblue-event", eventId: event.eventId });
           throw error;
         }
       }));
@@ -572,8 +574,13 @@ async function main(): Promise<void> {
     app.get("/health", async (c) => {
       try {
         const me = await bot.api.getMe();
-        return c.json({ ok: true, bot: me.username, agent: "Chusky", persistence: isDurableStore() ? "redis" : "memory", channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled } });
+        const redis = isDurableStore();
+        const production = process.env.NODE_ENV === "production";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled" } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured";
+        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
+        recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
         return c.json({ ok: false, error: String(e) }, 503);
       }
     });

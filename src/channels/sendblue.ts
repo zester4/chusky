@@ -43,6 +43,8 @@ function attachment(payload: any): ChannelAttachment[] {
   return [{ id: String(payload.message_handle ?? mediaUrl), kind, url: mediaUrl }];
 }
 
+const REACTIONS = new Set(["love", "like", "dislike", "laugh", "emphasize", "question"]);
+
 export function normalizeSendblueMessage(payload: any, receivedAt = Date.now()): InboundMessage | undefined {
   if (!payload || payload.is_outbound === true || !payload.message_handle || !payload.from_number) return undefined;
   const groupId = String(payload.group_id ?? "").trim();
@@ -55,6 +57,7 @@ export function normalizeSendblueMessage(payload: any, receivedAt = Date.now()):
     providerUserId: sender,
     providerConversationId: groupId || sender,
     ...(groupId ? { providerWorkspaceId: recipient } : {}),
+    ...(payload.reply_to?.message_handle ? { providerReplyToId: String(payload.reply_to.message_handle) } : {}),
     text: typeof payload.content === "string" && payload.content.trim() ? payload.content.trim() : undefined,
     attachments: attachment(payload),
     receivedAt,
@@ -111,6 +114,18 @@ export class SendblueAdapter implements ChannelAdapter {
       body: JSON.stringify({ from_number: this.fromNumber, number: target.conversationId, state: "stop" }),
     });
     if (!response.ok) throw new Error(`Sendblue typing indicator stop failed: ${response.status}`);
+  }
+
+  async markRead(target: OutboundMessage["target"]): Promise<void> {
+    if (this.isGroup(target) || !this.apiKey || !this.apiSecret || !this.fromNumber) return;
+    const response = await this.fetchImpl("https://api.sendblue.com/api/mark-read", { method: "POST", headers: this.headers(), body: JSON.stringify({ number: target.conversationId, from_number: this.fromNumber }) });
+    if (!response.ok) throw new Error(`Sendblue mark-read failed: ${response.status}`);
+  }
+
+  async react(target: OutboundMessage["target"], messageHandle: string, reaction: "love" | "like" | "dislike" | "laugh" | "emphasize" | "question"): Promise<void> {
+    if (this.isGroup(target) || !REACTIONS.has(reaction) || !messageHandle || !this.apiKey || !this.apiSecret || !this.fromNumber) return;
+    const response = await this.fetchImpl("https://api.sendblue.com/api/send-reaction", { method: "POST", headers: this.headers(), body: JSON.stringify({ from_number: this.fromNumber, message_handle: messageHandle, reaction }) });
+    if (!response.ok) throw new Error(`Sendblue reaction failed: ${response.status}`);
   }
 
   async configureReceiveWebhook(url: string, secret: string): Promise<void> {

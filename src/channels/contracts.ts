@@ -34,6 +34,7 @@ export interface InboundMessage {
   providerWorkspaceId?: string;
   providerConversationId: string;
   providerThreadId?: string;
+  providerReplyToId?: string;
   text?: string;
   attachments: ChannelAttachment[];
   interaction?: ChannelInteraction;
@@ -112,6 +113,8 @@ export interface ChannelAdapter {
   edit?(target: ReplyTarget, providerMessageId: string, text: string, blocks?: unknown[]): Promise<DeliveryReceipt>;
   typing?(target: ReplyTarget): Promise<void>;
   stopTyping?(target: ReplyTarget): Promise<void>;
+  markRead?(target: ReplyTarget): Promise<void>;
+  react?(target: ReplyTarget, messageHandle: string, reaction: "love" | "like" | "dislike" | "laugh" | "emphasize" | "question"): Promise<void>;
 }
 
 export class ChannelVerificationError extends Error {

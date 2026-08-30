@@ -7,6 +7,7 @@ import {
   type OutboxRecord,
 } from "../store.js";
 import type { ChannelAdapter, OutboundMessage, DeliveryReceipt } from "./contracts.js";
+import { recordFailure } from "../monitoring.js";
 
 const DELIVERY_LEASE_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 5;
@@ -64,6 +65,7 @@ export class ChannelOutbox {
       })) ?? claimed;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      recordFailure("delivery_failure", error, { provider: claimed.provider, outboxId: record.id });
       const failed = await updateOutbox(record.id, {
         status: "failed",
         lastError: message.slice(0, 1000),

@@ -74,6 +74,8 @@ test("Sendblue verifies its webhook secret and normalizes direct and group iMess
   assert.equal(direct?.provider, "sendblue");
   assert.equal(direct?.providerConversationId, "+15550001");
   assert.equal(direct?.scope, "private");
+  const reply = normalizeSendblueMessage({ message_handle: "sb-3", from_number: "+15550001", sendblue_number: "+15550002", reply_to: { message_handle: "sb-parent" } });
+  assert.equal(reply?.providerReplyToId, "sb-parent");
   const group = normalizeSendblueMessage({ message_handle: "sb-2", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "plan this", participants: ["+15550001", "+15550002"] });
   assert.equal(group?.providerConversationId, "group-1");
   assert.equal(group?.scope, "shared");
@@ -104,6 +106,21 @@ test("Sendblue typing indicators use the direct-message API", async () => {
   assert.equal(requests[0].url.endsWith("/send-typing-indicator"), true);
   assert.equal(requests[0].body.state, "start");
   assert.equal(requests[1].body.state, "stop");
+});
+
+test("Sendblue mark-read and tapback reactions use the documented endpoints", async () => {
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ status: "SENT" }), { status: 200 });
+  }) as typeof fetch);
+  const target = { provider: "sendblue" as const, conversationId: "+15550001" };
+  await adapter.markRead(target);
+  await adapter.react(target, "sb-parent", "love");
+  assert.equal(requests[0].url.endsWith("/mark-read"), true);
+  assert.deepEqual(requests[0].body, { number: "+15550001", from_number: "+15550002" });
+  assert.equal(requests[1].url.endsWith("/send-reaction"), true);
+  assert.deepEqual(requests[1].body, { from_number: "+15550002", message_handle: "sb-parent", reaction: "love" });
 });
 
 test("WhatsApp bursts are merged by a Redis-backed debounce queue", async () => {
@@ -175,6 +192,24 @@ test("provider adapters use channel-specific delivery APIs", async () => {
   assert.equal(requests[1].url.includes("/P1/messages"), true);
   assert.equal(requests[2].url.endsWith("/send-message"), true);
   assert.equal(requests[2].body.from_number, "+15550002");
+});
+
+test("Slack hydrates private files with bounded trusted downloads", async () => {
+  const fetcher = (async (url: string | URL, init?: RequestInit) => {
+    assert.equal(String(url), "https://files.slack.com/files-pri/F1/download");
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer xoxb-token");
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-length": "3" } });
+  }) as typeof fetch;
+  const adapter = new SlackAdapter("xoxb-token", fetcher);
+  const message = normalizeSlackEvent({ type: "event_callback", event_id: "Ev-file", team_id: "T1", event: { type: "message", user: "U1", channel: "D1", channel_type: "im", text: "read", files: [{ id: "F1", name: "a.txt", mimetype: "text/plain", url_private_download: "https://files.slack.com/files-pri/F1/download" }] } });
+  const hydrated = await adapter.hydrateInbound(message!);
+  assert.match(hydrated.attachments[0].url!, /^data:text\/plain;base64,/);
+});
+
+test("Slack rejects attachment redirects", async () => {
+  const adapter = new SlackAdapter("xoxb-token", (async () => new Response(null, { status: 302, headers: { location: "https://evil.example" } })) as typeof fetch);
+  const message = normalizeSlackEvent({ type: "event_callback", event_id: "Ev-redirect", team_id: "T1", event: { type: "message", user: "U1", channel: "D1", channel_type: "im", files: [{ id: "F1", url_private: "https://files.slack.com/files-pri/F1/download" }] } });
+  await assert.rejects(() => adapter.hydrateInbound(message!), /redirect rejected/);
 });
 
 test("webhook routes return non-2xx for invalid provider signatures", async () => {

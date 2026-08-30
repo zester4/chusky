@@ -1,6 +1,13 @@
 # Chusky AI Agent
 
-Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** via Composio managed auth, powered by any OpenRouter model. Chusky can connect apps, run shell commands, browse the web, handle real-time trigger events, and execute across every major SaaS platform — from Telegram or a linked terminal.
+Chusky is a production-oriented personal AI agent with access to **1,000+ tools** via Composio managed auth, powered by any OpenRouter model. Chusky can connect apps, run shell commands, browse the web, handle real-time trigger events, and execute across major SaaS platforms from Telegram, linked channels, or a terminal.
+
+The service has two layers:
+
+- The agent layer owns model inference, Composio sessions, native tools, approvals, memory, tasks, and durable workflows.
+- The transport layer owns Telegram, CLI, Slack, WhatsApp, and Sendblue delivery. Provider-specific payloads never enter the agent layer directly.
+
+Production deployments should use Redis and QStash. In-memory persistence is intended for local development and tests only; it does not survive restarts and must not be used for production reminders, approvals, memories, or channel deduplication.
 
 ---
 
@@ -15,7 +22,7 @@ Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** v
 | **Tool discovery** | `COMPOSIO_SEARCH_TOOL` — finds the right tool by intent |
 | **Real-time triggers** | Composio webhook → Chusky notifies you on Slack messages, GitHub commits, emails, etc. |
 | **Any LLM** | Switch model per-user at runtime via `/model` |
-| **Redis persistence** | Sessions survive restarts; falls back to memory |
+| **Redis persistence** | Sessions, memories, approvals, tasks, and channel events survive restarts; memory mode is development-only |
 | **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
 | **Voice replies** | `/voice on` adds an OpenRouter TTS audio reply while retaining the readable text response |
 | **Private scratchpad** | Chusky can save and retrieve per-user working notes across turns |
@@ -24,9 +31,10 @@ Chusky is a production-ready Telegram AI agent with access to **1,000+ tools** v
 | **Export** | `/export` downloads full conversation as `.txt` |
 | **Inline mode** | `@chusky query` in any chat |
 | **Linked CLI** | Continue the same Redis-backed session from a terminal |
-| **Shared channel gateway** | One account identity and durable conversation/outbox boundary for Telegram, CLI, Slack, and WhatsApp |
+| **Shared channel gateway** | One account identity and durable conversation/outbox boundary for Telegram, CLI, Slack, WhatsApp, and Sendblue |
 | **Verified Slack adapter** | Signed Events API/interactions, DMs, mentions, threads, OAuth installation, and Block Kit approvals |
 | **Verified WhatsApp adapter** | Signed Cloud API webhooks, text/media normalization, and durable outbound receipts |
+| **Verified Sendblue adapter** | iMessage webhooks, durable workflows, direct/group replies, media, typing indicators, and iMessage-safe formatting |
 | **Provider boundaries** | SMS and voice contracts are available for provider injection; live provider routes are not enabled yet |
 
 ---
@@ -151,6 +159,12 @@ its PM2 registration, not for a normal temporary stop.
 2. Set env vars in Railway dashboard
 3. Copy Railway URL → set `WEBHOOK_URL` → redeploy
 
+### Local dashboard
+
+From the repository root, run `npm run dashboard` to start the existing
+`chusky-web` Next.js app. Visit `http://localhost:3000/app/operations` after
+signing in; `/app/delivery` is the focused delivery view.
+
 ### Fly.io
 ```bash
 fly launch --name chuck-agent --no-deploy
@@ -225,7 +239,8 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli revoke <name>` | Revoke a linked terminal |
 | `/channel link slack|whatsapp|sendblue` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
-| `/channel notify slack|whatsapp on|off` | Enable or disable proactive notifications for a linked channel |
+| `/channel notify slack|whatsapp|sendblue on|off` | Enable or disable proactive notifications for a linked channel |
+| `/dashboard` | Open the authenticated Chusky web dashboard |
 
 ## Natural-language reminders, jobs, and scratchpad
 
@@ -302,6 +317,29 @@ Enable the adapters only after their public HTTPS webhook endpoints are reachabl
 
 Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
 
+### Sendblue iMessage channel
+
+Sendblue connects Chusky to an iMessage-capable Sendblue line. It uses a verified inbound webhook and a durable Upstash Workflow so the provider request can be acknowledged quickly while agent work continues safely after retries or process restarts.
+
+Required deployment variables:
+
+```text
+SENDBLUE_ENABLED=true
+SENDBLUE_API_KEY=<Sendblue API key ID>
+SENDBLUE_API_SECRET=<Sendblue API secret>
+SENDBLUE_NUMBER=<your Sendblue iMessage number in E.164 format>
+SENDBLUE_WEBHOOK_SECRET=<random webhook secret>
+WEBHOOK_URL=https://your-domain.example
+REDIS_URL=<durable Redis URL>
+QSTASH_TOKEN=<Upstash QStash token>
+```
+
+Configure the Sendblue `receive` webhook as `https://your-domain.example/sendblue/webhook`. From the owning Telegram account, run `/channel link sendblue`, then send the generated six-digit code from iMessage using `/link <code>`. Confirm with `/channel list` and send a normal message.
+
+The adapter verifies timestamped HMAC signatures when present and supports the legacy signing-secret header for compatibility. It claims provider event IDs before workflow enqueue, stores only bounded event data, hydrates permitted media, and sends replies through the durable outbox.
+
+Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
+
 ### Channel support and operating model
 
 | Channel | Current status | Conversation behavior |
@@ -310,6 +348,7 @@ Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions fo
 | CLI | Active | Authenticated client of the deployed service; shares the user's private account session |
 | Slack | Implemented | DMs use private account history; channel threads are shared-scope conversations |
 | WhatsApp | Implemented | Linked private chats use the account session; proactive notifications require explicit opt-in |
+| Sendblue | Implemented | Linked private iMessages use the account session; groups use shared scope; replies use the durable outbox |
 | SMS | Boundary only | Requires a provider sender, webhook route, signature scheme, and deployment wiring |
 | Voice | Boundary only | Requires a telephony/STT/TTS provider and deployment wiring |
 
@@ -318,6 +357,18 @@ To connect Slack, WhatsApp, or Sendblue, first run `/channel link <provider>` in
 In webhook mode, provider routes must be publicly reachable over HTTPS. Slack uses `/slack/events` and `/slack/interactions`; WhatsApp Cloud API uses `GET` and `POST /whatsapp/webhook`. Both routes verify the raw request signature, reject invalid requests with a non-2xx status, acknowledge provider webhooks quickly, and dispatch work asynchronously. Duplicate events are claimed in Redis, and every outbound reply is persisted in the Redis outbox before provider delivery.
 
 The channel gateway is intentionally provider-neutral. It resolves provider identity to `account_<telegram-user-id>`, applies private/shared conversation scope, obtains the distributed account lock, runs the shared agent handler, and recovers queued outbound messages after a process restart. Keep provider parsing, signature verification, and formatting inside `src/channels/`; do not add provider payload parsing to `agent.ts` or `handlers.ts`.
+
+### Current product gaps
+
+The core agent and Sendblue conversation loop are operational. Remaining product work is concentrated in production operations and channel breadth:
+
+- Dashboard operations pages now expose provider readiness, channel status, runtime failure counters, and delivery health through the authenticated `/v1/ops/health` endpoint.
+- The CLI doctor now prints the same provider checks and runtime failure summary; Redis is fail-closed in production and webhook mode.
+- Add Sendblue App Cards for interactive actions where a plain URL is not sufficient.
+- Add SMS and Voice provider implementations; their current contracts are intentionally provider-neutral boundaries.
+- Expand end-to-end deployment tests for Redis outages, provider retries, duplicate webhooks, concurrent messages, and long-running tool calls.
+
+Treat this list as a roadmap, not as a claim that these capabilities are already complete.
 
 ---
 
@@ -329,6 +380,7 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `OPENROUTER_API_KEY` | ✅ | — | From openrouter.ai/keys |
 | `COMPOSIO_API_KEY` | ✅ | — | From app.composio.dev |
 | `WEBHOOK_URL` | prod | — | Public URL (blank = polling) |
+| `DASHBOARD_URL` | dashboard | — | Public Next.js dashboard URL; `/dashboard` opens its `/app` route |
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `~deepseek/deepseek-v4-flash-latest` | Any OpenRouter model ID |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
@@ -372,6 +424,12 @@ The channel gateway is intentionally provider-neutral. It resolves provider iden
 | `WHATSAPP_VERIFY_TOKEN` | WhatsApp | — | Webhook verification token |
 | `WHATSAPP_APP_SECRET` | WhatsApp | — | Meta app secret for `X-Hub-Signature-256` |
 | `WHATSAPP_GRAPH_VERSION` | — | `v23.0` | Graph API version |
+| `SENDBLUE_ENABLED` | — | `false` | Enable the Sendblue iMessage adapter |
+| `SENDBLUE_API_KEY` | Sendblue | — | Sendblue API key ID |
+| `SENDBLUE_API_SECRET` | Sendblue | — | Sendblue API secret |
+| `SENDBLUE_NUMBER` | Sendblue | — | Sending iMessage-capable number in E.164 format |
+| `SENDBLUE_WEBHOOK_SECRET` | Sendblue | — | Secret used to verify Sendblue receive webhooks |
+| `SENDBLUE_WORKFLOW_URL` | — | derived | Optional public `/workflows/sendblue-event` URL override |
 | `CHUSKY_API_KEY` | — | — | Optional root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
 
 ---
@@ -389,7 +447,7 @@ src/
 ├── types.ts      Shared API, media, and tool-call types
 ├── policy.ts     Risk detection and human progress messages
 ├── nativeTools.ts Native reminders, CRON, scratchpad, and Daytona dispatch
-├── channels/     Provider-neutral gateway, identity, scopes, outbox, and channel adapters
+├── channels/     Provider-neutral gateway, identity, scopes, outbox, formatters, and adapters
 ├── lib/daytona/  Daytona SDK client, workspace lifecycle, files, and process engine
 ├── handlers.ts   grammY commands, live status bar, /connect, /apps, inline mode
 └── markdown.ts   LLM markdown → Telegram HTML

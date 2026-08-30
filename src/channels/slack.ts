@@ -4,6 +4,8 @@ import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage, ReplyTarget } from "./contracts.js";
 
 const SLACK_MAX_AGE_SECONDS = 5 * 60;
+const SLACK_MAX_FILE_BYTES = 25 * 1024 * 1024;
+const SLACK_TRUSTED_HOSTS = new Set(["files.slack.com", "slack-files.com"]);
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 function header(headers: Headers | Record<string, string | undefined>, name: string): string {
@@ -145,5 +147,28 @@ export class SlackAdapter implements ChannelAdapter {
 
   async typing(_target: ReplyTarget): Promise<void> {
     // Slack has no public bot typing endpoint. Deliberately do nothing.
+  }
+
+  /** Hydrate Slack private file URLs only from Slack-owned hosts, with a
+   * bounded manual-redirect download. Tokens are never sent to redirects. */
+  async hydrateInbound(message: InboundMessage): Promise<InboundMessage> {
+    if (!message.attachments.length) return message;
+    const attachments = await Promise.all(message.attachments.slice(0, 5).map(async (attachment) => {
+      if (!attachment.url || attachment.url.startsWith("data:")) return attachment;
+      const parsed = new URL(attachment.url);
+      if (!SLACK_TRUSTED_HOSTS.has(parsed.hostname) && !parsed.hostname.endsWith(".slack.com")) throw new Error("Slack attachment host is not trusted");
+      const token = typeof this.token === "function" ? await this.token(message.providerWorkspaceId) : this.token;
+      if (!token) throw new Error("Slack bot token is not configured for file download");
+      const response = await this.fetchImpl(attachment.url, { headers: { Authorization: `Bearer ${token}` }, redirect: "manual" });
+      if (response.status >= 300 && response.status < 400) throw new Error("Slack attachment redirect rejected");
+      if (!response.ok) throw new Error(`Slack attachment download failed (${response.status})`);
+      const declared = Number(response.headers.get("content-length") ?? attachment.sizeBytes ?? 0);
+      if (declared > SLACK_MAX_FILE_BYTES) throw new Error("Slack attachment exceeds the 25 MB limit");
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > SLACK_MAX_FILE_BYTES) throw new Error("Slack attachment exceeds the 25 MB limit");
+      const mime = attachment.mimeType ?? "application/octet-stream";
+      return { ...attachment, url: `data:${mime};base64,${Buffer.from(bytes).toString("base64")}`, sizeBytes: bytes.byteLength };
+    }));
+    return { ...message, attachments };
   }
 }

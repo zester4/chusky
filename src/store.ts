@@ -6,6 +6,7 @@ import Redis from "ioredis";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
+import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage } from "./channels/contracts.js";
 
 export interface Message {
@@ -978,8 +979,11 @@ function fresh(): UserSession {
 let backend: Backend;
 
 export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
-  if (config.webhookUrl && !config.redisUrl && !options.memoryOnly) {
-    throw new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
+  const production = process.env.NODE_ENV === "production";
+  if ((config.webhookUrl || production) && !config.redisUrl && !options.memoryOnly) {
+    const error = new Error("REDIS_URL is required in webhook/production mode; refusing in-memory persistence");
+    recordFailure("redis_failure", error, { phase: "startup", reason: "missing_url" });
+    throw error;
   }
   if (config.redisUrl && !options.memoryOnly) {
     try {
@@ -990,7 +994,11 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
-      if (config.webhookUrl) throw new Error("Redis is unavailable in webhook/production mode; refusing in-memory persistence");
+      if (config.webhookUrl || production) {
+        const error = new Error("Redis is unavailable in webhook/production mode; refusing in-memory persistence");
+        recordFailure("redis_failure", e, { phase: "startup", reason: "connection_failed" });
+        throw error;
+      }
       logger.warn({ err: e }, "Store: Redis failed, using memory");
     }
   } else {

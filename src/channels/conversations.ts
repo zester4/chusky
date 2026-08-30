@@ -20,6 +20,7 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
       metadata: {
         ...(message.scope === "shared" ? { groupId: message.providerConversationId } : {}),
         messageHandle: message.providerEventId,
+        ...(message.providerReplyToId ? { replyToHandle: message.providerReplyToId } : {}),
       },
     } : {}),
   };

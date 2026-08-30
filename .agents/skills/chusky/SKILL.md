@@ -40,6 +40,7 @@ For deep work, load only the references relevant to the task:
 - `src/policy.ts`: risky-tool detection and human-readable progress messages.
 - `src/types.ts`: shared API-message, tool-call, and media types.
 - `src/markdown.ts`: Markdown-to-Telegram-HTML conversion and message splitting.
+- `src/channels/sendblueFormatting.ts`: Sendblue-specific Markdown-to-plain-text conversion for iMessage.
 - `src/telegramRich.ts`: opt-in Telegram Rich HTML rendering for valid Markdown
   tables; ordinary Markdown remains on the legacy formatter path with fallback.
 - `src/sdkApi.ts`: authenticated `/v1` developer API for projects, threads, runs, approvals, tasks, files, audit events, and webhook subscriptions.
@@ -58,6 +59,7 @@ Chusky's own implementation and must not be described as the `chat` package.
 | CLI | Active | Authenticated remote client; it shares the user's private Redis-backed account session. |
 | Slack | Implemented | Signed Events API and interaction routes, DMs, mentions, threads, OAuth installation, and Block Kit approval buttons. |
 | WhatsApp | Implemented | Signed Cloud API webhook, text/media normalization, media hydration, debounce, receipts, and opt-in proactive notifications. |
+| Sendblue | Implemented | Signed iMessage webhook, durable workflow dispatch, direct/group delivery, media hydration, typing indicators, Markdown-to-plain-text formatting, and durable receipts. |
 | SMS | Boundary only | A provider-neutral adapter and normalizer exist; no live sender/webhook is registered. |
 | Voice | Boundary only | Transcript and speech delivery contracts exist; no telephony/STT/TTS provider is registered. |
 
@@ -80,7 +82,7 @@ Channel invariants:
   after agent work and delivery succeed. Allow stale processing leases to recover.
 - Persist every outbound response in the idempotent, leased outbox before sending.
   Provider receipts and retry state must be durable.
-- Verify Slack and WhatsApp signatures against the exact raw body, reject stale or
+- Verify Slack, WhatsApp, and Sendblue signatures against the exact raw body, reject stale or
   invalid requests with non-2xx responses, and acknowledge provider webhooks quickly.
 - Redact raw event payloads from user-facing messages and logs; send bounded safe
   summaries for trigger notifications.
@@ -90,9 +92,9 @@ Channel onboarding and commands:
 1. Configure Redis and the provider's HTTPS webhook credentials.
 2. Run `/channel link slack` or `/channel link whatsapp` from the owning Telegram
    account.
-3. Complete Slack OAuth, or send the WhatsApp one-time code with `/link <code>`.
+3. Complete Slack OAuth, or send the WhatsApp/Sendblue one-time code with `/link <code>`.
 4. Verify `/channel list`, then test a private message and an approval interaction.
-5. Use `/channel notify whatsapp on|off` to control proactive WhatsApp delivery.
+5. Use `/channel notify whatsapp|sendblue on|off` to control proactive channel delivery.
 
 Slack routes are `/slack/events`, `/slack/interactions`, `/slack/install`, and
 `/slack/oauth/callback`. WhatsApp uses `GET` and `POST /whatsapp/webhook`. Polling
@@ -100,6 +102,18 @@ mode is Telegram-only; external webhooks require `WEBHOOK_URL`, HTTPS, and Redis
 Register a new provider in `routes.ts` and `index.ts`, add adapter tests for valid,
 invalid, duplicate, stale, and unauthorized events, and keep all provider-specific
 logic inside `src/channels/`.
+
+Sendblue-specific rules:
+
+- Use `sb-api-key-id` and `sb-api-secret-key` only on outbound requests; never log either value.
+- Verify the exact raw webhook body. Prefer `X-Sendblue-Signature: t=<unix-seconds>,v1=<hex-hmac>` using HMAC-SHA256 over `<timestamp>.<raw-body>` and reject stale timestamps. Retain legacy `sb-signing-secret` support only for provider compatibility.
+- Treat `message_handle` as the durable provider event ID. Ignore outbound webhook echoes when `is_outbound` is true.
+- Send typing indicators with `POST /api/send-typing-indicator` only for one-to-one iMessage targets. Start before agent work and stop in a `finally` path after delivery; typing failure must never fail the user response. Do not attempt typing indicators for groups.
+- Mark verified one-to-one inbound messages read with `POST /api/mark-read` as a best-effort side effect; never let a read-receipt failure block agent processing. Send tapbacks through `POST /api/send-reaction` only for an explicit linked-user action and a known inbound `message_handle`; never react to unlinked or group messages.
+- Sendblue outbound messages use a `/sendblue/status` callback to update durable outbox provider status. Keep receive and status callbacks separately observable, while verifying both with the configured webhook secret.
+- Sendblue `content` is plain text. Apply `src/channels/sendblueFormatting.ts` at the adapter boundary to remove Markdown emphasis markers, convert bullets and headings, and preserve safe URLs. Do not change shared Telegram, Slack, or CLI Markdown rendering to accommodate Sendblue.
+- Generated Sendblue media must be persisted through the existing R2 layer and delivered only through short-lived HTTPS URLs; never put binary data in Redis or provider JSON. If R2 is unavailable, keep the text response and report the media-delivery limitation.
+- The Sendblue dashboard's typing-indicator webhook is for receiving user-typing events and is not required for outbound typing. Add that route only when the product needs typing-aware behavior.
 
 When a change crosses Telegram and CLI, keep business behavior in shared agent/store modules and keep transport-specific formatting or input handling in `handlers.ts` and `src/cli/`. Do not fork session, model, approval, or persistence semantics between transports.
 
@@ -241,3 +255,5 @@ For CLI changes, additionally verify pairing-code expiry/replay, revoked-device 
 - Reminder did not arrive: verify `QSTASH_TOKEN`, public workflow URL, Redis persistence, workflow signature validation, active record status, and Telegram chat ID.
 - Tool was not found: search Composio tools by intent and confirm the model supports tool calling.
 - History disappeared: check `REDIS_URL`, session TTL, accidental `/clear session`, and whether the process fell back to in-memory storage.
+- Sendblue receives a message but does not reply: verify `SENDBLUE_API_KEY`, `SENDBLUE_API_SECRET`, `SENDBLUE_NUMBER`, `SENDBLUE_ENABLED=true`, `QSTASH_TOKEN`, and the PM2 environment with `pm2 restart chusky --update-env`; inspect the workflow error without printing secret values.
+- Sendblue replies show Markdown markers: confirm the response is delivered through `SendblueAdapter.send()` and that `formatSendblueText()` is applied only at that provider boundary.

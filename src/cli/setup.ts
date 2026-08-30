@@ -54,6 +54,12 @@ export function healthReport(values: Map<string, string>): SetupHealth[] {
   rows.push({ key: "REDIS_URL", status: values.get("REDIS_URL") ? "configured" : "optional", detail: values.get("REDIS_URL") ? "configured" : "recommended for persistence" });
   rows.push({ key: "WEBHOOK_URL", status: values.get("WEBHOOK_URL") ? "configured" : "optional", detail: values.get("WEBHOOK_URL") ? "webhook mode" : "polling mode" });
   rows.push({ key: "QSTASH_TOKEN", status: values.get("QSTASH_TOKEN") ? "configured" : "optional", detail: values.get("QSTASH_TOKEN") ? "workflow features enabled" : "reminders/jobs/video workflows unavailable" });
+  rows.push({ key: "DASHBOARD_URL", status: values.get("DASHBOARD_URL") ? "configured" : "optional", detail: values.get("DASHBOARD_URL") ? "dashboard links enabled" : "set this to enable /dashboard links" });
+  if (values.get("SENDBLUE_ENABLED") === "true") {
+    for (const key of ["SENDBLUE_API_KEY", "SENDBLUE_API_SECRET", "SENDBLUE_NUMBER", "SENDBLUE_WEBHOOK_SECRET"]) {
+      rows.push({ key, status: values.get(key) ? "configured" : "missing", detail: values.get(key) ? "configured" : "required when Sendblue is enabled" });
+    }
+  }
   for (const key of ["DAYTONA_API_KEY"]) rows.push({ key, status: values.get(key) ? "configured" : "optional", detail: values.get(key) ? "configured" : "optional integration" });
   for (const key of Object.keys(DEFAULTS)) rows.push({ key, status: values.get(key) ? "configured" : "optional", detail: values.get(key) ? "configured" : `default: ${DEFAULTS[key]}` });
   return rows;
@@ -116,6 +122,10 @@ export async function runDoctor(serverOverride?: string): Promise<void> {
   if (server) try {
     const response = await fetch(`${server.replace(/\/$/, "")}/health`, { signal: AbortSignal.timeout(10000) });
     console.log(`${response.ok ? "✓" : "!"} service health: HTTP ${response.status}`);
+    const body = await response.json().catch(() => undefined) as { checks?: Record<string, string>; monitoring?: { counters?: Record<string, number> } } | undefined;
+    for (const [key, status] of Object.entries(body?.checks ?? {})) console.log(`${status === "ok" || status === "configured" || status === "disabled" ? "✓" : "!"} service ${key}: ${status}`);
+    const failures = Object.entries(body?.monitoring?.counters ?? {}).filter(([, count]) => count > 0);
+    if (failures.length) console.log(`! runtime failures: ${failures.map(([key, count]) => `${key}=${count}`).join(", ")}`);
   } catch (error) { console.log(`! service health: ${error instanceof Error ? error.message : String(error)}`); }
   else console.log("· service health: skipped (polling mode)");
   if (!values.get("REDIS_URL")) console.log("\nRecommendation: configure REDIS_URL before production use.");

@@ -93,8 +93,19 @@ export class ChannelGateway {
       return { duplicate: false, linked: false, delivered: [] };
     }
 
+    if (message.provider === "sendblue" && message.text) {
+      const reaction = message.text.trim().match(/^\/react\s+(love|like|dislike|laugh|emphasize|question)$/i)?.[1]?.toLowerCase() as "love" | "like" | "dislike" | "laugh" | "emphasize" | "question" | undefined;
+      const handle = message.providerReplyToId;
+      if (reaction && handle && adapter.react && message.scope === "private") {
+        await adapter.react({ provider: "sendblue", conversationId: message.providerConversationId }, handle, reaction);
+        await completeChannelEvent(message.provider, message.providerEventId);
+        return { duplicate: false, linked: true, delivered: [] };
+      }
+    }
+
     const conversation = buildConversation(identity.userId, message);
     if (!conversation.permissions.canUseAgent) throw new Error("Channel identity is not permitted to use Chusky");
+    if (adapter.markRead && message.scope === "private") void adapter.markRead(conversation.replyTarget).catch(() => undefined);
     const lockToken = randomUUID();
     const deadline = Date.now() + 120_000;
     while (!(await acquireUserLock(identity.userId, lockToken, 180))) {

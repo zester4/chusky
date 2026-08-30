@@ -250,6 +250,13 @@ export function registerHandlers(bot: Bot): void {
     );
   });
 
+  bot.command("dashboard", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const url = config.dashboardUrl || config.webhookUrl;
+    if (!url) { await ctx.reply("The dashboard is not configured yet. Set DASHBOARD_URL in the Chusky deployment."); return; }
+    await ctx.reply("Open your Chusky workspace:", { reply_markup: new InlineKeyboard().url("Open dashboard", `${url.replace(/\/+$/, "")}/app`) });
+  });
+
   bot.command("cancel", async (ctx) => {
     if (!(await guard(ctx))) return;
     const controller = activeRequests.get(ctx.from!.id);

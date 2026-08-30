@@ -7,7 +7,8 @@ import { ApprovalRequiredError, runAgent } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
-import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getSession, getTask, listOutbox, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getDaytonaWorkspace, getSession, getTask, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { monitoringSnapshot } from "./monitoring.js";
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
@@ -96,6 +97,48 @@ export function registerSdkApi(app: Hono): void {
     if (!sdkUser(c)) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required.");
     const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
     const owner = sdkUser(c); if (owner && c.req.method !== "GET") await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+  });
+
+  app.get("/v1/ops/health", async (c) => {
+    const sendblueConfigured = !config.sendblueEnabled || Boolean(config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret);
+    const redis = isDurableStore();
+    const production = process.env.NODE_ENV === "production";
+    const checks = {
+      redis: redis ? "ok" : production ? "failed" : "degraded",
+      qstash: config.qstashToken ? "configured" : "disabled",
+      sendblue: config.sendblueEnabled ? (sendblueConfigured ? "configured" : "misconfigured") : "disabled",
+      telegram: "configured",
+    } as const;
+    const ok = checks.redis === "ok" && checks.sendblue !== "misconfigured";
+    return c.json({ ok, status: ok ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled }, monitoring: monitoringSnapshot() });
+  });
+
+  app.get("/v1/account/overview", async (c) => {
+    const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const [channels, devices, reminders, jobs, workspace, deliveries] = await Promise.all([
+      listChannelIdentities(owner.userId),
+      listCliDevices(owner.userId),
+      listReminders(owner.userId),
+      listJobs(owner.userId),
+      getDaytonaWorkspace(owner.userId),
+      listOutbox(undefined, 100),
+    ]);
+    return c.json({
+      model: session.model,
+      voiceReplies: Boolean(session.voiceReplies),
+      approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
+      channels: channels.filter((item) => !item.disabledAt).map((item) => ({ provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
+      reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
+      jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      memory: session.memories.map(({ id, category, key, value, confidence, updatedAt }) => ({ id, category, key, value, confidence, updatedAt: new Date(updatedAt).toISOString() })),
+      scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
+      triggers: session.triggerIds,
+      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash: _tokenHash, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
+      workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
+      webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
+      deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
+    });
   });
 
   app.post("/v1/admin/projects", async (c) => { const body = await c.req.json().catch(() => ({})) as { name?: string; scopes?: string[] }; const name = String(body.name ?? "").trim().slice(0, 100); const scopes = Array.isArray(body.scopes) && body.scopes.every((item) => typeof item === "string") ? [...new Set(body.scopes)].slice(0, 20) : ["*"]; if (!name) return apiError(c, 400, "invalid_project", "Project name is required."); const control = await getSession(0); const id = `proj_${randomUUID()}`; const secret = `chsk_${id}_${randomBytes(24).toString("base64url")}`; const record: SdkProjectRecord = { id, name, keyPrefix: secret.slice(0, 18), keyHash: digestKey(secret), scopes, createdAt: Date.now() }; control.sdkProjects!.push(record); await saveSession(0, control); return c.json({ id, name, key: secret, keyPrefix: record.keyPrefix, scopes, createdAt: new Date(record.createdAt).toISOString() }, 201); });

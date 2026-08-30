@@ -36,7 +36,8 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
       if (!claim) return c.json({ ok: false, error: "Invalid or expired Slack link code" }, 401);
       const state = randomBytes(24).toString("base64url");
       await createChannelOAuthState(claim.userId, hashCliSecret(state));
-      const params = new URLSearchParams({ client_id: config.slackClientId, redirect_uri: config.slackRedirectUri, state, scope: "chat:write" });
+      const scopes = ["app_mentions:read", "channels:history", "channels:read", "chat:write", "groups:history", "groups:read", "im:history", "im:read", "mpim:history", "mpim:read", "reactions:read", "reactions:write", "users:read", "files:read"];
+      const params = new URLSearchParams({ client_id: config.slackClientId, redirect_uri: config.slackRedirectUri, state, scope: scopes.join(",") });
       return c.redirect(`https://slack.com/oauth/v2/authorize?${params.toString()}`);
     });
 
@@ -71,7 +72,7 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
         if (!message) return c.json({ ok: true, ignored: true });
         // Slack requires a fast acknowledgement. Agent work is deliberately
         // detached from the HTTP acknowledgement after signature validation.
-        void gateway.processInbound(message).catch((error) => logger.error({ err: error, eventId: message.providerEventId }, "Slack event processing failed"));
+        void slack.adapter.hydrateInbound(message).then((hydrated) => gateway.processInbound(hydrated)).catch((error) => logger.error({ err: error, eventId: message.providerEventId }, "Slack event processing failed"));
         return c.json({ ok: true });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Slack event");
@@ -136,17 +137,29 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
 
   if (options.sendblue) {
     const sendblue = options.sendblue;
+    const processStatus = async (payload: any) => {
+      const status = normalizeSendblueStatus(payload);
+      if (!status) return false;
+      const record = await getOutboxByProviderMessageId("sendblue", status.providerMessageId);
+      if (record) await updateOutbox(record.id, { providerStatus: status.status });
+      return true;
+    };
+    app.post("/sendblue/status", async (c) => {
+      const raw = await c.req.text();
+      try {
+        verifySendblueSignature(raw, c.req.header(), sendblue.webhookSecret);
+        return c.json({ ok: true, status: await processStatus(JSON.parse(raw)) });
+      } catch (error) {
+        logger.warn({ err: error }, "Rejected Sendblue status callback");
+        return c.json({ ok: false, error: error instanceof ChannelVerificationError ? error.message : "invalid Sendblue status" }, error instanceof SyntaxError ? 400 : errorStatus(error));
+      }
+    });
     app.post("/sendblue/webhook", async (c) => {
       const raw = await c.req.text();
       try {
         verifySendblueSignature(raw, c.req.header(), sendblue.webhookSecret);
         const payload = JSON.parse(raw) as any;
-        const status = normalizeSendblueStatus(payload);
-        if (status) {
-          const record = await getOutboxByProviderMessageId("sendblue", status.providerMessageId);
-          if (record) await updateOutbox(record.id, { providerStatus: status.status });
-          return c.json({ ok: true, status: true });
-        }
+        if (await processStatus(payload)) return c.json({ ok: true, status: true });
         const message = normalizeSendblueMessage(payload);
         if (!message) return c.json({ ok: true, ignored: true });
         const record = await createChannelInboundEvent(message);

@@ -179,6 +179,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // ── Server ─────────────────────────────────────────────────────────
   port: positiveInt("PORT", 8080),
   webhookUrl: optional("WEBHOOK_URL", ""),
+  dashboardUrl: optional("DASHBOARD_URL", ""),
   // Better Auth is opt-in so existing Telegram polling deployments keep their
   // current startup contract until the auth database and origins are configured.
   betterAuthEnabled: optional("BETTER_AUTH_ENABLED", "false") === "true",

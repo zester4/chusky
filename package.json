@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dashboard": "npm --prefix chusky-web run dev",
     "build": "tsc",
     "build:sdk": "tsc -p sdk/tsconfig.json",
     "start": "node dist/index.js",
