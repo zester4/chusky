@@ -731,14 +731,19 @@ export async function parseTriggerWebhook(
       return null;
     }
     if (r.rawPayload.type !== "composio.trigger.message") return null;
-    const eventId = String(r.rawPayload?.id ?? r.rawPayload?.eventId ?? r.payload?.eventId ?? "");
+    // Composio V3 keeps routing metadata in the webhook envelope while older
+    // payloads exposed these fields directly on the parsed payload. Accept
+    // both shapes so valid events reach ownership validation and QStash.
+    const metadata = r.rawPayload?.metadata ?? r.metadata ?? {};
+    const data = r.rawPayload?.data ?? r.data ?? {};
+    const eventId = String(r.rawPayload?.id ?? r.rawPayload?.eventId ?? r.payload?.eventId ?? r.payload?.event_id ?? "");
     if (!eventId) throw new Error("Composio trigger event has no event ID");
     return {
       eventId,
-      triggerSlug: String(r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? ""),
-      userId: String(r.payload?.userId ?? r.payload?.user_id ?? ""),
-      triggerId: (r.payload?.triggerId ?? r.payload?.trigger_id ?? r.rawPayload?.triggerId) ? String(r.payload?.triggerId ?? r.payload?.trigger_id ?? r.rawPayload?.triggerId) : undefined,
-      payload: r.payload?.payload ?? {},
+      triggerSlug: String(r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? metadata.trigger_slug ?? metadata.triggerSlug ?? ""),
+      userId: String(r.payload?.userId ?? r.payload?.user_id ?? metadata.user_id ?? metadata.userId ?? ""),
+      triggerId: (r.payload?.triggerId ?? r.payload?.trigger_id ?? metadata.trigger_id ?? metadata.triggerId ?? r.rawPayload?.triggerId) ? String(r.payload?.triggerId ?? r.payload?.trigger_id ?? metadata.trigger_id ?? metadata.triggerId ?? r.rawPayload?.triggerId) : undefined,
+      payload: r.payload?.payload ?? data ?? {},
       rawPayload: r.rawPayload,
     };
 }
