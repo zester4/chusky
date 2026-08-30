@@ -1,9 +1,9 @@
 /**
  * Production PM2 definition for Chusky.
  *
- * Keep exactly one clustered worker on this small Oracle VM. PM2 can still
- * perform a readiness-gated reload: it starts a replacement worker, waits for
- * process.send("ready"), then asks the old worker to drain.
+ * Keep one worker on this small Oracle VM. Fork mode avoids PM2's cluster
+ * readiness lifecycle, which can interrupt a healthy Chusky process before
+ * it finishes serving traffic.
  */
 module.exports = {
   apps: [
@@ -13,9 +13,7 @@ module.exports = {
       script: "dist/index.js",
       interpreter: "node",
       instances: 1,
-      exec_mode: "cluster",
-      wait_ready: true,
-      listen_timeout: 30_000,
+      exec_mode: "fork",
       kill_timeout: 35_000,
       min_uptime: "10s",
       max_restarts: 10,
