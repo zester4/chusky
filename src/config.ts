@@ -185,6 +185,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   betterAuthEnabled: optional("BETTER_AUTH_ENABLED", "false") === "true",
   betterAuthTrustedOrigins: optional("BETTER_AUTH_TRUSTED_ORIGINS", "http://localhost:3000,http://localhost:3010")
     .split(",").map((origin) => origin.trim()).filter(Boolean),
+  // Neon/Postgres is the production source of truth for Better Auth. The
+  // SQLite path remains available only for local development.
+  betterAuthDatabaseUrl: optional("BETTER_AUTH_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
   // Dedicated bearer key for the self-hosted developer SDK. It is never a CLI device token.
   apiKey: optional("CHUSKY_API_KEY", ""),

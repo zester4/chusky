@@ -1,10 +1,12 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { Pool } from "pg";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { redisStorage } from "@better-auth/redis-storage";
 import Redis from "ioredis";
+import { config } from "./config.js";
 import { sendAuthEmail } from "./auth-email.js";
 
 // The Redis storage package and Better Auth core currently expose separate
@@ -12,6 +14,8 @@ import { sendAuthEmail } from "./auth-email.js";
 // compatibility boundary local rather than weakening the rest of the service.
 let instance: any;
 let redis: Redis | undefined;
+let postgres: Pool | undefined;
+let sqlite: Database.Database | undefined;
 let migration: Promise<void> | undefined;
 
 function authConfig() {
@@ -21,14 +25,19 @@ function authConfig() {
   const baseURL = (process.env.BETTER_AUTH_URL?.trim() || "http://localhost:8080").replace(/\/+$/, "");
   const trustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS || "http://localhost:3000,http://localhost:3010")
     .split(",").map((origin) => origin.trim()).filter(Boolean);
-  const databasePath = process.env.BETTER_AUTH_DATABASE?.trim() || "./data/better-auth.sqlite";
-  mkdirSync(dirname(resolve(databasePath)), { recursive: true });
-  const database = new Database(databasePath);
+  const databaseUrl = config.betterAuthDatabaseUrl;
+  if (process.env.NODE_ENV === "production" && !databaseUrl) {
+    throw new Error("BETTER_AUTH_DATABASE_URL must be configured in production; use Neon Postgres instead of local SQLite.");
+  }
+  const database = databaseUrl
+    ? (postgres = new Pool({ connectionString: databaseUrl, max: 10, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 }))
+    : (() => { mkdirSync(dirname(resolve(config.betterAuthDatabasePath)), { recursive: true }); return sqlite = new Database(config.betterAuthDatabasePath); })();
   const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
 
   return {
-    database,
+    // Better Auth accepts both pg.Pool and better-sqlite3 as built-in Kysely adapters.
+    database: database as any,
     secret,
     baseURL,
     trustedOrigins,
@@ -93,5 +102,7 @@ export const auth = process.env.BETTER_AUTH_ENABLED === "true" ? getAuth() : und
 
 export async function closeAuth(): Promise<void> {
   if (redis) { await redis.quit().catch(() => undefined); redis = undefined; }
+  if (postgres) { await postgres.end().catch(() => undefined); postgres = undefined; }
+  if (sqlite) { sqlite.close(); sqlite = undefined; }
   instance = undefined;
 }

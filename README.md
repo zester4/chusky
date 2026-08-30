@@ -410,6 +410,8 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `MAX_HISTORY` | — | `20` | Conversation turns to keep |
 | `REDIS_URL` | — | (memory) | Redis for persistence |
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
+| `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |
+| `BETTER_AUTH_DATABASE` | — | `./data/better-auth.sqlite` | Local-development Better Auth SQLite fallback only |
 | `PORT` | — | `8080` | HTTP port |
 | `LOG_LEVEL` | — | `info` | trace/debug/info/warn/error |
 | `SLACK_ENABLED` | — | `false` | Enable the verified Slack adapter |

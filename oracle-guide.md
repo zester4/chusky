@@ -126,6 +126,24 @@ REMINDER_WORKFLOW_URL=https://chusky.selithub.shop/workflows/reminder
 JOB_WORKFLOW_URL=https://chusky.selithub.shop/workflows/job
 ```
 
+### Production Better Auth database (Neon Postgres)
+
+Create a Neon project for production and copy its **pooled** PostgreSQL
+connection string. Add it on Oracle only—never in Vercel or Git:
+
+```env
+BETTER_AUTH_ENABLED=true
+BETTER_AUTH_DATABASE_URL=postgresql://<role>:<password>@<endpoint>-pooler.<region>.aws.neon.tech/neondb?sslmode=require
+```
+
+Keep `REDIS_URL`: Neon stores Better Auth's relational records, while Redis
+continues to hold Chusky's locks, agent state, workflow state, and delivery
+outbox. Do not set `BETTER_AUTH_DATABASE` in production; SQLite is local-only.
+On startup, Chusky applies Better Auth's built-in migration to the configured
+Postgres database. Deploy first to a Neon staging branch, test sign-up,
+verification, sign-in, sign-out, and `/api/auth/ok`, then switch the production
+Oracle environment to the production branch connection string.
+
 Optional multi-channel adapters (keep these in `.env`, never in Git):
 
 ```env
