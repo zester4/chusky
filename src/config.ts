@@ -191,8 +191,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Use Neon's direct (non-pooler) URL only for explicit schema migrations.
   betterAuthMigrationDatabaseUrl: optional("BETTER_AUTH_MIGRATION_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
-  // Dedicated bearer key for the self-hosted developer SDK. It is never a CLI device token.
-  apiKey: optional("CHUSKY_API_KEY", ""),
+  // Private Oracle root/bootstrap key for the self-hosted Developer API. It is
+  // never a CLI device token or a developer project's scoped chsk_ key.
+  apiKey: optional("CHUSKY_PROJECT_KEY", ""),
   r2AccountId: optional("R2_ACCOUNT_ID", ""),
   r2AccessKeyId: optional("R2_ACCESS_KEY_ID", ""),
   r2SecretAccessKey: optional("R2_SECRET_ACCESS_KEY", ""),

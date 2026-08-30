@@ -115,6 +115,10 @@ PORT=3003
 WEBHOOK_SECRET=generated_random_value
 COMPOSIO_WEBHOOK_SECRET=generated_random_value
 REDIS_URL=your_redis_url
+# Private root/bootstrap key for the self-hosted Developer API. Do not share it
+# with developers; their scoped chsk_ project key is named CHUSKY_API_KEY in
+# their own server environment.
+CHUSKY_PROJECT_KEY=generate_a_long_random_secret
 ```
 
 For durable workflows:

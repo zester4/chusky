@@ -439,7 +439,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `SENDBLUE_NUMBER` | Sendblue | — | Sending iMessage-capable number in E.164 format |
 | `SENDBLUE_WEBHOOK_SECRET` | Sendblue | — | Secret used to verify Sendblue receive webhooks |
 | `SENDBLUE_WORKFLOW_URL` | — | derived | Optional public `/workflows/sendblue-event` URL override |
-| `CHUSKY_API_KEY` | — | — | Optional root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
+| `CHUSKY_PROJECT_KEY` | — | — | Optional private Oracle root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
 
 ---
 

@@ -5,7 +5,7 @@ This document is the implementation contract for the SDK. It prevents the existi
 ## Principles
 
 1. `/v1` is the only public prefix. Existing `/cli`, Telegram, channel, and workflow routes remain private transport endpoints.
-2. `CHUSKY_API_KEY` is the root bootstrap/admin key. It creates project-scoped `chsk_` keys, returned once and persisted as hashes only; an end-user identifier is supplied in `X-Chusky-User-Id` and is never inferred from a phone number, display name, or channel identity. The first-party web dashboard may use its Better Auth session cookie for user-scoped `/v1` resources; API keys remain server-side credentials.
+2. `CHUSKY_PROJECT_KEY` is the root bootstrap/admin key on the Oracle server. It creates project-scoped `chsk_` keys, returned once and persisted as hashes only. A developer puts their scoped key in `CHUSKY_API_KEY` in their own server environment. An end-user identifier is supplied in `X-Chusky-User-Id` and is never inferred from a phone number, display name, or channel identity. The first-party web dashboard may use its Better Auth session cookie for user-scoped `/v1` resources; API keys remain server-side credentials.
 3. Project keys are revocable and scope-enforced (`resource:read`, `resource:write`, `resource:*`, or `*`). Never use CLI device tokens for the SDK.
 4. Durable mutations accept `Idempotency-Key`; persist method, normalized path, body digest, response status/body, and a 24-hour replay window. A reused key with a different body returns `409 idempotency_mismatch`. Live streaming is not replayable; reconnect through persisted run state and events.
 5. Every response has `X-Request-Id`. Errors use `{ "error": { "code", "message", "requestId" } }`.
