@@ -131,18 +131,18 @@ async function main(): Promise<void> {
         const event = await getChannelInboundEvent(payload.eventId);
         if (!event || event.provider !== "sendblue") throw new Error("Sendblue event is missing or invalid");
         if (event.status === "completed") return;
-        await updateChannelInboundEvent(event.eventId, { status: "running", workflowRunId: workflow.workflowRunId });
-        try {
-          await workflow.run("process-sendblue-message", async () => {
+        await workflow.run("process-sendblue-message", async () => {
+          try {
+            await updateChannelInboundEvent(event.eventId, { status: "running", workflowRunId: workflow.workflowRunId });
             const hydrated = await sendblueAdapter.hydrateInbound(event.message);
             await channelGateway.processInbound(hydrated);
-          });
-          await updateChannelInboundEvent(event.eventId, { status: "completed" });
-        } catch (error) {
-          await updateChannelInboundEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
-          recordFailure("workflow_failure", error, { workflow: "sendblue-event", eventId: event.eventId });
-          throw error;
-        }
+            await updateChannelInboundEvent(event.eventId, { status: "completed" });
+          } catch (error) {
+            await updateChannelInboundEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+            recordFailure("workflow_failure", error, { workflow: "sendblue-event", eventId: event.eventId });
+            throw error;
+          }
+        });
       }));
     }
     channelGateway.startRecovery();
