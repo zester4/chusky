@@ -46,6 +46,8 @@ export interface SdkRunRecord {
   id: string;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
+  /** Verified R2 uploads used for this run. Keys are intentionally never exposed. */
+  attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   output?: string;
   approvalId?: string;
   error?: { code: string; message: string };

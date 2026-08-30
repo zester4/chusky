@@ -3,12 +3,13 @@ import type { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, runAgent } from "./agent.js";
-import { deleteR2Object, inspectR2Object, r2Configured, signR2Download, signR2Upload } from "./lib/storage/r2.js";
+import { ApprovalRequiredError, runAgent, transcribeAudio } from "./agent.js";
+import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { acquireUserLock, canSpend, checkRateLimit, claimApproval, getApproval, getDaytonaWorkspace, getSession, getTask, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
+import type { ContentPart } from "./types.js";
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
@@ -60,6 +61,37 @@ function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
 function runView(threadId: string, run: SdkRunRecord) { return { ...run, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }; }
+type RunBody = { input?: string; attachments?: string[] };
+
+/**
+ * Turn account-owned, verified uploads into model input.  The browser can only
+ * submit file IDs; object keys and signed URLs never cross the browser boundary.
+ */
+async function resolveRunInput(session: Awaited<ReturnType<typeof getSession>>, body: RunBody): Promise<{ input: string; message: string | ContentPart[]; attachments: NonNullable<SdkRunRecord["attachments"]> }> {
+  const input = String(body.input ?? "").trim();
+  const ids = Array.isArray(body.attachments) ? [...new Set(body.attachments.filter((id): id is string => typeof id === "string" && id.length > 0))] : [];
+  if ((!input && !ids.length) || input.length > 30_000 || ids.length > 5) throw new Error("invalid_input");
+  const files = ids.map((id) => session.sdkFiles!.find((file) => file.id === id));
+  if (files.some((file) => !file || file.status !== "available")) throw new Error("invalid_attachment");
+  const verified = files as NonNullable<typeof files[number]>[];
+  const parts: ContentPart[] = [{ type: "text", text: input || "Please analyze the attached file(s)." }];
+  for (const file of verified) {
+    if (file.contentType === "video/mp4") {
+      parts.push({ type: "video_url", video_url: { url: await signR2Download(file.key) } });
+      continue;
+    }
+    const data = await readR2Object(file.key);
+    if (file.contentType.startsWith("audio/")) {
+      const transcript = await transcribeAudio(data, file.contentType.split("/")[1] || "wav");
+      parts.push({ type: "text", text: `Transcript of ${file.name}:\n${transcript}` });
+    } else if (file.contentType.startsWith("image/")) {
+      parts.push({ type: "image_url", image_url: { url: `data:${file.contentType};base64,${data.toString("base64")}` } });
+    } else {
+      parts.push({ type: "file", file: { filename: file.name, file_data: `data:${file.contentType};base64,${data.toString("base64")}` } });
+    }
+  }
+  return { input, message: parts.length === 1 ? input : parts, attachments: verified.map(({ id, name, contentType, size }) => ({ id, name, contentType, size })) };
+}
 function page<T extends { id: string; updatedAt: number }>(items: T[], cursor: string | undefined, limit: string | undefined): { data: T[]; nextCursor?: string } { const size = Math.max(1, Math.min(100, Number(limit ?? 20) || 20)); const [at = "", id = ""] = Buffer.from(cursor ?? "", "base64url").toString("utf8").split(":"); const sorted = [...items].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id)); const filtered = at ? sorted.filter((item) => item.updatedAt < Number(at) || (item.updatedAt === Number(at) && item.id < id)) : sorted; const data = filtered.slice(0, size); const last = data.at(-1); return { data, ...(last && filtered.length > data.length ? { nextCursor: Buffer.from(`${last.updatedAt}:${last.id}`).toString("base64url") } : {}) }; }
 function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fingerprint: string): { replay?: unknown; key?: string; mismatch?: boolean } {
   const now = Date.now(); const cutoff = now - 24 * 60 * 60 * 1000;
@@ -161,31 +193,31 @@ export function registerSdkApi(app: Hono): void {
     const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
   });
   app.post("/v1/threads/:threadId/runs", async (c) => {
-    const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { input?: string };
-    const input = String(body.input ?? "").trim(); if (!input || input.length > 30_000) return apiError(c, 400, "invalid_input", "input must be between 1 and 30000 characters.");
+    const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
-    try { const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, c.req.raw.signal); run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); }
+    let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input: resolved.input, attachments: resolved.attachments, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, session.model, undefined, c.req.raw.signal); run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
-    const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { input?: string };
-    const input = String(body.input ?? "").trim(); if (!input || input.length > 30_000) return apiError(c, 400, "invalid_input", "input must be between 1 and 30000 characters.");
+    const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input: resolved.input, attachments: resolved.attachments, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
     const abort = new AbortController(); const abortOnDisconnect = () => abort.abort(); c.req.raw.signal.addEventListener("abort", abortOnDisconnect, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({ start: async (controller) => {
       const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
-        const result = await runAgent(owner.userId, input, thread.history, session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); });
-        run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: input }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+        const result = await runAgent(owner.userId, resolved.message, thread.history, session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); });
+        run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
         else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
