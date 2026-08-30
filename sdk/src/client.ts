@@ -19,6 +19,7 @@ export class Chusky {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly userAgent: string;
+  private readonly model?: string;
 
   constructor(options: ChuskyClientOptions) {
     if (!options.apiKey.trim()) throw new ChuskyError("apiKey is required");
@@ -29,6 +30,7 @@ export class Chusky {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.userAgent = options.userAgent ?? "chusky-typescript/0.1.0";
+    this.model = options.model;
     this.threads = new ThreadsResource(this);
     this.tasks = new TasksResource(this);
     this.approvals = new ApprovalsResource(this);
@@ -38,6 +40,9 @@ export class Chusky {
     this.usage = new UsageResource(this);
     this.projects = new ProjectsResource(this);
   }
+
+  /** @internal Returns the configured default model for run requests. */
+  modelForRuns(): { model?: string } { return this.model ? { model: this.model } : {}; }
 
   async request<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
     const controller = new AbortController();
@@ -107,7 +112,7 @@ export class ThreadsResource {
 
 export class RunsResource {
   constructor(private readonly client: Chusky, private readonly threadId: string) {}
-  create(params: CreateRunParams, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs`, { method: "POST", body: JSON.stringify(params) }, options); }
+  create(params: CreateRunParams, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs`, { method: "POST", body: JSON.stringify({ ...params, ...(params.model ? {} : this.client.modelForRuns()) }) }, options); }
   get(runId: string, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs/${encodeURIComponent(runId)}`, {}, options); }
   list(params: { cursor?: string; limit?: number } = {}, options?: RequestOptions): Promise<Page<Run>> { const query = new URLSearchParams(); if (params.cursor) query.set("cursor", params.cursor); if (params.limit) query.set("limit", String(params.limit)); return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs${query.size ? `?${query}` : ""}`, {}, options); }
   cancel(runId: string, options?: RequestOptions): Promise<Run> { return this.client.request(`/threads/${encodeURIComponent(this.threadId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", body: "{}" }, options); }
@@ -115,7 +120,7 @@ export class RunsResource {
   async *stream(params: Omit<CreateRunParams, "wait">, options: RequestOptions = {}): AsyncIterable<RunStreamEvent> {
     const { response, dispose } = await this.client.streamRequest(
       `/threads/${encodeURIComponent(this.threadId)}/runs/stream`,
-      { method: "POST", body: JSON.stringify(params) },
+      { method: "POST", body: JSON.stringify({ ...params, ...(params.model ? {} : this.client.modelForRuns()) }) },
       options,
     );
     try { yield* readNdjson<RunStreamEvent>(response.body); } finally { dispose(); }

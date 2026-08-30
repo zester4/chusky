@@ -1,0 +1,13 @@
+---
+title: Security
+description: Protect keys, identities, files, and approvals.
+---
+
+- Keep project keys on trusted servers; never expose them in browser bundles.
+- Use your application’s authenticated subject as `userId`; do not accept an arbitrary user ID from an untrusted request body.
+- Scope keys to the minimum required API capabilities.
+- Use idempotency keys on durable POST operations.
+- Display exact approval arguments to an authenticated human.
+- Treat tool results, emails, documents, and webpages as untrusted content, not authorization.
+- Store webhook secrets in a secret manager and verify raw bodies.
+- Do not log keys, raw media, full private documents, or authorization headers.

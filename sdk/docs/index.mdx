@@ -1,0 +1,27 @@
+---
+title: Chusky Developer Platform
+description: Build products with a persistent, tool-using AI agent.
+---
+
+Chusky is an agent platform with a TypeScript SDK and versioned REST API. Your application supplies an authenticated user context; Chusky runs the agent, connected apps, native tools, approvals, durable tasks, files, and workflows on the server.
+
+<Card title="Start in five minutes" icon="rocket" href="/docs/quickstart">
+Install the SDK, create a thread, and stream the first response.
+</Card>
+
+## What you can build
+
+- AI customer-support and operations workspaces
+- Agents that use Gmail, Slack, GitHub, Notion, and other connected apps
+- Durable research and automation tasks that survive restarts
+- Authenticated chat products with streaming responses
+- Human-in-the-loop workflows for sending, deleting, publishing, or changing data
+- File-aware assistants using verified Cloudflare R2 uploads
+
+## The execution model
+
+```text
+Your application → @chusky/sdk → Chusky API → agent → tools/workflows → response
+```
+
+The SDK is a secure client for the Developer API. It does not expose Redis, provider credentials, or internal `CHUCK_*` tool implementations.

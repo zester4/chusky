@@ -1,0 +1,25 @@
+---
+title: Model selection
+description: Choose a default model or override it for one run.
+---
+
+Set a client-wide default:
+
+```ts
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  userId: "customer_123",
+  model: "openai/gpt-5.6-luna",
+});
+```
+
+Override the model for a specific run:
+
+```ts
+await chusky.threads.runs(thread.id).create({
+  input: "Analyze this report",
+  model: "anthropic/claude-sonnet-4",
+});
+```
+
+The explicit run model wins over the client default. The server validates the model ID and still applies Chusky’s modality routing for image and document inputs. Model availability depends on the deployed OpenRouter catalog.

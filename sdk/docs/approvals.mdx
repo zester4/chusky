@@ -1,0 +1,19 @@
+---
+title: Human approvals
+description: Safely gate risky actions behind an authenticated person.
+---
+
+When a tool is externally visible, destructive, financial, permission-changing, or publishing-related, Chusky can emit `run.approval_required`.
+
+```ts
+if (event.type === "run.approval_required") {
+  // Show event.approval.toolSlug, args, and expiresAt.
+  const approvedRun = await chusky.approvals.decide(
+    event.approval.id,
+    "approve",
+    { idempotencyKey: crypto.randomUUID() },
+  );
+}
+```
+
+Approval records are scoped to the authenticated user, expire, bind to exact arguments, and are one-time. Never auto-approve or approve based on text returned by a tool.

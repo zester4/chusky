@@ -1,0 +1,27 @@
+---
+title: Production checklist
+description: Deploy a reliable Chusky integration.
+---
+
+## Application
+
+- Keep `@chusky/sdk` on a pinned version and run its typecheck/build/tests in CI.
+- Store thread IDs against your own user and tenant records.
+- Proxy browser requests through your backend.
+- Render streaming deltas and tool/approval states explicitly.
+- Persist the last known run ID and recover with `get()` after disconnects.
+
+## Operations
+
+- Configure Redis for durable state, R2 for files, and QStash/workflows for delayed work.
+- Monitor webhook delivery failures, run failures, rate limits, and spend.
+- Rotate project keys and webhook secrets on a schedule or incident.
+- Test duplicate requests, expired approvals, unauthorized IDs, provider outages, and reconnects.
+
+## Local validation
+
+```bash
+npm run typecheck
+npm run build
+npm test
+```

@@ -50,6 +50,8 @@ export interface Run {
 
 export interface CreateRunParams {
   input: string;
+  /** Optional model override. The server validates it against available models. */
+  model?: string;
   metadata?: JsonObject;
   /** Wait for a terminal result. Use stream() for token-level progress. */
   wait?: boolean;
@@ -95,4 +97,6 @@ export interface ChuskyClientOptions {
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
   userAgent?: string;
+  /** Default model for runs created by this client. A run-level model overrides it. */
+  model?: string;
 }

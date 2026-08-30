@@ -1,0 +1,28 @@
+---
+title: Streaming and run lifecycle
+description: Render tokens, tools, approvals, and terminal state in real time.
+---
+
+```ts
+const abort = new AbortController();
+
+for await (const event of chusky.threads.runs(thread.id).stream(
+  { input: "Review the latest report" },
+  { signal: abort.signal, idempotencyKey: crypto.randomUUID() },
+)) {
+  switch (event.type) {
+    case "run.delta": console.log(event.text); break;
+    case "run.tool_started": console.log(`Using ${event.toolSlug}`); break;
+    case "run.approval_required": /* show exact args to a human */ break;
+    case "run.completed": /* persist event.run */ break;
+    case "run.failed": console.error(event.error.message); break;
+  }
+}
+```
+
+Abort stops the current HTTP stream. For durable state, use `get()` or `events()` with the run ID. Do not automatically retry a stream as a new run.
+
+```ts
+const run = await chusky.threads.runs(thread.id).get(runId);
+const events = await chusky.threads.runs(thread.id).events(runId);
+```

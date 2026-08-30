@@ -1,0 +1,15 @@
+---
+title: Webhooks
+description: Receive durable notifications in your application.
+---
+
+```ts
+const webhook = await chusky.webhooks.create("https://your-app.example.com/chusky/events", {
+  idempotencyKey: crypto.randomUUID(),
+});
+console.log(webhook.secret); // store immediately; it is returned once
+```
+
+Verify the signature using the raw request body, timestamp, and signing secret. Deduplicate by event ID. Return a successful response only after the event is durably accepted; process expensive work asynchronously.
+
+Webhook deliveries have retry state and may fail. Build an operator view for delivery status and keep your handler idempotent.

@@ -1,0 +1,24 @@
+---
+title: Core concepts
+description: Understand identity, threads, runs, tools, and durable state.
+---
+
+## Users and projects
+
+A project key identifies your application. `userId` identifies the end user whose Chusky state is used. Project keys are scoped and may be revoked or rotated.
+
+## Threads and runs
+
+A thread is a durable conversation. A run is one agent execution within that thread. Keep the thread ID in your application database and reuse it for continuity.
+
+## Tools
+
+The agent selects tools from its server-side catalog. Connected-app tools require the user to connect the relevant account. Read-only actions can run directly; risky actions create an approval.
+
+## Durable state
+
+Chusky persists conversation history, summaries, tasks, approvals, files, audit events, and connected-app sessions. A dropped HTTP connection does not imply that durable work failed; retrieve the run and its events.
+
+## Idempotency
+
+Use a fresh `idempotencyKey` for each logical mutation. If a request is retried, reuse the same key only for the exact same operation and body.

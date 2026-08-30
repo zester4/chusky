@@ -1,0 +1,56 @@
+---
+title: Quickstart
+description: Create your first Chusky conversation.
+---
+
+## Install
+
+```bash
+npm install @chusky/sdk
+```
+
+## Configure the server
+
+```env
+CHUSKY_API_KEY=chsk_your_project_key
+CHUSKY_BASE_URL=https://chusky.selithub.shop
+```
+
+Keep `CHUSKY_API_KEY` in a trusted server environment. Never bundle it into browser JavaScript.
+
+## Create a thread and run the agent
+
+```ts
+import { Chusky } from "@chusky/sdk";
+
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  baseUrl: process.env.CHUSKY_BASE_URL,
+  userId: "customer_123",
+});
+
+const thread = await chusky.threads.create({
+  metadata: { source: "my-app" },
+});
+
+const run = await chusky.threads.runs(thread.id).create({
+  input: "Prepare a concise renewal brief.",
+});
+
+console.log(run.output);
+```
+
+## Stream the response
+
+```ts
+for await (const event of chusky.threads.runs(thread.id).stream({
+  input: "Prepare a concise renewal brief.",
+})) {
+  if (event.type === "run.delta") process.stdout.write(event.text);
+  if (event.type === "run.approval_required") {
+    console.log("Human approval required", event.approval);
+  }
+}
+```
+
+`userId` must be your own application’s authenticated user ID. Chusky uses it to isolate threads, files, memory, approvals, tasks, and connected accounts.

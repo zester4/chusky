@@ -1,0 +1,24 @@
+---
+title: Files and R2 uploads
+description: Upload verified files and attach them to agent runs.
+---
+
+Files use a two-step upload: create an intent, upload bytes to the short-lived R2 URL, then complete verification.
+
+```ts
+const intent = await chusky.files.create({
+  name: "renewal.pdf",
+  contentType: "application/pdf",
+  size: file.size,
+});
+
+await fetch(intent.uploadUrl, {
+  method: "PUT",
+  headers: { "Content-Type": file.type },
+  body: file,
+});
+
+const verified = await chusky.files.complete(intent.id);
+```
+
+Only verified files can be attached or downloaded. Upload URLs expire quickly; do not persist them. The backend enforces type, size, ownership, and content-type verification.

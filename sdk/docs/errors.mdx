@@ -1,0 +1,21 @@
+---
+title: Errors and retries
+description: Handle API failures safely.
+---
+
+The SDK exposes typed errors for authentication and rate limits. API errors include a status and machine-readable code.
+
+```ts
+try {
+  await chusky.threads.runs(thread.id).create({ input: "Hello" });
+} catch (error) {
+  if (error instanceof ChuskyRateLimitError) {
+    // Respect Retry-After before retrying.
+  }
+  if (error instanceof ChuskyAuthenticationError) {
+    // Rotate or correct the project key; do not retry blindly.
+  }
+}
+```
+
+Retry transient network, 429, and 5xx failures with bounded backoff. Reuse an idempotency key for the same durable mutation. Do not create a second run merely because a stream disconnected.

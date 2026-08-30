@@ -1,5 +1,9 @@
 # Chusky TypeScript SDK
 
+## Documentation
+
+The complete Mintlify-style documentation is in [`docs/`](docs/index.mdx), including the quickstart, concepts, streaming, model selection, files, approvals, durable tasks, webhooks, security, errors, and production guidance. The Mintlify navigation configuration is [`docs.json`](docs.json).
+
 This package is the public developer boundary for Chusky. It is intentionally separate from the Telegram bot, Redis store, Composio credentials, and internal `CHUCK_*` tool names. Developers place their scoped `chsk_` project key in `CHUSKY_API_KEY`. On the self-hosted Oracle server only, `CHUSKY_PROJECT_KEY` is the private root/bootstrap credential used to provision those project keys.
 
 ```ts

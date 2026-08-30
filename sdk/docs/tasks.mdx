@@ -1,0 +1,13 @@
+---
+title: Durable tasks
+description: Run work that can pause, retry, and survive process restarts.
+---
+
+Use tasks for long-running work. Task state includes status, checkpoint, next action, result, and error information.
+
+```ts
+const page = await chusky.tasks.list({ limit: 20 });
+const task = await chusky.tasks.get("task_123");
+```
+
+Tasks are durable and retried by the server workflow layer. Treat `queued`, `running`, `blocked`, `completed`, `failed`, and `cancelled` as distinct states. A blocked task may require an approval or user input rather than a blind retry.
