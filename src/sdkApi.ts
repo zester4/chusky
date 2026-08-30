@@ -3,11 +3,11 @@ import type { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, runAgent, transcribeAudio } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, fetchModels, getConnectionUrl, getToolkitStates, listTriggers, runAgent, setTriggerState, transcribeAudio } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
-import { acquireUserLock, canSpend, checkRateLimit, claimApproval, createWebTelegramLinkCode, getApproval, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, canSpend, checkRateLimit, claimApproval, createWebTelegramLinkCode, getApproval, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, saveSession, setApprovalStatus, setModel, setVoiceReplies, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import type { ContentPart } from "./types.js";
 
@@ -184,6 +184,63 @@ export function registerSdkApi(app: Hono): void {
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
       deliveries: deliveries.filter((item) => item.userId === owner.userId && !item.webhook).slice(0, 20).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })),
     });
+  });
+
+  app.get("/v1/account/models", async (c) => {
+    try { return c.json({ data: await fetchModels() }); }
+    catch (error) { return apiError(c, 502, "models_unavailable", error instanceof Error ? error.message : "Models are temporarily unavailable."); }
+  });
+
+  app.patch("/v1/account/preferences", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { model?: unknown; voiceReplies?: unknown };
+    if (body.model !== undefined && (typeof body.model !== "string" || !/^[a-zA-Z0-9._:/~-]{1,200}$/.test(body.model))) return apiError(c, 400, "invalid_model", "model must be a valid model ID.");
+    if (body.voiceReplies !== undefined && typeof body.voiceReplies !== "boolean") return apiError(c, 400, "invalid_voice_setting", "voiceReplies must be a boolean.");
+    if (body.model === undefined && body.voiceReplies === undefined) return apiError(c, 400, "empty_preferences", "Provide model or voiceReplies.");
+    if (body.model !== undefined) await setModel(owner.userId, body.model);
+    if (body.voiceReplies !== undefined) await setVoiceReplies(owner.userId, body.voiceReplies);
+    const session = await getSession(owner.userId);
+    return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies) });
+  });
+
+  app.get("/v1/apps", async (c) => {
+    try { return c.json({ data: await getToolkitStates(sdkUser(c)!.userId) }); }
+    catch (error) { return apiError(c, 502, "apps_unavailable", error instanceof Error ? error.message : "Connected apps are temporarily unavailable."); }
+  });
+
+  app.post("/v1/apps/:toolkit/connect", async (c) => {
+    const toolkit = c.req.param("toolkit").trim();
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(toolkit)) return apiError(c, 400, "invalid_toolkit", "Invalid toolkit name.");
+    try { return c.json({ toolkit, url: await getConnectionUrl(sdkUser(c)!.userId, toolkit) }); }
+    catch (error) { return apiError(c, 502, "connection_unavailable", error instanceof Error ? error.message : "Could not create an app connection link."); }
+  });
+
+  app.get("/v1/triggers", async (c) => {
+    try {
+      const items = await listTriggers(sdkUser(c)!.userId);
+      return c.json({ data: items.map((item: any) => ({ id: String(item.id ?? item.trigger_id ?? item.triggerId ?? ""), slug: String(item.trigger_slug ?? item.slug ?? ""), status: String(item.status ?? (item.enabled === false ? "disabled" : "active")), config: item.config ?? item.triggerConfig ?? {} })).filter((item) => item.id) });
+    } catch (error) { return apiError(c, 502, "triggers_unavailable", error instanceof Error ? error.message : "Triggers are temporarily unavailable."); }
+  });
+
+  app.post("/v1/triggers", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { slug?: unknown; triggerConfig?: unknown };
+    const slug = String(body.slug ?? "").trim();
+    if (!/^[A-Z0-9][A-Z0-9_.-]{1,150}$/.test(slug)) return apiError(c, 400, "invalid_trigger", "Provide a valid trigger slug.");
+    if (body.triggerConfig !== undefined && (typeof body.triggerConfig !== "object" || body.triggerConfig === null || Array.isArray(body.triggerConfig))) return apiError(c, 400, "invalid_trigger_config", "triggerConfig must be an object.");
+    try { return c.json(await createTrigger(sdkUser(c)!.userId, slug, { triggerConfig: body.triggerConfig ?? {} }), 201); }
+    catch (error) { return apiError(c, 502, "trigger_create_failed", error instanceof Error ? error.message : "Could not create the trigger."); }
+  });
+
+  app.patch("/v1/triggers/:triggerId", async (c) => {
+    const enabled = (await c.req.json().catch(() => ({})) as { enabled?: unknown }).enabled;
+    if (typeof enabled !== "boolean") return apiError(c, 400, "invalid_trigger_state", "enabled must be a boolean.");
+    try { return c.json(await setTriggerState(sdkUser(c)!.userId, c.req.param("triggerId"), enabled)); }
+    catch (error) { return apiError(c, 403, "trigger_not_owned", error instanceof Error ? error.message : "You do not own this trigger."); }
+  });
+
+  app.delete("/v1/triggers/:triggerId", async (c) => {
+    try { await deleteTrigger(sdkUser(c)!.userId, c.req.param("triggerId")); return c.body(null, 204); }
+    catch (error) { return apiError(c, 403, "trigger_not_owned", error instanceof Error ? error.message : "You do not own this trigger."); }
   });
 
   app.post("/v1/account/telegram-link", async (c) => {
