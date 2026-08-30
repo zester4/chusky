@@ -44,3 +44,24 @@ export const chuckTools = [
   { type: "function", function: { name: "CHUCK_DAYTONA_BROWSER", description: "Browse the web in the user's Daytona desktop through the official Computer Use API. Open http(s) URLs, inspect accessibility snapshots, find elements by role/name, invoke or fill accessible controls, inspect windows, take screenshots, and use keyboard navigation. Verify the page after each interaction. Browser state is retained in the user's Daytona workspace.", parameters: { type: "object", properties: { action: { type: "string", enum: ["status", "open", "snapshot", "find", "focus", "invoke", "fill", "windows", "screenshot", "click", "type", "press", "scroll", "back", "forward", "refresh"] }, url: { type: "string" }, x: { type: "number" }, y: { type: "number" }, text: { type: "string" }, value: { type: "string" }, key: { type: "string" }, keys: { type: "string" }, direction: { type: "string", enum: ["up", "down"] }, amount: { type: "number" }, maxDepth: { type: "number" }, role: { type: "string" }, name: { type: "string" }, nameMatch: { type: "string" }, limit: { type: "number" }, nodeId: { type: "string" }, nodeAction: { type: "string" } }, required: ["action"] } } },
   { type: "function", function: { name: "CHUCK_ARTIFACT", description: "Create and manage durable user-owned deliverables in Daytona. Create text artifacts, register files generated in the workspace, list/get/delete artifacts, and package workspace files into a ZIP. For DOCX, PDF, PPTX, XLSX, images, and videos, generate the valid file in Daytona first, then register its path.", parameters: { type: "object", properties: { action: { type: "string", enum: ["create", "register", "list", "get", "delete", "package"] }, id: { type: "string" }, name: { type: "string" }, type: { type: "string", enum: ["website", "report", "presentation", "pdf", "spreadsheet", "image", "video", "zip", "project"] }, path: { type: "string" }, content: { type: "string" }, contentType: { type: "string" }, files: { type: "array", items: { type: "string" } }, removeFile: { type: "boolean" } }, required: ["action"] } } },
 ] as const;
+
+/** Validate local-tool arguments at the execution boundary, not just in the model prompt. */
+export function validateNativeToolArguments(name: string, args: Record<string, unknown>): void {
+  const tool = chuckTools.find((item) => item.function.name === name);
+  if (!tool) throw new Error(`Unknown native tool: ${name}`);
+  const schema = tool.function.parameters as { required?: readonly string[]; properties?: Record<string, { type?: string; enum?: readonly string[]; items?: { type?: string } }> };
+  for (const key of schema.required ?? []) {
+    if (!(key in args) || args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !args[key].trim())) throw new Error(`${name} requires argument: ${key}`);
+  }
+  for (const [key, rule] of Object.entries(schema.properties ?? {})) {
+    const value = args[key];
+    if (value === undefined || value === null || !rule.type) continue;
+    const valid = rule.type === "number" ? typeof value === "number" && Number.isFinite(value)
+      : rule.type === "string" ? typeof value === "string"
+      : rule.type === "boolean" ? typeof value === "boolean"
+      : rule.type === "array" ? Array.isArray(value) && (!rule.items?.type || value.every((item) => typeof item === rule.items?.type))
+      : rule.type === "object" ? typeof value === "object" && !Array.isArray(value) : true;
+    if (!valid) throw new Error(`${name}.${key} must be a ${rule.type}`);
+    if (rule.enum && !rule.enum.includes(value as string)) throw new Error(`${name}.${key} has an unsupported value`);
+  }
+}

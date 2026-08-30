@@ -111,6 +111,7 @@ export interface ChannelAdapter {
   send(message: OutboundMessage): Promise<DeliveryReceipt>;
   edit?(target: ReplyTarget, providerMessageId: string, text: string, blocks?: unknown[]): Promise<DeliveryReceipt>;
   typing?(target: ReplyTarget): Promise<void>;
+  stopTyping?(target: ReplyTarget): Promise<void>;
 }
 
 export class ChannelVerificationError extends Error {

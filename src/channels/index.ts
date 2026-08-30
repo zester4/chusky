@@ -9,6 +9,7 @@ export * from "./telegram.js";
 export * from "./cli.js";
 export * from "./whatsapp.js";
 export * from "./sendblue.js";
+export * from "./sendblueFormatting.js";
 export * from "./sms.js";
 export * from "./voice.js";
 export * from "./debounce.js";

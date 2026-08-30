@@ -9,6 +9,7 @@ import { ChannelDebouncer } from "../src/channels/debounce.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "../src/channels/slack.js";
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
+import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
@@ -82,6 +83,27 @@ test("Sendblue hydrates bounded media for the shared agent handler", async () =>
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/png", "content-length": "3" } })) as typeof fetch);
   const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-media", providerUserId: "+15550001", providerConversationId: "+15550001", text: "edit this", attachments: [{ id: "m1", kind: "image", url: "https://cdn.example/image.png" }], receivedAt: Date.now(), scope: "private" });
   assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
+});
+
+test("Sendblue converts Markdown into readable iMessage text", () => {
+  const result = formatSendblueText("**Today**\n\n- Check email\n- [Open dashboard](https://example.com)\n\n`npm test`");
+  assert.equal(result, "Today\n\n• Check email\n• Open dashboard: https://example.com\n\nnpm test");
+  assert.equal(result.includes("*"), false);
+});
+
+test("Sendblue typing indicators use the direct-message API", async () => {
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ status: "SENT" }), { status: 200 });
+  }) as typeof fetch);
+  const target = { provider: "sendblue" as const, conversationId: "+15550001" };
+  await adapter.typing(target);
+  await adapter.stopTyping(target);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].url.endsWith("/send-typing-indicator"), true);
+  assert.equal(requests[0].body.state, "start");
+  assert.equal(requests[1].body.state, "stop");
 });
 
 test("WhatsApp bursts are merged by a Redis-backed debounce queue", async () => {

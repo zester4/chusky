@@ -22,6 +22,7 @@ import { SendblueAdapter } from "./channels/sendblue.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { triggerWorkflowUrl, workflowClient } from "./triggerWorkflow.js";
+import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 
 function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown> }): string {
   const redacted = Object.entries(event.payload ?? {}).filter(([key, value]) => {
@@ -524,15 +525,17 @@ async function main(): Promise<void> {
         await appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: result.text }]);
         if (result.cost) await addUsage(event.userId, result.cost);
         const chatId = await getTelegramChatId(event.userId);
-        if (chatId && result.text.trim()) {
-          await bot.api.sendMessage(chatId, `🔔 <b>Chusky trigger</b>\n\n${result.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 3900)}`, { parse_mode: "HTML" });
-        }
+        if (chatId && result.text.trim()) await workflow.run("deliver-trigger-result", async () => {
+          for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 <b>Chusky trigger</b>\n\n${result.text}`), 3900).entries()) {
+            await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${chatId}:${index}`, correlationId: event.eventId, kind: "notification" });
+          }
+        });
       } catch (error) {
         if (error instanceof ApprovalRequiredError) {
           await updateTriggerEvent(event.eventId, { status: "awaiting_approval", approvalId: error.approvalId });
           const approval = await getApproval(event.userId, error.approvalId);
           const chatId = await getTelegramChatId(event.userId);
-          if (chatId && approval) await bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) });
+          if (chatId && approval) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", `trigger-approval:${error.approvalId}`, { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
             await updateTriggerEvent(event.eventId, { status: "completed", result: "The requested triggered action was denied or expired." });
@@ -546,7 +549,11 @@ async function main(): Promise<void> {
           await appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: resumed.text }]);
           if (resumed.cost) await addUsage(event.userId, resumed.cost);
           const resumedChatId = await getTelegramChatId(event.userId);
-          if (resumedChatId && resumed.text.trim()) await bot.api.sendMessage(resumedChatId, `🔔 <b>Chusky trigger</b>\n\n${resumed.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").slice(0, 3900)}`, { parse_mode: "HTML" });
+          if (resumedChatId && resumed.text.trim()) await workflow.run("deliver-resumed-trigger-result", async () => {
+            for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 <b>Chusky trigger</b>\n\n${resumed.text}`), 3900).entries()) {
+              await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(resumedChatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${resumedChatId}:${index}`, correlationId: event.eventId, kind: "notification" });
+            }
+          });
           return;
         }
         await updateTriggerEvent(event.eventId, { status: "failed", error: String(error).slice(0, 2000) });

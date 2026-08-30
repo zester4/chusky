@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getSession, initStore } from "../src/store.js";
-import { cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -93,6 +93,26 @@ test("malformed tool JSON becomes a controlled tool error and the loop continues
   ], async () => undefined, async () => {
     const result = await runAgent(830004, "recover", [], "test/model");
     assert.equal(result.text, "recovered");
+  });
+});
+
+test("tool argument parser accepts fenced and single-quoted JSON-like objects safely", () => {
+  assert.deepEqual(parseToolArguments("```json\n{'type': 'report', 'title': 'Chusky\\'s findings',}\n```"), { type: "report", title: "Chusky's findings" });
+  assert.throws(() => parseToolArguments("{action: create, value: process.exit(1)}"));
+});
+
+test("repeated provider tool-call IDs execute only once", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830009);
+  let executions = 0;
+  await withAgentMocks([
+    toolResponse("TEST_SAFE_TOOL", '{"value":"one"}'),
+    toolResponse("TEST_SAFE_TOOL", '{"value":"one"}'),
+    chatResponse({ role: "assistant", content: "done" }),
+  ], async () => { executions++; return { ok: true }; }, async () => {
+    const result = await runAgent(830009, "repeat", [], "test/model");
+    assert.equal(result.text, "done");
+    assert.equal(executions, 1);
   });
 });
 

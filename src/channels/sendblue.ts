@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
+import { formatSendblueText } from "./sendblueFormatting.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -88,6 +89,30 @@ export class SendblueAdapter implements ChannelAdapter {
     return { "sb-api-key-id": this.apiKey, "sb-api-secret-key": this.apiSecret, "Content-Type": "application/json" };
   }
 
+  private isGroup(target: OutboundMessage["target"]): boolean {
+    return Boolean(target.metadata?.groupId);
+  }
+
+  async typing(target: OutboundMessage["target"]): Promise<void> {
+    if (this.isGroup(target) || !this.apiKey || !this.apiSecret || !this.fromNumber) return;
+    const response = await this.fetchImpl("https://api.sendblue.com/api/send-typing-indicator", {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ from_number: this.fromNumber, number: target.conversationId, state: "start", max_duration_ms: 300_000 }),
+    });
+    if (!response.ok) throw new Error(`Sendblue typing indicator failed: ${response.status}`);
+  }
+
+  async stopTyping(target: OutboundMessage["target"]): Promise<void> {
+    if (this.isGroup(target) || !this.apiKey || !this.apiSecret || !this.fromNumber) return;
+    const response = await this.fetchImpl("https://api.sendblue.com/api/send-typing-indicator", {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ from_number: this.fromNumber, number: target.conversationId, state: "stop" }),
+    });
+    if (!response.ok) throw new Error(`Sendblue typing indicator stop failed: ${response.status}`);
+  }
+
   async configureReceiveWebhook(url: string, secret: string): Promise<void> {
     if (!this.apiKey || !this.apiSecret) throw new Error("Sendblue API credentials are required");
     const response = await this.fetchImpl("https://api.sendblue.com/api/account/webhooks", { method: "POST", headers: this.headers(), body: JSON.stringify({ webhooks: [{ url, secret }], type: "receive" }) });
@@ -108,7 +133,7 @@ export class SendblueAdapter implements ChannelAdapter {
     const isGroup = Boolean(groupId);
     const body: Record<string, unknown> = {
       from_number: this.fromNumber,
-      content: (message.text ?? "").slice(0, this.capabilities.maxTextLength),
+      content: formatSendblueText(message.text ?? "").slice(0, this.capabilities.maxTextLength),
       ...(this.statusCallback ? { status_callback: this.statusCallback } : {}),
       ...(groupId ? { group_id: groupId } : { number: message.target.conversationId }),
       ...(message.target.metadata?.messageHandle ? { reply_to: { message_handle: message.target.metadata.messageHandle } } : {}),

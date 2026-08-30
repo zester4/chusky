@@ -79,12 +79,12 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
   if (!approval || approval.expiresAt <= Date.now() || approval.status !== "pending") return reply(conversation, "That approval has expired or was already handled.", message.providerEventId);
   if (action === "deny") {
     if (!(await setApprovalStatus(conversation.userId, approvalId, "denied"))) return reply(conversation, "That approval could not be denied safely.", message.providerEventId);
-    if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false);
+    if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId);
     return reply(conversation, "❌ Denied. I did not run the requested action.", message.providerEventId, { kind: "approval", correlationId: approvalId });
   }
   if (!(await claimApproval(conversation.userId, approvalId))) return reply(conversation, "That approval was already claimed by another request.", message.providerEventId);
   if (approval.triggerEventId) {
-    await notifyTriggerApproval(approval.id, true);
+    await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
     return reply(conversation, "✅ Approved. Chusky is resuming the triggered workflow.", message.providerEventId, { kind: "approval", correlationId: approvalId });
   }
   try {

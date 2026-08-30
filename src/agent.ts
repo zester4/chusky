@@ -32,7 +32,7 @@ import { createApproval, getSession, saveSession, setApprovalStatus, setComposio
 import type { Message } from "./store.js";
 import { nativeTool } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
-import { chuckTools } from "./agentTools.js";
+import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { daytonaEngine } from "./lib/daytona/index.js";
@@ -42,6 +42,7 @@ let composio: any = new Composio({ apiKey: config.composioApiKey });
 
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+const MAX_TOOL_RESULT_CHARS = 20_000;
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
 
@@ -84,6 +85,49 @@ function normalizeLegacyDsml(value: string): string {
   // vertical bars (｜) instead of ASCII pipes. Normalize protocol syntax only;
   // argument values are decoded later and remain otherwise untouched.
   return value.replace(/｜/g, "|");
+}
+
+/** Parse provider tool arguments without evaluating JavaScript or JSON5 code. */
+export function parseToolArguments(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string") throw new Error("Tool arguments must be a JSON object");
+  let value = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const first = value.indexOf("{");
+  const last = value.lastIndexOf("}");
+  if (first > 0 || last >= 0 && last < value.length - 1) value = value.slice(Math.max(0, first), last + 1).trim();
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch { /* try the narrow JSON-like repair below */ }
+
+  // Repair only quoted strings, unquoted object keys, and trailing commas.
+  // This deliberately does not evaluate expressions, calls, or prototypes.
+  let repaired = "";
+  let single = false;
+  let double = false;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (single) {
+      if (ch === "\\") {
+        const next = value[++i];
+        repaired += next === "'" ? "'" : next === '"' ? '\\"' : `\\${next}`;
+      } else if (ch === "'") {
+        repaired += '"'; single = false;
+      } else if (ch === '"') repaired += '\\"';
+      else repaired += ch;
+    } else if (double) {
+      repaired += ch;
+      if (ch === "\\") repaired += value[++i] ?? "";
+      else if (ch === '"') double = false;
+    } else if (ch === "'") { repaired += '"'; single = true; }
+    else { repaired += ch; if (ch === '"') double = true; }
+  }
+  repaired = repaired
+    .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":')
+    .replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(repaired) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool arguments must be a JSON object");
+  return parsed as Record<string, unknown>;
 }
 
 function decodeLegacyDsml(value: string): string {
@@ -368,6 +412,7 @@ export async function runAgent(
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
+  const toolResultsByCallId = new Map<string, string>();
 
   for (let round = 0; round < config.maxToolRounds; round++) {
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
@@ -420,7 +465,13 @@ export async function runAgent(
 
       let result: string;
       try {
-        const args = JSON.parse(call.function.arguments) as Record<string, unknown>;
+        const previousResult = toolResultsByCallId.get(call.id);
+        if (previousResult !== undefined) {
+          messages.push({ role: "tool", tool_call_id: call.id, content: previousResult });
+          continue;
+        }
+        const args = parseToolArguments(call.function.arguments);
+        if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
         if (isRiskyToolSlug(slug, args)) {
           const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
           const matches = approved && approved.toolSlug === slug && JSON.stringify(approved.args) === JSON.stringify(args);
@@ -468,6 +519,8 @@ export async function runAgent(
         result = typeof execResult === "string"
           ? execResult
           : JSON.stringify(execResult);
+        if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
+        toolResultsByCallId.set(call.id, result);
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;

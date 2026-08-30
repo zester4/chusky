@@ -624,7 +624,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
         return;
       }
-      if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
+      if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
       await ctx.editMessageText("🛑 Action denied. Nothing was executed.");
       return;
     }
@@ -634,7 +634,7 @@ export function registerHandlers(bot: Bot): void {
     }
     await ctx.editMessageText("✅ Approved. Chusky is executing the action…");
     if (approval.triggerEventId) {
-      await notifyTriggerApproval(approval.id, true);
+      await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
       return;
     }
     try {

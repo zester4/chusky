@@ -103,6 +103,9 @@ export class ChannelGateway {
     }
     const renewal = setInterval(() => { void renewUserLock(identity.userId, lockToken, 180); }, 60_000);
     try {
+      if (adapter.typing) {
+        try { await adapter.typing(conversation.replyTarget); } catch { /* typing is best-effort */ }
+      }
       const response = await this.handler(message, conversation);
       const responses = response ? (Array.isArray(response) ? response : [response]) : [];
       const delivered: string[] = [];
@@ -113,6 +116,9 @@ export class ChannelGateway {
       await completeChannelEvent(message.provider, message.providerEventId);
       return { duplicate: false, linked: true, conversation, delivered };
     } finally {
+      if (adapter.stopTyping) {
+        try { await adapter.stopTyping(conversation.replyTarget); } catch { /* typing is best-effort */ }
+      }
       clearInterval(renewal);
       await releaseUserLock(identity.userId, lockToken);
     }
