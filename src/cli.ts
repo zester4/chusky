@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { ChuskyClient, getCliConfigPath, loadCliConfig, saveCliConfig, type CliTask } from "./cli/client.js";
+import { ChuskyClient, getCliConfigPath, loadCliConfig, saveCliConfig, type CliTask, type CliGeneratedFile } from "./cli/client.js";
 import { formatApproval, formatError, formatSessionBanner, formatStatus, formatSuccess, formatToolSummary, formatWarning, paint, renderMarkdown } from "./cli/renderer.js";
 import { pickModel } from "./cli/modelPicker.js";
 import { approveFromPicker } from "./cli/approvalPicker.js";
@@ -66,8 +66,8 @@ async function loadCollection(client: ChuskyClient, kind: "history" | "memories"
   return all;
 }
 
-async function saveArtifacts(images: { data: string; mediaType: string }[], color: boolean): Promise<void> {
-  if (!images.length) return;
+async function saveArtifacts(images: { data: string; mediaType: string }[], files: CliGeneratedFile[] = [], color: boolean): Promise<void> {
+  if (!images.length && !files.length) return;
   const directory = join(dirname(getCliConfigPath()), "artifacts");
   await mkdir(directory, { recursive: true });
   for (let i = 0; i < images.length; i++) {
@@ -75,6 +75,12 @@ async function saveArtifacts(images: { data: string; mediaType: string }[], colo
     const path = join(directory, `chusky-${Date.now()}-${i}.${ext}`);
     await writeFile(path, Buffer.from(images[i].data, "base64"));
     console.log(formatSuccess(`Saved artifact: ${path}`, color));
+  }
+  for (const file of files) {
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "artifact.bin";
+    const path = join(directory, `${Date.now()}-${safeName}`);
+    await writeFile(path, Buffer.from(file.data, "base64"));
+    console.log(formatSuccess(`Saved ${file.type || "file"} artifact: ${path}`, color));
   }
 }
 
@@ -110,7 +116,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /voice [on|off|status] /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -125,6 +131,63 @@ async function chat(): Promise<void> {
         const result = await approveFromPicker(client, approval, color);
         if (result) console.log(result.ok ? formatSuccess(`${approval.id}: ${result.text || "Decision recorded."}`, color) : formatError(result.error || "Approval could not be updated.", color));
         continue;
+      }
+      if (line === "/apps" || line.startsWith("/apps ")) {
+        const page = Number(line.slice(5).trim()) || 1; const result = await client.apps(page);
+        if (!result.ok) console.log(formatError(result.error || "Could not load apps.", color));
+        else await showPaged(`${paint("App connections", "cyan", color)}  page ${result.page}/${result.totalPages}\n\n${result.apps?.map((app) => `${app.connected ? "✓" : "·"} ${app.name}  (${app.slug})`).join("\n") || "No apps found."}\n\nUse /apps ${result.page < result.totalPages ? result.page + 1 : 1} for another page.`, true);
+        continue;
+      }
+      if (line.startsWith("/connect ")) {
+        const toolkit = line.slice(9).trim(); const result = await client.connect(toolkit);
+        console.log(result.ok ? `${formatSuccess(`Connection link for ${toolkit}:`, color)}\n${result.url}` : formatError(result.error || "Could not create connection link.", color)); continue;
+      }
+      if (line === "/info") {
+        const result = await client.usage();
+        console.log(result.ok ? `${paint("Chusky session", "cyan", color)}\n${formatStatus("User", String(result.userId), color)}\n${formatStatus("Model", String(result.model), color)}\n${formatStatus("Messages", String(result.totalMessages), color)}\n${formatStatus("Context", `${result.historyTurns}/${result.maxHistory} turns`, color)}\n${formatStatus("Tool rounds", String(result.maxToolRounds), color)}\n${formatStatus("Cost", `$${Number(result.totalCost || 0).toFixed(5)}`, color)}` : formatError(result.error || "Could not load session info.", color)); continue;
+      }
+      if (line === "/image" || line.startsWith("/image ")) {
+        const prompt = line.slice(6).trim();
+        if (!prompt) { console.log(formatError("Usage: /image <description>", color)); continue; }
+        const result = await client.chat(`Generate an image of: ${prompt}`);
+        if (!result.ok) console.log(formatError(result.error || "Image generation failed.", color));
+        else { console.log(renderMarkdown(String(result.text || "Image generated."), color)); await saveArtifacts(Array.isArray(result.images) ? result.images as { data: string; mediaType: string }[] : [], Array.isArray(result.files) ? result.files as CliGeneratedFile[] : [], color); }
+        continue;
+      }
+      if (line.startsWith("/tools")) {
+        const query = line.replace(/^\/tools\s+search\s*/i, "").trim();
+        if (!query) { console.log(formatError("Usage: /tools search <what you want to do>", color)); continue; }
+        const result = await client.tools(query); if (result.ok) await showPaged((result.tools as any[] || []).map((tool: any) => `${tool.slug || tool.name || "tool"}\n${tool.description || ""}`).join("\n\n") || "No matching tools found.", true); else console.log(formatError(result.error || "Tool search failed.", color)); continue;
+      }
+      if (line === "/triggers") {
+        const result = await client.triggers(); if (result.ok) await showPaged((result.triggers as any[] || []).map((t: any) => `${t.id || t.trigger_id} — ${t.trigger_slug || t.slug || "trigger"} — ${t.status || (t.enabled === false ? "disabled" : "active")}`).join("\n") || "No triggers found.", true); else console.log(formatError(result.error || "Could not load triggers.", color)); continue;
+      }
+      if (line.startsWith("/trigger ")) {
+        const parts = line.slice(9).trim().split(/\s+/); const action = parts.shift() || ""; const value = parts.shift() || "";
+        let config: Record<string, unknown> | undefined;
+        if (action === "create" && parts.length) { try { config = JSON.parse(parts.join(" ")); } catch { console.log(formatError("Trigger configuration must be valid JSON.", color)); continue; } }
+        if (!["create", "enable", "disable", "delete"].includes(action) || !value) { console.log(formatError("Usage: /trigger create <slug> <json> | /trigger enable|disable|delete <id>", color)); continue; }
+        const result = await client.trigger(action as "create" | "enable" | "disable" | "delete", value, config); console.log(result.ok ? formatSuccess(`Trigger ${action} completed.`, color) : formatError(result.error || "Trigger operation failed.", color)); continue;
+      }
+      if (line === "/channel" || line.startsWith("/channel ")) {
+        const parts = line.slice(8).trim().split(/\s+/); const action = parts.shift() || ""; const provider = parts.shift() || "";
+        let result: any;
+        if (action === "list") { result = await client.channels(); console.log(result.ok ? (result.channels?.map((c: any) => `${c.provider} — ${c.externalUserId}${c.workspaceId ? ` (${c.workspaceId})` : ""} — proactive ${c.proactiveOptIn === false ? "off" : "on"}`).join("\n") || "No external channels are linked.") : formatError(result.error || "Could not load channels.", color)); }
+        else if (action === "link" && provider) { result = await client.channelLink(provider); console.log(result.ok ? `${formatSuccess(`Link code for ${provider}:`, color)} ${result.code}\n${result.instructions}` : formatError(result.error || "Could not create link code.", color)); }
+        else if (action === "notify" && provider && (parts[0] === "on" || parts[0] === "off")) { result = await client.channelNotify(provider, parts[0] === "on"); console.log(result.ok ? formatSuccess(`Proactive ${provider} notifications are ${parts[0]}.`, color) : formatError(result.error || "Could not update notifications.", color)); }
+        else console.log(formatError("Usage: /channel list | /channel link <provider> | /channel notify <provider> on|off", color));
+        continue;
+      }
+      if (line === "/voice" || line.startsWith("/voice ")) {
+        const action = line.slice(6).trim().toLowerCase(); const result = await client.voice(action === "on" || action === "enable" ? true : action === "off" || action === "disable" ? false : undefined);
+        console.log(result.ok ? formatSuccess(result.enabled ? "Voice replies are on." : "Voice replies are off.", color) : formatError(result.error || "Could not update voice replies.", color)); continue;
+      }
+      if (line === "/usage") { const result = await client.usage(); console.log(result.ok ? `${formatStatus("Usage", `${result.totalMessages} messages  •  $${Number(result.totalCost || 0).toFixed(5)}`, color)}\n${formatStatus("Context", `${result.historyTurns}/${result.maxHistory} turns`, color)}\n${formatStatus("Voice", result.voiceReplies ? "on" : "off", color)}` : formatError(result.error || "Could not load usage.", color)); continue; }
+      if (line === "/dashboard") { const result = await client.dashboard(); console.log(result.ok ? `${formatSuccess("Dashboard:", color)} ${result.url}` : formatError(result.error || "Dashboard is not configured.", color)); continue; }
+      if (line === "/export") {
+        const current = await client.session(); if (!current.ok) { console.log(formatError(current.error || "Could not load session.", color)); continue; }
+        const path = join(process.cwd(), `chusky-export-${Date.now()}.txt`); const text = [`Chusky AI Agent`, `Model: ${current.model}`, `Exported: ${new Date().toISOString()}`, "─".repeat(50), "", ...(current.history || []).flatMap((m: any) => [`[${m.role === "user" ? "You" : "Chusky"}]`, m.content, ""])].join("\n");
+        await writeFile(path, text, "utf8"); console.log(formatSuccess(`Conversation exported to ${path}`, color)); continue;
       }
       if (line === "/history") { const items = await loadCollection(client, "history"); await showPaged(items.map((m) => `${m.role}: ${m.content}`).join("\n") || "No history.", true); continue; }
       if (line === "/tasks") {
@@ -170,7 +233,7 @@ async function chat(): Promise<void> {
           if (!result.ok) console.log(formatError(result.error || "Attachment failed.", color));
           else {
             console.log(`${paint("Chusky", "cyan", color)}\n${renderMarkdown(result.text || "", color)}\n${formatToolSummary((result.toolsUsed as string[] | undefined) || [], Number(result.cost ?? 0), color)}`);
-            await saveArtifacts(Array.isArray(result.images) ? result.images as { data: string; mediaType: string }[] : [], color);
+            await saveArtifacts(Array.isArray(result.images) ? result.images as { data: string; mediaType: string }[] : [], [...(Array.isArray(result.files) ? result.files as CliGeneratedFile[] : []), ...(result.speech ? [{ ...result.speech as { data: string; mediaType: string }, name: "chusky.mp3", contentType: (result.speech as { data: string; mediaType: string }).mediaType, type: "voice" }] : [])], color);
           }
         } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); }
         continue;
@@ -249,7 +312,7 @@ async function chat(): Promise<void> {
         else { process.stdout.write(renderMarkdown(streamed.slice(streamedPrinted), color)); process.stdout.write("\n"); }
         console.log(`${formatToolSummary(final.toolsUsed || [], final.cost, color)}  ${paint(`${Date.now() - startedAt}ms`, "dim", color)}`);
         const images = Array.isArray(final.images) ? final.images as { data: string; mediaType: string }[] : [];
-        await saveArtifacts(images, color);
+        await saveArtifacts(images, [...(Array.isArray(final.files) ? final.files as CliGeneratedFile[] : []), ...(final.speech ? [{ ...final.speech as { data: string; mediaType: string }, name: "chusky.mp3", contentType: final.speech.mediaType, type: "voice" }] : [])], color);
       }
       else if (pendingApproval) {
         const result = await approveFromPicker(client, pendingApproval, color);

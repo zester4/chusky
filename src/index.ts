@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore } from "./store.js";
 import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError } from "./agent.js";
+import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -36,6 +36,8 @@ import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import { registerAuthRoutes } from "./authRoutes.js";
 import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
+import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
+import { setVoiceReplies } from "./store.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -171,6 +173,11 @@ async function main(): Promise<void> {
       }
       try { return await work(); } finally { await releaseUserLock(userId, token); }
     };
+    const cliSpeech = async (userId: number, text: string) => {
+      if (!(await getSession(userId)).voiceReplies || !text.trim()) return undefined;
+      try { const audio = await generateSpeech(text); return { data: audio.data.toString("base64"), mediaType: audio.mediaType }; }
+      catch (error) { logger.warn({ err: error, userId }, "CLI voice reply failed"); return undefined; }
+    };
 
     app.post("/cli/pair", async (c) => {
       try {
@@ -228,7 +235,7 @@ async function main(): Promise<void> {
       const result = await withCliLock(device.userId, c.req.raw.signal, () => runAgent(device.userId, parts, s.history, s.model, undefined, c.req.raw.signal));
       await appendMessages(device.userId, [{ role: "user", content: historyLabel }, { role: "assistant", content: result.text }]);
       if (result.cost) await addUsage(device.userId, result.cost);
-      return c.json({ ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })) });
+      return c.json({ ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), speech: await cliSpeech(device.userId, result.text) });
     });
 
     app.get("/cli/session", async (c) => {
@@ -334,6 +341,106 @@ async function main(): Promise<void> {
       return c.json({ ok: true, page: safePage, pageSize, totalPages, total: models.length, models: models.slice((safePage - 1) * pageSize, safePage * pageSize) });
     });
 
+    app.get("/cli/apps", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try {
+        const page = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
+        const pageSize = Math.min(50, Math.max(1, Number(c.req.query("pageSize") ?? "15") || 15));
+        const apps = await getToolkitStates(device.userId);
+        const totalPages = Math.max(1, Math.ceil(apps.length / pageSize));
+        const safePage = Math.min(page, totalPages);
+        return c.json({ ok: true, page: safePage, pageSize, total: apps.length, totalPages, apps: apps.slice((safePage - 1) * pageSize, safePage * pageSize) });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not load apps" }, 502); }
+    });
+
+    app.post("/cli/connect", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const toolkit = String((await c.req.json() as { toolkit?: string }).toolkit ?? "").trim().toLowerCase();
+      if (!toolkit || toolkit.length > 100 || !/^[a-z0-9_.-]+$/.test(toolkit)) return c.json({ ok: false, error: "invalid toolkit" }, 400);
+      try { return c.json({ ok: true, toolkit, url: await getConnectionUrl(device.userId, toolkit) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not create connection link" }, 502); }
+    });
+
+    app.get("/cli/tools", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const query = String(c.req.query("query") ?? "").trim();
+      if (!query || query.length > 200) return c.json({ ok: false, error: "query is required" }, 400);
+      try { return c.json({ ok: true, query, tools: (await searchTools(device.userId, query)).slice(0, 50) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "tool search failed" }, 502); }
+    });
+
+    app.get("/cli/triggers", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { return c.json({ ok: true, triggers: await listTriggers(device.userId) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not load triggers" }, 502); }
+    });
+
+    app.post("/cli/triggers", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json() as { action?: string; value?: string; triggerConfig?: Record<string, unknown> };
+      const action = String(body.action ?? "");
+      const value = String(body.value ?? "").trim();
+      if (!value || value.length > 300 || !["create", "enable", "disable", "delete"].includes(action)) return c.json({ ok: false, error: "invalid trigger operation" }, 400);
+      try {
+        if (action === "create") return c.json({ ok: true, result: await createTrigger(device.userId, value, body.triggerConfig ?? {}) });
+        if (action === "enable" || action === "disable") return c.json({ ok: true, result: await setTriggerState(device.userId, value, action === "enable") });
+        return c.json({ ok: true, result: await deleteTrigger(device.userId, value) });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "trigger operation failed" }, 409); }
+    });
+
+    app.get("/cli/channels", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      return c.json({ ok: true, channels: await listLinkedChannels(device.userId) });
+    });
+
+    app.post("/cli/channels/link", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const provider = String((await c.req.json() as { provider?: string }).provider ?? "").trim().toLowerCase();
+      if (!["slack", "whatsapp", "sendblue"].includes(provider)) return c.json({ ok: false, error: "provider must be slack, whatsapp, or sendblue" }, 400);
+      return c.json({ ok: true, provider, code: await createLinkCode(device.userId, provider as "slack" | "whatsapp" | "sendblue"), instructions: `Send /link <code> from your ${provider} account.` });
+    });
+
+    app.post("/cli/channels/notify", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json() as { provider?: string; enabled?: boolean };
+      const provider = String(body.provider ?? "").trim().toLowerCase();
+      if (!["slack", "whatsapp", "sendblue"].includes(provider) || typeof body.enabled !== "boolean") return c.json({ ok: false, error: "invalid channel notification setting" }, 400);
+      return c.json({ ok: true, provider, enabled: body.enabled, changed: await setProactivePreference(device.userId, provider as "slack" | "whatsapp" | "sendblue", body.enabled) });
+    });
+
+    app.post("/cli/voice", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { enabled?: boolean };
+      const current = (await getSession(device.userId)).voiceReplies === true;
+      if (body.enabled !== undefined && typeof body.enabled !== "boolean") return c.json({ ok: false, error: "enabled must be boolean" }, 400);
+      if (body.enabled !== undefined) await setVoiceReplies(device.userId, body.enabled);
+      return c.json({ ok: true, enabled: body.enabled ?? current });
+    });
+
+    app.get("/cli/usage", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const s = await getSession(device.userId);
+      return c.json({ ok: true, userId: device.userId, model: s.model, totalMessages: s.totalMessages, totalCost: s.totalCost ?? 0, historyCount: s.history.length, historyTurns: Math.floor(s.history.length / 2), maxHistory: config.maxHistory, maxToolRounds: config.maxToolRounds, voiceReplies: s.voiceReplies === true });
+    });
+
+    app.get("/cli/dashboard", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const base = config.dashboardUrl || config.webhookUrl;
+      if (!base) return c.json({ ok: false, error: "dashboard is not configured" }, 503);
+      return c.json({ ok: true, url: `${base.replace(/\/+$/, "")}/app` });
+    });
+
     app.post("/cli/clear", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -358,7 +465,7 @@ async function main(): Promise<void> {
           const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, undefined, body.approvalId);
           await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
-          return { ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })) };
+          return { ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })), speech: await cliSpeech(device.userId, result.text) };
         }));
       } catch (e) {
         if (e instanceof ApprovalRequiredError) return c.json({ ok: false, error: "approval_required", approval: { id: e.approvalId, toolSlug: e.toolSlug, args: e.args } }, 409);
@@ -391,7 +498,7 @@ async function main(): Promise<void> {
             const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }));
             await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
             if (result.cost) await addUsage(device.userId, result.cost);
-            send({ type: "done", text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })) });
+            send({ type: "done", text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })), speech: await cliSpeech(device.userId, result.text) });
           } catch (e) {
             if (e instanceof ApprovalRequiredError) send({ type: "approval_required", approval: { id: e.approvalId, toolSlug: e.toolSlug, args: e.args } });
             else send({ type: "error", error: e instanceof Error ? e.message : String(e) });
@@ -421,7 +528,7 @@ async function main(): Promise<void> {
           const result = await runAgent(device.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, id);
           await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
-          return { ok: true, text: result.text, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })) };
+          return { ok: true, text: result.text, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })) };
         }));
       } catch (e) { return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500); }
     });

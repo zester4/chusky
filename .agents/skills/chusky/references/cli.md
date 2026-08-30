@@ -26,6 +26,15 @@ Authenticated routes currently include:
 - `POST /cli/chat/stream` for newline-delimited `start`, `delta`, `done`, `approval_required`, or `error` events.
 - `POST /cli/approve` for one-time approval decisions.
 - `POST /cli/clear` with `history` or `session` scope.
+- `GET /cli/apps` for paginated Composio app connection states.
+- `POST /cli/connect` for an authenticated, short-lived app authorization URL.
+- `GET /cli/tools?query=...` for bounded Composio tool discovery.
+- `GET /cli/triggers` and `POST /cli/triggers` for owned trigger lifecycle operations.
+- `GET /cli/channels`, `POST /cli/channels/link`, and `POST /cli/channels/notify` for linked-channel management.
+- `POST /cli/voice` for the user's durable voice-reply preference.
+- `GET /cli/usage` for the user's bounded usage summary.
+- `GET /cli/dashboard` for the configured dashboard URL.
+- Voice-enabled chat responses include a bounded base64 audio payload; the CLI writes it as an artifact rather than attempting platform-specific playback.
 
 All mutating or agent routes must use the distributed user lock, rate limits, spend checks, and the same `runAgent()` path used by Telegram. Persist a completed turn only after the agent finishes successfully; do not append partial stream fragments as assistant history.
 
@@ -38,6 +47,7 @@ All mutating or agent routes must use the distributed user lock, rate limits, sp
 - Render final Markdown for the terminal after collection so code blocks, links, lists, and tables remain coherent.
 - Use a pager for long output and support `q`, Space/Down, and `b`/Up.
 - Never claim Telegram feature parity when the CLI cannot upload media or receive asynchronous Telegram-only workflow notifications.
+- The CLI now exposes the same app, tool, trigger, channel, voice, usage, export, and dashboard controls as Telegram. `/attach` uploads supported media/documents, while generated images and files are written to the local CLI artifacts directory; Telegram-only delivery remains provider-specific.
 
 ## Compatibility rules
 

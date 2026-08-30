@@ -28,7 +28,11 @@ export interface CliCollectionResponse extends CliResponse { kind: string; page:
 export interface CliResponse { ok: boolean; text?: string; error?: string; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; [key: string]: unknown; }
 export interface CliModel { id: string; name: string; }
 export interface CliModelsResponse extends CliResponse { page: number; pageSize: number; totalPages: number; total: number; models: CliModel[]; }
-export type CliStreamEvent = { type: "start" | "delta" | "done" | "approval_required" | "error"; text?: string; error?: string; model?: string; toolsUsed?: string[]; cost?: number; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; images?: { data: string; mediaType: string }[] };
+export interface CliAppsResponse extends CliResponse { apps: { slug: string; name: string; connected: boolean; logo?: string }[]; }
+export interface CliTriggersResponse extends CliResponse { triggers: unknown[]; }
+export interface CliChannelsResponse extends CliResponse { channels: { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; proactiveOptIn?: boolean }[]; }
+export interface CliGeneratedFile { data: string; name: string; contentType: string; artifactId?: string; type?: string; }
+export type CliStreamEvent = { type: "start" | "delta" | "done" | "approval_required" | "error"; text?: string; error?: string; model?: string; toolsUsed?: string[]; cost?: number; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; images?: { data: string; mediaType: string }[]; files?: CliGeneratedFile[]; speech?: { data: string; mediaType: string } };
 
 const configPath = process.platform === "win32"
   ? join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "Chusky", "config.json")
@@ -94,6 +98,17 @@ export class ChuskyClient {
   approve(approvalId: string, decision: "approve" | "deny") { return this.request("/cli/approve", { method: "POST", body: JSON.stringify({ approvalId, decision }) }); }
   model(model: string) { return this.request("/cli/model", { method: "POST", body: JSON.stringify({ model }) }); }
   models(page = 1, pageSize = 10, query = "") { return this.request(`/cli/models?page=${page}&pageSize=${pageSize}&query=${encodeURIComponent(query)}`) as Promise<CliModelsResponse>; }
+  apps(page = 1, pageSize = 15) { return this.request(`/cli/apps?page=${Math.max(1, page)}&pageSize=${Math.min(50, Math.max(1, pageSize))}`) as Promise<CliAppsResponse & { page: number; pageSize: number; totalPages: number; total: number }>; }
+  connect(toolkit: string) { return this.request("/cli/connect", { method: "POST", body: JSON.stringify({ toolkit }) }); }
+  tools(query: string) { return this.request(`/cli/tools?query=${encodeURIComponent(query)}`); }
+  triggers() { return this.request("/cli/triggers") as Promise<CliTriggersResponse>; }
+  trigger(action: "create" | "enable" | "disable" | "delete", value: string, triggerConfig?: Record<string, unknown>) { return this.request("/cli/triggers", { method: "POST", body: JSON.stringify({ action, value, triggerConfig }) }); }
+  channels() { return this.request("/cli/channels") as Promise<CliChannelsResponse>; }
+  channelLink(provider: string) { return this.request("/cli/channels/link", { method: "POST", body: JSON.stringify({ provider }) }); }
+  channelNotify(provider: string, enabled: boolean) { return this.request("/cli/channels/notify", { method: "POST", body: JSON.stringify({ provider, enabled }) }); }
+  voice(enabled?: boolean) { return this.request("/cli/voice", { method: "POST", body: JSON.stringify({ ...(enabled === undefined ? {} : { enabled }) }) }); }
+  usage() { return this.request("/cli/usage"); }
+  dashboard() { return this.request("/cli/dashboard"); }
   clear(scope: "history" | "session") { return this.request("/cli/clear", { method: "POST", body: JSON.stringify({ scope }) }); }
   tasks() { return this.request("/cli/tasks") as Promise<CliResponse & { tasks: CliTask[] }>; }
   taskAction(id: string, action: "cancel" | "retry") { return this.request(`/cli/tasks/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ action }) }) as Promise<CliResponse & { task?: CliTask }>; }

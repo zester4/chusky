@@ -321,6 +321,7 @@ export interface AgentResult {
   cost?: number;
   generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
+  speech?: { data: Buffer; mediaType: string };
 }
 
 export interface AgentChannelContext {

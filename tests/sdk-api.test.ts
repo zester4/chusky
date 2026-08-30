@@ -27,6 +27,28 @@ test("SDK thread creation is authenticated, replay-safe, and rejects key/body mi
   assert.equal(forbidden.status, 401);
 });
 
+test("SDK conversation lifecycle is owned, archive-aware, and protects active runs", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "lifecycle-user", "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: JSON.stringify({ metadata: { title: "Original" } }) }));
+  assert.equal(created.status, 201);
+  const thread = await created.json() as { id: string; metadata: Record<string, unknown> };
+  const renamed = await api.fetch(new Request(`http://local/v1/threads/${thread.id}`, { method: "PATCH", headers, body: JSON.stringify({ title: "Renamed" }) }));
+  assert.equal(renamed.status, 200); assert.equal((await renamed.json() as typeof thread).metadata.title, "Renamed");
+  const archived = await api.fetch(new Request(`http://local/v1/threads/${thread.id}`, { method: "PATCH", headers, body: JSON.stringify({ archived: true }) }));
+  assert.equal(archived.status, 200);
+  const activeThreads = await api.fetch(new Request("http://local/v1/threads", { headers }));
+  assert.equal((await activeThreads.json() as { data: unknown[] }).data.length, 0);
+  const allThreads = await api.fetch(new Request("http://local/v1/threads?includeArchived=true", { headers }));
+  assert.equal((await allThreads.json() as { data: unknown[] }).data.length, 1);
+  const invalid = await api.fetch(new Request(`http://local/v1/threads/${thread.id}`, { method: "PATCH", headers, body: JSON.stringify({ title: "x".repeat(121) }) }));
+  assert.equal(invalid.status, 400);
+  const deleted = await api.fetch(new Request(`http://local/v1/threads/${thread.id}`, { method: "DELETE", headers }));
+  assert.equal(deleted.status, 204);
+  const missing = await api.fetch(new Request(`http://local/v1/threads/${thread.id}`, { method: "DELETE", headers }));
+  assert.equal(missing.status, 404);
+});
+
 test("SDK file intents enforce the configured allowlist and maximum size before storage access", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json" };

@@ -112,3 +112,28 @@ test("CLI client polls authenticated event snapshots with a monotonic cursor", a
     assert.match(url, /\/cli\/events\?since=999/);
   } finally { globalThis.fetch = original; }
 });
+
+test("CLI client exposes Telegram parity management APIs", async () => {
+  const original = globalThis.fetch;
+  const calls: { path: string; method: string; body?: any }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    calls.push({ path: new URL(request.url).pathname, method: request.method, body: request.method === "GET" ? undefined : JSON.parse(await request.text()) });
+    if (request.url.includes("/cli/apps")) return response({ ok: true, apps: [], page: 1, totalPages: 1, total: 0 });
+    if (request.url.includes("/cli/tools")) return response({ ok: true, tools: [] });
+    if (request.url.includes("/cli/triggers")) return response({ ok: true, triggers: [] });
+    if (request.url.includes("/cli/channels")) return response({ ok: true, channels: [] });
+    if (request.url.includes("/cli/usage")) return response({ ok: true, totalCost: 0 });
+    if (request.url.includes("/cli/dashboard")) return response({ ok: true, url: "https://example.test/app" });
+    return response({ ok: true, enabled: true, url: "https://connect.example.test", code: "123456" });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    await client.apps(); await client.connect("github"); await client.tools("issues"); await client.triggers();
+    await client.trigger("enable", "tr-1"); await client.channels(); await client.channelLink("slack");
+    await client.channelNotify("slack", true); await client.voice(true); await client.usage(); await client.dashboard();
+    assert.deepEqual(calls.map((call) => call.path), ["/cli/apps", "/cli/connect", "/cli/tools", "/cli/triggers", "/cli/triggers", "/cli/channels", "/cli/channels/link", "/cli/channels/notify", "/cli/voice", "/cli/usage", "/cli/dashboard"]);
+    assert.deepEqual(calls[1].body, { toolkit: "github" });
+    assert.deepEqual(calls[7].body, { provider: "slack", enabled: true });
+  } finally { globalThis.fetch = original; }
+});

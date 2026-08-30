@@ -1,5 +1,6 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
+import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
@@ -54,11 +55,6 @@ function futureTimestamp(args: Record<string, unknown>): number {
   if (!Number.isFinite(runAt) || runAt <= now) throw new Error("Reminder time must be in the future (use runAt ISO or delaySeconds)");
   if (runAt > now + 365 * 24 * 60 * 60 * 1000) throw new Error("Reminder cannot be more than one year ahead");
   return runAt;
-}
-
-function taskWorkflowUrl(): string {
-  if (!config.webhookUrl) throw new Error("Task scheduling requires WEBHOOK_URL and QStash configuration");
-  return `${config.webhookUrl.replace(/\/$/, "")}/workflows/task`;
 }
 
 export async function setReminder(userId: number, args: Record<string, unknown>): Promise<ReminderRecord> {
@@ -168,17 +164,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!task) throw new Error("Task not found or not owned by you");
       const runAt = futureTimestamp(args);
       await scheduleTask(userId, id, runAt);
-      const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
-      const workflow = await client.trigger({
-        url: taskWorkflowUrl(),
-        body: { taskId: id, userId },
-        delay: Math.max(1, Math.ceil((runAt - Date.now()) / 1000)),
-        workflowRunId: `task-${id}-${runAt}`,
-        retries: 3,
-        retryDelay: "1000 * (1 + retried)",
-        flowControl: { key: `chusky-task-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
-      });
-      await setTaskWorkflowRunId(userId, id, workflow.workflowRunId);
+      await setTaskWorkflowRunId(userId, id, await enqueueTaskWorkflow(userId, id, runAt));
       return await getTask(userId, id);
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status");
