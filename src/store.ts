@@ -148,6 +148,7 @@ export interface ReminderRecord {
   runAt: number;
   workflowRunId?: string;
   status: "scheduled" | "sent" | "cancelled" | "failed";
+  deliveryError?: string;
   createdAt: number;
 }
 
@@ -158,6 +159,7 @@ export interface JobRecord {
   cron: string;
   scheduleId: string;
   status: "active" | "cancelled";
+  deliveryError?: string;
   createdAt: number;
 }
 
@@ -285,6 +287,8 @@ export interface OutboxRecord {
   conversationId: string;
   threadId?: string;
   workspaceId?: string;
+  /** Provider-specific reply routing data needed when an outbox item is retried. */
+  targetMetadata?: Record<string, string>;
   text?: string;
   blocks?: unknown[];
   interactive?: {
@@ -340,6 +344,8 @@ interface Backend {
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
+  claimDelivery(key: string, leaseMs: number): Promise<boolean>;
+  completeDelivery(key: string, ttlSeconds: number): Promise<void>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
@@ -469,6 +475,15 @@ class RedisBackend implements Backend {
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
+  }
+  async claimDelivery(key: string, leaseMs: number): Promise<boolean> {
+    const digest = createHash("sha256").update(key).digest("hex");
+    if (await this.r.exists(`chuck:delivery:done:${digest}`)) return false;
+    return (await this.r.set(`chuck:delivery:claim:${digest}`, "1", "PX", leaseMs, "NX")) === "OK";
+  }
+  async completeDelivery(key: string, ttlSeconds: number): Promise<void> {
+    const digest = createHash("sha256").update(key).digest("hex");
+    await this.r.multi().set(`chuck:delivery:done:${digest}`, "1", "EX", ttlSeconds).del(`chuck:delivery:claim:${digest}`).exec();
   }
   async getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined> {
     const raw = await this.r.get(this.dk(userId));
@@ -816,6 +831,8 @@ class MemoryBackend implements Backend {
   private channelConversations = new Map<string, ChannelConversationRecord>();
   private outboxByProvider = new Map<string, string>();
   private channelDebounce = new Map<string, InboundMessage[]>();
+  private deliveryClaims = new Map<string, number>();
+  private completedDeliveries = new Map<string, number>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
@@ -860,6 +877,19 @@ class MemoryBackend implements Backend {
     if (expiresAt && expiresAt > Date.now()) return false;
     this.telegramUpdates.set(updateId, Date.now() + ttlSeconds * 1000);
     return true;
+  }
+  async claimDelivery(key: string, leaseMs: number): Promise<boolean> {
+    const now = Date.now();
+    const done = this.completedDeliveries.get(key);
+    if (done && done > now) return false;
+    const claim = this.deliveryClaims.get(key);
+    if (claim && claim > now) return false;
+    this.deliveryClaims.set(key, now + leaseMs);
+    return true;
+  }
+  async completeDelivery(key: string, ttlSeconds: number): Promise<void> {
+    this.deliveryClaims.delete(key);
+    this.completedDeliveries.set(key, Date.now() + ttlSeconds * 1000);
   }
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
@@ -1086,6 +1116,16 @@ export async function getSession(uid: number): Promise<UserSession> {
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+/** Best-effort provider delivery dedupe. The lease prevents concurrent workflow retries;
+ * completion keeps an already-delivered occurrence from being sent twice. */
+export async function claimDelivery(key: string, leaseMs: number): Promise<boolean> {
+  return backend.claimDelivery(key, leaseMs);
+}
+
+export async function completeDelivery(key: string, ttlSeconds: number): Promise<void> {
+  return backend.completeDelivery(key, ttlSeconds);
 }
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {

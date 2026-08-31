@@ -10,12 +10,21 @@ export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sendblue" | "
 
 export type AttachmentKind = "image" | "audio" | "video" | "document";
 
+/** A bounded, user-safe explanation of an inbound-media failure. */
+export type ChannelMediaError = "download_failed" | "unsupported_media_type" | "too_large" | "empty_media";
+
 export interface ChannelAttachment {
   id: string;
   kind: AttachmentKind;
   mimeType?: string;
   filename?: string;
   sizeBytes?: number;
+  /**
+   * Set by an adapter when it could verify the inbound event but could not
+   * safely hydrate its media. This lets the shared handler reply instead of
+   * turning a recoverable attachment problem into a silent workflow retry.
+   */
+  mediaError?: ChannelMediaError;
   /** A provider URL or a short-lived data URL. Never persist raw provider payloads. */
   url?: string;
 }

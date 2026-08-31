@@ -1,4 +1,5 @@
 import { Bot, InputFile, InlineKeyboard } from "grammy";
+import { Receiver } from "@upstash/qstash";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { serve, type ServerType } from "@hono/node-server";
 import { Hono } from "hono";
@@ -6,12 +7,13 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore } from "./store.js";
-import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent } from "./store.js";
+import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
-import { deliverJob, deliverReminder } from "./workflows.js";
+import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
+import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
@@ -38,6 +40,7 @@ import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { setVoiceReplies } from "./store.js";
+import { isWorkflowControlFlow } from "./workflowControl.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -569,13 +572,43 @@ async function main(): Promise<void> {
     }));
 
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { reminderId: string; userId: number };
-      await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, getTelegramChatId, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
+      let payload;
+      try { payload = parseReminderWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid reminder workflow payload"); }
+      await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
     }));
 
+    // QStash failure callbacks are authenticated separately from Workflow
+    // requests. Persist the useful owner-facing state, while keeping the raw
+    // provider payload out of logs and user history.
+    app.post("/workflows/failure", async (c) => {
+      const signature = c.req.header("upstash-signature");
+      const raw = await c.req.text();
+      if (!signature || !config.qstashCurrentSigningKey || !config.qstashNextSigningKey) return c.json({ ok: false, error: "QStash callback verification is not configured" }, 503);
+      try {
+        await new Receiver({ currentSigningKey: config.qstashCurrentSigningKey, nextSigningKey: config.qstashNextSigningKey }).verify({ signature, body: raw, url: c.req.url, clockTolerance: 30 });
+      } catch (error) {
+        recordFailure("workflow_failure", error, { workflow: "qstash-failure-callback" });
+        return c.json({ ok: false, error: "invalid callback signature" }, 401);
+      }
+      let body: Record<string, unknown>;
+      try { body = JSON.parse(raw) as Record<string, unknown>; }
+      catch { return c.json({ ok: false, error: "invalid callback body" }, 400); }
+      const nested = (body.body && typeof body.body === "string" ? (() => { try { return JSON.parse(body.body) as Record<string, unknown>; } catch { return {}; } })() : body.body && typeof body.body === "object" ? body.body as Record<string, unknown> : body);
+      const userId = Number(nested.userId);
+      const errorMessage = String(body.responseBody ?? body.error ?? body.message ?? "QStash delivery failed").slice(0, 500);
+      recordFailure("workflow_failure", new Error(errorMessage), { workflow: "qstash-failure-callback", userId: Number.isSafeInteger(userId) ? userId : undefined });
+      if (Number.isSafeInteger(userId) && userId > 0) {
+        if (typeof nested.reminderId === "string") await updateReminder(userId, nested.reminderId, { status: "failed", deliveryError: errorMessage });
+        if (typeof nested.jobId === "string") await updateJob(userId, nested.jobId, { deliveryError: errorMessage });
+      }
+      return c.json({ ok: true });
+    });
+
     app.post("/workflows/job", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { jobId: string; userId: number };
-      await workflow.run("deliver-job", () => deliverJob(payload, { getReminder, updateReminder, getJob, getTelegramChatId, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
+      let payload;
+      try { payload = parseJobWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid job workflow payload"); }
+      const occurrenceId = workflow.workflowRunId ?? `run-${Date.now()}`;
+      await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
     }));
 
     app.post("/workflows/task", serveWorkflow(async (workflow) => {
@@ -640,6 +673,10 @@ async function main(): Promise<void> {
           }
         });
       } catch (error) {
+        // `workflow.run`, `sleep`, and `waitForEvent` deliberately throw this
+        // after persisting a step. Do not mark the trigger failed; the Upstash
+        // runtime needs this exact value to continue the replay safely.
+        if (isWorkflowControlFlow(error)) throw error;
         if (error instanceof ApprovalRequiredError) {
           await updateTriggerEvent(event.eventId, { status: "awaiting_approval", approvalId: error.approvalId });
           const approval = await getApproval(event.userId, error.approvalId);

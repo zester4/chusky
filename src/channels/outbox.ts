@@ -22,6 +22,7 @@ export class ChannelOutbox {
       conversationId: message.target.conversationId,
       threadId: message.target.threadId,
       workspaceId: message.target.workspaceId,
+      targetMetadata: message.target.metadata,
       text: message.text,
       blocks: message.blocks,
       interactive: message.interactive,
@@ -96,7 +97,13 @@ export class ChannelOutbox {
       const adapter = adapters.get(record.provider);
       if (!adapter) continue;
       try {
-        await this.deliver(record, adapter, { provider: record.provider, conversationId: record.conversationId, threadId: record.threadId, workspaceId: record.workspaceId });
+        await this.deliver(record, adapter, {
+          provider: record.provider,
+          conversationId: record.conversationId,
+          threadId: record.threadId,
+          workspaceId: record.workspaceId,
+          metadata: record.targetMetadata,
+        });
         recovered++;
       } catch { /* leave failed record for the next bounded recovery pass */ }
     }

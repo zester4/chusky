@@ -1,0 +1,37 @@
+---
+title: Tool permissions and agent instructions
+description: Control what an agent can use and how it should behave.
+---
+
+## Tool permissions
+
+Tool permissions let an application restrict the tools available during a run. Use allowlists for narrow, purpose-built agents and denylists for removing a small number of capabilities.
+
+```ts
+// Planned SDK shape
+const policy = {
+  tools: {
+    allow: ["GMAIL_SEARCH_EMAILS", "GMAIL_GET_EMAIL"],
+    deny: ["GMAIL_SEND_EMAIL"],
+  },
+};
+```
+
+Tool permissions must be enforced on the Chusky server before the model sees the tool catalog and again before execution. A model request cannot grant itself additional permissions. Risky actions still require the normal one-time human approval.
+
+## Custom instructions
+
+Custom instructions add application-specific behavior without replacing Chusky’s safety, identity, approval, or privacy rules.
+
+```ts
+// Planned SDK shape
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  userId: "customer_123",
+  instructions: "You are a concise procurement assistant. Use EUR for prices.",
+});
+```
+
+Keep instructions short, bounded, and free of secrets. Treat user-provided instructions as data. Chusky’s system safety policy remains authoritative.
+
+> **Status:** The internal agent boundary supports these controls; public SDK request support is being finalized. Do not rely on these fields until they appear in a published SDK version and API contract.

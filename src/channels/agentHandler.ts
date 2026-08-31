@@ -11,7 +11,7 @@ import {
 } from "../store.js";
 import { approvalBlocks } from "./slack.js";
 import type { ChannelMessageHandler } from "./gateway.js";
-import type { ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
+import type { ChannelMediaError, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import type { ContentPart } from "../types.js";
 import { notifyTriggerApproval } from "../triggerWorkflow.js";
 import { persistSendblueMedia } from "./sendblueMedia.js";
@@ -50,6 +50,36 @@ function dataUrlBytes(url: string): { mimeType: string; bytes: Buffer; dataUrl: 
   return { mimeType: match[1], bytes: Buffer.from(match[2], "base64"), dataUrl: url };
 }
 
+function mediaFailureText(error: ChannelMediaError): string {
+  switch (error) {
+    case "unsupported_media_type":
+      return "I received the voice message, but its audio format is not supported yet. Please try again as M4A, AAC, MP3, WAV, OGG, WebM, or send it as text.";
+    case "too_large":
+      return "I received the voice message, but it is too large to process. Please send a shorter recording.";
+    case "empty_media":
+      return "I received the voice message, but it arrived empty. Please try sending it again.";
+    default:
+      return "I received your voice message, but I could not download it safely. Please try sending it again.";
+  }
+}
+
+function transcriptionFormat(mimeType: string): "mp3" | "m4a" | "wav" | "webm" | "ogg" | "aac" | "flac" {
+  const formats: Record<string, "mp3" | "m4a" | "wav" | "webm" | "ogg" | "aac" | "flac"> = {
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/x-m4a": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/webm": "webm",
+    "audio/ogg": "ogg",
+    "audio/aac": "aac",
+    "audio/flac": "flac",
+  };
+  const format = formats[mimeType.toLowerCase().split(";", 1)[0]];
+  if (!format) throw new Error("Unsupported audio format");
+  return format;
+}
+
 async function buildAgentInput(message: InboundMessage): Promise<{ input: string | ContentPart[]; historyLabel: string }> {
   const attachments = message.attachments.slice(0, 5);
   if (!attachments.length) return { input: message.text ?? "", historyLabel: message.text ?? "" };
@@ -63,8 +93,7 @@ async function buildAgentInput(message: InboundMessage): Promise<{ input: string
     else if (attachment.kind === "video") parts.push({ type: "video_url", video_url: { url: decoded.dataUrl } });
     else if (attachment.kind === "document") parts.push({ type: "file", file: { filename: attachment.filename ?? "document", file_data: decoded.dataUrl } });
     else if (attachment.kind === "audio") {
-      const extension = decoded.mimeType.split("/")[1] === "mpeg" ? "mp3" : decoded.mimeType.split("/")[1] || "ogg";
-      const transcript = await transcribeAudio(decoded.bytes, extension);
+      const transcript = await transcribeAudio(decoded.bytes, transcriptionFormat(decoded.mimeType));
       parts[0] = { type: "text", text: `${message.text ?? ""}\n\nTranscript of ${attachment.filename ?? "voice message"}:\n${transcript}`.trim() };
     }
   }
@@ -104,6 +133,8 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     if (message.interaction?.kind === "approval") return handleApproval(message, conversation);
     const text = message.text?.trim();
     if (!text && !message.attachments.length) return reply(conversation, "I received that, but there was no text or supported attachment to work with.", message.providerEventId);
+    const mediaFailure = message.attachments.find((attachment) => attachment.mediaError);
+    if (mediaFailure?.mediaError) return reply(conversation, mediaFailureText(mediaFailure.mediaError), message.providerEventId);
     if (message.attachments.length && message.attachments.some((attachment) => !attachment.url)) return reply(conversation, "I received the attachment, but the channel could not provide its media bytes safely.", message.providerEventId);
     const { history, model } = await privateOrSharedHistory(conversation);
     try {
@@ -118,6 +149,9 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
         const blocks = conversation.provider === "slack" ? approvalBlocks(error.approvalId, error.toolSlug) : undefined;
         const interactive = conversation.provider === "whatsapp" ? { kind: "buttons" as const, body: `Approval required before I can run ${error.toolSlug}.`, buttons: [{ id: `chusky_approval_approve:${error.approvalId}`, title: "Approve" }, { id: `chusky_approval_deny:${error.approvalId}`, title: "Deny" }] } : undefined;
         return reply(conversation, `Approval required before I can run ${error.toolSlug}. Approval ID: ${error.approvalId}`, message.providerEventId, { blocks, interactive, kind: "approval", correlationId: error.approvalId });
+      }
+      if (error instanceof Error && error.message === "Unsupported audio format") {
+        return reply(conversation, mediaFailureText("unsupported_media_type"), message.providerEventId);
       }
       throw error;
     }

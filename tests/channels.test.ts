@@ -10,6 +10,7 @@ import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSi
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
+import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
@@ -87,6 +88,22 @@ test("Sendblue hydrates bounded media for the shared agent handler", async () =>
   assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
 });
 
+test("Sendblue identifies a voice recording from its downloaded MIME type", async () => {
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mp4", "content-length": "3" } })) as typeof fetch);
+  const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-voice", providerUserId: "+15550001", providerConversationId: "+15550001", attachments: [{ id: "voice-1", kind: "image", url: "https://cdn.example/media" }], receivedAt: Date.now(), scope: "private" });
+  assert.equal(hydrated.attachments[0].kind, "audio");
+  assert.equal(hydrated.attachments[0].mimeType, "audio/mp4");
+  assert.match(hydrated.attachments[0].url ?? "", /^data:audio\/mp4;base64,/);
+});
+
+test("Sendblue media errors return a safe reply instead of silently failing the workflow", async () => {
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/x-caf", "content-length": "3" } })) as typeof fetch);
+  const message = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-caf", providerUserId: "+15550001", providerConversationId: "+15550001", attachments: [{ id: "voice-2", kind: "audio", url: "https://cdn.example/voice" }], receivedAt: Date.now(), scope: "private" });
+  assert.equal(message.attachments[0].mediaError, "unsupported_media_type");
+  const response = await createAgentChannelHandler()(message, { accountId: "account_42", userId: 42, provider: "sendblue", scope: "private", conversationId: "sendblue:-:+15550001:-", permissions: { canUseAgent: true, canApprove: true, canUseSharedContext: true, canReceiveProactive: true }, replyTarget: { provider: "sendblue", conversationId: "+15550001" } });
+  assert.match(response?.text ?? "", /audio format is not supported/i);
+});
+
 test("Sendblue converts Markdown into readable iMessage text", () => {
   const result = formatSendblueText("**Today**\n\n- Check email\n- [Open dashboard](https://example.com)\n\n`npm test`");
   assert.equal(result, "Today\n\n• Check email\n• Open dashboard: https://example.com\n\nnpm test");
@@ -156,6 +173,40 @@ test("channel identity ownership and gateway event deduplication are durable bou
   assert.equal(adapter.sent[0].accountId, "account_42");
 });
 
+test("a Sendblue identity linked in a direct chat can use Chusky in a group", async () => {
+  await linkChannelIdentity(42, { provider: "sendblue", externalUserId: "+15550001" });
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: "sb-out-1" }), { status: 200 });
+  }) as typeof fetch);
+  const gateway = new ChannelGateway(async (_message, conversation) => ({
+    accountId: conversation.accountId,
+    userId: conversation.userId,
+    target: conversation.replyTarget,
+    text: "Group reply",
+    idempotencyKey: "sendblue-group-reply-1",
+  }));
+  gateway.register(adapter);
+  const group = normalizeSendblueMessage({
+    message_handle: "sb-group-in-1",
+    from_number: "+15550001",
+    sendblue_number: "+15550002",
+    group_id: "group-1",
+    content: "hello group",
+    participants: ["+15550001", "+15550002"],
+  });
+  const result = await gateway.processInbound(group!);
+  assert.equal(result.linked, true);
+  assert.equal(requests[0].url.endsWith("/send-group-message"), true);
+  assert.deepEqual(requests[0].body, {
+    from_number: "+15550002",
+    content: "Group reply",
+    group_id: "group-1",
+    reply_to: { message_handle: "sb-group-in-1" },
+  });
+});
+
 test("outbox idempotency prevents duplicate provider sends and records receipts", async () => {
   const adapter = new FakeAdapter();
   const outbox = new ChannelOutbox();
@@ -165,6 +216,30 @@ test("outbox idempotency prevents duplicate provider sends and records receipts"
   assert.equal(first.id, second.id);
   assert.equal(adapter.sent.length, 1);
   assert.equal((await getOutbox(first.id))?.status, "delivered");
+});
+
+test("Sendblue group metadata survives durable outbox recovery", async () => {
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: "sb-out-2" }), { status: 200 });
+  }) as typeof fetch);
+  const outbox = new ChannelOutbox();
+  await outbox.enqueue({
+    accountId: "account_42",
+    userId: 42,
+    target: { provider: "sendblue", conversationId: "group-1", metadata: { groupId: "group-1", messageHandle: "sb-group-in-2" } },
+    text: "Recovered group reply",
+    idempotencyKey: "sendblue-group-recovery-1",
+  });
+  assert.equal(await outbox.recover(new Map([["sendblue", adapter]])), 1);
+  assert.equal(requests[0].url.endsWith("/send-group-message"), true);
+  assert.deepEqual(requests[0].body, {
+    from_number: "+15550002",
+    content: "Recovered group reply",
+    group_id: "group-1",
+    reply_to: { message_handle: "sb-group-in-2" },
+  });
 });
 
 test("account locks can be renewed and only the owner can release them", async () => {

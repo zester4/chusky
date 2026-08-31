@@ -1,5 +1,65 @@
 export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|SEND|POST|PUBLISH|CREATE_PAYMENT|CHARGE|TRANSFER|INVITE|REVOKE|UPDATE_PERMISSION|MERGE|DEPLOY)(_|$)/i;
 
+export type ToolApprovalPolicy = "private" | "approval_required";
+
+const PRIVATE_NATIVE_TOOLS = new Set([
+  "CHUCK_ARTIFACT", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
+  "CHUCK_FORGET_MEMORY", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
+  "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
+  "CHUCK_SCHEDULE_JOB", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_SCRATCHPAD_READ",
+  "CHUCK_SCRATCHPAD_WRITE", "CHUCK_SEARCH_MEMORY", "CHUCK_SET_REMINDER",
+  "CHUCK_TASK_BLOCK", "CHUCK_TASK_CANCEL", "CHUCK_TASK_CHECKPOINT",
+  "CHUCK_TASK_COMPLETE", "CHUCK_TASK_CREATE", "CHUCK_TASK_GET",
+  "CHUCK_TASK_LIST", "CHUCK_TASK_RETRY", "CHUCK_TASK_SCHEDULE",
+]);
+
+const PRIVATE_COMPOSIO_META_TOOLS = new Set([
+  "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_REMOTE_BASH_TOOL",
+  "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_SEARCH_TOOL",
+]);
+
+function nestedToolSlug(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") return undefined;
+  const value = item as Record<string, unknown>;
+  for (const key of ["tool_slug", "toolSlug", "slug", "name"]) {
+    if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+  }
+  return undefined;
+}
+
+function nestedToolArguments(item: unknown): Record<string, unknown> {
+  if (!item || typeof item !== "object") return {};
+  const value = item as Record<string, unknown>;
+  const raw = value.arguments ?? value.args;
+  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+}
+
+/**
+ * The explicit registry protects Chusky-native contracts. Composio provider
+ * tools remain classified conservatively by their externally-visible action
+ * name because their catalogue is dynamic. New CHUCK_* tools fail closed until
+ * they are deliberately added here.
+ */
+export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
+  if (slug === "CHUCK_DAYTONA_GIT") {
+    // Daytona is Chusky's private workspace; only pushing leaves it.
+    return String(args.action ?? "") === "push" ? "approval_required" : "private";
+  }
+  if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
+  if (slug === "CHUCK_CREATE_TRIGGER") return "approval_required";
+  if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const tools = args.tools;
+    if (!Array.isArray(tools) || tools.length === 0) return "approval_required";
+    return tools.some((item) => {
+      const nested = nestedToolSlug(item);
+      return !nested || toolApprovalPolicy(nested, nestedToolArguments(item)) === "approval_required";
+    }) ? "approval_required" : "private";
+  }
+  if (slug.startsWith("CHUCK_")) return "approval_required";
+  return RISKY_TOOL_PATTERN.test(slug) ? "approval_required" : "private";
+}
+
 const STATUSES: Record<string, string> = {
   COMPOSIO_MANAGE_CONNECTIONS: "🔗 I’m opening the connection screen…",
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",
@@ -53,18 +113,7 @@ const STATUSES: Record<string, string> = {
 };
 
 export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): boolean {
-  // Daytona is Chusky's private agent sandbox. The agent may freely use its
-  // desktop, shell, filesystem, and workspace lifecycle without interrupting
-  // the user for approval. External side effects remain gated below.
-  if (slug === "CHUCK_DAYTONA_GIT" && String(args?.action ?? "") === "push") return true;
-  if (slug.startsWith("CHUCK_DAYTONA_")) return false;
-  if (slug === "CHUCK_DAYTONA_COMPUTER") {
-    return ["mouse_click", "mouse_drag", "keyboard_type", "keyboard_press", "keyboard_hotkey", "accessibility_invoke", "accessibility_set_value"].includes(String(args?.action ?? ""));
-  }
-  return RISKY_TOOL_PATTERN.test(slug) || [
-    "CHUCK_DAYTONA_EXECUTE", "CHUCK_DAYTONA_WRITE_FILE", "CHUCK_DAYTONA_MOVE_FILES",
-    "CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE", "CHUCK_DAYTONA_CREATE_SNAPSHOT",
-  ].includes(slug);
+  return toolApprovalPolicy(slug, args) === "approval_required";
 }
 
 export function humanToolStatus(slug: string): string {

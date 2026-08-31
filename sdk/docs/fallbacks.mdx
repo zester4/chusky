@@ -1,0 +1,23 @@
+---
+title: Fallback models
+description: Keep runs available when a model is unavailable or unsuitable.
+---
+
+Fallbacks are an ordered list of models used only for retryable failures such as provider outages, rate limits, or unsupported input modalities.
+
+```ts
+// Planned SDK shape
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  userId: "customer_123",
+  model: "openai/gpt-5.6-luna",
+  fallbackModels: [
+    "deepseek/deepseek-v4-flash",
+    "anthropic/claude-sonnet-4",
+  ],
+});
+```
+
+Fallbacks must not retry invalid input, denied permissions, expired approvals, or destructive tool calls. The final selected model should be recorded in the run and webhook metadata. A fallback must preserve the same conversation and idempotency context.
+
+> **Status:** Planned public API. The current SDK supports a configured model and per-run model override; ordered fallback execution is not yet exposed.

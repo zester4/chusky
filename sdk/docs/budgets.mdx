@@ -1,0 +1,28 @@
+---
+title: Usage and budget limits
+description: Keep model, tool, file, and workflow costs predictable.
+---
+
+Budget policies should be configured server-side at project, user, and run levels.
+
+```ts
+// Planned SDK shape
+const budget = {
+  maxCostPerRun: 0.25,
+  maxDailyCost: 5,
+  maxToolCallsPerRun: 20,
+  maxInputBytes: 25_000_000,
+};
+```
+
+The server should reserve budget before execution, account for actual provider usage after each model response, and release unused reservations. Concurrent runs must use an atomic Redis-backed check so two requests cannot overspend the same limit.
+
+Recommended responses:
+
+- `402 spend_limit` when a budget is exhausted
+- `429 rate_limited` when request throughput is exceeded
+- `409 policy_violation` when a run requests a disallowed capability
+
+Expose usage through the usage endpoint and include bounded cost metadata in run and webhook records. Never trust a client-provided cost value.
+
+> **Status:** The platform already enforces the configured global user spend cap. Per-project, per-run, token, and tool-call budgets are planned additions.

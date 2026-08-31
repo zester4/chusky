@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
-import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
+import type { ChannelAdapter, ChannelAttachment, ChannelMediaError, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
 import { formatSendblueText } from "./sendblueFormatting.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -41,6 +41,27 @@ function attachment(payload: any): ChannelAttachment[] {
   const kind = String(payload.message_type ?? "").toLowerCase().includes("audio") ? "audio"
     : /\.(mp4|mov|webm)(?:\?|$)/i.test(mediaUrl) ? "video" : "image";
   return [{ id: String(payload.message_handle ?? mediaUrl), kind, url: mediaUrl }];
+}
+
+const SEND_BLUE_MEDIA_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif",
+  "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/wav", "audio/x-wav",
+  "audio/webm", "audio/ogg", "audio/aac", "audio/flac",
+  "video/mp4", "video/webm",
+]);
+
+function kindForMimeType(mimeType: string): ChannelAttachment["kind"] {
+  if (mimeType.startsWith("audio/")) return "audio";
+  if (mimeType.startsWith("video/")) return "video";
+  return "image";
+}
+
+function mediaErrorFor(error: unknown): ChannelMediaError {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("larger than")) return "too_large";
+  if (message.includes("empty")) return "empty_media";
+  if (message.includes("Unsupported")) return "unsupported_media_type";
+  return "download_failed";
 }
 
 const REACTIONS = new Set(["love", "like", "dislike", "laugh", "emphasize", "question"]);
@@ -174,16 +195,21 @@ export class SendblueAdapter implements ChannelAdapter {
     const attachments: ChannelAttachment[] = [];
     for (const item of message.attachments.slice(0, 5)) {
       if (!item.url) continue;
-      const response = await this.fetchImpl(item.url, { signal: AbortSignal.timeout(20_000) });
-      if (!response.ok) throw new Error(`Sendblue media download failed: ${response.status}`);
-      const mimeType = String(response.headers.get("content-type") ?? item.mimeType ?? "application/octet-stream").split(";", 1)[0].toLowerCase();
-      const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "video/mp4", "video/webm"]);
-      if (!allowed.has(mimeType)) throw new Error(`Unsupported Sendblue media type: ${mimeType}`);
-      const declared = Number(response.headers.get("content-length") ?? 0);
-      if (declared > 12 * 1024 * 1024) throw new Error("Sendblue media is larger than 12 MB");
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length < 1 || bytes.length > 12 * 1024 * 1024) throw new Error("Sendblue media is empty or larger than 12 MB");
-      attachments.push({ ...item, mimeType, url: `data:${mimeType};base64,${bytes.toString("base64")}` });
+      try {
+        const response = await this.fetchImpl(item.url, { signal: AbortSignal.timeout(20_000) });
+        if (!response.ok) throw new Error(`Sendblue media download failed: ${response.status}`);
+        const mimeType = String(response.headers.get("content-type") ?? item.mimeType ?? "application/octet-stream").split(";", 1)[0].toLowerCase();
+        if (!SEND_BLUE_MEDIA_TYPES.has(mimeType)) throw new Error(`Unsupported Sendblue media type: ${mimeType}`);
+        const declared = Number(response.headers.get("content-length") ?? 0);
+        if (declared > 12 * 1024 * 1024) throw new Error("Sendblue media is larger than 12 MB");
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length < 1 || bytes.length > 12 * 1024 * 1024) throw new Error("Sendblue media is empty or larger than 12 MB");
+        attachments.push({ ...item, kind: kindForMimeType(mimeType), mimeType, sizeBytes: bytes.length, url: `data:${mimeType};base64,${bytes.toString("base64")}` });
+      } catch (error) {
+        // The webhook itself is valid. Preserve a safe marker so the handler
+        // can acknowledge the sender rather than endlessly retrying media.
+        attachments.push({ ...item, mediaError: mediaErrorFor(error) });
+      }
     }
     return { ...message, attachments };
   }

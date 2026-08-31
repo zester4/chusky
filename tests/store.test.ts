@@ -6,6 +6,7 @@ import {
   listReminders, releaseUserLock, saveDaytonaWorkspace, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
+  claimDelivery, completeDelivery,
   type DaytonaWorkspaceRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
   createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
@@ -115,6 +116,14 @@ test("Telegram update claims deduplicate retries", async () => {
   assert.equal(await claimTelegramUpdate(991001), true);
   assert.equal(await claimTelegramUpdate(991001), false);
   assert.equal(await claimTelegramUpdate(991002), true);
+});
+
+test("delivery claims are exclusive and completion remains idempotent", async () => {
+  const key = `reminder:claim-${Date.now()}`;
+  assert.equal(await claimDelivery(key, 60_000), true);
+  assert.equal(await claimDelivery(key, 60_000), false);
+  await completeDelivery(key, 60);
+  assert.equal(await claimDelivery(key, 60_000), false);
 });
 
 test("CLI pairing is one-time and device tokens authenticate by hash", async () => {

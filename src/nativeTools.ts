@@ -1,6 +1,6 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
-import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
+import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
@@ -39,7 +39,39 @@ function taskStatuses(value: unknown): TaskStatus[] | undefined {
 
 function requireUrl(url: string, label: string): string {
   if (!url) throw new Error(`${label} is not configured`);
+  if (!/^https:\/\//i.test(url)) throw new Error(`${label} must be an HTTPS URL`);
   return url;
+}
+
+export function workflowUrl(configured: string, label: string, path: string): string {
+  return requireUrl(configured || (config.webhookUrl ? `${config.webhookUrl.replace(/\/+$/, "")}${path}` : ""), label);
+}
+
+export function validateCronExpression(value: string): string {
+  const cron = value.trim();
+  const timezoneMatch = cron.match(/^CRON_TZ=([A-Za-z0-9_./+-]+)\s+/);
+  if (timezoneMatch) {
+    try { new Intl.DateTimeFormat("en-US", { timeZone: timezoneMatch[1] }).format(); }
+    catch { throw new Error(`cron uses an unknown timezone: ${timezoneMatch[1]}`); }
+  }
+  const withoutTimezone = timezoneMatch ? cron.slice(timezoneMatch[0].length) : cron;
+  const fields = withoutTimezone.split(/\s+/);
+  if (fields.length !== 5 || fields.some((field) => !field || !/^[0-9*/?,LW#-]+$/.test(field))) {
+    throw new Error("cron must be a valid 5-field CRON expression (optionally prefixed with CRON_TZ=<IANA timezone>)");
+  }
+  const ranges = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  fields.forEach((field, index) => {
+    for (const token of field.split(",")) {
+      const [base, step] = token.split("/");
+      if (token.split("/").length > 2 || base.split("-").length > 2) throw new Error(`cron field ${index + 1} contains an invalid range or step`);
+      if (step !== undefined && (!/^\d+$/.test(step) || Number(step) < 1 || Number(step) > 60)) throw new Error(`cron field ${index + 1} contains an invalid step`);
+      const parts = base.split("-");
+      for (const part of parts) {
+        if (/^\d+$/.test(part) && (Number(part) < ranges[index][0] || Number(part) > ranges[index][1])) throw new Error(`cron field ${index + 1} contains an out-of-range value`);
+      }
+    }
+  });
+  return cron;
 }
 
 function requireQStash(): string {
@@ -67,15 +99,24 @@ export async function setReminder(userId: number, args: Record<string, unknown>)
     createdAt: Date.now(),
   };
   const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
-  const workflow = await client.trigger({
-    url: requireUrl(config.reminderWorkflowUrl, "REMINDER_WORKFLOW_URL"),
+  await addReminder(userId, reminder);
+  let workflow;
+  try {
+    workflow = await client.trigger({
+    url: workflowUrl(config.reminderWorkflowUrl, "REMINDER_WORKFLOW_URL", "/workflows/reminder"),
     body: { reminderId: reminder.id, userId },
     delay: Math.max(1, Math.ceil((reminder.runAt - Date.now()) / 1000)),
     workflowRunId: reminder.id,
     retries: 3,
-  });
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+    });
+  } catch (error) {
+    await updateReminder(userId, reminder.id, { status: "failed", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
   reminder.workflowRunId = workflow.workflowRunId;
-  await addReminder(userId, reminder);
+  await updateReminder(userId, reminder.id, { workflowRunId: reminder.workflowRunId });
   return reminder;
 }
 
@@ -87,28 +128,39 @@ export async function cancelReminder(userId: number, id: string): Promise<string
 }
 
 export async function scheduleJob(userId: number, args: Record<string, unknown>): Promise<JobRecord> {
-  const cron = text(args.cron);
-  if (cron.split(/\s+/).length < 5) throw new Error("cron must be a valid 5-field CRON expression");
+  const cron = validateCronExpression(text(args.cron));
   const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: text(args.text), cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", createdAt: Date.now() };
   const client = new QStashClient({ token: requireQStash() });
-  await client.schedules.create({
+  await addJob(userId, job);
+  try { await client.schedules.create({
     scheduleId: job.scheduleId,
-    destination: requireUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL"),
+    destination: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
     body: JSON.stringify({ jobId: job.id, userId }),
     headers: { "Content-Type": "application/json" },
     cron,
     retries: 3,
-  });
-  await addJob(userId, job);
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureCallback: workflowFailureUrl() } : {}),
+  }); } catch (error) {
+    await updateJob(userId, job.id, { status: "cancelled", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
   return job;
 }
 
 export async function cancelJob(userId: number, id: string): Promise<string> {
   const job = await getJob(userId, id);
   if (!job) throw new Error("Job not found or not owned by you");
-  const client = new QStashClient({ token: requireQStash() });
-  await client.schedules.delete(job.scheduleId);
+  // Flip durable state first: an already-queued QStash invocation must observe
+  // cancellation and skip, even if schedule deletion races or is delayed.
   await updateJob(userId, id, { status: "cancelled" });
+  const client = new QStashClient({ token: requireQStash() });
+  try { await client.schedules.delete(job.scheduleId); }
+  catch (error) {
+    // The schedule may already be gone. Keep the cancellation authoritative;
+    // a stray delivery will re-read the record and be safely ignored.
+    throw new Error(`Recurring job cancelled locally but QStash schedule removal failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return `Recurring job ${id} cancelled.`;
 }
 

@@ -13,6 +13,11 @@ export function workflowClient(): WorkflowClient {
   return new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
 }
 
+export function workflowFailureUrl(): string | undefined {
+  if (!config.webhookUrl || !config.qstashCurrentSigningKey || !config.qstashNextSigningKey) return undefined;
+  return `${config.webhookUrl.replace(/\/+$/, "")}/workflows/failure`;
+}
+
 export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt = Date.now()): Promise<string> {
   if (!config.webhookUrl) throw new Error("Task scheduling requires WEBHOOK_URL and QStash configuration");
   const workflow = await workflowClient().trigger({
@@ -22,6 +27,7 @@ export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt 
     workflowRunId: `task-${taskId}-${runAt}`,
     retries: 3,
     retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
     flowControl: { key: `chusky-task-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
   });
   return workflow.workflowRunId;

@@ -1,21 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deliverJob, deliverReminder } from "../src/workflows.js";
+import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "../src/workflows.js";
 import type { JobRecord, ReminderRecord } from "../src/store.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
   const updates: Partial<ReminderRecord>[] = [];
+  const jobUpdates: Record<string, unknown>[] = [];
+  const claims = new Set<string>();
   const reminder: ReminderRecord = { id: "rem-1", userId: 1, text: "A <danger> & check", runAt: Date.now(), status: "scheduled", createdAt: Date.now() };
   const job: JobRecord = { id: "job-1", userId: 1, text: "Run <task>", cron: "* * * * *", scheduleId: "schedule-1", status: "active", createdAt: Date.now() };
   const base = {
     getReminder: async () => reminder,
     updateReminder: async (_userId: number, _id: string, patch: Partial<ReminderRecord>) => { updates.push(patch); return true; },
     getJob: async () => job,
+    updateJob: async (_userId: number, _id: string, patch: Record<string, unknown>) => { jobUpdates.push(patch); return true; },
     getTelegramChatId: async () => 99,
     sendMessage: async (chatId: number, text: string) => { sent.push({ chatId, text }); },
+    claimDelivery: async (key: string) => { if (claims.has(key)) return false; claims.add(key); return true; },
+    completeDelivery: async () => undefined,
   };
-  return { ...base, ...overrides, sent, updates, reminder, job };
+  return { ...base, ...overrides, sent, updates, jobUpdates, reminder, job };
 }
 
 test("reminder delivery is idempotent for cancelled or already-sent records", async () => {
@@ -37,7 +42,7 @@ test("reminders without a Telegram mapping fail without attempting delivery", as
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
   assert.deepEqual(result, { delivered: false });
-  assert.deepEqual(state.updates, [{ status: "failed" }]);
+  assert.deepEqual(state.updates, [{ status: "failed", deliveryError: "No Telegram mapping" }]);
   assert.equal(state.sent.length, 0);
 });
 
@@ -61,4 +66,20 @@ test("recurring jobs do not deliver without a Telegram mapping", async () => {
   const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
   assert.deepEqual(result, { delivered: false });
   assert.equal(state.sent.length, 0);
+});
+
+test("delivery claims suppress duplicate reminder and job executions", async () => {
+  const state = deps();
+  assert.deepEqual(await deliverReminder({ reminderId: "rem-1", userId: 1 }, state), { delivered: true });
+  assert.deepEqual(await deliverReminder({ reminderId: "rem-1", userId: 1 }, state), { skipped: true, delivered: false });
+  assert.deepEqual(await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-1" }, state), { delivered: true });
+  assert.deepEqual(await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-1" }, state), { skipped: true, delivered: false });
+  assert.equal(state.sent.length, 2);
+});
+
+test("workflow payload validation rejects malformed and cross-tenant payloads", () => {
+  assert.deepEqual(parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 7 }), { reminderId: "rem_abc", userId: 7 });
+  assert.deepEqual(parseJobWorkflowPayload({ jobId: "job_abc", userId: 7, occurrenceId: "run-1" }), { jobId: "job_abc", userId: 7, occurrenceId: "run-1" });
+  assert.throws(() => parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 0 }));
+  assert.throws(() => parseJobWorkflowPayload({ jobId: "other", userId: 7 }));
 });

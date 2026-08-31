@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { humanToolStatus, isRiskyToolSlug } from "../src/policy.js";
+import { humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
 
 test("recognizes destructive and externally visible tools", () => {
   for (const slug of ["GMAIL_SEND_EMAIL", "GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "SLACK_POST_MESSAGE", "AWS_UPDATE_PERMISSION"]) {
@@ -12,6 +12,16 @@ test("does not gate read-only tools", () => {
   for (const slug of ["GITHUB_GET_REPOSITORY", "GMAIL_LIST_MESSAGES", "NOTION_SEARCH_PAGES", "COMPOSIO_SEARCH_TOOL"]) {
     assert.equal(isRiskyToolSlug(slug), false, slug);
   }
+});
+
+test("uses explicit native policies and inspects Composio multi-tool calls", () => {
+  assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), true);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), true);
 });
 
 test("renders human tool progress", () => {

@@ -1,0 +1,30 @@
+---
+title: JSON and schema responses
+description: Request predictable structured output for software integrations.
+---
+
+Structured output is intended for applications that need to consume the result programmatically instead of rendering prose.
+
+```ts
+// Planned SDK shape
+const run = await chusky.threads.runs(thread.id).create({
+  input: "Classify this support request",
+  responseFormat: {
+    type: "json_schema",
+    name: "support_classification",
+    schema: {
+      type: "object",
+      properties: {
+        category: { type: "string" },
+        priority: { type: "string", enum: ["low", "normal", "urgent"] },
+      },
+      required: ["category", "priority"],
+      additionalProperties: false,
+    },
+  },
+});
+```
+
+The server should validate the final model output against the schema, return a typed validation error when it does not match, and preserve the raw run status for recovery. Schemas must be bounded in size and depth.
+
+> **Status:** Planned public API. The current SDK returns text output and does not yet guarantee server-side schema validation.

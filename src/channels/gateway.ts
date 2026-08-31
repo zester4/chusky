@@ -1,5 +1,5 @@
 import { acquireUserLock, claimChannelEvent, completeChannelEvent, releaseChannelEvent, releaseUserLock, renewUserLock } from "../store.js";
-import { buildConversation } from "./conversations.js";
+import { buildConversation, buildReplyTarget } from "./conversations.js";
 import { redeemLinkCode, resolveIdentity } from "./identity.js";
 import { ChannelOutbox } from "./outbox.js";
 import type { ChannelAdapter, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
@@ -68,7 +68,7 @@ export class ChannelGateway {
           await this.outbox.send({
             accountId: "unlinked",
             userId: 0,
-            target: { provider: message.provider, conversationId: message.providerConversationId, threadId: message.providerThreadId, workspaceId: message.providerWorkspaceId },
+            target: buildReplyTarget(message),
             text: error instanceof Error ? error.message : "That channel link code is invalid or expired.",
             idempotencyKey: `${message.provider}:${message.providerEventId}:link-error`,
             kind: "notification",
@@ -84,7 +84,7 @@ export class ChannelGateway {
       await this.outbox.send({
         accountId: "unlinked",
         userId: 0,
-        target: { provider: message.provider, conversationId: message.providerConversationId, threadId: message.providerThreadId, workspaceId: message.providerWorkspaceId },
+        target: buildReplyTarget(message),
         text: "This channel is not linked to a Chusky account yet. In Telegram, use /channel link " + message.provider + " to create a one-time code, then send /link <code> here.",
         idempotencyKey: `${message.provider}:${message.providerEventId}:unlinked`,
         kind: "notification",

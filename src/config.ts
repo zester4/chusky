@@ -19,6 +19,15 @@ function positiveInt(key: string, fallback: number): number {
   return n;
 }
 
+function nonNegativeInt(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0)
+    throw new Error(`${key} must be a non-negative integer, got: ${raw}`);
+  return n;
+}
+
 export const config = {
   // ── Telegram ───────────────────────────────────────────────────────
   telegramToken: required("TELEGRAM_BOT_TOKEN"),
@@ -37,6 +46,8 @@ export const config = {
   imageModel: optional("IMAGE_MODEL", "openai/gpt-image-1"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   qstashUrl: optional("QSTASH_URL", ""),
+  qstashCurrentSigningKey: optional("QSTASH_CURRENT_SIGNING_KEY", ""),
+  qstashNextSigningKey: optional("QSTASH_NEXT_SIGNING_KEY", ""),
   triggerWorkflowUrl: optional("TRIGGER_WORKFLOW_URL", ""),
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
   reminderWorkflowUrl: optional("REMINDER_WORKFLOW_URL", ""),
@@ -171,6 +182,14 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   maxHistory: positiveInt("MAX_HISTORY", 20),
   maxToolRounds: positiveInt("MAX_TOOL_ROUNDS", 10),
   userCostCap: Number(process.env.USER_COST_CAP ?? 0),
+  // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
+  // still choose a healthy provider/model fallback within that deadline.
+  openRouterTimeoutMs: positiveInt("OPENROUTER_TIMEOUT_MS", 45_000),
+  openRouterMaxAttempts: positiveInt("OPENROUTER_MAX_ATTEMPTS", 2),
+  openRouterFallbackModels: optional("OPENROUTER_FALLBACK_MODELS", "")
+    .split(",").map((model) => model.trim()).filter(Boolean),
+  // This is a routing preference, not a hard client timeout. Set 0 to omit it.
+  openRouterPreferredMaxLatencySeconds: nonNegativeInt("OPENROUTER_PREFERRED_MAX_LATENCY_SECONDS", 45),
 
   // ── Redis ──────────────────────────────────────────────────────────
   redisUrl: optional("REDIS_URL", ""),

@@ -34,17 +34,18 @@ test("agent uses the selected model for a normal text response", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830001);
   const originalFetch = globalThis.fetch;
-  const models: string[] = [];
+  const requests: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (input, init) => {
     if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    models.push(JSON.parse(String(init?.body)).model);
+    requests.push(JSON.parse(String(init?.body)));
     return chatResponse({ role: "assistant", content: "done" });
   }) as typeof fetch;
   setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "text-session", tools: async () => [], execute: async () => undefined }) } });
   try {
     const result = await runAgent(830001, "hello", [], "test/model");
     assert.equal(result.text, "done");
-    assert.deepEqual(models, ["test/model"]);
+    assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
+    assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, require_parameters: true, preferred_max_latency: { p90: 45 } });
   } finally { globalThis.fetch = originalFetch; }
 });
 
