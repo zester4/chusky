@@ -45,7 +45,7 @@ test("agent uses the selected model for a normal text response", async () => {
     const result = await runAgent(830001, "hello", [], "test/model");
     assert.equal(result.text, "done");
     assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
-    assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, require_parameters: true, preferred_max_latency: { p90: 45 } });
+    assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 45 } });
   } finally { globalThis.fetch = originalFetch; }
 });
 

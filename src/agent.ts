@@ -216,13 +216,12 @@ async function orChat(
     model,
     messages,
     max_tokens: 4096,
-    temperature: 0.7,
     // OpenRouter keeps provider fallback enabled by default. Declaring it here
-    // makes the production intent explicit, and optional model fallbacks stay
-    // entirely server-side in environment configuration.
+    // makes the production intent explicit. Do not require every provider to
+    // support every optional request parameter: multimodal and reasoning
+    // providers legitimately expose different parameter sets.
     provider: {
       allow_fallbacks: true,
-      ...(tools.length ? { require_parameters: true } : {}),
       ...(config.openRouterPreferredMaxLatencySeconds > 0
         ? { preferred_max_latency: { p90: config.openRouterPreferredMaxLatencySeconds } }
         : {}),
