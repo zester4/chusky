@@ -6,8 +6,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore } from "./store.js";
-import { getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -25,6 +24,7 @@ import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { triggerWorkflowUrl, workflowClient } from "./triggerWorkflow.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
+import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 
 function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown> }): string {
   const redacted = Object.entries(event.payload ?? {}).filter(([key, value]) => {
@@ -176,6 +176,50 @@ async function main(): Promise<void> {
       }
       try { return await work(); } finally { await releaseUserLock(userId, token); }
     };
+
+    // Private bridge-only route. It receives final speech transcripts, not
+    // audio, and reuses the owner's normal Chusky memory and agent runtime.
+    // Voice turns deliberately expose only read-only native tools: an agent
+    // cannot silently take an external action during a live call.
+    app.post("/internal/facetime/turn", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.faceTimeMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string };
+      const callId = String(body.callId ?? "").trim();
+      const userId = Number(body.userId);
+      const transcript = String(body.transcript ?? "").trim();
+      if (!/^ftc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || call.status !== "bridging") return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      if (!(await canSpend(userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
+      try {
+        const result = await withCliLock(userId, c.req.raw.signal, async () => {
+          const session = await getSession(userId);
+          return runAgent(userId, transcript, session.history, session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, {
+            instructions: "You are speaking live in a FaceTime call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
+            toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS"],
+          });
+        });
+        await appendMessages(userId, [{ role: "user", content: `[FaceTime ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
+        if (result.cost) await addUsage(userId, result.cost);
+        return c.json({ ok: true, text: result.text.slice(0, 5000) });
+      } catch (error) {
+        logger.warn({ err: error, callId, userId }, "FaceTime voice turn failed");
+        return c.json({ ok: false, error: "voice turn failed" }, 502);
+      }
+    });
+
+    app.post("/internal/facetime/status", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.faceTimeMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; status?: string; error?: string };
+      const callId = String(body.callId ?? "").trim();
+      const userId = Number(body.userId);
+      const status = String(body.status ?? "");
+      if (!/^ftc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status)) return c.json({ ok: false, error: "invalid call status" }, 400);
+      const call = await updateFaceTimeCall(userId, callId, { status: status as "active" | "ended" | "failed", ...(status === "failed" && body.error ? { error: String(body.error).slice(0, 500) } : {}) });
+      if (!call) return c.json({ ok: false, error: "unknown call" }, 404);
+      return c.json({ ok: true });
+    });
     const cliSpeech = async (userId: number, text: string) => {
       if (!(await getSession(userId)).voiceReplies || !text.trim()) return undefined;
       try { const audio = await generateSpeech(text); return { data: audio.data.toString("base64"), mediaType: audio.mediaType }; }

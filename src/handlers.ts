@@ -25,6 +25,47 @@ import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 
 const activeRequests = new Map<number, AbortController>();
+const MODEL_PAGE_SIZE = 8;
+
+type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepseek" | "mistralai" | "all";
+
+function escapeTelegramHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function modelProviderKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🧠 Anthropic Claude", "mpv:anthropic").row()
+    .text("⚡ OpenAI", "mpv:openai").row()
+    .text("🔮 Google Gemini", "mpv:google").row()
+    .text("🦙 Meta Llama", "mpv:meta-llama").row()
+    .text("🧬 DeepSeek", "mpv:deepseek").row()
+    .text("🤝 Mistral", "mpv:mistralai").row()
+    .text("🌐 Browse all models", "mpv:all");
+}
+
+function modelListKeyboard(models: Array<{ id: string; name: string }>, provider: ModelProvider, page: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const start = page * MODEL_PAGE_SIZE;
+  for (let index = start; index < Math.min(start + MODEL_PAGE_SIZE, models.length); index++) {
+    const model = models[index];
+    const label = `${model.name || model.id} · ${model.id}`.slice(0, 60);
+    keyboard.text(label, `msel:${model.id}`);
+    if ((index - start) % 2 === 1 || index === Math.min(start + MODEL_PAGE_SIZE, models.length) - 1) keyboard.row();
+  }
+  const pageCount = Math.max(1, Math.ceil(models.length / MODEL_PAGE_SIZE));
+  if (page > 0) keyboard.text("← Previous", `mpg:${provider}:${page - 1}`);
+  keyboard.text(`Page ${page + 1}/${pageCount}`, "mpg:noop");
+  if (page + 1 < pageCount) keyboard.text("Next →", `mpg:${provider}:${page + 1}`);
+  keyboard.row().text("← Providers", "mpv:__back");
+  return keyboard;
+}
+
+function modelsForProvider(models: Array<{ id: string; name: string }>, provider: ModelProvider): Array<{ id: string; name: string }> {
+  return models
+    .filter((model) => provider === "all" || model.id.startsWith(`${provider}/`))
+    .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id) || a.id.localeCompare(b.id));
+}
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
   while (!(await acquireUserLock(userId, token))) {
     if (signal.aborted) throw new DOMException("Request cancelled", "AbortError");
@@ -585,17 +626,9 @@ export function registerHandlers(bot: Bot): void {
   bot.command("model", async (ctx) => {
     if (!(await guard(ctx))) return;
     const model = await getModel(ctx.from!.id);
-    const kb = new InlineKeyboard()
-      .text("🧠 Anthropic Claude", "mpv:anthropic").row()
-      .text("⚡ OpenAI", "mpv:openai").row()
-      .text("🔮 Google Gemini", "mpv:google").row()
-      .text("🦙 Meta Llama", "mpv:meta-llama").row()
-      .text("🧬 DeepSeek", "mpv:deepseek").row()
-      .text("🤝 Mistral", "mpv:mistralai").row()
-      .text("🌐 Browse all", "mpv:all").row();
     await ctx.reply(
       `Active model: <code>${model}</code>\n\nChoose a provider:`,
-      { parse_mode: "HTML", reply_markup: kb }
+      { parse_mode: "HTML", reply_markup: modelProviderKeyboard() }
     );
   });
 
@@ -604,35 +637,46 @@ export function registerHandlers(bot: Bot): void {
     const provider = ctx.match[1];
     if (provider === "__back") {
       const model = await getModel(ctx.from!.id);
-      const kb = new InlineKeyboard()
-        .text("🧠 Anthropic Claude", "mpv:anthropic").row()
-        .text("⚡ OpenAI", "mpv:openai").row()
-        .text("🔮 Google Gemini", "mpv:google").row()
-        .text("🦙 Meta Llama", "mpv:meta-llama").row()
-        .text("🧬 DeepSeek", "mpv:deepseek").row()
-        .text("🤝 Mistral", "mpv:mistralai").row()
-        .text("🌐 Browse all", "mpv:all").row();
       await ctx.editMessageText(
         `Active model: <code>${model}</code>\n\nChoose a provider:`,
-        { parse_mode: "HTML", reply_markup: kb }
+        { parse_mode: "HTML", reply_markup: modelProviderKeyboard() }
       );
       return;
     }
+    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "all"].includes(provider)) return;
     const msg = await ctx.reply("⏳ Fetching models…");
     try {
       const all = await fetchModels();
-      const filtered = (provider === "all" ? all.slice(0, 40) : all.filter((m) => m.id.startsWith(provider)).slice(0, 30));
+      const filtered = modelsForProvider(all, provider as ModelProvider);
       if (!filtered.length) {
         await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, `No models found for: <code>${provider}</code>`, { parse_mode: "HTML" });
         return;
       }
-      const kb = new InlineKeyboard();
-      for (const m of filtered) kb.text((m.name || m.id).slice(0, 48), `msel:${m.id}`).row();
-      kb.text("← Back", "mpv:__back");
-      await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, `<b>Select model</b> (${filtered.length} shown):`, { parse_mode: "HTML", reply_markup: kb });
+      const page = 0;
+      const pageCount = Math.ceil(filtered.length / MODEL_PAGE_SIZE);
+      await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, `<b>Select model</b>\n${escapeTelegramHtml(provider)} · ${filtered.length} available · page 1/${pageCount}\nChoose a model by name or ID:`, { parse_mode: "HTML", reply_markup: modelListKeyboard(filtered, provider as ModelProvider, page) });
     } catch (e) {
       await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, `❌ ${String(e)}`);
     }
+  });
+
+  bot.callbackQuery(/^mpg:(.+):(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const provider = ctx.match[1];
+    const page = Number(ctx.match[2]);
+    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "all"].includes(provider) || !Number.isSafeInteger(page) || page < 0) return;
+    try {
+      const filtered = modelsForProvider(await fetchModels(), provider as ModelProvider);
+      const pageCount = Math.max(1, Math.ceil(filtered.length / MODEL_PAGE_SIZE));
+      const safePage = Math.min(page, pageCount - 1);
+      await ctx.editMessageText(`<b>Select model</b>\n${escapeTelegramHtml(provider)} · ${filtered.length} available · page ${safePage + 1}/${pageCount}\nChoose a model by name or ID:`, { parse_mode: "HTML", reply_markup: modelListKeyboard(filtered, provider as ModelProvider, safePage) });
+    } catch (e) {
+      await ctx.editMessageText(`❌ Could not load models: ${escapeTelegramHtml(String(e))}`, { parse_mode: "HTML" });
+    }
+  });
+
+  bot.callbackQuery("mpg:noop", async (ctx) => {
+    await ctx.answerCallbackQuery();
   });
 
   bot.callbackQuery(/^msel:(.+)$/, async (ctx) => {

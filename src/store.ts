@@ -47,7 +47,7 @@ export interface FaceTimeCallRecord {
   userId: number;
   phoneNumber: string;
   purpose: string;
-  status: "starting" | "bridging" | "failed";
+  status: "starting" | "bridging" | "active" | "ended" | "failed";
   bridgeSessionId?: string;
   error?: string;
   createdAt: number;
@@ -1333,6 +1333,10 @@ export async function updateFaceTimeCall(uid: number, id: string, patch: Partial
 
 export async function listFaceTimeCalls(uid: number): Promise<FaceTimeCallRecord[]> {
   return (await getSession(uid)).faceTimeCalls ?? [];
+}
+
+export async function getFaceTimeCall(uid: number, id: string): Promise<FaceTimeCallRecord | undefined> {
+  return (await getSession(uid)).faceTimeCalls?.find((item) => item.id === id && item.userId === uid);
 }
 
 /** Best-effort provider delivery dedupe. The lease prevents concurrent workflow retries;
