@@ -2,6 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
+import { formatWhatsAppText } from "./whatsappFormatting.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -98,7 +99,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     const body = message.interactive ? {
       messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "interactive",
       interactive: { type: "button", body: { text: message.interactive.body.slice(0, 1024) }, action: { buttons: message.interactive.buttons.slice(0, 3).map((button) => ({ type: "reply", reply: { id: button.id.slice(0, 256), title: button.title.slice(0, 20) } })) } },
-    } : { messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "text", text: { preview_url: false, body: message.text ?? "" } };
+    } : { messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "text", text: { preview_url: false, body: formatWhatsAppText(message.text ?? "") } };
     const response = await this.fetchImpl(`https://graph.facebook.com/${this.graphVersion}/${this.phoneNumberId}/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.accessToken}`, "Content-Type": "application/json" },

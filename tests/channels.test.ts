@@ -10,6 +10,7 @@ import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSi
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
+import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
 import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
@@ -108,6 +109,16 @@ test("Sendblue converts Markdown into readable iMessage text", () => {
   const result = formatSendblueText("**Today**\n\n- Check email\n- [Open dashboard](https://example.com)\n\n`npm test`");
   assert.equal(result, "Today\n\n• Check email\n• Open dashboard: https://example.com\n\nnpm test");
   assert.equal(result.includes("*"), false);
+});
+
+test("WhatsApp converts Markdown into native rich text", () => {
+  const result = formatWhatsAppText("# Today\n\n**Important** and *quickly*\n\n- Check [the dashboard](https://example.com)\n- `npm test`\n\n~~old plan~~");
+  assert.equal(result, "*Today*\n\n*Important* and _quickly_\n\n• Check the dashboard: https://example.com\n• ```npm test```\n\n~old plan~");
+});
+
+test("WhatsApp preserves code blocks while formatting surrounding text", () => {
+  const result = formatWhatsAppText("Use **this**:\n\n```ts\nconst value = 1;\n```");
+  assert.equal(result, "Use *this*:\n\n```const value = 1;```");
 });
 
 test("Sendblue typing indicators use the direct-message API", async () => {
