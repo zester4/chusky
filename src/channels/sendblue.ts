@@ -91,6 +91,13 @@ export interface SendblueStatus {
   status: string;
 }
 
+/** Short-lived Agora credentials returned by Sendblue for an outbound FaceTime call. */
+export interface SendblueFaceTimeCall {
+  status: string;
+  message: string;
+  agora: { appId: string; channelName: string; token: string; uid: number };
+}
+
 export function normalizeSendblueStatus(payload: any): SendblueStatus | undefined {
   if (!payload?.is_outbound || !payload?.message_handle || !payload?.status) return undefined;
   return { providerMessageId: String(payload.message_handle), status: String(payload.status) };
@@ -115,6 +122,25 @@ export class SendblueAdapter implements ChannelAdapter {
 
   private isGroup(target: OutboundMessage["target"]): boolean {
     return Boolean(target.metadata?.groupId);
+  }
+
+  /**
+   * Start an outbound FaceTime call on a Sendblue FaceTime-enabled line.
+   * The returned Agora token is intentionally short-lived and must be passed
+   * directly to a media bridge; callers must never persist or log it.
+   */
+  async startFaceTimeCall(phoneNumber: string, fromNumber = this.fromNumber): Promise<SendblueFaceTimeCall> {
+    if (!this.apiKey || !this.apiSecret || !fromNumber) throw new Error("Sendblue API credentials and FaceTime sending number are required");
+    if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber) || !/^\+[1-9]\d{7,14}$/.test(fromNumber)) throw new Error("FaceTime numbers must be in E.164 format");
+    const response = await this.fetchImpl("https://api.sendblue.com/facetime/start-call", {
+      method: "POST", headers: this.headers(), body: JSON.stringify({ phoneNumber, fromNumber }), signal: AbortSignal.timeout(15_000),
+    });
+    const value = await response.json().catch(() => ({})) as any;
+    const agora = value?.agora;
+    if (!response.ok || value?.status !== "OK" || !agora || typeof agora.appId !== "string" || typeof agora.channelName !== "string" || typeof agora.token !== "string" || !Number.isSafeInteger(agora.uid)) {
+      throw new Error(`Sendblue FaceTime call failed: ${String(value?.message ?? value?.error ?? response.statusText).slice(0, 300)}`);
+    }
+    return { status: "OK", message: String(value.message ?? "Call started"), agora: { appId: agora.appId, channelName: agora.channelName, token: agora.token, uid: agora.uid } };
   }
 
   async typing(target: OutboundMessage["target"]): Promise<void> {

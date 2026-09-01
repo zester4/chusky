@@ -5,6 +5,10 @@ import {
   saveChannelIdentity,
   createChannelLinkCode,
   consumeChannelLinkCode,
+  getSendblueGroupAuthorization,
+  saveSendblueGroupAuthorization,
+  consumeSendblueGroupLinkCode,
+  type SendblueGroupAuthorizationRecord,
   type ChannelIdentityRecord,
 } from "../store.js";
 import type { ChannelProvider, InboundMessage } from "./contracts.js";
@@ -68,6 +72,24 @@ export async function redeemLinkCode(provider: ChannelProvider, code: string, ex
 
 export async function listLinkedChannels(userId: number): Promise<ChannelIdentityRecord[]> {
   return listChannelIdentities(userId);
+}
+
+export async function activateSendblueGroup(userId: number, message: Pick<InboundMessage, "providerConversationId" | "providerWorkspaceId" | "providerUserId">, code: string, ownerExternalUserId: string): Promise<SendblueGroupAuthorizationRecord> {
+  const groupId = message.providerConversationId.trim();
+  const workspaceId = message.providerWorkspaceId?.trim() ?? "";
+  if (!groupId || !workspaceId || message.providerUserId !== ownerExternalUserId) throw new Error("Only the linked account owner can activate this group");
+  if (await getSendblueGroupAuthorization(groupId, workspaceId)) throw new Error("This iMessage group is already linked");
+  const claim = await consumeSendblueGroupLinkCode(code);
+  if (!claim || claim.userId !== userId) throw new Error("Invalid or expired group link code");
+  const now = Date.now();
+  const record: SendblueGroupAuthorizationRecord = { provider: "sendblue", groupId, workspaceId, accountId: accountIdForUser(userId), userId, ownerExternalUserId, participantPolicy: "all", createdAt: now, updatedAt: now };
+  await saveSendblueGroupAuthorization(record);
+  return record;
+}
+
+export async function resolveSendblueGroupAuthorization(message: Pick<InboundMessage, "providerConversationId" | "providerWorkspaceId">): Promise<SendblueGroupAuthorizationRecord | undefined> {
+  if (!message.providerWorkspaceId) return undefined;
+  return getSendblueGroupAuthorization(message.providerConversationId, message.providerWorkspaceId);
 }
 
 /** Stable, non-secret fingerprint useful in logs and audit records. */

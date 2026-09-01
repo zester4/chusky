@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
-import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
+import type { ChannelAdapter, ChannelAttachment, ChannelTemplate, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
 import { formatWhatsAppText } from "./whatsappFormatting.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -94,9 +94,29 @@ export class WhatsAppAdapter implements ChannelAdapter {
     this.fetchImpl = fetchImpl;
   }
 
+  private templateBody(template: ChannelTemplate): Record<string, unknown> {
+    if (!/^[a-z0-9_]{1,512}$/.test(template.name)) throw new Error("WhatsApp template name must contain only lowercase letters, numbers, and underscores");
+    if (!/^[A-Za-z0-9_-]{1,35}$/.test(template.languageCode)) throw new Error("WhatsApp template language code is invalid");
+    if (template.components !== undefined) {
+      if (!Array.isArray(template.components) || template.components.length > 10 || template.components.some((component) => !component || Array.isArray(component) || typeof component !== "object")) {
+        throw new Error("WhatsApp template components are invalid");
+      }
+      if (JSON.stringify(template.components).length > 16_384) throw new Error("WhatsApp template components are too large");
+    }
+    return {
+      name: template.name,
+      language: { code: template.languageCode },
+      ...(template.components?.length ? { components: template.components } : {}),
+    };
+  }
+
   async send(message: OutboundMessage): Promise<DeliveryReceipt> {
     if (!this.accessToken || !this.phoneNumberId) throw new Error("WhatsApp access token and phone number ID are required");
-    const body = message.interactive ? {
+    if (message.template && message.interactive) throw new Error("WhatsApp template cannot be combined with interactive message");
+    const body = message.template ? {
+      messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "template",
+      template: this.templateBody(message.template),
+    } : message.interactive ? {
       messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "interactive",
       interactive: { type: "button", body: { text: message.interactive.body.slice(0, 1024) }, action: { buttons: message.interactive.buttons.slice(0, 3).map((button) => ({ type: "reply", reply: { id: button.id.slice(0, 256), title: button.title.slice(0, 20) } })) } },
     } : { messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "text", text: { preview_url: false, body: formatWhatsAppText(message.text ?? "") } };

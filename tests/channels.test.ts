@@ -15,7 +15,7 @@ import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, getOutbox, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
+import { acquireUserLock, createSendblueGroupLinkCode, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, OutboundMessage } from "../src/channels/contracts.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -81,6 +81,20 @@ test("Sendblue verifies its webhook secret and normalizes direct and group iMess
   const group = normalizeSendblueMessage({ message_handle: "sb-2", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "plan this", participants: ["+15550001", "+15550002"] });
   assert.equal(group?.providerConversationId, "group-1");
   assert.equal(group?.scope, "shared");
+});
+
+test("Sendblue starts FaceTime with its documented endpoint and never accepts malformed credentials", async () => {
+  let request: { url?: string; init?: RequestInit } = {};
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    request = { url: String(url), init };
+    return new Response(JSON.stringify({ status: "OK", message: "Call started", agora: { appId: "app", channelName: "channel", token: "short-lived-token", uid: 42 } }), { status: 200 });
+  }) as typeof fetch);
+  const result = await adapter.startFaceTimeCall("+15550001");
+  assert.equal(request.url, "https://api.sendblue.com/facetime/start-call");
+  assert.deepEqual(JSON.parse(String(request.init?.body)), { phoneNumber: "+15550001", fromNumber: "+15550002" });
+  assert.equal((request.init?.headers as Record<string, string>)["sb-api-key-id"], "key");
+  assert.equal(result.agora.channelName, "channel");
+  await assert.rejects(() => adapter.startFaceTimeCall("5550001"), /E.164/);
 });
 
 test("Sendblue hydrates bounded media for the shared agent handler", async () => {
@@ -218,6 +232,33 @@ test("a Sendblue identity linked in a direct chat can use Chusky in a group", as
   });
 });
 
+test("a linked owner can authorize a Sendblue group for all participants and unlink it", async () => {
+  await linkChannelIdentity(42, { provider: "sendblue", externalUserId: "+15550001" });
+  const code = await createSendblueGroupLinkCode(42);
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: `sb-out-${requests.length}` }), { status: 200 });
+  }) as typeof fetch);
+  const seen: string[] = [];
+  const gateway = new ChannelGateway(async (message, conversation) => {
+    seen.push(`${message.providerUserId}:${conversation.scope}:${conversation.conversationId}`);
+    return { accountId: conversation.accountId, userId: conversation.userId, target: conversation.replyTarget, text: "Group reply", idempotencyKey: `group-reply-${message.providerEventId}` };
+  });
+  gateway.register(adapter);
+  const activate = normalizeSendblueMessage({ message_handle: "sb-group-link", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: `/link-group ${code}` });
+  assert.equal((await gateway.processInbound(activate!)).linked, true);
+  assert.equal(await getSendblueGroupAuthorization("group-1", "+15550002") !== undefined, true);
+  const participant = normalizeSendblueMessage({ message_handle: "sb-group-chat", from_number: "+15550003", sendblue_number: "+15550002", group_id: "group-1", content: "hello everyone" });
+  const result = await gateway.processInbound(participant!);
+  assert.equal(result.linked, true);
+  assert.deepEqual(seen, ["+15550003:shared:sendblue:+15550002:group-1:-"]);
+  assert.equal(requests.at(-1)?.body.group_id, "group-1");
+  const unlink = normalizeSendblueMessage({ message_handle: "sb-group-unlink", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "/unlink-group" });
+  assert.equal((await gateway.processInbound(unlink!)).linked, true);
+  assert.equal(await getSendblueGroupAuthorization("group-1", "+15550002"), undefined);
+});
+
 test("outbox idempotency prevents duplicate provider sends and records receipts", async () => {
   const adapter = new FakeAdapter();
   const outbox = new ChannelOutbox();
@@ -278,6 +319,35 @@ test("provider adapters use channel-specific delivery APIs", async () => {
   assert.equal(requests[1].url.includes("/P1/messages"), true);
   assert.equal(requests[2].url.endsWith("/send-message"), true);
   assert.equal(requests[2].body.from_number, "+15550002");
+});
+
+test("WhatsApp sends approved templates with Meta's documented payload", async () => {
+  let request: { url: string; body: any } | undefined;
+  const fetcher = (async (url: string | URL, init?: RequestInit) => {
+    request = { url: String(url), body: JSON.parse(String(init?.body)) };
+    return new Response(JSON.stringify({ messages: [{ id: "wamid.template-1" }] }), { status: 200 });
+  }) as typeof fetch;
+  const adapter = new WhatsAppAdapter("token", "P1", "v23.0", fetcher);
+  const outbox = new ChannelOutbox();
+  const record = await outbox.send({
+    accountId: "account_1", userId: 1, target: { provider: "whatsapp", conversationId: "1555" },
+    template: { name: "hello_world", languageCode: "en_US", components: [{ type: "body", parameters: [{ type: "text", text: "Seyyid" }] }] },
+    idempotencyKey: "template-1",
+  }, adapter);
+  assert.equal(record.status, "delivered");
+  assert.equal(request?.url, "https://graph.facebook.com/v23.0/P1/messages");
+  assert.deepEqual(request?.body, {
+    messaging_product: "whatsapp", recipient_type: "individual", to: "1555", type: "template",
+    template: { name: "hello_world", language: { code: "en_US" }, components: [{ type: "body", parameters: [{ type: "text", text: "Seyyid" }] }] },
+  });
+  assert.deepEqual((await getOutbox(record.id))?.template, { name: "hello_world", languageCode: "en_US", components: [{ type: "body", parameters: [{ type: "text", text: "Seyyid" }] }] });
+});
+
+test("WhatsApp rejects unsafe or conflicting template messages", async () => {
+  const adapter = new WhatsAppAdapter("token", "P1", "v23.0", (async () => new Response(JSON.stringify({ messages: [{ id: "1" }] }), { status: 200 })) as typeof fetch);
+  const base = { accountId: "account_1", userId: 1, target: { provider: "whatsapp" as const, conversationId: "1555" }, idempotencyKey: "template-invalid" };
+  await assert.rejects(() => adapter.send({ ...base, template: { name: "Hello World", languageCode: "en_US" } }), /template name/);
+  await assert.rejects(() => adapter.send({ ...base, template: { name: "hello_world", languageCode: "en_US" }, interactive: { kind: "buttons", body: "Choose", buttons: [{ id: "yes", title: "Yes" }] } }), /cannot be combined/);
 });
 
 test("Slack hydrates private files with bounded trusted downloads", async () => {

@@ -29,6 +29,13 @@ export interface ChannelAttachment {
   url?: string;
 }
 
+/** Provider-native approved template data (currently used by WhatsApp). */
+export interface ChannelTemplate {
+  name: string;
+  languageCode: string;
+  components?: Array<Record<string, unknown>>;
+}
+
 export interface ChannelInteraction {
   kind: "approval" | "button" | "form";
   id: string;
@@ -92,6 +99,8 @@ export interface OutboundMessage {
     body: string;
     buttons: Array<{ id: string; title: string }>;
   };
+  /** Explicit approved-template delivery for providers that support it. */
+  template?: ChannelTemplate;
   attachments?: ChannelAttachment[];
   idempotencyKey: string;
   /** The originating event/task/approval, for audit and delivery correlation. */
@@ -112,6 +121,7 @@ export interface ChannelCapabilities {
   supportsMarkdown: boolean;
   supportsButtons: boolean;
   supportsTyping: boolean;
+  supportsTemplates?: boolean;
   maxTextLength: number;
 }
 

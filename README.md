@@ -319,7 +319,7 @@ Natural-language image and trigger requests are exposed to the model as Chusky t
 
 The channel gateway keeps the internal account identity (`account_<telegram-user-id>`) separate from provider IDs. A Slack, WhatsApp, or Sendblue user is never trusted by display name alone: link it from the owning Telegram account with `/channel link <provider>`. Slack OAuth links the installer’s verified Slack user; WhatsApp and Sendblue use the one-time code with `/link <code>`. Unlinked messages receive instructions only and never enter an account’s history, memory, tasks, or approvals.
 
-Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease.
+Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease. WhatsApp also supports explicit approved-template delivery through the outbound contract: set `template.name`, `template.languageCode`, and optional Meta `components`; the adapter sends `type: "template"`. Normal replies remain text messages with WhatsApp formatting, and templates are never selected implicitly.
 
 Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
 
@@ -335,6 +335,10 @@ SENDBLUE_API_KEY=<Sendblue API key ID>
 SENDBLUE_API_SECRET=<Sendblue API secret>
 SENDBLUE_NUMBER=<your Sendblue iMessage number in E.164 format>
 SENDBLUE_WEBHOOK_SECRET=<random webhook secret>
+SENDBLUE_FACETIME_ENABLED=false
+SENDBLUE_FACETIME_NUMBER=<Sendblue-purchased FaceTime-enabled line>
+FACETIME_MEDIA_BRIDGE_URL=<HTTPS URL of your server-side Agora media bridge>
+FACETIME_MEDIA_BRIDGE_SECRET=<shared bridge bearer secret>
 WEBHOOK_URL=https://your-domain.example
 REDIS_URL=<durable Redis URL>
 QSTASH_TOKEN=<Upstash QStash token>
@@ -343,6 +347,10 @@ QSTASH_TOKEN=<Upstash QStash token>
 Configure the Sendblue `receive` webhook as `https://your-domain.example/sendblue/webhook`. From the owning Telegram account, run `/channel link sendblue`, then send the generated six-digit code from iMessage using `/link <code>`. Confirm with `/channel list` and send a normal message.
 
 The adapter verifies timestamped HMAC signatures when present and supports the legacy signing-secret header for compatibility. It claims provider event IDs before workflow enqueue, stores only bounded event data, hydrates permitted media, and sends replies through the durable outbox.
+
+#### Outbound FaceTime voice calls
+
+Chusky can start an **outbound** FaceTime call only when `SENDBLUE_FACETIME_ENABLED=true`, the sending line is purchased and FaceTime-enabled by Sendblue, and an HTTPS media bridge is configured. Sendblue's `POST /facetime/start-call` returns short-lived Agora credentials; Chusky passes them directly to the bridge, which must be a server-side Agora participant that streams remote audio to STT and sends TTS audio back. Chusky persists only call metadata and bridge session IDs—never Agora tokens or media. The `CHUCK_START_FACETIME_CALL` tool is approval-gated. Sendblue does not provide an inbound-call webhook, so automatic answering of incoming FaceTime calls is not supported.
 
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 

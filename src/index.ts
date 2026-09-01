@@ -720,8 +720,8 @@ async function main(): Promise<void> {
         const me = await bot.api.getMe();
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled" } as const;
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled" } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });

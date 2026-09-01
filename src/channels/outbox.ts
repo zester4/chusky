@@ -26,6 +26,7 @@ export class ChannelOutbox {
       text: message.text,
       blocks: message.blocks,
       interactive: message.interactive,
+      template: message.template,
       attachments: message.attachments,
       correlationId: message.correlationId,
       kind: message.kind ?? "message",
@@ -51,6 +52,7 @@ export class ChannelOutbox {
         text: claimed.text,
         blocks: claimed.blocks,
         interactive: claimed.interactive,
+        template: claimed.template,
         attachments: claimed.attachments,
         idempotencyKey: claimed.idempotencyKey,
         correlationId: claimed.correlationId,
@@ -78,6 +80,9 @@ export class ChannelOutbox {
   }
 
   async send(message: OutboundMessage, adapter: ChannelAdapter): Promise<OutboxRecord> {
+    if (message.template && !adapter.capabilities.supportsTemplates) {
+      throw new Error(`The ${adapter.provider} adapter does not support approved templates`);
+    }
     const record = await this.enqueue(message);
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {

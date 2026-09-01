@@ -7,7 +7,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
-import type { ChannelProvider, InboundMessage } from "./channels/contracts.js";
+import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -37,6 +37,19 @@ export interface UserSession {
   sdkAudit?: Array<{ id: string; action: string; requestId: string; status: number; at: number }>;
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
   sdkProjects?: SdkProjectRecord[];
+  faceTimeCalls?: FaceTimeCallRecord[];
+  createdAt: number;
+  updatedAt: number;
+}
+/** Safe control-plane record. It deliberately excludes Agora credentials and media. */
+export interface FaceTimeCallRecord {
+  id: string;
+  userId: number;
+  phoneNumber: string;
+  purpose: string;
+  status: "starting" | "bridging" | "failed";
+  bridgeSessionId?: string;
+  error?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -177,6 +190,70 @@ export interface MemoryFact {
   updatedAt: number;
 }
 
+export type AttentionEntityKind =
+  | "observation"
+  | "open_loop"
+  | "attention_candidate"
+  | "standing_order"
+  | "delivery_preference"
+  | "relationship"
+  | "project_state";
+export type AttentionCollection =
+  | "observations"
+  | "open-loops"
+  | "attention-candidates"
+  | "standing-orders"
+  | "delivery-preferences"
+  | "relationships"
+  | "project-states";
+export type AttentionMetadata = Record<string, string | number | boolean | null>;
+
+export interface ObservationRecord {
+  id: string; userId: number; source: string; eventType: string; summary: string;
+  entityId?: string; dedupeKey?: string; metadata?: AttentionMetadata;
+  occurredAt: number; importance: number; novelty: number; confidence: number;
+  privacyScope: "private" | "shared"; status: "new" | "processed" | "ignored";
+  createdAt: number; updatedAt: number;
+}
+export interface OpenLoopRecord {
+  id: string; userId: number; title: string; objective?: string; source?: string;
+  priority: number; confidence: number; dueAt?: number; snoozedUntil?: number;
+  nextAction?: string; waitingFor?: string; relatedEntityIds?: string[];
+  status: "open" | "waiting" | "blocked" | "snoozed" | "completed" | "dismissed";
+  createdAt: number; updatedAt: number;
+}
+export interface AttentionCandidateRecord {
+  id: string; userId: number; candidateType: "nudge" | "digest" | "prepare" | "ask" | "act";
+  status: "pending" | "delivered" | "accepted" | "dismissed" | "snoozed" | "expired";
+  observationId?: string; openLoopId?: string; score: number; reason: string;
+  proposedAction?: string; channel?: ChannelProvider; availableAt?: number; expiresAt?: number;
+  createdAt: number; updatedAt: number;
+}
+export interface StandingOrderRecord {
+  id: string; userId: number; name: string; instruction: string; scope: string[];
+  authority: "observe" | "prepare" | "execute_reversible"; constraints?: AttentionMetadata;
+  status: "active" | "paused" | "revoked"; expiresAt?: number; lastUsedAt?: number;
+  createdAt: number; updatedAt: number;
+}
+export interface DeliveryPreferenceRecord {
+  id: string; userId: number; provider: ChannelProvider; conversationId?: string;
+  enabled: boolean; mode: "immediate" | "digest" | "silent";
+  quietHoursUtc?: { startMinute: number; endMinute: number };
+  maxPerDay?: number; minScore?: number; createdAt: number; updatedAt: number;
+}
+export interface RelationshipRecord {
+  id: string; userId: number; personKey: string; name?: string; role?: string; notes?: string;
+  importance: number; lastInteractionAt?: number; preferredChannel?: ChannelProvider;
+  confidence: number; createdAt: number; updatedAt: number;
+}
+export interface ProjectStateRecord {
+  id: string; userId: number; projectKey: string; name: string; status: "active" | "paused" | "completed" | "archived";
+  summary: string; currentPhase?: string; nextAction?: string; blockers?: string[];
+  lastActivityAt?: number; confidence: number; createdAt: number; updatedAt: number;
+}
+export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord;
+export interface AttentionListOptions { query?: string; status?: string; limit?: number; }
+
 export interface ApprovalRecord {
   id: string;
   userId: number;
@@ -268,6 +345,27 @@ export interface ChannelLinkCodeRecord {
   used: boolean;
 }
 
+export interface SendblueGroupAuthorizationRecord {
+  provider: "sendblue";
+  groupId: string;
+  workspaceId: string;
+  accountId: string;
+  userId: number;
+  ownerExternalUserId: string;
+  participantPolicy: "all" | "owner";
+  createdAt: number;
+  updatedAt: number;
+  disabledAt?: number;
+}
+
+export interface SendblueGroupLinkCodeRecord {
+  codeHash: string;
+  userId: number;
+  provider: "sendblue";
+  expiresAt: number;
+  used: boolean;
+}
+
 /** A one-time proof that an authenticated web account may join a Telegram account. */
 export interface WebTelegramLinkCodeRecord {
   codeHash: string;
@@ -296,6 +394,7 @@ export interface OutboxRecord {
     body: string;
     buttons: Array<{ id: string; title: string }>;
   };
+  template?: ChannelTemplate;
   attachments?: InboundMessage["attachments"];
   correlationId?: string;
   kind: "message" | "approval" | "notification" | "receipt";
@@ -354,6 +453,8 @@ interface Backend {
   clearDaytonaWorkspace(userId: number): Promise<void>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   saveTasks(userId: number, tasks: TaskRecord[]): Promise<void>;
+  getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]>;
+  mutateAttentionRecords(userId: number, collection: AttentionCollection, mutate: (records: AttentionRecord[]) => AttentionRecord[]): Promise<AttentionRecord[]>;
   claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined>;
   settleTask(userId: number, id: string, leaseToken: string, patch: Partial<TaskRecord>, event: TaskEvent): Promise<TaskRecord | undefined>;
   createCliPairing(record: CliPairingRecord): Promise<void>;
@@ -372,6 +473,11 @@ interface Backend {
   consumeChannelOAuthState(stateHash: string): Promise<ChannelOAuthStateRecord | undefined>;
   createChannelLinkCode(record: ChannelLinkCodeRecord): Promise<void>;
   consumeChannelLinkCode(provider: ChannelProvider, codeHash: string): Promise<ChannelLinkCodeRecord | undefined>;
+  createSendblueGroupLinkCode(record: SendblueGroupLinkCodeRecord): Promise<void>;
+  consumeSendblueGroupLinkCode(codeHash: string): Promise<SendblueGroupLinkCodeRecord | undefined>;
+  getSendblueGroupAuthorization(groupId: string, workspaceId: string): Promise<SendblueGroupAuthorizationRecord | undefined>;
+  saveSendblueGroupAuthorization(record: SendblueGroupAuthorizationRecord): Promise<void>;
+  revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number): Promise<boolean>;
   createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void>;
   redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult>;
   getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined>;
@@ -401,6 +507,7 @@ class RedisBackend implements Backend {
   private rk = (id: number) => `chuck:rate:${id}`;
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
+  private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
   private pk = (hash: string) => `chuck:cli:pairing:${hash}`;
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
   private uk = (id: number) => `chuck:user:${id}:devices`;
@@ -411,6 +518,8 @@ class RedisBackend implements Backend {
   private channelInstallationKey = (provider: ChannelInstallationRecord["provider"], workspaceId: string) => `chuck:channel:installation:${provider}:${workspaceId}`;
   private channelOAuthKey = (stateHash: string) => `chuck:channel:oauth:${stateHash}`;
   private channelLinkKey = (provider: ChannelProvider, codeHash: string) => `chuck:channel:link:${provider}:${codeHash}`;
+  private sendblueGroupLinkKey = (codeHash: string) => `chuck:sendblue:group-link:${codeHash}`;
+  private sendblueGroupKey = (groupId: string, workspaceId: string) => `chuck:sendblue:group:${createHash("sha256").update(`${workspaceId}:${groupId}`).digest("hex")}`;
   private webTelegramLinkKey = (codeHash: string) => `chuck:web-telegram:code:${codeHash}`;
   private webTelegramUserKey = (webAuthUserId: string) => `chuck:web-telegram:web:${createHash("sha1").update(webAuthUserId).digest("hex")}`;
   private telegramWebUserKey = (telegramUserId: number) => `chuck:web-telegram:telegram:${telegramUserId}`;
@@ -504,6 +613,30 @@ class RedisBackend implements Backend {
   async saveTasks(userId: number, tasks: TaskRecord[]): Promise<void> {
     // Intentionally no expiry: task recovery must outlive conversational context.
     await this.r.set(this.taskk(userId), JSON.stringify(tasks));
+  }
+  async getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]> {
+    const raw = await this.r.get(this.attentionKey(userId, collection));
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((record) => record && typeof record === "object" && (record as Record<string, unknown>).userId === userId) as AttentionRecord[] : [];
+    } catch { return []; }
+  }
+  async mutateAttentionRecords(userId: number, collection: AttentionCollection, mutate: (records: AttentionRecord[]) => AttentionRecord[]): Promise<AttentionRecord[]> {
+    const key = this.attentionKey(userId, collection);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let records: AttentionRecord[] = [];
+      try {
+        const parsed = raw ? JSON.parse(raw) : [];
+        records = Array.isArray(parsed) ? parsed.filter((record) => record && typeof record === "object" && (record as Record<string, unknown>).userId === userId) as AttentionRecord[] : [];
+      } catch { records = []; }
+      const next = mutate(records);
+      const result = await this.r.multi().set(key, JSON.stringify(next)).exec();
+      if (result) return next;
+    }
+    throw new Error("Attention state changed concurrently; please retry");
   }
   async claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined> {
     const key = this.taskk(userId);
@@ -658,6 +791,35 @@ class RedisBackend implements Backend {
     if (record.used || record.expiresAt <= Date.now()) { await this.r.del(key); return undefined; }
     const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
     return claimed ? JSON.parse(claimed) as ChannelLinkCodeRecord : undefined;
+  }
+  async createSendblueGroupLinkCode(record: SendblueGroupLinkCodeRecord): Promise<void> {
+    const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
+    await this.r.set(this.sendblueGroupLinkKey(record.codeHash), JSON.stringify(record), "EX", ttl, "NX");
+  }
+  async consumeSendblueGroupLinkCode(codeHash: string): Promise<SendblueGroupLinkCodeRecord | undefined> {
+    const key = this.sendblueGroupLinkKey(codeHash);
+    const raw = await this.r.get(key);
+    if (!raw) return undefined;
+    const record = JSON.parse(raw) as SendblueGroupLinkCodeRecord;
+    if (record.used || record.expiresAt <= Date.now()) { await this.r.del(key); return undefined; }
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return nil end; local r=cjson.decode(v); if r.used or r.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return nil end; r.used=true; redis.call('del',KEYS[1]); return cjson.encode(r)", 1, key, Date.now()) as string | null;
+    return claimed ? JSON.parse(claimed) as SendblueGroupLinkCodeRecord : undefined;
+  }
+  async getSendblueGroupAuthorization(groupId: string, workspaceId: string): Promise<SendblueGroupAuthorizationRecord | undefined> {
+    const raw = await this.r.get(this.sendblueGroupKey(groupId, workspaceId));
+    if (!raw) return undefined;
+    try { const record = JSON.parse(raw) as SendblueGroupAuthorizationRecord; return record.disabledAt ? undefined : record; } catch { return undefined; }
+  }
+  async saveSendblueGroupAuthorization(record: SendblueGroupAuthorizationRecord): Promise<void> {
+    await this.r.set(this.sendblueGroupKey(record.groupId, record.workspaceId), JSON.stringify(record));
+  }
+  async revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number): Promise<boolean> {
+    const record = await this.getSendblueGroupAuthorization(groupId, workspaceId);
+    if (!record || record.userId !== userId) return false;
+    record.disabledAt = Date.now();
+    record.updatedAt = Date.now();
+    await this.saveSendblueGroupAuthorization(record);
+    return true;
   }
   async createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void> {
     const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
@@ -819,6 +981,8 @@ class MemoryBackend implements Backend {
   private channelInstallations = new Map<string, ChannelInstallationRecord>();
   private channelOAuthStates = new Map<string, ChannelOAuthStateRecord>();
   private channelLinkCodes = new Map<string, ChannelLinkCodeRecord>();
+  private sendblueGroupLinkCodes = new Map<string, SendblueGroupLinkCodeRecord>();
+  private sendblueGroupAuthorizations = new Map<string, SendblueGroupAuthorizationRecord>();
   private webTelegramLinkCodes = new Map<string, WebTelegramLinkCodeRecord>();
   private telegramUserByWebAuth = new Map<string, number>();
   private webAuthByTelegramUser = new Map<number, string>();
@@ -833,6 +997,7 @@ class MemoryBackend implements Backend {
   private channelDebounce = new Map<string, InboundMessage[]>();
   private deliveryClaims = new Map<string, number>();
   private completedDeliveries = new Map<string, number>();
+  private attention = new Map<string, AttentionRecord[]>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
@@ -898,6 +1063,16 @@ class MemoryBackend implements Backend {
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async saveTasks(userId: number, tasks: TaskRecord[]) { this.tasks.set(userId, tasks); }
+  private attentionKey(userId: number, collection: AttentionCollection): string { return `${userId}:${collection}`; }
+  async getAttentionRecords(userId: number, collection: AttentionCollection) {
+    return this.attention.get(this.attentionKey(userId, collection)) ?? [];
+  }
+  async mutateAttentionRecords(userId: number, collection: AttentionCollection, mutate: (records: AttentionRecord[]) => AttentionRecord[]) {
+    const key = this.attentionKey(userId, collection);
+    const next = mutate(this.attention.get(key) ?? []);
+    this.attention.set(key, next);
+    return next;
+  }
   async claimTask(userId: number, id: string, workerId: string, leaseMs: number) {
     const tasks = this.tasks.get(userId) ?? [];
     const index = tasks.findIndex((task) => task.id === id);
@@ -982,6 +1157,28 @@ class MemoryBackend implements Backend {
     record.used = true;
     this.channelLinkCodes.delete(key);
     return record;
+  }
+  private sendblueGroupKey(groupId: string, workspaceId: string) { return `${workspaceId}:${groupId}`; }
+  async createSendblueGroupLinkCode(record: SendblueGroupLinkCodeRecord) { this.sendblueGroupLinkCodes.set(record.codeHash, record); }
+  async consumeSendblueGroupLinkCode(codeHash: string) {
+    const record = this.sendblueGroupLinkCodes.get(codeHash);
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.sendblueGroupLinkCodes.delete(codeHash); return undefined; }
+    record.used = true;
+    this.sendblueGroupLinkCodes.delete(codeHash);
+    return record;
+  }
+  async getSendblueGroupAuthorization(groupId: string, workspaceId: string) {
+    const record = this.sendblueGroupAuthorizations.get(this.sendblueGroupKey(groupId, workspaceId));
+    return record?.disabledAt ? undefined : record;
+  }
+  async saveSendblueGroupAuthorization(record: SendblueGroupAuthorizationRecord) { this.sendblueGroupAuthorizations.set(this.sendblueGroupKey(record.groupId, record.workspaceId), record); }
+  async revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number) {
+    const record = await this.getSendblueGroupAuthorization(groupId, workspaceId);
+    if (!record || record.userId !== userId) return false;
+    record.disabledAt = Date.now();
+    record.updatedAt = Date.now();
+    await this.saveSendblueGroupAuthorization(record);
+    return true;
   }
   async createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord) { this.webTelegramLinkCodes.set(record.codeHash, record); }
   async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
@@ -1110,12 +1307,32 @@ export function isDurableStore(): boolean {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+export async function addFaceTimeCall(uid: number, record: FaceTimeCallRecord): Promise<FaceTimeCallRecord> {
+  const s = await getSession(uid);
+  s.faceTimeCalls = [record, ...(s.faceTimeCalls ?? [])].slice(0, 50);
+  await saveSession(uid, s);
+  return record;
+}
+
+export async function updateFaceTimeCall(uid: number, id: string, patch: Partial<Pick<FaceTimeCallRecord, "status" | "bridgeSessionId" | "error">>): Promise<FaceTimeCallRecord | undefined> {
+  const s = await getSession(uid);
+  const current = (s.faceTimeCalls ?? []).find((item) => item.id === id && item.userId === uid);
+  if (!current) return undefined;
+  Object.assign(current, patch, { updatedAt: Date.now() });
+  await saveSession(uid, s);
+  return current;
+}
+
+export async function listFaceTimeCalls(uid: number): Promise<FaceTimeCallRecord[]> {
+  return (await getSession(uid)).faceTimeCalls ?? [];
 }
 
 /** Best-effort provider delivery dedupe. The lease prevents concurrent workflow retries;
@@ -1558,6 +1775,183 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
   return true;
 }
 
+const attentionCollections: Record<AttentionEntityKind, AttentionCollection> = {
+  observation: "observations", open_loop: "open-loops", attention_candidate: "attention-candidates",
+  standing_order: "standing-orders", delivery_preference: "delivery-preferences",
+  relationship: "relationships", project_state: "project-states",
+};
+const attentionPrefixes: Record<AttentionEntityKind, string> = {
+  observation: "obs", open_loop: "loop", attention_candidate: "cand", standing_order: "order",
+  delivery_preference: "pref", relationship: "rel", project_state: "proj",
+};
+const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "voice", "cli", "webhook"];
+
+function attentionText(value: unknown, field: string, max = 4000, required = false): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    if (required) throw new Error(`${field} is required`);
+    return undefined;
+  }
+  if (typeof value !== "string") throw new Error(`${field} must be a string`);
+  const result = value.trim();
+  if (required && !result) throw new Error(`${field} is required`);
+  if (result.length > max) throw new Error(`${field} must be at most ${max} characters`);
+  return result || undefined;
+}
+function attentionNumber(value: unknown, field: string, fallback: number, min: number, max: number): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${field} must be a finite number`);
+  return Math.max(min, Math.min(max, value));
+}
+function attentionBoolean(value: unknown, field: string, fallback: boolean): boolean {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "boolean") throw new Error(`${field} must be a boolean`);
+  return value;
+}
+function attentionTimestamp(value: unknown, field: string, fallback?: number): number | undefined {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${field} must be a timestamp`);
+  return Math.round(value);
+}
+function attentionArray(value: unknown, field: string, maxItems = 20): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${field} must be an array of strings`);
+  return value.map((item) => item.trim()).filter(Boolean).slice(0, maxItems).map((item) => item.slice(0, 500));
+}
+function attentionProvider(value: unknown, field: string, fallback?: ChannelProvider): ChannelProvider | undefined {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "string" || !channelProviders.includes(value as ChannelProvider)) throw new Error(`${field} has an unsupported provider`);
+  return value as ChannelProvider;
+}
+function attentionMetadata(value: unknown): AttentionMetadata | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) throw new Error("metadata must be an object");
+  const result: AttentionMetadata = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 20)) {
+    if (!/^[a-zA-Z0-9_.-]{1,80}$/.test(key)) continue;
+    if (item === null || typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
+      result[key] = typeof item === "string" ? item.slice(0, 500) : item;
+    }
+  }
+  return result;
+}
+function attentionStatus(value: unknown, allowed: readonly string[], fallback: string): string {
+  const result = value === undefined || value === null ? fallback : String(value);
+  if (!allowed.includes(result)) throw new Error(`Unsupported attention status: ${result}`);
+  return result;
+}
+function attentionRecord(collection: AttentionCollection, raw: Record<string, unknown>): AttentionRecord {
+  const base = {
+    id: attentionText(raw.id, "id", 160, true)!, userId: Number(raw.userId),
+    createdAt: attentionTimestamp(raw.createdAt, "createdAt", Date.now())!,
+    updatedAt: attentionTimestamp(raw.updatedAt, "updatedAt", Date.now())!,
+  };
+  if (!Number.isSafeInteger(base.userId) || base.userId < 0) throw new Error("Invalid attention owner");
+  switch (collection) {
+    case "observations": return {
+      ...base, source: attentionText(raw.source, "source", 200, true)!, eventType: attentionText(raw.eventType, "eventType", 200, true)!,
+      summary: attentionText(raw.summary, "summary", 4000, true)!, entityId: attentionText(raw.entityId, "entityId", 200), dedupeKey: attentionText(raw.dedupeKey, "dedupeKey", 300),
+      metadata: attentionMetadata(raw.metadata), occurredAt: attentionTimestamp(raw.occurredAt, "occurredAt", base.createdAt)!,
+      importance: attentionNumber(raw.importance, "importance", 0.5, 0, 1), novelty: attentionNumber(raw.novelty, "novelty", 0.5, 0, 1), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1),
+      privacyScope: raw.privacyScope === "shared" ? "shared" : "private", status: attentionStatus(raw.status, ["new", "processed", "ignored"], "new") as ObservationRecord["status"],
+    };
+    case "open-loops": return {
+      ...base, title: attentionText(raw.title, "title", 300, true)!, objective: attentionText(raw.objective, "objective"), source: attentionText(raw.source, "source", 200),
+      priority: attentionNumber(raw.priority, "priority", 0.5, 0, 1), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1), dueAt: attentionTimestamp(raw.dueAt, "dueAt"), snoozedUntil: attentionTimestamp(raw.snoozedUntil, "snoozedUntil"),
+      nextAction: attentionText(raw.nextAction, "nextAction"), waitingFor: attentionText(raw.waitingFor, "waitingFor"), relatedEntityIds: attentionArray(raw.relatedEntityIds, "relatedEntityIds"),
+      status: attentionStatus(raw.status, ["open", "waiting", "blocked", "snoozed", "completed", "dismissed"], "open") as OpenLoopRecord["status"],
+    };
+    case "attention-candidates": return {
+      ...base, candidateType: attentionStatus(raw.candidateType, ["nudge", "digest", "prepare", "ask", "act"], "nudge") as AttentionCandidateRecord["candidateType"],
+      status: attentionStatus(raw.status, ["pending", "delivered", "accepted", "dismissed", "snoozed", "expired"], "pending") as AttentionCandidateRecord["status"],
+      observationId: attentionText(raw.observationId, "observationId", 160), openLoopId: attentionText(raw.openLoopId, "openLoopId", 160), score: attentionNumber(raw.score, "score", 0.5, 0, 1),
+      reason: attentionText(raw.reason, "reason", 1000, true)!, proposedAction: attentionText(raw.proposedAction, "proposedAction"), channel: attentionProvider(raw.channel, "channel"),
+      availableAt: attentionTimestamp(raw.availableAt, "availableAt"), expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"),
+    };
+    case "standing-orders": return {
+      ...base, name: attentionText(raw.name, "name", 200, true)!, instruction: attentionText(raw.instruction, "instruction", 4000, true)!, scope: attentionArray(raw.scope, "scope") ?? [],
+      authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as StandingOrderRecord["authority"], constraints: attentionMetadata(raw.constraints),
+      status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as StandingOrderRecord["status"], expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"), lastUsedAt: attentionTimestamp(raw.lastUsedAt, "lastUsedAt"),
+    };
+    case "delivery-preferences": return {
+      ...base, provider: attentionProvider(raw.provider, "provider", "telegram")!, conversationId: attentionText(raw.conversationId, "conversationId", 300), enabled: attentionBoolean(raw.enabled, "enabled", true),
+      mode: attentionStatus(raw.mode, ["immediate", "digest", "silent"], "silent") as DeliveryPreferenceRecord["mode"],
+      maxPerDay: raw.maxPerDay === undefined ? undefined : Math.round(attentionNumber(raw.maxPerDay, "maxPerDay", 10, 0, 1000)), minScore: raw.minScore === undefined ? undefined : attentionNumber(raw.minScore, "minScore", 0.7, 0, 1),
+    };
+    case "relationships": return {
+      ...base, personKey: attentionText(raw.personKey, "personKey", 300, true)!, name: attentionText(raw.name, "name", 300), role: attentionText(raw.role, "role", 300), notes: attentionText(raw.notes, "notes"),
+      importance: attentionNumber(raw.importance, "importance", 0.5, 0, 1), lastInteractionAt: attentionTimestamp(raw.lastInteractionAt, "lastInteractionAt"), preferredChannel: attentionProvider(raw.preferredChannel, "preferredChannel"), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1),
+    };
+    case "project-states": return {
+      ...base, projectKey: attentionText(raw.projectKey, "projectKey", 300, true)!, name: attentionText(raw.name, "name", 300, true)!,
+      status: attentionStatus(raw.status, ["active", "paused", "completed", "archived"], "active") as ProjectStateRecord["status"], summary: attentionText(raw.summary, "summary", 4000, true)!,
+      currentPhase: attentionText(raw.currentPhase, "currentPhase", 300), nextAction: attentionText(raw.nextAction, "nextAction"), blockers: attentionArray(raw.blockers, "blockers"),
+      lastActivityAt: attentionTimestamp(raw.lastActivityAt, "lastActivityAt"), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1),
+    };
+  }
+}
+
+function safeAttentionRecord(collection: AttentionCollection, raw: unknown): AttentionRecord | undefined {
+  try {
+    return raw && typeof raw === "object" ? attentionRecord(collection, raw as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function collectionFor(kind: AttentionEntityKind): AttentionCollection {
+  const collection = attentionCollections[kind];
+  if (!collection) throw new Error(`Unsupported attention entity: ${String(kind)}`);
+  return collection;
+}
+
+export async function listAttentionRecords(userId: number, kind: AttentionEntityKind, options: AttentionListOptions = {}): Promise<AttentionRecord[]> {
+  const collection = collectionFor(kind);
+  const query = options.query?.trim().toLowerCase();
+  const records = (await backend.getAttentionRecords(userId, collection)).map((item) => safeAttentionRecord(collection, item)).filter((item): item is AttentionRecord => Boolean(item));
+  return records.filter((record) => {
+    const status = "status" in record ? record.status : undefined;
+    if (options.status && status !== options.status) return false;
+    if (!query) return true;
+    return JSON.stringify(record).toLowerCase().includes(query);
+  }).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(options.limit ?? 50))));
+}
+
+export async function getAttentionRecord(userId: number, kind: AttentionEntityKind, id: string): Promise<AttentionRecord | undefined> {
+  return (await listAttentionRecords(userId, kind, { limit: 200 })).find((record) => record.id === id);
+}
+
+export async function createAttentionRecord(userId: number, kind: AttentionEntityKind, input: Record<string, unknown>): Promise<AttentionRecord> {
+  const collection = collectionFor(kind);
+  const now = Date.now();
+  const raw = { ...input, id: `${attentionPrefixes[kind]}_${randomUUID()}`, userId, createdAt: now, updatedAt: now };
+  const created = attentionRecord(collection, raw);
+  let result = created;
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is AttentionRecord => Boolean(item));
+    const dedupeKey = kind === "observation" ? (created as ObservationRecord).dedupeKey : undefined;
+    const preference = kind === "delivery_preference" ? created as DeliveryPreferenceRecord : undefined;
+    const existing = normalized.find((item) => (dedupeKey && kind === "observation" && (item as ObservationRecord).dedupeKey === dedupeKey) || (preference && kind === "delivery_preference" && (item as DeliveryPreferenceRecord).provider === preference.provider && (item as DeliveryPreferenceRecord).conversationId === preference.conversationId));
+    if (existing) { result = existing; return normalized; }
+    return [...normalized, created].slice(-200);
+  });
+  return result;
+}
+
+export async function updateAttentionRecord(userId: number, kind: AttentionEntityKind, id: string, patch: Record<string, unknown>): Promise<AttentionRecord | undefined> {
+  const collection = collectionFor(kind);
+  let result: AttentionRecord | undefined;
+  const safePatch = Object.fromEntries(Object.entries(patch).filter(([key, value]) => !["id", "userId", "createdAt", "updatedAt"].includes(key) && value !== undefined));
+  await backend.mutateAttentionRecords(userId, collection, (records) => {
+    const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is AttentionRecord => Boolean(item));
+    const index = normalized.findIndex((item) => item.id === id && item.userId === userId);
+    if (index < 0) return normalized;
+    result = attentionRecord(collection, { ...normalized[index], ...safePatch, id, userId, createdAt: normalized[index].createdAt, updatedAt: Date.now() });
+    normalized[index] = result;
+    return normalized;
+  });
+  return result;
+}
+
 export async function addHistorySummary(uid: number, summary: string): Promise<void> {
   const s = await getSession(uid);
   s.summaries = [...s.summaries, summary].slice(-10);
@@ -1629,6 +2023,31 @@ export async function createChannelLinkCode(userId: number, provider: ChannelPro
 
 export async function consumeChannelLinkCode(provider: ChannelProvider, code: string): Promise<ChannelLinkCodeRecord | undefined> {
   return backend.consumeChannelLinkCode(provider, hashCliSecret(code.trim()));
+}
+
+export async function createSendblueGroupLinkCode(userId: number, ttlMs = 10 * 60 * 1000): Promise<string> {
+  const code = createPairingCode();
+  await backend.createSendblueGroupLinkCode({ codeHash: hashCliSecret(code), userId, provider: "sendblue", expiresAt: Date.now() + ttlMs, used: false });
+  return code;
+}
+
+export async function consumeSendblueGroupLinkCode(code: string): Promise<SendblueGroupLinkCodeRecord | undefined> {
+  return backend.consumeSendblueGroupLinkCode(hashCliSecret(code.trim()));
+}
+
+export async function getSendblueGroupAuthorization(groupId: string, workspaceId: string): Promise<SendblueGroupAuthorizationRecord | undefined> {
+  const group = groupId.trim();
+  const workspace = workspaceId.trim();
+  return group && workspace ? backend.getSendblueGroupAuthorization(group, workspace) : undefined;
+}
+
+export async function saveSendblueGroupAuthorization(record: SendblueGroupAuthorizationRecord): Promise<void> {
+  if (!record.groupId.trim() || !record.workspaceId.trim() || !record.ownerExternalUserId.trim()) throw new Error("Sendblue group authorization requires group, workspace, and owner identity");
+  await backend.saveSendblueGroupAuthorization({ ...record, groupId: record.groupId.trim(), workspaceId: record.workspaceId.trim(), ownerExternalUserId: record.ownerExternalUserId.trim() });
+}
+
+export async function revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number): Promise<boolean> {
+  return backend.revokeSendblueGroupAuthorization(groupId.trim(), workspaceId.trim(), userId);
 }
 
 const webTelegramCodePattern = /^web_[A-Za-z0-9_-]{20,}$/;

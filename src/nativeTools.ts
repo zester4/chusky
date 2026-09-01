@@ -8,10 +8,14 @@ import {
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId,
+  createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
+  type AttentionEntityKind,
   type TaskStatus,
   type JobRecord, type ReminderRecord,
+  listFaceTimeCalls,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
+import { startFaceTimeCallForUser } from "./calls/facetime.js";
 
 const MAX_TEXT = 1000;
 
@@ -35,6 +39,38 @@ function taskStatuses(value: unknown): TaskStatus[] | undefined {
   const statuses = value.map((item) => String(item));
   if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as TaskStatus))) throw new Error("Invalid task status filter");
   return [...new Set(statuses)] as TaskStatus[];
+}
+
+function attentionKind(value: unknown): AttentionEntityKind {
+  const allowed: AttentionEntityKind[] = ["observation", "open_loop", "attention_candidate", "standing_order", "delivery_preference", "relationship", "project_state"];
+  const kind = String(value ?? "");
+  if (!allowed.includes(kind as AttentionEntityKind)) throw new Error("Unsupported attention entity");
+  return kind as AttentionEntityKind;
+}
+
+function attentionInput(args: Record<string, unknown>): Record<string, unknown> {
+  const excluded = new Set(["action", "kind", "id", "query", "limit"]);
+  return Object.fromEntries(Object.entries(args).filter(([key]) => !excluded.has(key)));
+}
+
+async function attentionTool(userId: number, args: Record<string, unknown>): Promise<unknown> {
+  const action = String(args.action ?? "");
+  if (!["create", "list", "update"].includes(action)) throw new Error("Attention action must be create, list, or update");
+  const kind = attentionKind(args.kind);
+  if (action === "list") return listAttentionRecords(userId, kind, { query: args.query ? text(args.query) : undefined, status: args.status ? String(args.status).trim().slice(0, 100) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
+  if (action === "update") {
+    const id = text(args.id);
+    const updated = await updateAttentionRecord(userId, kind, id, attentionInput(args));
+    if (!updated) throw new Error("Attention record not found or not owned by you");
+    return updated;
+  }
+  const input = attentionInput(args);
+  const requiredByKind: Partial<Record<AttentionEntityKind, string[]>> = {
+    observation: ["source", "eventType", "summary"], open_loop: ["title"], attention_candidate: ["candidateType", "reason"],
+    standing_order: ["name", "instruction", "authority"], delivery_preference: ["provider"], relationship: ["personKey"], project_state: ["projectKey", "name", "summary"],
+  };
+  for (const field of requiredByKind[kind] ?? []) if (!(field in input) || input[field] === undefined || input[field] === null || input[field] === "") throw new Error(`${field} is required for ${kind}`);
+  return createAttentionRecord(userId, kind, input);
 }
 
 function requireUrl(url: string, label: string): string {
@@ -178,6 +214,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), confidence: Number(args.confidence ?? 1) });
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
+    case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
+    case "CHUCK_START_FACETIME_CALL": return startFaceTimeCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
+    case "CHUCK_LIST_FACETIME_CALLS": return listFaceTimeCalls(userId);
     case "CHUCK_TASK_CREATE": return createTask(userId, { title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
     case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));
     case "CHUCK_TASK_GET": {

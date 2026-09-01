@@ -21,7 +21,7 @@ import { putR2Object, r2Configured } from "./lib/storage/r2.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
-import { redeemWebTelegramLinkCode } from "./store.js";
+import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 
 const activeRequests = new Map<number, AbortController>();
@@ -318,6 +318,11 @@ export function registerHandlers(bot: Bot): void {
   bot.command("channel", async (ctx) => {
     if (!(await guard(ctx))) return;
     const [action, provider] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+    if (action === "link" && provider === "sendblue-group") {
+      const code = await createSendblueGroupLinkCode(ctx.from!.id);
+      await replyHtml(ctx, `<b>Link an iMessage group</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link-group ${code}</code> inside the iMessage group from your linked Sendblue number. It expires in 10 minutes.`);
+      return;
+    }
     if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
       const code = await createLinkCode(ctx.from!.id, provider);
       if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
@@ -339,7 +344,7 @@ export function registerHandlers(bot: Bot): void {
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
       return;
     }
-    await ctx.reply("Usage: /channel link slack|whatsapp|sendblue | /channel list | /channel notify slack|whatsapp|sendblue on|off");
+    await ctx.reply("Usage: /channel link slack|whatsapp|sendblue|sendblue-group | /channel list | /channel notify slack|whatsapp|sendblue on|off");
   });
 
   // A web account proves possession of its Better Auth session by generating a

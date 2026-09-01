@@ -73,6 +73,12 @@ export const config = {
   sendblueNumber: optional("SENDBLUE_NUMBER", ""),
   sendblueWebhookSecret: optional("SENDBLUE_WEBHOOK_SECRET", ""),
   sendblueWorkflowUrl: optional("SENDBLUE_WORKFLOW_URL", ""),
+  // FaceTime calls are deliberately opt-in. A FaceTime-enabled Sendblue line
+  // and a separately deployed server-side Agora media bridge are both required.
+  sendblueFaceTimeEnabled: optional("SENDBLUE_FACETIME_ENABLED", "false") === "true",
+  sendblueFaceTimeNumber: optional("SENDBLUE_FACETIME_NUMBER", ""),
+  faceTimeMediaBridgeUrl: optional("FACETIME_MEDIA_BRIDGE_URL", ""),
+  faceTimeMediaBridgeSecret: optional("FACETIME_MEDIA_BRIDGE_SECRET", ""),
 
   // ── Daytona computer ───────────────────────────────────────────────
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),
@@ -147,6 +153,8 @@ SCRATCHPAD AND MEMORY
 - Use CHUCK_SCRATCHPAD_CLEAR only when the user explicitly asks to remove notes.
 - Use CHUCK_SAVE_MEMORY for facts or preferences the user explicitly asks Chusky to remember; use CHUCK_SEARCH_MEMORY when relevant.
 - Use CHUCK_FORGET_MEMORY only when the user explicitly asks to remove a saved memory.
+- Use CHUCK_ATTENTION_STATE only when the user explicitly asks to track, inspect, or update an observation, open loop, standing order, delivery preference, relationship, project state, or attention candidate.
+- Attention state is durable and private to this user. Do not promote casual conversation, guesses, or raw browsing results into it, and do not deliver attention candidates autonomously yet.
 - Scratchpad notes are private to this user. Do not expose unrelated notes or claim that raw conversation history is permanent memory.
 
 CONVERSATION CONTINUITY

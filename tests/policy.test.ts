@@ -16,6 +16,8 @@ test("does not gate read-only tools", () => {
 
 test("uses explicit native policies and inspects Composio multi-tool calls", () => {
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_START_FACETIME_CALL"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_LIST_FACETIME_CALLS"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);

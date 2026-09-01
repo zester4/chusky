@@ -1,6 +1,7 @@
 import { acquireUserLock, claimChannelEvent, completeChannelEvent, releaseChannelEvent, releaseUserLock, renewUserLock } from "../store.js";
 import { buildConversation, buildReplyTarget } from "./conversations.js";
-import { redeemLinkCode, resolveIdentity } from "./identity.js";
+import { activateSendblueGroup, redeemLinkCode, resolveIdentity, resolveSendblueGroupAuthorization } from "./identity.js";
+import { revokeSendblueGroupAuthorization, saveSendblueGroupAuthorization } from "../store.js";
 import { ChannelOutbox } from "./outbox.js";
 import type { ChannelAdapter, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import { randomUUID } from "node:crypto";
@@ -58,7 +59,41 @@ export class ChannelGateway {
     if (!(await claimChannelEvent(message.provider, message.providerEventId, 300))) return { duplicate: true, linked: false, delivered: [] };
 
     try {
-    let identity = await resolveIdentity(message);
+    const isSendblueGroup = message.provider === "sendblue" && message.scope === "shared" && Boolean(message.providerWorkspaceId);
+    let groupAuthorization = isSendblueGroup ? await resolveSendblueGroupAuthorization(message) : undefined;
+    let identity = groupAuthorization ? {
+      accountId: groupAuthorization.accountId,
+      userId: groupAuthorization.userId,
+      provider: "sendblue" as const,
+      externalUserId: groupAuthorization.ownerExternalUserId,
+      workspaceId: groupAuthorization.workspaceId,
+      verifiedAt: groupAuthorization.createdAt,
+      createdAt: groupAuthorization.createdAt,
+      updatedAt: groupAuthorization.updatedAt,
+      proactiveOptIn: true,
+    } : await resolveIdentity(message);
+    if (groupAuthorization && groupAuthorization.participantPolicy === "owner" && message.providerUserId !== groupAuthorization.ownerExternalUserId) {
+      await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: "This iMessage group is restricted to the linked account owner.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-restricted`, kind: "notification" }, adapter);
+      await completeChannelEvent(message.provider, message.providerEventId);
+      return { duplicate: false, linked: true, delivered: [] };
+    }
+    if (isSendblueGroup && !groupAuthorization && message.text) {
+      const groupLink = message.text.trim().match(/^\/link-group\s+(\d{6})$/i);
+      if (groupLink) {
+        const linkedOwner = await resolveIdentity(message);
+        try {
+          if (!linkedOwner) throw new Error("Activate this group from the linked iMessage account");
+          groupAuthorization = await activateSendblueGroup(linkedOwner.userId, message, groupLink[1], message.providerUserId);
+          await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: "This iMessage group is now linked to Chusky. Everyone in the group can use the shared conversation.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-linked`, kind: "notification" }, adapter);
+          await completeChannelEvent(message.provider, message.providerEventId);
+          return { duplicate: false, linked: true, delivered: [] };
+        } catch (error) {
+          await this.outbox.send({ accountId: "unlinked", userId: 0, target: buildReplyTarget(message), text: error instanceof Error ? error.message : "Could not link this iMessage group.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-link-error`, kind: "notification" }, adapter);
+          await completeChannelEvent(message.provider, message.providerEventId);
+          return { duplicate: false, linked: false, delivered: [] };
+        }
+      }
+    }
     if (!identity && message.text) {
       const match = message.text.trim().match(/^\/link\s+(\d{6})$/i);
       if (match) {
@@ -91,6 +126,32 @@ export class ChannelGateway {
       }, adapter);
       await completeChannelEvent(message.provider, message.providerEventId);
       return { duplicate: false, linked: false, delivered: [] };
+    }
+
+    if (groupAuthorization && message.text) {
+      const command = message.text.trim().toLowerCase();
+      if (command === "/unlink-group") {
+        if (message.providerUserId !== groupAuthorization.ownerExternalUserId) {
+          await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: "Only the linked account owner can unlink this group.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-unlink-denied`, kind: "notification" }, adapter);
+        } else {
+          await revokeSendblueGroupAuthorization(groupAuthorization.groupId, groupAuthorization.workspaceId, groupAuthorization.userId);
+          await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: "This iMessage group has been unlinked from Chusky.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-unlinked`, kind: "notification" }, adapter);
+        }
+        await completeChannelEvent(message.provider, message.providerEventId);
+        return { duplicate: false, linked: true, delivered: [] };
+      }
+      const access = command.match(/^\/group-access\s+(all|owner)$/);
+      if (access) {
+        if (message.providerUserId !== groupAuthorization.ownerExternalUserId) {
+          await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: "Only the linked account owner can change group access.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-access-denied`, kind: "notification" }, adapter);
+        } else {
+          groupAuthorization = { ...groupAuthorization, participantPolicy: access[1] as "all" | "owner", updatedAt: Date.now() };
+          await saveSendblueGroupAuthorization(groupAuthorization);
+          await this.outbox.send({ accountId: groupAuthorization.accountId, userId: groupAuthorization.userId, target: buildReplyTarget(message), text: `Group access is now restricted to ${access[1] === "all" ? "everyone" : "the linked account owner"}.`, idempotencyKey: `${message.provider}:${message.providerEventId}:group-access-updated`, kind: "notification" }, adapter);
+        }
+        await completeChannelEvent(message.provider, message.providerEventId);
+        return { duplicate: false, linked: true, delivered: [] };
+      }
     }
 
     if (message.provider === "sendblue" && message.text) {
