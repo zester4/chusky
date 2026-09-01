@@ -16,7 +16,10 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
   let index = 0;
   const session = {
     sessionId: "test-composio-session",
-    tools: async () => [],
+    tools: async () => [
+      { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GMAIL_SEND_EMAIL", description: "Test-only risky tool", parameters: { type: "object" } } },
+    ],
     execute,
   };
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });

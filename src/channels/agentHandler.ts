@@ -28,6 +28,11 @@ function reply(conversation: ChuskyConversation, text: string, idempotencySeed: 
   };
 }
 
+function agentInstructions(conversation: ChuskyConversation): string | undefined {
+  if (conversation.scope !== "shared") return undefined;
+  return `You are replying in a shared ${conversation.provider} group conversation. Your response is visible to every participant, so address the group naturally rather than assuming you are speaking privately to the linked account owner. Never reveal or rely on private Telegram, direct-channel, personal memory, or account-only conversation context. Use only this group's conversation history and the current message. If a request needs private context or private confirmation, ask the user to continue in a direct chat.`;
+}
+
 async function privateOrSharedHistory(conversation: ChuskyConversation) {
   if (conversation.scope === "private") {
     const session = await getSession(conversation.userId);
@@ -139,7 +144,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     const { history, model } = await privateOrSharedHistory(conversation);
     try {
       const prepared = await buildAgentInput(message);
-      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId });
+      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope }, { instructions: agentInstructions(conversation) });
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, result.generatedImages, result.generatedFiles) : [];
