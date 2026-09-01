@@ -16,6 +16,7 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
+import { startTwilioCallForUser } from "./calls/twilio.js";
 
 const MAX_TEXT = 1000;
 
@@ -217,6 +218,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_START_FACETIME_CALL": return startFaceTimeCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_FACETIME_CALLS": return listFaceTimeCalls(userId);
+    case "CHUCK_START_PHONE_CALL": return startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
+    case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
     case "CHUCK_TASK_CREATE": return createTask(userId, { title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
     case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));
     case "CHUCK_TASK_GET": {

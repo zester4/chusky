@@ -723,12 +723,13 @@ export function registerHandlers(bot: Bot): void {
       // after approval can produce semantically similar but JSON-different
       // arguments, causing an unnecessary second approval. Execute precisely
       // the reviewed native request instead.
-      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL") {
+      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL" || approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         validateNativeToolArguments(approval.toolSlug, approval.args);
         await nativeTool(ctx.from.id, approval.toolSlug, approval.args);
         await setApprovalStatus(ctx.from.id, approval.id, "consumed");
-        await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: "FaceTime call started. I’m joining the call now." }]);
-        await ctx.reply("📞 FaceTime call started. I’m joining the call now.");
+        const label = approval.toolSlug === "CHUCK_START_PHONE_CALL" ? "Phone call" : "FaceTime call";
+        await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: `${label} started. I’m joining the call now.` }]);
+        await ctx.reply(`📞 ${label} started. I’m joining the call now.`);
         return;
       }
       const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);

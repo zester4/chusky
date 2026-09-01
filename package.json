@@ -41,7 +41,8 @@
     "ioredis": "^5.4.1",
     "pg": "^8.23.0",
     "pino": "^9.5.0",
-    "pino-pretty": "^11.3.0"
+    "pino-pretty": "^11.3.0",
+    "twilio": "^5.13.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

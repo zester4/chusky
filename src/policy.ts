@@ -5,6 +5,7 @@ export type ToolApprovalPolicy = "private" | "approval_required";
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_ARTIFACT", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_LIST_FACETIME_CALLS",
+  "CHUCK_LIST_PHONE_CALLS",
   "CHUCK_ATTENTION_STATE",
   "CHUCK_FORGET_MEMORY", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
@@ -65,6 +66,8 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 const STATUSES: Record<string, string> = {
   CHUCK_START_FACETIME_CALL: "📞 I’m preparing that FaceTime call…",
   CHUCK_LIST_FACETIME_CALLS: "📞 I’m checking your FaceTime call history…",
+  CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
+  CHUCK_LIST_PHONE_CALLS: "📞 I’m checking your phone-call history…",
   CHUCK_ATTENTION_STATE: "🧠 I’m updating your private attention state…",
   COMPOSIO_MANAGE_CONNECTIONS: "🔗 I’m opening the connection screen…",
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",

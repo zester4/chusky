@@ -25,6 +25,13 @@ import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./teleg
 import { triggerWorkflowUrl, workflowClient } from "./triggerWorkflow.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
+import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
+import twilio from "twilio";
+import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
+
+function xmlEscape(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
+}
 
 function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown> }): string {
   const redacted = Object.entries(event.payload ?? {}).filter(([key, value]) => {
@@ -177,6 +184,87 @@ async function main(): Promise<void> {
       try { return await work(); } finally { await releaseUserLock(userId, token); }
     };
 
+    const twilioCallbackUrl = (path: string, callId: string, userId: number) => `${config.twilioWebhookBaseUrl.replace(/\/+$/, "")}${path}?callId=${encodeURIComponent(callId)}&userId=${encodeURIComponent(String(userId))}`;
+    const twilioForm = (body: Record<string, unknown>): Record<string, string> => Object.fromEntries(
+      Object.entries(body).filter(([, value]) => typeof value === "string").map(([key, value]) => [key, value as string]),
+    );
+    const trustedTwilioRequest = (signature: string | undefined, url: string, body: Record<string, unknown>) => Boolean(
+      config.twilioAuthToken && signature && twilio.validateRequest(config.twilioAuthToken, signature, url, twilioForm(body)),
+    );
+    const twilioStreamTwiML = (callId: string, userId: number) => {
+      const ticket = createVoiceBridgeTicket(callId, userId, config.faceTimeMediaBridgeSecret);
+      const streamUrl = config.twilioMediaStreamUrl.replace(/\/+$/, "");
+      const statusCallback = twilioCallbackUrl("/twilio/stream-status", callId, userId);
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/></Stream></Connect></Response>`;
+    };
+
+    // Twilio signs the initial TwiML request. Do not derive the signed URL
+    // from Host/X-Forwarded headers: the configured public URL is authoritative.
+    app.post("/twilio/twiml", async (c) => {
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken || !config.twilioMediaStreamUrl || !config.faceTimeMediaBridgeSecret) return c.text("Not found", 404);
+      const callId = String(c.req.query("callId") ?? "").trim();
+      const userId = Number(c.req.query("userId"));
+      const form = await c.req.parseBody();
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/twiml", callId, userId), form)) return c.text("Forbidden", 403);
+      const callSid = String(form.CallSid ?? "").trim();
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      await updateFaceTimeCall(userId, callId, { status: "bridging", providerCallId: callSid || call.providerCallId });
+      return c.body(twilioStreamTwiML(callId, userId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+    });
+
+    // Configure this URL as the incoming Voice webhook on the Twilio number.
+    // Signature verification happens before the caller's number is considered;
+    // then an explicit E.164 allowlist prevents unknown callers from entering
+    // an owner's private Chusky history, memory, or tool context.
+    app.post("/twilio/inbound", async (c) => {
+      if (!config.twilioVoiceEnabled || !config.twilioInboundEnabled || !config.twilioAuthToken || !config.twilioMediaStreamUrl || !config.faceTimeMediaBridgeSecret) return c.text("Not found", 404);
+      const form = await c.req.parseBody();
+      const base = config.twilioWebhookBaseUrl.replace(/\/+$/, "");
+      if (!base || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), `${base}/twilio/inbound`, form)) return c.text("Forbidden", 403);
+      try {
+        const ownerUserId = inboundTwilioOwner(config.twilioInboundOwnerUserId);
+        const allowedCallers = parseTwilioCallerAllowlist(config.twilioInboundAllowedCallers);
+        const from = String(form.From ?? "").trim();
+        const to = String(form.To ?? "").trim();
+        const callSid = String(form.CallSid ?? "").trim();
+        if (!allowedCallers.includes(from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid });
+        return c.body(twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      } catch (error) {
+        logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
+        return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      }
+    });
+
+    app.post("/twilio/status", async (c) => {
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.text("Not found", 404);
+      const callId = String(c.req.query("callId") ?? "").trim();
+      const userId = Number(c.req.query("userId"));
+      const form = await c.req.parseBody();
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/status", callId, userId), form)) return c.text("Forbidden", 403);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      const providerStatus = String(form.CallStatus ?? "").toLowerCase();
+      const status = ["completed", "canceled"].includes(providerStatus) ? "ended" : ["busy", "failed", "no-answer"].includes(providerStatus) ? "failed" : undefined;
+      if (status) await updateFaceTimeCall(userId, callId, { status, providerCallId: String(form.CallSid ?? call.providerCallId ?? "").slice(0, 100), ...(status === "failed" ? { error: `Twilio call ${providerStatus}` } : {}) });
+      return c.body(null, 204);
+    });
+
+    app.post("/twilio/stream-status", async (c) => {
+      if (!config.twilioVoiceEnabled || !config.twilioAuthToken) return c.text("Not found", 404);
+      const callId = String(c.req.query("callId") ?? "").trim();
+      const userId = Number(c.req.query("userId"));
+      const form = await c.req.parseBody();
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !trustedTwilioRequest(c.req.header("X-Twilio-Signature"), twilioCallbackUrl("/twilio/stream-status", callId, userId), form)) return c.text("Forbidden", 403);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || call.provider !== "twilio") return c.text("Not found", 404);
+      const event = String(form.StreamEvent ?? "").toLowerCase();
+      if (event === "stream-error") await updateFaceTimeCall(userId, callId, { status: "failed", error: "Twilio media stream error" });
+      if (event === "stream-stopped" && call.status !== "failed") await updateFaceTimeCall(userId, callId, { status: "ended" });
+      return c.body(null, 204);
+    });
+
     // Private bridge-only route. It receives final speech transcripts, not
     // audio, and reuses the owner's normal Chusky memory and agent runtime.
     // Voice turns deliberately expose only read-only native tools: an agent
@@ -187,20 +275,20 @@ async function main(): Promise<void> {
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
-      if (!/^ftc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
+      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
       const call = await getFaceTimeCall(userId, callId);
-      if (!call || call.status !== "bridging") return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
       if (!(await canSpend(userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
       try {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
           return runAgent(userId, transcript, session.history, session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, {
-            instructions: "You are speaking live in a FaceTime call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
-            toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS"],
+            instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
+            toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS", "CHUCK_LIST_PHONE_CALLS"],
           });
         });
-        await appendMessages(userId, [{ role: "user", content: `[FaceTime ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
+        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
         if (result.cost) await addUsage(userId, result.cost);
         return c.json({ ok: true, text: result.text.slice(0, 5000) });
       } catch (error) {
@@ -215,7 +303,7 @@ async function main(): Promise<void> {
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const status = String(body.status ?? "");
-      if (!/^ftc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status)) return c.json({ ok: false, error: "invalid call status" }, 400);
+      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status)) return c.json({ ok: false, error: "invalid call status" }, 400);
       const call = await updateFaceTimeCall(userId, callId, { status: status as "active" | "ended" | "failed", ...(status === "failed" && body.error ? { error: String(body.error).slice(0, 500) } : {}) });
       if (!call) return c.json({ ok: false, error: "unknown call" }, 404);
       return c.json({ ok: true });
@@ -764,8 +852,8 @@ async function main(): Promise<void> {
         const me = await bot.api.getMe();
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled" } as const;
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled" } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioInbound !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });

@@ -45,10 +45,14 @@ export interface UserSession {
 export interface FaceTimeCallRecord {
   id: string;
   userId: number;
+  /** Explicit provider keeps shared safe call storage transport-aware. */
+  provider?: "facetime" | "twilio";
+  direction?: "inbound" | "outbound";
   phoneNumber: string;
   purpose: string;
   status: "starting" | "bridging" | "active" | "ended" | "failed";
   bridgeSessionId?: string;
+  providerCallId?: string;
   error?: string;
   createdAt: number;
   updatedAt: number;
@@ -1322,7 +1326,7 @@ export async function addFaceTimeCall(uid: number, record: FaceTimeCallRecord): 
   return record;
 }
 
-export async function updateFaceTimeCall(uid: number, id: string, patch: Partial<Pick<FaceTimeCallRecord, "status" | "bridgeSessionId" | "error">>): Promise<FaceTimeCallRecord | undefined> {
+export async function updateFaceTimeCall(uid: number, id: string, patch: Partial<Pick<FaceTimeCallRecord, "status" | "bridgeSessionId" | "providerCallId" | "error">>): Promise<FaceTimeCallRecord | undefined> {
   const s = await getSession(uid);
   const current = (s.faceTimeCalls ?? []).find((item) => item.id === id && item.userId === uid);
   if (!current) return undefined;

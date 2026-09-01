@@ -354,6 +354,30 @@ Chusky can start an **outbound** FaceTime call only when `SENDBLUE_FACETIME_ENAB
 
 The bridge implementation lives in [`voice-bridge/`](voice-bridge/README.md). It uses Agora's Python Server SDK to receive and publish 16 kHz PCM, Deepgram for live transcription and synthesis, and the private `/internal/facetime/turn` route to reuse the caller's Chusky memory. Configure `DEEPGRAM_API_KEY` and `CHUSKY_VOICE_TURN_URL=http://127.0.0.1:3003/internal/facetime/turn` in the bridge process, then proxy `voice.selithub.shop` to its loopback port `3004`. Voice turns allow only read-only tools; external actions remain in Telegram where approvals are visible.
 
+#### Outbound Twilio phone calls
+
+Twilio phone calls are a separate approval-gated transport; they do not replace
+Sendblue FaceTime. Verify `TWILIO_CALLER_ID` in Twilio, then configure
+`TWILIO_VOICE_ENABLED=true`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+`TWILIO_WEBHOOK_BASE_URL=https://chusky.selithub.shop`, and
+`TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream`. Chusky
+validates signed TwiML and status callbacks; the bridge uses Twilio's
+bidirectional Media Streams with Deepgram and stores only safe call metadata.
+For inbound calls, purchase a Twilio voice number and configure its incoming
+Voice URL as `https://chusky.selithub.shop/twilio/inbound` (POST). Set
+`TWILIO_INBOUND_ENABLED=true`, `TWILIO_INBOUND_OWNER_USER_ID` to the owner’s
+Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
+E.164 allowlist. Unknown callers are rejected before they can access private
+memory or the agent.
+
+The voice bridge validates Twilio's WebSocket signature and a short-lived
+server-issued stream ticket. It uses streaming Flux TTS in Twilio-compatible
+8 kHz μ-law and supports barge-in: caller VAD/interim speech cancels in-flight
+speech, interrupts TTS, and clears Twilio's buffered playback. Configure the
+same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
+`voice-bridge/.env`; see [`voice-bridge/README.md`](voice-bridge/README.md)
+for latency tuning and Nginx WebSocket settings.
+
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 
 ### Channel support and operating model

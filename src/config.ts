@@ -79,6 +79,19 @@ export const config = {
   sendblueFaceTimeNumber: optional("SENDBLUE_FACETIME_NUMBER", ""),
   faceTimeMediaBridgeUrl: optional("FACETIME_MEDIA_BRIDGE_URL", ""),
   faceTimeMediaBridgeSecret: optional("FACETIME_MEDIA_BRIDGE_SECRET", ""),
+  // Twilio is an independent phone-call transport. It does not replace the
+  // opt-in Sendblue/Agora FaceTime transport above.
+  twilioVoiceEnabled: optional("TWILIO_VOICE_ENABLED", "false") === "true",
+  twilioAccountSid: optional("TWILIO_ACCOUNT_SID", ""),
+  twilioAuthToken: optional("TWILIO_AUTH_TOKEN", ""),
+  twilioCallerId: optional("TWILIO_CALLER_ID", ""),
+  twilioWebhookBaseUrl: optional("TWILIO_WEBHOOK_BASE_URL", ""),
+  twilioMediaStreamUrl: optional("TWILIO_MEDIA_STREAM_URL", ""),
+  // Inbound calls stay fail-closed until an owner and caller allowlist are
+  // explicitly configured. This protects private memory from random callers.
+  twilioInboundEnabled: optional("TWILIO_INBOUND_ENABLED", "false") === "true",
+  twilioInboundOwnerUserId: optional("TWILIO_INBOUND_OWNER_USER_ID", ""),
+  twilioInboundAllowedCallers: optional("TWILIO_INBOUND_ALLOWED_CALLERS", ""),
 
   // ── Daytona computer ───────────────────────────────────────────────
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),

@@ -1,13 +1,17 @@
-"""Chusky's server-side Sendblue FaceTime media bridge.
+"""Chusky's server-side voice media bridge.
 
 This service accepts an already-authorized call handoff from Chusky, joins the
 short-lived Agora room supplied by Sendblue, streams 16 kHz PCM to Deepgram,
 and speaks Chusky's response back into the room. It intentionally stores no
-audio, Agora token, transcript, or caller phone number.
+audio, Agora token, or caller phone number. Chusky may retain bounded text
+turns in the owner's existing private conversation history.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -20,7 +24,7 @@ from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect
 
@@ -41,6 +45,12 @@ class Settings:
     chusky_status_url: str
     max_call_seconds: int
     max_active_calls: int
+    twilio_auth_token: str
+    twilio_media_stream_url: str
+    stt_model: str
+    stt_endpointing_ms: int
+    tts_model: str
+    barge_in_min_chars: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,7 +60,17 @@ class Settings:
         status_url = os.getenv("CHUSKY_VOICE_STATUS_URL", "http://127.0.0.1:3003/internal/facetime/status").strip()
         if not secret or not deepgram or not turn_url.startswith(("http://", "https://")) or not status_url.startswith(("http://", "https://")):
             raise RuntimeError("FACETIME_MEDIA_BRIDGE_SECRET, DEEPGRAM_API_KEY, CHUSKY_VOICE_TURN_URL, and CHUSKY_VOICE_STATUS_URL are required")
-        return cls(secret, deepgram, turn_url, status_url, max(60, min(int(os.getenv("VOICE_BRIDGE_MAX_CALL_SECONDS", "7200")), 14_400)), max(1, min(int(os.getenv("VOICE_BRIDGE_MAX_ACTIVE_CALLS", "4")), 20)))
+        return cls(
+            secret, deepgram, turn_url, status_url,
+            max(60, min(int(os.getenv("VOICE_BRIDGE_MAX_CALL_SECONDS", "7200")), 14_400)),
+            max(1, min(int(os.getenv("VOICE_BRIDGE_MAX_ACTIVE_CALLS", "4")), 20)),
+            os.getenv("TWILIO_AUTH_TOKEN", "").strip(),
+            os.getenv("TWILIO_MEDIA_STREAM_URL", "").strip().rstrip("/"),
+            os.getenv("VOICE_STT_MODEL", "nova-3").strip(),
+            max(100, min(int(os.getenv("VOICE_STT_ENDPOINTING_MS", "300")), 1500)),
+            os.getenv("VOICE_TTS_MODEL", "flux-haley-en").strip(),
+            max(1, min(int(os.getenv("VOICE_BARGE_IN_MIN_CHARS", "2")), 100)),
+        )
 
 
 class AgoraCredentials(BaseModel):
@@ -70,6 +90,38 @@ class StartCall(BaseModel):
 
 class CallerAudioObserver:  # Base class is added dynamically after Agora imports.
     pass
+
+
+def valid_twilio_ticket(call_id: str, user_id: int, ticket: str, secret: str) -> bool:
+    """Verify the short-lived HMAC ticket minted by Chusky's signed TwiML route."""
+    try:
+        expires, supplied = ticket.split(".", 1)
+        expires_at = int(expires)
+    except (TypeError, ValueError):
+        return False
+    if expires_at < int(time.time() * 1000) or expires_at > int(time.time() * 1000) + 6 * 60_000:
+        return False
+    payload = f"{call_id}.{user_id}.{expires_at}".encode()
+    expected = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(supplied, expected)
+
+
+def valid_twilio_websocket(websocket: WebSocket, settings: Settings) -> bool:
+    """Validate Twilio's signed WSS handshake using its official SDK helper.
+
+    Twilio documents a trailing-slash retry for WebSocket validation; we retain
+    the short-lived Chusky ticket as a second independent authorization check.
+    """
+    signature = websocket.headers.get("x-twilio-signature", "")
+    if not signature or not settings.twilio_auth_token or not settings.twilio_media_stream_url:
+        return False
+    try:
+        from twilio.request_validator import RequestValidator
+        validator = RequestValidator(settings.twilio_auth_token)
+        return validator.validate(settings.twilio_media_stream_url, {}, signature) or validator.validate(f"{settings.twilio_media_stream_url}/", {}, signature)
+    except Exception:
+        LOG.exception("Twilio WebSocket signature validation could not run")
+        return False
 
 
 def load_agora_observer(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[bytes]):
@@ -278,9 +330,250 @@ class VoiceCall:
             self.service = None
 
 
+class TwilioVoiceCall:
+    """Twilio bidirectional Media Stream transport.
+
+    Twilio sends and accepts base64 `audio/x-mulaw` at 8 kHz. Deepgram is
+    configured for the same codec, avoiding lossy conversion or audio files.
+    """
+    def __init__(self, call_id: str, user_id: int, stream_sid: str, websocket: WebSocket, settings: Settings, metrics: "BridgeMetrics") -> None:
+        self.call_id, self.user_id, self.stream_sid = call_id, user_id, stream_sid
+        self.websocket, self.settings = websocket, settings
+        self.metrics = metrics
+        self.stop = asyncio.Event()
+        # Twilio typically sends 20 ms frames. Keep at most one second of
+        # audio so a transient STT slowdown drops stale speech instead of
+        # creating a multi-second conversational lag.
+        self.audio: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
+        self.response_task: asyncio.Task[None] | None = None
+        self.response_started_at = 0.0
+        self.tts_socket: Any | None = None
+        self.tts_lock = asyncio.Lock()
+        self.twilio_send_lock = asyncio.Lock()
+        self.interrupted = False
+
+    async def run(self) -> None:
+        try:
+            await self._notify_status("active")
+            await asyncio.wait_for(self._run(), timeout=self.settings.max_call_seconds)
+            await self._notify_status("ended")
+            self.metrics.twilio_completed += 1
+        except asyncio.TimeoutError:
+            await self._notify_status("ended")
+            self.metrics.twilio_completed += 1
+        except WebSocketDisconnect:
+            await self._notify_status("ended")
+            self.metrics.twilio_completed += 1
+        except Exception:
+            LOG.exception("Twilio voice call ended with an error", extra={"call_id": self.call_id})
+            await self._notify_status("failed", "Twilio media stream processing failed")
+            self.metrics.twilio_failed += 1
+        finally:
+            self.stop.set()
+            if self.response_task and not self.response_task.done():
+                self.response_task.cancel()
+                await asyncio.gather(self.response_task, return_exceptions=True)
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
+
+    async def _run(self) -> None:
+        query = f"model={self.settings.stt_model}&language=en&encoding=mulaw&sample_rate=8000&channels=1&punctuate=true&interim_results=true&vad_events=true&endpointing={self.settings.stt_endpointing_ms}"
+        async with connect(f"wss://api.deepgram.com/v1/listen?{query}", additional_headers={"Authorization": f"Token {self.settings.deepgram_api_key}"}, max_size=1_000_000) as socket:
+            inbound = asyncio.create_task(self._receive_twilio(), name=f"twilio-in-{self.call_id}")
+            sender = asyncio.create_task(self._send_audio(socket), name=f"twilio-stt-{self.call_id}")
+            transcripts = asyncio.create_task(self._receive_transcripts(socket), name=f"twilio-out-{self.call_id}")
+            done, pending = await asyncio.wait({inbound, sender, transcripts}, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+
+    async def _receive_twilio(self) -> None:
+        while not self.stop.is_set():
+            event = json.loads(await self.websocket.receive_text())
+            if event.get("event") == "stop":
+                return
+            if event.get("event") != "media":
+                continue
+            payload = str((event.get("media") or {}).get("payload") or "")
+            if not payload:
+                continue
+            try:
+                audio = base64.b64decode(payload, validate=True)
+            except Exception:
+                continue
+            if audio and not self.audio.full():
+                self.audio.put_nowait(audio)
+            elif audio:
+                self.metrics.dropped_inbound_frames += 1
+
+    async def _send_audio(self, socket: Any) -> None:
+        while not self.stop.is_set():
+            await socket.send(await self.audio.get())
+
+    async def _receive_transcripts(self, socket: Any) -> None:
+        parts: list[str] = []
+        async for raw in socket:
+            if not isinstance(raw, str):
+                continue
+            event = json.loads(raw)
+            if event.get("type") == "SpeechStarted":
+                await self._barge_in()
+                continue
+            if event.get("type") != "Results":
+                continue
+            text = str((((event.get("channel") or {}).get("alternatives") or [{}])[0]).get("transcript") or "").strip()
+            # VAD events are the fast path. An interim transcript covers
+            # telephony providers that do not emit the optional VAD event.
+            if text and not event.get("is_final") and len(text) >= self.settings.barge_in_min_chars:
+                await self._barge_in()
+            if text and event.get("is_final"):
+                parts.append(text)
+            if event.get("speech_final") and parts:
+                transcript = " ".join(parts).strip()
+                parts.clear()
+                if transcript:
+                    await self._barge_in()
+                    self.interrupted = False
+                    self.response_started_at = time.monotonic()
+                    self.response_task = asyncio.create_task(self._respond(transcript), name=f"twilio-response-{self.call_id}")
+                    self.response_task.add_done_callback(self._observe_response_task)
+
+    def _observe_response_task(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # Never log transcript/audio; the call may continue after a single
+            # failed turn, and aggregate health exposes the failure count.
+            LOG.warning("Twilio agent turn failed", extra={"call_id": self.call_id})
+
+    async def _barge_in(self) -> None:
+        """Stop active agent speech immediately when the caller starts talking."""
+        if not self.response_task or self.response_task.done() or time.monotonic() - self.response_started_at < 0.25:
+            return
+        self.interrupted = True
+        self.metrics.barge_ins += 1
+        if self.tts_socket is not None:
+            try:
+                async with self.tts_lock:
+                    await self.tts_socket.send(json.dumps({"type": "Interrupt"}))
+            except Exception:
+                # The task cancellation below still closes a stalled TTS socket.
+                pass
+        try:
+            await self._send_twilio({"event": "clear", "streamSid": self.stream_sid})
+        except Exception:
+            pass
+        task = self.response_task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if self.response_task is task:
+            self.response_task = None
+
+    async def _send_twilio(self, event: dict[str, Any]) -> None:
+        # Media, clear, and mark messages share one WebSocket. Serializing
+        # sends preserves Twilio's expected order during a barge-in race.
+        async with self.twilio_send_lock:
+            await self.websocket.send_text(json.dumps(event))
+
+    async def _respond(self, transcript: str) -> None:
+        started = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=10.0)) as client:
+                response = await client.post(self.settings.chusky_turn_url, headers={"Authorization": f"Bearer {self.settings.bridge_secret}"}, json={"callId": self.call_id, "userId": self.user_id, "transcript": transcript})
+                response.raise_for_status()
+                text = str(response.json().get("text") or "").strip()
+            self.metrics.agent_turn_ms_total += int((time.monotonic() - started) * 1000)
+            self.metrics.agent_turns += 1
+            if text and not self.interrupted:
+                await self._speak(text[:5000])
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.metrics.agent_failures += 1
+            raise
+
+    async def _speak(self, text: str) -> None:
+        if not self.settings.tts_model.startswith("flux-"):
+            raise RuntimeError("VOICE_TTS_MODEL must be a Flux streaming model (for example flux-haley-en)")
+        url = f"wss://api.deepgram.com/v2/speak?model={self.settings.tts_model}&encoding=mulaw&sample_rate=8000"
+        first_audio_at: float | None = None
+        async with connect(url, additional_headers={"Authorization": f"Token {self.settings.deepgram_api_key}"}, max_size=1_000_000) as socket:
+            self.tts_socket = socket
+            try:
+                async with self.tts_lock:
+                    await socket.send(json.dumps({"type": "Speak", "text": text}))
+                    await socket.send(json.dumps({"type": "Flush"}))
+                async for raw in socket:
+                    if isinstance(raw, bytes):
+                        if self.interrupted or self.stop.is_set():
+                            return
+                        if first_audio_at is None:
+                            first_audio_at = time.monotonic()
+                            self.metrics.tts_first_audio_ms_total += int((first_audio_at - self.response_started_at) * 1000)
+                            self.metrics.tts_first_audio_count += 1
+                        # Twilio permits any payload size; bounded 200 ms chunks
+                        # reduce jitter and make clear/mark interruption prompt.
+                        for offset in range(0, len(raw), 1600):
+                            payload = base64.b64encode(raw[offset:offset + 1600]).decode()
+                            await self._send_twilio({"event": "media", "streamSid": self.stream_sid, "media": {"payload": payload}})
+                    elif isinstance(raw, str):
+                        event = json.loads(raw)
+                        if event.get("type") == "SpeechMetadata":
+                            if not self.interrupted:
+                                await self._send_twilio({"event": "mark", "streamSid": self.stream_sid, "mark": {"name": f"chusky-{uuid.uuid4()}"}})
+                            return
+            finally:
+                self.tts_socket = None
+
+    async def _notify_status(self, status: str, error: str | None = None) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                response = await client.post(self.settings.chusky_status_url, headers={"Authorization": f"Bearer {self.settings.bridge_secret}"}, json={"callId": self.call_id, "userId": self.user_id, "status": status, **({"error": error} if error else {})})
+                response.raise_for_status()
+        except Exception:
+            LOG.warning("Could not report Twilio call status", extra={"call_id": self.call_id, "status": status})
+
+
+@dataclass
+class BridgeMetrics:
+    twilio_started: int = 0
+    twilio_completed: int = 0
+    twilio_failed: int = 0
+    barge_ins: int = 0
+    dropped_inbound_frames: int = 0
+    agent_turns: int = 0
+    agent_turn_ms_total: int = 0
+    agent_failures: int = 0
+    tts_first_audio_count: int = 0
+    tts_first_audio_ms_total: int = 0
+
+    def snapshot(self, active_twilio: int, active_facetime: int) -> dict[str, Any]:
+        return {
+            "twilio": {
+                "active": active_twilio,
+                "started": self.twilio_started,
+                "completed": self.twilio_completed,
+                "failed": self.twilio_failed,
+                "bargeIns": self.barge_ins,
+                "droppedInboundFrames": self.dropped_inbound_frames,
+                "agentFailures": self.agent_failures,
+                "averageAgentTurnMs": round(self.agent_turn_ms_total / self.agent_turns) if self.agent_turns else None,
+                "averageTtsFirstAudioMs": round(self.tts_first_audio_ms_total / self.tts_first_audio_count) if self.tts_first_audio_count else None,
+            },
+            "facetime": {"active": active_facetime},
+        }
+
+
 class CallManager:
     def __init__(self) -> None:
         self.calls: dict[str, VoiceCall] = {}
+        self.twilio_calls: set[str] = set()
         self.lock = asyncio.Lock()
 
     async def start(self, request: StartCall, settings: Settings) -> VoiceCall:
@@ -288,7 +581,7 @@ class CallManager:
             existing = self.calls.get(request.callId)
             if existing:
                 return existing
-            if len(self.calls) >= settings.max_active_calls:
+            if len(self.calls) + len(self.twilio_calls) >= settings.max_active_calls:
                 raise RuntimeError("voice bridge call capacity reached")
             call = VoiceCall(request, settings)
             self.calls[request.callId] = call
@@ -296,9 +589,21 @@ class CallManager:
             task.add_done_callback(lambda _task: self.calls.pop(request.callId, None))
             return call
 
+    async def reserve_twilio(self, call_id: str, settings: Settings) -> bool:
+        async with self.lock:
+            if call_id in self.twilio_calls or len(self.calls) + len(self.twilio_calls) >= settings.max_active_calls:
+                return False
+            self.twilio_calls.add(call_id)
+            return True
 
-app = FastAPI(title="Chusky FaceTime Media Bridge", docs_url=None, redoc_url=None)
+    async def release_twilio(self, call_id: str) -> None:
+        async with self.lock:
+            self.twilio_calls.discard(call_id)
+
+
+app = FastAPI(title="Chusky Voice Media Bridge", docs_url=None, redoc_url=None)
 calls = CallManager()
+metrics = BridgeMetrics()
 
 
 def authenticate(authorization: str | None, settings: Settings) -> None:
@@ -308,8 +613,13 @@ def authenticate(authorization: str | None, settings: Settings) -> None:
 
 
 @app.get("/health")
-async def health() -> dict[str, bool]:
-    return {"ok": True}
+async def health() -> dict[str, Any]:
+    try:
+        settings = Settings.from_env()
+        twilio_ready = bool(settings.twilio_auth_token and settings.twilio_media_stream_url.startswith("wss://"))
+        return {"ok": True, "checks": {"twilioWebSocket": "configured" if twilio_ready else "misconfigured", "fluxTts": "configured" if settings.tts_model.startswith("flux-") else "misconfigured"}, "metrics": metrics.snapshot(len(calls.twilio_calls), len(calls.calls))}
+    except RuntimeError:
+        return {"ok": False, "checks": {"configuration": "misconfigured"}, "metrics": metrics.snapshot(len(calls.twilio_calls), len(calls.calls))}
 
 
 @app.post("/calls", status_code=202)
@@ -325,6 +635,65 @@ async def start_call(request: StartCall, authorization: str | None = Header(defa
     except RuntimeError as error:
         raise HTTPException(status_code=429, detail="voice bridge call capacity reached") from error
     return {"status": "accepted", "sessionId": call.session_id}
+
+
+@app.websocket("/twilio/stream")
+async def twilio_stream(websocket: WebSocket) -> None:
+    """Receive a signed Twilio bidirectional Media Stream.
+
+    The WebSocket itself carries no browser/client authorization. Chusky's
+    TwiML route embeds an expiring HMAC ticket as a Stream parameter, which is
+    checked only after Twilio's initial `start` event arrives.
+    """
+    try:
+        settings = Settings.from_env()
+    except RuntimeError:
+        await websocket.close(code=1011)
+        return
+    if not valid_twilio_websocket(websocket, settings):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    try:
+        start_event: dict[str, Any] | None = None
+        for _ in range(3):
+            event = json.loads(await asyncio.wait_for(websocket.receive_text(), timeout=5))
+            if event.get("event") == "start":
+                start_event = event
+                break
+        if not start_event:
+            await websocket.close(code=1008)
+            return
+        start = start_event.get("start") or {}
+        params = start.get("customParameters") or {}
+        call_id = str(params.get("callId") or "").strip()
+        try:
+            user_id = int(str(params.get("userId") or ""))
+        except ValueError:
+            user_id = 0
+        ticket = str(params.get("ticket") or "")
+        stream_sid = str(start.get("streamSid") or start_event.get("streamSid") or "").strip()
+        media_format = start.get("mediaFormat") or {}
+        if (not call_id.startswith("twc_") or user_id <= 0 or not stream_sid
+                or media_format.get("encoding") != "audio/x-mulaw"
+                or media_format.get("sampleRate") != 8000
+                or media_format.get("channels") != 1
+                or not valid_twilio_ticket(call_id, user_id, ticket, settings.bridge_secret)):
+            await websocket.close(code=1008)
+            return
+        if not await calls.reserve_twilio(call_id, settings):
+            await websocket.close(code=1013)
+            return
+        metrics.twilio_started += 1
+        try:
+            await TwilioVoiceCall(call_id, user_id, stream_sid, websocket, settings, metrics).run()
+        finally:
+            await calls.release_twilio(call_id)
+    except (WebSocketDisconnect, asyncio.TimeoutError, json.JSONDecodeError):
+        try:
+            await websocket.close(code=1008)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

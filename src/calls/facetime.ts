@@ -45,7 +45,7 @@ export async function startFaceTimeCallForUser(userId: number, input: FaceTimeCa
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = safeText(input.purpose, "purpose");
   const now = Date.now();
-  const call: FaceTimeCallRecord = { id: `ftc_${randomUUID()}`, userId, phoneNumber, purpose, status: "starting", createdAt: now, updatedAt: now };
+  const call: FaceTimeCallRecord = { id: `ftc_${randomUUID()}`, userId, provider: "facetime", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: now, updatedAt: now };
   await addFaceTimeCall(userId, call);
   try {
     const start = options.startCall ?? ((to, from) => new SendblueAdapter(options.apiKey, options.apiSecret, from).startFaceTimeCall(to, from));

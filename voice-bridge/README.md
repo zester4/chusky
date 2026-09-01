@@ -7,7 +7,14 @@ Chusky's authenticated internal agent endpoint, synthesizes the response with
 Deepgram, and publishes PCM audio back to the call.
 
 It is deliberately a separate process from Chusky. It never persists audio,
-Agora credentials, phone numbers, or transcripts.
+Agora credentials, or phone numbers. Chusky retains bounded text turns in the
+owner's existing private conversation history so a call continues the same
+context as their chat.
+
+It also accepts a separate **Twilio bidirectional Media Stream** at
+`/twilio/stream`. Twilio sends and receives base64 `audio/x-mulaw` at 8 kHz;
+the bridge passes that codec directly to/from Deepgram and uses the same
+private Chusky voice-turn route for memory and safe read-only agent behavior.
 
 ## Required environment
 
@@ -37,6 +44,71 @@ curl -i http://127.0.0.1:3004/health
 
 The Nginx virtual host for `voice.selithub.shop` must proxy `/` to
 `http://127.0.0.1:3004`; it should not expose port 3004 publicly.
+
+For Twilio Media Streams, preserve WebSocket upgrades:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3004;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+    proxy_buffering off;
+}
+```
+
+## Twilio telephone calls
+
+Twilio credentials belong in Chusky's root `.env`. The bridge needs only the
+Twilio Auth Token and public WSS URL for WebSocket signature validation:
+
+```ini
+TWILIO_VOICE_ENABLED=true
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_CALLER_ID=+<Twilio-verified caller ID>
+TWILIO_WEBHOOK_BASE_URL=https://chusky.selithub.shop
+TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream
+TWILIO_INBOUND_ENABLED=true
+TWILIO_INBOUND_OWNER_USER_ID=<your Telegram numeric user ID>
+TWILIO_INBOUND_ALLOWED_CALLERS=+233550472834
+```
+
+Chusky validates Twilio's signed TwiML and status callbacks. Its TwiML sends a
+short-lived HMAC ticket as a Stream parameter; the bridge rejects connections
+without it. The bridge also validates Twilio's `x-twilio-signature` WSS
+handshake with Twilio's official Python helper, including Twilio's documented
+trailing-slash compatibility check. Neither credentials nor audio are sent to
+a browser or persisted in Chusky.
+
+Add these to `voice-bridge/.env`:
+
+```ini
+TWILIO_AUTH_TOKEN=<same root Twilio auth token>
+TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream
+VOICE_STT_MODEL=nova-3
+VOICE_STT_ENDPOINTING_MS=300
+VOICE_TTS_MODEL=flux-haley-en
+VOICE_BARGE_IN_MIN_CHARS=2
+```
+
+The bridge uses Deepgram's streaming Flux TTS WebSocket in raw 8 kHz μ-law,
+which Twilio plays without transcoding. When caller VAD/interim speech arrives
+while Chusky is speaking, the bridge cancels the active response, sends
+Deepgram `Interrupt`, then Twilio `clear`: this is barge-in. `mark` events are
+emitted after complete responses for playback tracking. `/health` exposes only
+aggregate latency/error/barging counters.
+
+In the Twilio Console, set the purchased Twilio number's **A call comes in**
+webhook to `https://chusky.selithub.shop/twilio/inbound`, method `POST`. The
+route is deliberately private-first: it rejects any caller not listed in
+`TWILIO_INBOUND_ALLOWED_CALLERS`. It maps approved calls to the configured
+Telegram owner, so only that owner's Chusky memory is available during the
+call. Add another caller only when you deliberately want that person to enter
+the same private voice context.
 
 ## Safety boundary
 
