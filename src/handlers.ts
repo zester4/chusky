@@ -23,6 +23,8 @@ import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
+import { nativeTool } from "./nativeTools.js";
+import { validateNativeToolArguments } from "./agentTools.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
@@ -675,7 +677,7 @@ export function registerHandlers(bot: Bot): void {
     }
   });
 
-  bot.callbackQuery("mpg:noop", async (ctx) => {
+  bot.callbackQuery(/^mpg:noop$/, async (ctx) => {
     await ctx.answerCallbackQuery();
   });
 
@@ -717,6 +719,18 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     try {
+      // A FaceTime call is a real external side effect. Re-running the model
+      // after approval can produce semantically similar but JSON-different
+      // arguments, causing an unnecessary second approval. Execute precisely
+      // the reviewed native request instead.
+      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL") {
+        validateNativeToolArguments(approval.toolSlug, approval.args);
+        await nativeTool(ctx.from.id, approval.toolSlug, approval.args);
+        await setApprovalStatus(ctx.from.id, approval.id, "consumed");
+        await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: "FaceTime call started. I’m joining the call now." }]);
+        await ctx.reply("📞 FaceTime call started. I’m joining the call now.");
+        return;
+      }
       const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
