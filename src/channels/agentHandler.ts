@@ -44,7 +44,7 @@ async function privateOrSharedHistory(conversation: ChuskyConversation) {
 }
 
 async function saveConversation(conversation: ChuskyConversation, message: InboundMessage, text: string, response: string): Promise<void> {
-  const messages = [{ role: "user" as const, content: text }, { role: "assistant" as const, content: response }];
+  const messages = [{ role: "user" as const, content: text, createdAt: message.receivedAt }, { role: "assistant" as const, content: response }];
   if (conversation.scope === "private") await appendMessages(conversation.userId, messages);
   else await appendChannelConversationMessages({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: conversation.scope, messages });
 }
@@ -144,7 +144,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     const { history, model } = await privateOrSharedHistory(conversation);
     try {
       const prepared = await buildAgentInput(message);
-      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY"] : undefined });
+      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, result.generatedImages, result.generatedFiles) : [];

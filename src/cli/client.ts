@@ -107,6 +107,7 @@ export class ChuskyClient {
   channelLink(provider: string) { return this.request("/cli/channels/link", { method: "POST", body: JSON.stringify({ provider }) }); }
   channelNotify(provider: string, enabled: boolean) { return this.request("/cli/channels/notify", { method: "POST", body: JSON.stringify({ provider, enabled }) }); }
   voice(enabled?: boolean) { return this.request("/cli/voice", { method: "POST", body: JSON.stringify({ ...(enabled === undefined ? {} : { enabled }) }) }); }
+  call(phoneNumber: string, purpose: string) { return this.request("/cli/call", { method: "POST", body: JSON.stringify({ phoneNumber, purpose }) }); }
   usage() { return this.request("/cli/usage"); }
   dashboard() { return this.request("/cli/dashboard"); }
   clear(scope: "history" | "session") { return this.request("/cli/clear", { method: "POST", body: JSON.stringify({ scope }) }); }

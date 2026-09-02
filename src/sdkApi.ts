@@ -7,10 +7,13 @@ import { ApprovalRequiredError, createTrigger, deleteTrigger, fetchModels, getCo
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
-import { acquireUserLock, canSpend, cancelTask, checkRateLimit, claimApproval, createWebTelegramLinkCode, getApproval, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listChannelIdentities, listCliDevices, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, retryTask, saveSession, setApprovalStatus, setModel, setTaskWorkflowRunId, setVoiceReplies, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, appendMessages, canSpend, cancelTask, checkRateLimit, claimApproval, createWebTelegramLinkCode, getApproval, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listChannelIdentities, listCliDevices, listFaceTimeCalls, listJobs, listOutbox, listReminders, listTasks, releaseUserLock, retryTask, saveSession, setApprovalStatus, setModel, setTaskWorkflowRunId, setVoiceReplies, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import type { ContentPart } from "./types.js";
+import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { nativeTool } from "./nativeTools.js";
+import { validateNativeToolArguments } from "./agentTools.js";
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
@@ -106,6 +109,23 @@ function accountProjectView(project: SdkProjectRecord) {
 function webProjectOwner(c: any): { id: string; verified: boolean } | undefined {
   const id = c.get("webAuthUserId") as string | undefined;
   return id ? { id, verified: c.get("webAuthEmailVerified") === true } : undefined;
+}
+
+async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefined> {
+  const web = webProjectOwner(c);
+  if (!web?.verified) return undefined;
+  const userId = await getTelegramUserIdForWebAuth(web.id);
+  return userId ? { userId } : undefined;
+}
+
+function phoneCallingAvailable(): boolean {
+  return Boolean(config.twilioVoiceEnabled && config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl);
+}
+
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; error?: string; createdAt: number; updatedAt: number }) {
+  const digits = call.phoneNumber.replace(/\D/g, "");
+  const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
+  return { id: call.id, provider: call.provider ?? "facetime", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
@@ -300,6 +320,28 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ code: link.code, expiresAt: new Date(link.expiresAt).toISOString() }, 201);
   });
 
+  app.get("/v1/account/calls", async (c) => {
+    const owner = await linkedWebCallOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
+    return c.json({ available: phoneCallingAvailable(), data: (await listFaceTimeCalls(owner.userId)).map(callView) });
+  });
+
+  app.post("/v1/account/calls", async (c) => {
+    const owner = await linkedWebCallOwner(c);
+    if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
+    if (!phoneCallingAvailable()) return apiError(c, 503, "phone_calling_unavailable", "Phone calling is not configured on this Chusky deployment.");
+    if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown };
+    try {
+      const phoneNumber = String(body.phoneNumber ?? "").trim();
+      const purpose = String(body.purpose ?? "").trim();
+      const approval = await requestPhoneCallApproval(owner.userId, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`);
+      return c.json({ id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() }, 201);
+    } catch (error) {
+      return apiError(c, 400, "invalid_phone_call", error instanceof Error ? error.message : "Invalid call request.");
+    }
+  });
+
   app.get("/v1/account/projects", async (c) => {
     const owner = webProjectOwner(c);
     if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
@@ -454,6 +496,20 @@ export function registerSdkApi(app: Hono): void {
     const token = randomUUID();
     if (!(await acquireUserLock(owner.userId, token))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     try {
+      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL" || approval.toolSlug === "CHUCK_START_PHONE_CALL") {
+        try {
+          validateNativeToolArguments(approval.toolSlug, approval.args);
+          await nativeTool(owner.userId, approval.toolSlug, approval.args);
+          await setApprovalStatus(owner.userId, approval.id, "consumed");
+          const label = approval.toolSlug === "CHUCK_START_PHONE_CALL" ? "Phone call" : "FaceTime call";
+          const text = `${label} started. I’m joining the call now.`;
+          await appendMessages(owner.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: text }]);
+          return c.json({ id: approval.id, status: "consumed", text });
+        } catch (error) {
+          await setApprovalStatus(owner.userId, approval.id, "consumed");
+          return apiError(c, 502, "call_start_failed", error instanceof Error ? error.message : "Phone call could not be started.");
+        }
+      }
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;

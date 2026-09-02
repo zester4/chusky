@@ -28,6 +28,9 @@ import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
+import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { nativeTool } from "./nativeTools.js";
+import { validateNativeToolArguments } from "./agentTools.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -598,6 +601,21 @@ async function main(): Promise<void> {
       return c.json({ ok: true, enabled: body.enabled ?? current });
     });
 
+    app.post("/cli/call", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown };
+      try {
+        const phoneNumber = String(body.phoneNumber ?? "").trim();
+        const purpose = String(body.purpose ?? "").trim();
+        const approval = await withCliLock(device.userId, c.req.raw.signal, () => requestPhoneCallApproval(device.userId, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`));
+        return c.json({ ok: true, approval: { id: approval.id, toolSlug: approval.toolSlug, args: approval.args }, text: "Approval required before Chusky places this phone call." });
+      } catch (error) {
+        return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 400);
+      }
+    });
+
     app.get("/cli/usage", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -697,6 +715,15 @@ async function main(): Promise<void> {
       if (!(await claimApproval(device.userId, id))) return c.json({ ok: false, error: "approval could not be claimed" }, 409);
       try {
         return c.json(await withCliLock(device.userId, c.req.raw.signal, async () => {
+          if (approval.toolSlug === "CHUCK_START_FACETIME_CALL" || approval.toolSlug === "CHUCK_START_PHONE_CALL") {
+            validateNativeToolArguments(approval.toolSlug, approval.args);
+            await nativeTool(device.userId, approval.toolSlug, approval.args);
+            await setApprovalStatus(device.userId, approval.id, "consumed");
+            const label = approval.toolSlug === "CHUCK_START_PHONE_CALL" ? "Phone call" : "FaceTime call";
+            const text = `${label} started. I’m joining the call now.`;
+            await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: text }]);
+            return { ok: true, text, toolsUsed: [approval.toolSlug], cost: 0, images: [], files: [] };
+          }
           const result = await runAgent(device.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, id);
           await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);

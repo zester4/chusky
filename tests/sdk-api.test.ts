@@ -3,7 +3,7 @@ import test, { beforeEach } from "node:test";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
 import { registerSdkApi, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
-import { getSession, initStore } from "../src/store.js";
+import { createWebTelegramLinkCode, getApproval, getSession, initStore, redeemWebTelegramLinkCode } from "../src/store.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -176,4 +176,24 @@ test("verified dashboard users can only manage their own bounded project keys", 
   const overLimit = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Too many" }) }));
   assert.equal(overLimit.status, 409);
   assert.equal((await overLimit.json() as { error: { code: string } }).error.code, "project_limit_reached");
+});
+
+test("linked verified dashboard users can request and list phone calls without exposing destinations", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  Object.assign(config as unknown as Record<string, unknown>, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream" });
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const link = await createWebTelegramLinkCode("alice");
+  assert.equal(await redeemWebTelegramLinkCode(link.code, 810099), "linked");
+  const api = app();
+  const headers = { "X-Test-Web-User": "alice", "Content-Type": "application/json" };
+  const create = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment" }) }));
+  assert.equal(create.status, 201);
+  const approval = await create.json() as { id: string; args: { phoneNumber: string } };
+  assert.equal(approval.args.phoneNumber, "+15550001");
+  assert.equal((await getApproval(810099, approval.id))?.toolSlug, "CHUCK_START_PHONE_CALL");
+  const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
+  assert.equal(listed.status, 200);
+  const body = await listed.json() as { available: boolean; data: unknown[] };
+  assert.equal(body.available, true);
+  assert.deepEqual(body.data, []);
 });

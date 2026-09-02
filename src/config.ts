@@ -38,7 +38,7 @@ export const config = {
 
   // ── OpenRouter (for LLM inference) ────────────────────────────────
   openRouterApiKey: required("OPENROUTER_API_KEY"),
-  defaultModel: optional("DEFAULT_MODEL", "~deepseek/deepseek-v4-flash-latest"),
+  defaultModel: optional("DEFAULT_MODEL", "minimax/minimax-m3:free"),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
@@ -211,6 +211,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
     .split(",").map((model) => model.trim()).filter(Boolean),
   // This is a routing preference, not a hard client timeout. Set 0 to omit it.
   openRouterPreferredMaxLatencySeconds: nonNegativeInt("OPENROUTER_PREFERRED_MAX_LATENCY_SECONDS", 45),
+  // Used for trusted local-time wording in the model context. UTC remains the
+  // safe fallback when no valid IANA timezone is configured.
+  timezone: optional("CHUSKY_TIMEZONE", process.env.TZ || "UTC"),
 
   // ── Redis ──────────────────────────────────────────────────────────
   redisUrl: optional("REDIS_URL", ""),

@@ -12,6 +12,15 @@
 
 CLI requests follow the same lifecycle through `/cli/chat` or `/cli/chat/stream`: the paired device resolves to the Telegram user ID, the server loads the same session, acquires the same distributed lock, calls `runAgent()`, persists the completed turn, and returns Markdown or an approval-required event. Provider credentials never leave the server.
 
+Sendblue iMessage groups use a separate authorization and conversation scope. The
+owner first links their private Sendblue identity, creates a short-lived code with
+`/channel link sendblue-group` in Telegram, and sends `/link-group <code>` inside
+the group from that linked number. Authorization defaults to all participants;
+`/group-access owner` restricts use to the owner, `/group-access all` restores
+participant access, and `/unlink-group` removes the authorization. Group history is
+stored separately from the owner's private account history, and shared prompts
+must not read or write account-only memory.
+
 ## Module contracts
 
 ### `agent.ts`

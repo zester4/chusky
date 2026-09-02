@@ -75,7 +75,7 @@ npm run cli
 
 The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
 
-CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/voice on|off|status`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
+CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. `/call` creates a one-time approval and cannot place the call until that approval is explicitly granted. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
 
 Email, publishing, deletion, payment, and direct externally visible actions require the approval picker before execution. Chusky's private Daytona computer and sandbox are agent-controlled and do not prompt for approval. `COMPOSIO_MULTI_EXECUTE_TOOL` itself is treated as an orchestration wrapper and does not prompt. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
 `/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
@@ -346,6 +346,30 @@ QSTASH_TOKEN=<Upstash QStash token>
 
 Configure the Sendblue `receive` webhook as `https://your-domain.example/sendblue/webhook`. From the owning Telegram account, run `/channel link sendblue`, then send the generated six-digit code from iMessage using `/link <code>`. Confirm with `/channel list` and send a normal message.
 
+#### Link an iMessage group
+
+First link the owner's private Sendblue identity. Then create a group authorization code from Telegram:
+
+```text
+/channel link sendblue-group
+```
+
+Send the generated six-digit code inside the iMessage group from that same linked Sendblue number:
+
+```text
+/link-group <code>
+```
+
+The group receives a confirmation and uses its own shared conversation history. By default, everyone in the group can use Chusky; private Telegram, web, direct-iMessage history, and account-only memory remain unavailable to the group. The linked owner can manage access from inside the group:
+
+```text
+/group-access owner   # only the linked owner can use Chusky
+/group-access all     # allow all group participants (default)
+/unlink-group         # remove Chusky from this group
+```
+
+Only the linked owner can activate, change access for, or unlink the group. Group linking requires the Sendblue webhook, Redis, QStash, and HTTPS webhook-mode deployment described above.
+
 The adapter verifies timestamped HMAC signatures when present and supports the legacy signing-secret header for compatibility. It claims provider event IDs before workflow enqueue, stores only bounded event data, hydrates permitted media, and sends replies through the durable outbox.
 
 #### Outbound FaceTime voice calls
@@ -424,7 +448,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `WEBHOOK_URL` | prod | — | Public URL (blank = polling) |
 | `DASHBOARD_URL` | dashboard | — | Public Next.js dashboard URL; `/dashboard` opens its `/app` route |
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
-| `DEFAULT_MODEL` | — | `~deepseek/deepseek-v4-flash-latest` | Any OpenRouter model ID |
+| `DEFAULT_MODEL` | — | `minimax/minimax-m3:free` | Any OpenRouter model ID |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
 | `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |

@@ -4,7 +4,7 @@ import { StringDecoder } from "node:string_decoder";
 
 const COMMANDS = [
   "/help", "/status", "/history", "/memory", "/scratchpad", "/reminders", "/jobs", "/tasks", "/task",
-  "/apps", "/connect", "/tools", "/triggers", "/trigger", "/channel", "/voice", "/usage", "/export", "/dashboard",
+  "/apps", "/connect", "/tools", "/triggers", "/trigger", "/channel", "/voice", "/call", "/usage", "/export", "/dashboard",
   "/attach", "/devices", "/revoke", "/model", "/approve", "/deny", "/clear history", "/clear session", "/exit",
 ];
 

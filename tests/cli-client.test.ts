@@ -32,7 +32,7 @@ test("CLI client reports HTTP failures and validates missing server configuratio
   } finally { globalThis.fetch = original; }
 });
 
-test("CLI client serializes chat approvals and clear/model requests", async () => {
+test("CLI client serializes chat approvals, direct calls, and clear/model requests", async () => {
   const original = globalThis.fetch;
   const calls: { path: string; body: any }[] = [];
   globalThis.fetch = (async (input, init) => {
@@ -44,11 +44,13 @@ test("CLI client serializes chat approvals and clear/model requests", async () =
     const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
     await client.chat("run", "approval-1");
     await client.approve("approval-1", "approve");
+    await client.call("+15550001", "Confirm appointment");
     await client.model("test/model");
     await client.clear("history");
-    assert.deepEqual(calls.map((call) => call.path), ["/cli/chat", "/cli/approve", "/cli/model", "/cli/clear"]);
+    assert.deepEqual(calls.map((call) => call.path), ["/cli/chat", "/cli/approve", "/cli/call", "/cli/model", "/cli/clear"]);
     assert.deepEqual(calls[0].body, { message: "run", approvalId: "approval-1" });
-    assert.deepEqual(calls[3].body, { scope: "history" });
+    assert.deepEqual(calls[2].body, { phoneNumber: "+15550001", purpose: "Confirm appointment" });
+    assert.deepEqual(calls[4].body, { scope: "history" });
   } finally { globalThis.fetch = original; }
 });
 

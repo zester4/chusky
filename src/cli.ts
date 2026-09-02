@@ -116,7 +116,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /voice [on|off|status] /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -181,6 +181,14 @@ async function chat(): Promise<void> {
       if (line === "/voice" || line.startsWith("/voice ")) {
         const action = line.slice(6).trim().toLowerCase(); const result = await client.voice(action === "on" || action === "enable" ? true : action === "off" || action === "disable" ? false : undefined);
         console.log(result.ok ? formatSuccess(result.enabled ? "Voice replies are on." : "Voice replies are off.", color) : formatError(result.error || "Could not update voice replies.", color)); continue;
+      }
+      if (line === "/call" || line.startsWith("/call ")) {
+        const raw = line.slice(5).trim(); const split = raw.search(/\s/);
+        const phoneNumber = split < 0 ? raw : raw.slice(0, split); const purpose = split < 0 ? "" : raw.slice(split).trim();
+        if (!phoneNumber || !purpose) { console.log(formatError("Usage: /call <E.164 phone number> <purpose>", color)); continue; }
+        const result = await client.call(phoneNumber, purpose);
+        console.log(result.ok && result.approval ? formatWarning(`Approval required: ${result.approval.toolSlug} — /approve ${result.approval.id}`, color) : formatError(result.error || "Could not request phone call.", color));
+        continue;
       }
       if (line === "/usage") { const result = await client.usage(); console.log(result.ok ? `${formatStatus("Usage", `${result.totalMessages} messages  •  $${Number(result.totalCost || 0).toFixed(5)}`, color)}\n${formatStatus("Context", `${result.historyTurns}/${result.maxHistory} turns`, color)}\n${formatStatus("Voice", result.voiceReplies ? "on" : "off", color)}` : formatError(result.error || "Could not load usage.", color)); continue; }
       if (line === "/dashboard") { const result = await client.dashboard(); console.log(result.ok ? `${formatSuccess("Dashboard:", color)} ${result.url}` : formatError(result.error || "Dashboard is not configured.", color)); continue; }

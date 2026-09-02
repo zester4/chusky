@@ -61,7 +61,7 @@ Chusky's own implementation and must not be described as the `chat` package.
 | WhatsApp | Implemented | Signed Cloud API webhook, text/media normalization, media hydration, debounce, receipts, and opt-in proactive notifications. |
 | Sendblue | Implemented | Signed iMessage webhook, durable workflow dispatch, direct/group delivery, media hydration, typing indicators, Markdown-to-plain-text formatting, and durable receipts. |
 | SMS | Boundary only | A provider-neutral adapter and normalizer exist; no live sender/webhook is registered. |
-| Voice | Boundary only | Transcript and speech delivery contracts exist; no telephony/STT/TTS provider is registered. |
+| Voice | Implemented | Twilio telephone calls use a private Deepgram voice bridge; Sendblue FaceTime remains an optional separate outbound transport. |
 
 The normalized contracts are in `src/channels/contracts.ts`. Adapters verify raw
 requests, normalize provider events, render outbound messages, and expose capability
@@ -96,6 +96,14 @@ Channel onboarding and commands:
 4. Verify `/channel list`, then test a private message and an approval interaction.
 5. Use `/channel notify whatsapp|sendblue on|off` to control proactive channel delivery.
 
+For an iMessage group, first link the owner's private Sendblue identity. Then run
+`/channel link sendblue-group` in Telegram and send `/link-group <code>` inside the
+group from that same linked Sendblue number. Group authorization defaults to all
+participants and creates a separate shared conversation history; it never exposes
+private Telegram, web, direct-iMessage history, or account-only memory. The owner
+can use `/group-access owner`, `/group-access all`, or `/unlink-group` inside the
+group. Only the linked owner may activate, change access, or unlink the group.
+
 Slack routes are `/slack/events`, `/slack/interactions`, `/slack/install`, and
 `/slack/oauth/callback`. WhatsApp uses `GET` and `POST /whatsapp/webhook`. Polling
 mode is Telegram-only; external webhooks require `WEBHOOK_URL`, HTTPS, and Redis.
@@ -114,6 +122,79 @@ Sendblue-specific rules:
 - Sendblue `content` is plain text. Apply `src/channels/sendblueFormatting.ts` at the adapter boundary to remove Markdown emphasis markers, convert bullets and headings, and preserve safe URLs. Do not change shared Telegram, Slack, or CLI Markdown rendering to accommodate Sendblue.
 - Generated Sendblue media must be persisted through the existing R2 layer and delivered only through short-lived HTTPS URLs; never put binary data in Redis or provider JSON. If R2 is unavailable, keep the text response and report the media-delivery limitation.
 - The Sendblue dashboard's typing-indicator webhook is for receiving user-typing events and is not required for outbound typing. Add that route only when the product needs typing-aware behavior.
+
+## Telephone calls and live voice
+
+Chusky has two deliberately separate call transports. Do not merge their
+credentials, webhook contracts, or provider assumptions.
+
+- **Twilio telephone calls** are the active inbound/outbound calling path.
+  `CHUCK_START_PHONE_CALL` is always approval-gated. Outbound calls use the
+  Twilio REST API and signed `/twilio/twiml` and `/twilio/status` callbacks.
+  Incoming calls enter only through `POST /twilio/inbound`; reject unknown
+  callers before any history, memory, agent, or tool access.
+- **Sendblue FaceTime** is optional and outbound-only. It requires a
+  Sendblue-purchased FaceTime-enabled line and hands short-lived Agora
+  credentials to the bridge. Sendblue does not provide an inbound FaceTime
+  webhook, so never claim Chusky can automatically answer FaceTime calls.
+- The private Python bridge lives in `voice-bridge/`, binds only to loopback
+  port `3004`, and is exposed through `https://voice.<domain>` via Nginx with
+  WebSocket upgrade headers and buffering disabled. Never expose port 3004
+  directly or log audio, provider credentials, Agora tokens, or raw phone
+  numbers.
+
+### Twilio trust boundary
+
+- Validate every Twilio HTTP callback using `X-Twilio-Signature` against the
+  configured public HTTPS callback URL; never construct the signed URL from an
+  untrusted Host header.
+- Validate the Twilio WebSocket handshake with the Twilio helper and require
+  Chusky's short-lived HMAC stream ticket in the `<Stream>` parameters. Both
+  checks are required.
+- `TWILIO_INBOUND_OWNER_USER_ID` maps an approved call to exactly one Telegram
+  account. `TWILIO_INBOUND_ALLOWED_CALLERS` must be explicit E.164 numbers;
+  every allowed caller enters that owner's private context. A public
+  multi-user product requires a phone-to-account linking flow and isolated
+  caller context, not a broad allowlist.
+- Keep only safe call metadata (provider, direction, status, timestamps, and
+  provider call ID). Voice text is appended to normal private history only
+  after a final turn is committed; raw audio is never persisted.
+
+### Low-latency Deepgram voice path
+
+- Twilio Media Streams are raw `audio/x-mulaw` at 8 kHz. Pass that codec
+  directly to and from Deepgram; do not transcode or add file/container
+  headers.
+- Use Deepgram Flux STT at `/v2/listen` with `flux-general-en`, explicit
+  `eager_eot_threshold`, `eot_threshold`, and `eot_timeout_ms`. Start a
+  read-only speculative agent draft on `EagerEndOfTurn`, cancel it on
+  `TurnResumed`, and only commit the exact `EndOfTurn` once through the
+  bridge-authenticated commit route.
+- Use Flux streaming TTS at `/v2/speak` with μ-law/8 kHz. Send `Interrupt` to
+  Deepgram and `clear` to Twilio as soon as a caller resumes speaking; send a
+  Twilio `mark` after complete output. Keep the inbound audio queue bounded so
+  stale speech is dropped rather than producing delayed replies.
+- Voice turns must use the owner's existing Chusky context but are limited to
+  read-only native tools. Any external action, approval, or sensitive change
+  must continue in Telegram.
+
+### Voice deployment and diagnostics
+
+1. Configure root Twilio settings (`TWILIO_VOICE_ENABLED`, account SID, auth
+   token, verified caller ID, public callback URL, and WSS stream URL) without
+   committing them.
+2. Configure the same Twilio auth token plus `DEEPGRAM_API_KEY`, bridge secret,
+   Flux STT thresholds, Flux TTS model, and greeting in `voice-bridge/.env`.
+3. Build Chusky before restarting the bridge so `/internal/facetime/turn` and
+   `/internal/facetime/commit-turn` are available; restart Chusky first, then
+   `chusky-voice-bridge` with `--update-env`.
+4. Confirm `https://voice.<domain>/health` reports `twilioWebSocket`,
+   `fluxStt`, and `fluxTts` as configured. Use its aggregate latency,
+   interruption, queue-drop, and failure counters; never add transcript/audio
+   logging just to troubleshoot a call.
+5. Test one approval-gated outbound call and one allowlisted inbound call.
+   Check Twilio's debugger and the two PM2 logs for provider errors; redact
+   all credentials if sharing output.
 
 When a change crosses Telegram and CLI, keep business behavior in shared agent/store modules and keep transport-specific formatting or input handling in `handlers.ts` and `src/cli/`. Do not fork session, model, approval, or persistence semantics between transports.
 

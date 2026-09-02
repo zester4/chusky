@@ -25,11 +25,12 @@ import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
 
-type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepseek" | "mistralai" | "all";
+type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepseek" | "mistralai" | "minimax" | "all";
 
 function escapeTelegramHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -43,6 +44,7 @@ function modelProviderKeyboard(): InlineKeyboard {
     .text("🦙 Meta Llama", "mpv:meta-llama").row()
     .text("🧬 DeepSeek", "mpv:deepseek").row()
     .text("🤝 Mistral", "mpv:mistralai").row()
+    .text("✨ MiniMax", "mpv:minimax").row()
     .text("🌐 Browse all models", "mpv:all");
 }
 
@@ -160,6 +162,11 @@ export function audioFormat(path: string): string {
   return ext === "oga" ? "ogg" : ext || "ogg";
 }
 
+function telegramMessageReceivedAt(ctx: Context): number {
+  const date = (ctx.message as { date?: unknown } | undefined)?.date;
+  return typeof date === "number" && Number.isFinite(date) && date > 0 ? date * 1000 : Date.now();
+}
+
 async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string): Promise<void> {
   if (!(await guard(ctx))) return;
   if (!(await checkRateLimit(ctx.from!.id))) {
@@ -187,9 +194,9 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);
-    const result = await runAgent(userId, parts, s.history, s.model, undefined, controller.signal);
+    const result = await runAgent(userId, parts, s.history, s.model, undefined, controller.signal, undefined, undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } });
     await appendMessages(userId, [
-      { role: "user", content: historyLabel },
+      { role: "user", content: historyLabel, createdAt: telegramMessageReceivedAt(ctx) },
       { role: "assistant", content: result.text },
     ]);
     if (result.cost) await addUsage(userId, result.cost);
@@ -257,7 +264,11 @@ export function registerHandlers(bot: Bot): void {
       `  /export — download conversation\n` +
       `  /usage — session stats\n` +
       `  /voice on|off — enable or disable spoken replies\n` +
+      `  /call <code>+number purpose</code> — request a phone call\n` +
       `  /channel link slack|whatsapp|sendblue — link another channel\n` +
+      `  /channel link sendblue-group — create an iMessage group link code\n` +
+      `  /group-access owner|all — set iMessage group access (inside the group)\n` +
+      `  /unlink-group — unlink an iMessage group (inside the group)\n` +
       `  /help — show this\n\n` +
       `What do you want to do?`
     );
@@ -278,9 +289,14 @@ export function registerHandlers(bot: Bot): void {
       `/export — download conversation as .txt\n` +
       `/usage — messages sent, model, turns\n` +
       `/voice on|off|status — control spoken replies\n` +
+      `/call <code>+number purpose</code> — request an approval-gated phone call\n` +
       `/cancel — cancel the active request\n` +
       `/channel link slack|whatsapp|sendblue — link another channel securely\n` +
+      `/channel link sendblue-group — create an iMessage group link code\n` +
       `/channel list — show linked channel identities\n` +
+      `/link-group <code> — activate the group (send inside iMessage)\n` +
+      `/group-access owner|all — control group access (send inside iMessage)\n` +
+      `/unlink-group — unlink the iMessage group (send inside iMessage)\n` +
       `/image <description> — generate an image\n` +
       `/info — full session details\n` +
       `/help — this message\n\n` +
@@ -328,6 +344,28 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await ctx.reply("Usage: /voice on, /voice off, or /voice status");
+  });
+
+  bot.command("call", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const raw = (ctx.match?.trim() ?? "");
+    const split = raw.search(/\s/);
+    const phoneNumber = split < 0 ? raw : raw.slice(0, split);
+    const purpose = split < 0 ? "" : raw.slice(split).trim();
+    if (!phoneNumber || !purpose) {
+      await ctx.reply("Usage: /call +14155550123 <purpose>. I will always ask for approval before placing the call.");
+      return;
+    }
+    try {
+      const approval = await requestPhoneCallApproval(ctx.from!.id, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`);
+      const keyboard = new InlineKeyboard().text("✅ Approve", `appr:approve:${approval.id}`).text("🛑 Deny", `appr:deny:${approval.id}`);
+      await ctx.reply(
+        `⚠️ <b>Approval required</b>\n\nI will call <code>${escapeTelegramHtml(approval.args.phoneNumber as string)}</code> about: ${escapeTelegramHtml(approval.args.purpose as string)}.`,
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+    } catch (error) {
+      await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
   });
 
   bot.command("cli", async (ctx) => {
@@ -645,7 +683,7 @@ export function registerHandlers(bot: Bot): void {
       );
       return;
     }
-    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "all"].includes(provider)) return;
+    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "minimax", "all"].includes(provider)) return;
     const msg = await ctx.reply("⏳ Fetching models…");
     try {
       const all = await fetchModels();
@@ -666,7 +704,7 @@ export function registerHandlers(bot: Bot): void {
     await ctx.answerCallbackQuery();
     const provider = ctx.match[1];
     const page = Number(ctx.match[2]);
-    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "all"].includes(provider) || !Number.isSafeInteger(page) || page < 0) return;
+    if (!["anthropic", "openai", "google", "meta-llama", "deepseek", "mistralai", "minimax", "all"].includes(provider) || !Number.isSafeInteger(page) || page < 0) return;
     try {
       const filtered = modelsForProvider(await fetchModels(), provider as ModelProvider);
       const pageCount = Math.max(1, Math.ceil(filtered.length / MODEL_PAGE_SIZE));
@@ -795,12 +833,13 @@ export function registerHandlers(bot: Bot): void {
             lastStreamEdit = Date.now();
             await editHtml(ctx, statusMsg.message_id, mdToTelegramHtml(streamedText));
           }
-        }
+        },
+        undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } }
       );
       clearInterval(typingInterval);
 
       await appendMessages(userId, [
-        { role: "user", content: text },
+        { role: "user", content: text, createdAt: telegramMessageReceivedAt(ctx) },
         { role: "assistant", content: result.text },
       ]);
       if (result.cost) await addUsage(userId, result.cost);

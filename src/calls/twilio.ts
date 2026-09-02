@@ -27,6 +27,13 @@ function validate(options: TwilioCallDependencies): void {
   if (!/^wss:\/\//i.test(options.mediaStreamUrl)) throw new Error("TWILIO_MEDIA_STREAM_URL must be a WSS URL");
 }
 
+/** Validates the exact user-reviewed arguments before an approval is created. */
+export function validateTwilioCallInput(input: TwilioCallInput): TwilioCallInput {
+  const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
+  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
+  return { phoneNumber, purpose: text(input.purpose, "purpose") };
+}
+
 /** Creates an outbound Twilio call. Its signed TwiML callback connects the
  * call to Chusky's private Deepgram media bridge. */
 export async function startTwilioCallForUser(userId: number, input: TwilioCallInput, options: TwilioCallDependencies = {
@@ -34,9 +41,7 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
 }): Promise<FaceTimeCallRecord> {
   validate(options);
-  const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
-  if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
-  const purpose = text(input.purpose, "purpose");
+  const { phoneNumber, purpose } = validateTwilioCallInput(input);
   const call: FaceTimeCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addFaceTimeCall(userId, call);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");

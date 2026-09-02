@@ -12,6 +12,7 @@ import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channel
 export interface Message {
   role: "user" | "assistant";
   content: string;
+  createdAt?: number;
 }
 
 export interface UserSession {
@@ -1355,8 +1356,12 @@ export async function completeDelivery(key: string, ttlSeconds: number): Promise
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {
   const s = await getSession(uid);
-  s.history.push(...msgs);
-  s.totalMessages += msgs.filter((m) => m.role === "user").length;
+  const stamped = msgs.map((message) => ({
+    ...message,
+    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
+  }));
+  s.history.push(...stamped);
+  s.totalMessages += stamped.filter((m) => m.role === "user").length;
   const cap = config.maxHistory * 2;
   if (s.history.length > cap) {
     const overflow = s.history.slice(0, s.history.length - cap);
