@@ -155,9 +155,8 @@ removes Chusky from PM2 entirely and is only appropriate when intentionally unin
 its PM2 registration, not for a normal temporary stop.
 
 ### Railway
-1. Push to GitHub → Railway → New Project → Deploy from repo
-2. Set env vars in Railway dashboard
-3. Copy Railway URL → set `WEBHOOK_URL` → redeploy
+See [`railway-guide.md`](railway-guide.md) for the complete Railway deployment,
+Redis, webhook, CLI pairing, and troubleshooting instructions.
 
 ### Local dashboard
 
