@@ -89,18 +89,25 @@ Add these to `voice-bridge/.env`:
 ```ini
 TWILIO_AUTH_TOKEN=<same root Twilio auth token>
 TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream
-VOICE_STT_MODEL=nova-3
-VOICE_STT_ENDPOINTING_MS=300
+VOICE_STT_MODEL=flux-general-en
+VOICE_STT_EAGER_EOT_THRESHOLD=0.45
+VOICE_STT_EOT_THRESHOLD=0.65
+VOICE_STT_EOT_TIMEOUT_MS=1200
 VOICE_TTS_MODEL=flux-haley-en
 VOICE_BARGE_IN_MIN_CHARS=2
+VOICE_GREETING=Hi, this is Chusky. How can I help?
 ```
 
-The bridge uses Deepgram's streaming Flux TTS WebSocket in raw 8 kHz μ-law,
-which Twilio plays without transcoding. When caller VAD/interim speech arrives
-while Chusky is speaking, the bridge cancels the active response, sends
-Deepgram `Interrupt`, then Twilio `clear`: this is barge-in. `mark` events are
-emitted after complete responses for playback tracking. `/health` exposes only
-aggregate latency/error/barging counters.
+The bridge uses Deepgram Flux conversational STT (`/v2/listen`) and streaming
+Flux TTS in raw 8 kHz μ-law, which Twilio plays without transcoding. On
+`EagerEndOfTurn` the bridge starts a private, read-only draft; `TurnResumed`
+cancels it, and only the definitive `EndOfTurn` is committed to Chusky memory
+and usage. This overlaps model time with end-of-turn detection without creating
+duplicate history. When caller speech resumes while Chusky is speaking, the
+bridge cancels the active response, sends Deepgram `Interrupt`, then Twilio
+`clear`: this is barge-in. `mark` events are emitted after complete responses
+for playback tracking. `/health` exposes only aggregate latency/error/barging
+counters.
 
 In the Twilio Console, set the purchased Twilio number's **A call comes in**
 webhook to `https://chusky.selithub.shop/twilio/inbound`, method `POST`. The
@@ -113,7 +120,8 @@ the same private voice context.
 ## Safety boundary
 
 `POST /calls` requires `Authorization: Bearer <FACETIME_MEDIA_BRIDGE_SECRET>`.
-The bridge can call only `/internal/facetime/turn` with the same secret. That
-Chusky endpoint validates the call ID and owner, uses the owner's existing
-memory, limits tools to read-only calls, and stores only text turns in Chusky's
-normal history.
+The bridge can call only `/internal/facetime/turn`,
+`/internal/facetime/commit-turn`, and `/internal/facetime/status` with the
+same secret. Chusky validates the call ID and owner, uses the owner's existing
+memory, limits tools to read-only calls, and stores only committed text turns
+in normal history.

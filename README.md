@@ -371,10 +371,12 @@ E.164 allowlist. Unknown callers are rejected before they can access private
 memory or the agent.
 
 The voice bridge validates Twilio's WebSocket signature and a short-lived
-server-issued stream ticket. It uses streaming Flux TTS in Twilio-compatible
-8 kHz μ-law and supports barge-in: caller VAD/interim speech cancels in-flight
-speech, interrupts TTS, and clears Twilio's buffered playback. Configure the
-same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
+server-issued stream ticket. It uses Deepgram Flux conversational STT turn
+events plus streaming Flux TTS in Twilio-compatible 8 kHz μ-law. An
+`EagerEndOfTurn` begins a cancellable read-only draft, `TurnResumed` cancels
+it, and only `EndOfTurn` is committed to history. Caller speech interrupts TTS
+and clears Twilio's buffered playback. Configure the same `TWILIO_AUTH_TOKEN`
+and `TWILIO_MEDIA_STREAM_URL` inside
 `voice-bridge/.env`; see [`voice-bridge/README.md`](voice-bridge/README.md)
 for latency tuning and Nginx WebSocket settings.
 

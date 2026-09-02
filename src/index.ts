@@ -271,10 +271,11 @@ async function main(): Promise<void> {
     // cannot silently take an external action during a live call.
     app.post("/internal/facetime/turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.faceTimeMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string };
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean };
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
+      const speculative = body.speculative === true;
       if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
       const call = await getFaceTimeCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
@@ -288,12 +289,48 @@ async function main(): Promise<void> {
             toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS", "CHUCK_LIST_PHONE_CALLS"],
           });
         });
-        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
-        if (result.cost) await addUsage(userId, result.cost);
-        return c.json({ ok: true, text: result.text.slice(0, 5000) });
+        // Flux can signal an eager end-of-turn before the caller is fully
+        // finished. A speculative result is never written to history or usage
+        // until the bridge receives the definitive EndOfTurn event and commits
+        // it through the idempotent route below.
+        if (!speculative) {
+          await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
+          if (result.cost) await addUsage(userId, result.cost);
+        }
+        return c.json({ ok: true, text: result.text.slice(0, 5000), cost: result.cost ?? 0, speculative });
       } catch (error) {
-        logger.warn({ err: error, callId, userId }, "FaceTime voice turn failed");
+        // A Flux eager draft is intentionally aborted when the caller resumes
+        // speaking. Avoid treating that normal client disconnect as an error.
+        if (!speculative || !c.req.raw.signal.aborted) logger.warn({ err: error, callId, userId }, "Voice turn failed");
         return c.json({ ok: false, error: "voice turn failed" }, 502);
+      }
+    });
+
+    // The bridge commits a completed Flux turn once. This keeps eager drafts
+    // out of memory if the caller resumes speaking, while retaining the same
+    // history and usage behavior as a normal completed voice turn.
+    app.post("/internal/facetime/commit-turn", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.faceTimeMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string };
+      const callId = String(body.callId ?? "").trim();
+      const userId = Number(body.userId);
+      const transcript = String(body.transcript ?? "").trim();
+      const text = String(body.text ?? "").trim();
+      const turnId = String(body.turnId ?? "").trim();
+      const cost = Number(body.cost ?? 0);
+      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000 || !text || text.length > 5000 || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10) return c.json({ ok: false, error: "invalid voice turn commit" }, 400);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      const key = `voice-turn:${callId}:${turnId}`;
+      if (!(await claimDelivery(key, 60_000))) return c.json({ ok: true, duplicate: true });
+      try {
+        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: text }]);
+        if (cost) await addUsage(userId, cost);
+        await completeDelivery(key, 7 * 24 * 60 * 60);
+        return c.json({ ok: true });
+      } catch (error) {
+        logger.warn({ err: error, callId, userId }, "Voice turn commit failed");
+        return c.json({ ok: false, error: "voice turn commit failed" }, 502);
       }
     });
 
