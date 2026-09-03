@@ -46,6 +46,12 @@ container builds TypeScript and starts Chusky with:
 node dist/index.js
 ```
 
+The Docker image also installs `ffmpeg`. This is required for Sendblue iMessage
+voice notes: Apple sends these as Opus-in-CAF, and Chusky converts them to
+Ogg/Opus before sending them to the transcription provider. Do not try to run
+`apt-get` in a Railway shell or add an environment variable for it; pushing
+this Dockerfile change causes Railway to build the dependency into the service.
+
 There is no need to run `npm run setup` inside Railway; that command is an
 interactive local setup helper. Configure the variables in the next section.
 

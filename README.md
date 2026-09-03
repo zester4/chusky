@@ -380,7 +380,7 @@ Only the linked owner can activate, change access for, or unlink the group. Grou
 
 The adapter verifies timestamped HMAC signatures when present and supports the legacy signing-secret header for compatibility. It claims provider event IDs before workflow enqueue, stores only bounded event data, hydrates permitted media, and sends replies through the durable outbox.
 
-Apple inline voice notes arrive as Opus-in-CAF (`audio/x-caf`). Chusky accepts that documented Sendblue format and converts it privately to Ogg/Opus before transcription; install `ffmpeg` on the Oracle host (`sudo apt-get install -y ffmpeg`). For outbound attachments, Sendblue relies on a real filename extension: Chusky maps MP3 to `.mp3`, M4A to `.m4a`, and CAF to `.caf` rather than deriving invalid extensions from MIME subtypes. A `.caf` file is required for an inline iMessage voice-note bubble; MP3/M4A are regular audio attachments.
+Apple inline voice notes arrive as Opus-in-CAF (`audio/x-caf`). Chusky accepts that documented Sendblue format and converts it privately to Ogg/Opus before transcription. The checked-in Railway Docker image includes `ffmpeg` for this conversion; no Railway variable or interactive install is needed. For outbound attachments, Sendblue relies on a real filename extension: Chusky maps MP3 to `.mp3`, M4A to `.m4a`, and CAF to `.caf` rather than deriving invalid extensions from MIME subtypes. Chusky keeps generated media private in R2, then uploads it directly to Sendblue's media endpoint before delivery because Sendblue does not accept signed URLs in `media_url`. A `.caf` file is required for an inline iMessage voice-note bubble; MP3/M4A are regular audio attachments.
 
 #### Outbound FaceTime voice calls
 

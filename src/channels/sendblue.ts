@@ -3,8 +3,10 @@ import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, ChannelMediaError, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
 import { formatSendblueText } from "./sendblueFormatting.js";
+import { readR2Object } from "../lib/storage/r2.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+type MediaLoader = (key: string) => Promise<Buffer>;
 
 function sameSecret(actual: string, expected: string): boolean {
   const actualBytes = Buffer.from(actual);
@@ -38,7 +40,7 @@ export function verifySendblueSignature(rawBody: string | Buffer, headers: Heade
 function attachment(payload: any): ChannelAttachment[] {
   const mediaUrl = typeof payload?.media_url === "string" ? payload.media_url.trim() : "";
   if (!mediaUrl || !/^https:\/\//i.test(mediaUrl)) return [];
-  const kind = String(payload.message_type ?? "").toLowerCase().includes("audio") ? "audio"
+  const kind = String(payload.message_type ?? "").toLowerCase().includes("audio") || /\.(caf|m4a|mp3|aac|ogg|oga|wav|webm|flac)(?:\?|$)/i.test(mediaUrl) ? "audio"
     : /\.(mp4|mov|webm)(?:\?|$)/i.test(mediaUrl) ? "video" : "image";
   return [{ id: String(payload.message_handle ?? mediaUrl), kind, url: mediaUrl }];
 }
@@ -46,7 +48,7 @@ function attachment(payload: any): ChannelAttachment[] {
 const SEND_BLUE_MEDIA_TYPES = new Set([
   "image/jpeg", "image/png", "image/webp", "image/gif",
   "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/wav", "audio/x-wav",
-  "audio/webm", "audio/ogg", "audio/aac", "audio/flac",
+  "audio/webm", "audio/ogg", "audio/aac", "audio/flac", "audio/caf", "audio/x-caf",
   "video/mp4", "video/webm",
 ]);
 
@@ -114,6 +116,7 @@ export class SendblueAdapter implements ChannelAdapter {
     private readonly fromNumber: string,
     private readonly statusCallback?: string,
     fetchImpl: FetchLike = fetch,
+    private readonly mediaLoader: MediaLoader = readR2Object,
   ) { this.fetchImpl = fetchImpl; }
 
   private headers(): Record<string, string> {
@@ -189,6 +192,31 @@ export class SendblueAdapter implements ChannelAdapter {
     return { verificationId: String(value.sid), code: String(value.delivery_target.code), destinationNumber: String(value.delivery_target.pool_number), deepLink: value.delivery_target.sms_deep_link ? String(value.delivery_target.sms_deep_link) : undefined };
   }
 
+  /**
+   * Sendblue explicitly does not support presigned media URLs in `media_url`.
+   * Generated Chusky media is stored privately in R2, then uploaded directly
+   * to Sendblue's media endpoint so the message uses its stable CDN URL.
+   */
+  private async providerMediaUrl(attachment: ChannelAttachment): Promise<string> {
+    const source = attachment.url;
+    if (!source || !/^https:\/\//i.test(source)) throw new Error("Sendblue outbound media must be hosted at an HTTPS URL");
+    if (!attachment.id.startsWith("sendblue/")) return source;
+    const bytes = await this.mediaLoader(attachment.id);
+    if (!bytes.length || bytes.length > 12 * 1024 * 1024) throw new Error("Sendblue outbound media is empty or too large");
+    const extension = attachment.id.split(".").pop() || "bin";
+    const form = new FormData();
+    form.append("file", new Blob([bytes], { type: attachment.mimeType || "application/octet-stream" }), `chusky.${extension}`);
+    const response = await this.fetchImpl("https://api.sendblue.com/api/upload-file", {
+      method: "POST",
+      headers: { "sb-api-key-id": this.apiKey, "sb-api-secret-key": this.apiSecret },
+      body: form,
+    });
+    const value = await response.json().catch(() => ({})) as { media_url?: unknown; error_message?: unknown; message?: unknown };
+    const mediaUrl = typeof value.media_url === "string" ? value.media_url.trim() : "";
+    if (!response.ok || !/^https:\/\//i.test(mediaUrl)) throw new Error(`Sendblue media upload failed: ${String(value.error_message ?? value.message ?? response.statusText).slice(0, 300)}`);
+    return mediaUrl;
+  }
+
   async send(message: OutboundMessage): Promise<DeliveryReceipt> {
     if (!this.apiKey || !this.apiSecret || !this.fromNumber) throw new Error("Sendblue API credentials and sending number are required");
     const groupId = message.target.metadata?.groupId;
@@ -200,11 +228,8 @@ export class SendblueAdapter implements ChannelAdapter {
       ...(groupId ? { group_id: groupId } : { number: message.target.conversationId }),
       ...(message.target.metadata?.messageHandle ? { reply_to: { message_handle: message.target.metadata.messageHandle } } : {}),
     };
-    const mediaUrl = message.attachments?.find((item) => item.url)?.url;
-    if (mediaUrl) {
-      if (!/^https:\/\//i.test(mediaUrl)) throw new Error("Sendblue outbound media must be hosted at an HTTPS URL");
-      body.media_url = mediaUrl;
-    }
+    const attachment = message.attachments?.find((item) => item.url);
+    if (attachment) body.media_url = await this.providerMediaUrl(attachment);
     const response = await this.fetchImpl(`https://api.sendblue.com/api/${isGroup ? "send-group-message" : "send-message"}`, {
       method: "POST",
       headers: this.headers(),

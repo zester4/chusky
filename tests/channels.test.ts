@@ -111,12 +111,26 @@ test("Sendblue identifies a voice recording from its downloaded MIME type", asyn
   assert.match(hydrated.attachments[0].url ?? "", /^data:audio\/mp4;base64,/);
 });
 
-test("Sendblue media errors return a safe reply instead of silently failing the workflow", async () => {
+test("Sendblue accepts Apple's documented CAF voice-note MIME type", async () => {
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/x-caf", "content-length": "3" } })) as typeof fetch);
   const message = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-caf", providerUserId: "+15550001", providerConversationId: "+15550001", attachments: [{ id: "voice-2", kind: "audio", url: "https://cdn.example/voice" }], receivedAt: Date.now(), scope: "private" });
-  assert.equal(message.attachments[0].mediaError, "unsupported_media_type");
-  const response = await createAgentChannelHandler()(message, { accountId: "account_42", userId: 42, provider: "sendblue", scope: "private", conversationId: "sendblue:-:+15550001:-", permissions: { canUseAgent: true, canApprove: true, canUseSharedContext: true, canReceiveProactive: true }, replyTarget: { provider: "sendblue", conversationId: "+15550001" } });
-  assert.match(response?.text ?? "", /audio format is not supported/i);
+  assert.equal(message.attachments[0].mediaError, undefined);
+  assert.equal(message.attachments[0].kind, "audio");
+  assert.equal(message.attachments[0].mimeType, "audio/x-caf");
+  assert.match(message.attachments[0].url ?? "", /^data:audio\/x-caf;base64,/);
+});
+
+test("Sendblue uploads private R2 media before sending instead of passing a signed URL", async () => {
+  const requests: Array<{ url: string; headers: Headers; body: unknown }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), headers: new Headers(init?.headers), body: init?.body });
+    if (String(url).endsWith("/upload-file")) return new Response(JSON.stringify({ media_url: "https://cdn.sendblue.example/chusky.mp3" }), { status: 201 });
+    return new Response(JSON.stringify({ message_handle: "sb-media-1" }), { status: 200 });
+  }) as typeof fetch, async (key) => { assert.equal(key, "sendblue/42/test.mp3"); return Buffer.from([1, 2, 3]); });
+  await adapter.send({ accountId: "account_42", userId: 42, target: { provider: "sendblue", conversationId: "+15550001" }, text: "Voice reply", attachments: [{ id: "sendblue/42/test.mp3", kind: "audio", mimeType: "audio/mpeg", url: "https://r2.example/signed?signature=private" }], idempotencyKey: "sb-upload-1" });
+  assert.equal(requests[0].url.endsWith("/upload-file"), true);
+  assert.equal(requests[0].body instanceof FormData, true);
+  assert.deepEqual(JSON.parse(String(requests[1].body)).media_url, "https://cdn.sendblue.example/chusky.mp3");
 });
 
 test("Sendblue converts Markdown into readable iMessage text", () => {

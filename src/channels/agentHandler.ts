@@ -15,6 +15,7 @@ import type { ChannelMediaError, ChuskyConversation, InboundMessage, OutboundMes
 import type { ContentPart } from "../types.js";
 import { notifyTriggerApproval } from "../triggerWorkflow.js";
 import { persistSendblueMedia } from "./sendblueMedia.js";
+import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -58,7 +59,7 @@ function dataUrlBytes(url: string): { mimeType: string; bytes: Buffer; dataUrl: 
 function mediaFailureText(error: ChannelMediaError): string {
   switch (error) {
     case "unsupported_media_type":
-      return "I received the voice message, but its audio format is not supported yet. Please try again as M4A, AAC, MP3, WAV, OGG, WebM, or send it as text.";
+      return "I received the voice message, but its audio format is not supported yet. Please try again as an iMessage voice note, M4A, AAC, MP3, WAV, OGG, WebM, or send it as text.";
     case "too_large":
       return "I received the voice message, but it is too large to process. Please send a shorter recording.";
     case "empty_media":
@@ -98,7 +99,9 @@ async function buildAgentInput(message: InboundMessage): Promise<{ input: string
     else if (attachment.kind === "video") parts.push({ type: "video_url", video_url: { url: decoded.dataUrl } });
     else if (attachment.kind === "document") parts.push({ type: "file", file: { filename: attachment.filename ?? "document", file_data: decoded.dataUrl } });
     else if (attachment.kind === "audio") {
-      const transcript = await transcribeAudio(decoded.bytes, transcriptionFormat(decoded.mimeType));
+      const caf = ["audio/caf", "audio/x-caf"].includes(decoded.mimeType.toLowerCase().split(";", 1)[0]);
+      const audio = caf ? await transcodeSendblueCafToOgg(decoded.bytes) : decoded.bytes;
+      const transcript = await transcribeAudio(audio, caf ? "ogg" : transcriptionFormat(decoded.mimeType));
       parts[0] = { type: "text", text: `${message.text ?? ""}\n\nTranscript of ${attachment.filename ?? "voice message"}:\n${transcript}`.trim() };
     }
   }

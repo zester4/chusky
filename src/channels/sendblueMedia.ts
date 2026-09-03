@@ -4,6 +4,18 @@ import type { ChannelAttachment } from "./contracts.js";
 
 type GeneratedMedia = { data: Buffer; mediaType?: string; contentType?: string; name?: string; type?: string };
 
+const extensionForMimeType: Record<string, string> = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+  "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/aac": "aac",
+  "audio/ogg": "ogg", "audio/webm": "webm", "audio/wav": "wav", "audio/x-wav": "wav",
+  "audio/flac": "flac", "audio/caf": "caf", "audio/x-caf": "caf",
+  "video/mp4": "mp4", "video/webm": "webm",
+};
+
+export function sendblueFileExtensionForMime(mimeType: string): string {
+  return extensionForMimeType[mimeType.toLowerCase().split(";", 1)[0]] ?? "bin";
+}
+
 /**
  * Sendblue fetches outbound media from HTTPS. R2 gives generated files a
  * bounded, provider-readable URL without putting binary data in Redis or in
@@ -16,7 +28,9 @@ export async function persistSendblueMedia(userId: number, images: GeneratedMedi
     const mimeType = (item.mediaType ?? item.contentType ?? "").toLowerCase().split(";", 1)[0];
     const allowed = mimeType.startsWith("image/") || mimeType.startsWith("audio/") || mimeType === "video/mp4" || mimeType === "video/webm";
     if (!allowed || !item.data?.length || item.data.length > 12 * 1024 * 1024) continue;
-    const extension = mimeType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "bin";
+    // Sendblue determines attachment rendering from the URL extension. In
+    // particular, .caf is the documented Apple inline voice-note format.
+    const extension = sendblueFileExtensionForMime(mimeType);
     const key = `sendblue/${userId}/${randomUUID()}.${extension}`;
     await putR2Object(key, item.data, mimeType);
     attachments.push({ id: key, kind: mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : "video", mimeType, filename: item.name, sizeBytes: item.data.length, url: await signR2Download(key) });
