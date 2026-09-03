@@ -92,6 +92,12 @@ test("reports an absent workspace without turning a normal status check into a t
   assert.deepEqual(result, { exists: false, message: "No Daytona workspace exists yet. Use action=create, or use a file/computer tool and Chusky will create it automatically." });
 });
 
+test("writes generated binary media into the user's workspace", async () => {
+  const e = engine();
+  const result = await e.writeBinaryFile(820021, "generated/images/hero.png", Buffer.from([1, 2, 3]));
+  assert.deepEqual(result, { path: "generated/images/hero.png", bytes: 3 });
+});
+
 test("reconnects after pause and refreshes activity", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820002);

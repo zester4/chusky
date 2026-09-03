@@ -286,6 +286,15 @@ export class DaytonaEngine {
     return { path: normalizedPath, bytes: Buffer.byteLength(normalizedContent, "utf8") };
   }
 
+  async writeBinaryFile(userId: number, path: string, content: Buffer): Promise<{ path: string; bytes: number }> {
+    const normalizedPath = safeDaytonaPath(path);
+    if (!Buffer.isBuffer(content) || content.length < 1) throw new DaytonaInputError("binary content must not be empty");
+    if (content.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`binary content must be at most ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    await sandbox.fs.uploadFile(content, normalizedPath);
+    return { path: normalizedPath, bytes: content.length };
+  }
+
   async findFiles(userId: number, path: string | undefined, pattern: string): Promise<unknown> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPattern = String(pattern ?? "").trim();

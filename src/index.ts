@@ -51,6 +51,7 @@ import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { setVoiceReplies } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
+import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -733,7 +734,9 @@ async function main(): Promise<void> {
     });
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId: number; prompt: string };
+      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string };
+      const destination = payload.destination ?? "telegram";
+      const workspacePath = payload.workspacePath ? safeDaytonaPath(payload.workspacePath, "workspacePath") : undefined;
       const submitted = await workflow.run("submit-video", async () => {
         const res = await fetch("https://openrouter.ai/api/v1/videos", {
           method: "POST",
@@ -758,9 +761,19 @@ async function main(): Promise<void> {
           if (!url) throw new Error("Completed video has no download URL");
           const file = await fetch(url);
           if (!file.ok) throw new Error(`Video download failed: ${file.status}`);
+          const bytes = Buffer.from(await file.arrayBuffer());
+          let saved;
+          if ((destination === "daytona" || destination === "both") && workspacePath) {
+            saved = await daytonaEngine.writeBinaryFile(payload.userId, workspacePath, bytes);
+          }
           const chatId = await getTelegramChatId(payload.userId);
-          if (chatId) await bot.api.sendVideo(chatId, new InputFile(Buffer.from(await file.arrayBuffer()), "chusky.mp4"), { caption: "🎬 Your video is ready." });
-          return { delivered: Boolean(chatId) };
+          if ((destination === "telegram" || destination === "both") && chatId) {
+            await bot.api.sendVideo(chatId, new InputFile(bytes, "chusky.mp4"), { caption: "🎬 Your video is ready." });
+          }
+          if (chatId && saved) {
+            await bot.api.sendMessage(chatId, `📁 Video saved in Daytona at <code>${xmlEscape(saved.path)}</code>.`, { parse_mode: "HTML" });
+          }
+          return { delivered: Boolean(chatId && (destination === "telegram" || destination === "both")), saved: saved ? { path: saved.path, bytes: saved.bytes } : undefined };
         }
         if (state === "failed" || state === "error") throw new Error(status.error?.message ?? "Video generation failed");
       }

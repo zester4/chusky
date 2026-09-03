@@ -36,7 +36,7 @@ import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
-import { daytonaEngine } from "./lib/daytona/index.js";
+import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -545,12 +545,21 @@ export async function runAgent(
         let execResult: unknown;
         if (slug === "CHUCK_GENERATE_IMAGE") {
           const image = await generateImage(String(args.prompt ?? ""));
-          generatedImages.push(image);
-          execResult = "Image generated successfully. It will be sent to the user.";
+          const destination = String(args.destination ?? "telegram");
+          let daytona;
+          if (destination === "daytona" || destination === "both") {
+            const extension = image.mediaType === "image/jpeg" ? "jpg" : image.mediaType === "image/webp" ? "webp" : "png";
+            const workspacePath = String(args.workspacePath ?? `generated/images/${randomUUID()}.${extension}`);
+            daytona = await daytonaEngine.writeBinaryFile(userId, workspacePath, image.data);
+          }
+          if (destination === "telegram" || destination === "both") generatedImages.push(image);
+          execResult = { imageGenerated: true, destination, ...(daytona ? { daytona } : {}), note: destination === "daytona" ? "Image saved in Daytona; it was not sent as a separate Telegram image." : "Image generated and delivered through the normal channel." };
         } else if (slug === "CHUCK_CREATE_TRIGGER") {
           execResult = await createTrigger(userId, String(args.slug ?? ""), { triggerConfig: args.triggerConfig ?? {} });
         } else if (slug === "CHUCK_GENERATE_VIDEO") {
-          execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""));
+          const destination: MediaDestination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
+          const workspacePath = args.workspacePath === undefined ? undefined : safeDaytonaPath(args.workspacePath, "workspacePath");
+          execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath);
         } else if (slug.startsWith("CHUCK_")) {
           execResult = await nativeTool(userId, slug, args);
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
@@ -745,13 +754,18 @@ export async function generateImage(prompt: string): Promise<{ data: Buffer; med
   return { data: Buffer.from(image.b64_json, "base64"), mediaType: image.media_type || "image/png", cost: result.usage?.cost };
 }
 
-export async function queueVideoWorkflow(userId: number, prompt: string): Promise<string> {
+export type MediaDestination = "telegram" | "daytona" | "both";
+
+export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string): Promise<{ started: true; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
   if (!config.qstashToken || !config.videoWorkflowUrl) {
     throw new Error("Video workflows are not configured. Set QSTASH_TOKEN and VIDEO_WORKFLOW_URL.");
   }
+  const resolvedPath = destination === "daytona" || destination === "both"
+    ? (workspacePath ? safeDaytonaPath(workspacePath, "workspacePath") : `generated/videos/${randomUUID()}.mp4`)
+    : undefined;
   const client = new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
-  const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt } });
-  return `Video generation started. Workflow ID: ${result.workflowRunId}`;
+  const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath } });
+  return { started: true, workflowId: result.workflowRunId, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) };
 }
 
 // ── Trigger webhook handler ───────────────────────────────────────────────────

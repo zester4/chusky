@@ -190,7 +190,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
             ? "🎬 <b>I’m reviewing your video…</b>"
             : parts.some((part) => part.type !== "text")
               ? "👀 <b>I’m taking a careful look at that for you…</b>"
-              : "👂 <b>I’m listening to your message…</b>";
+              : "📜 <b>I’m reading your message…</b>";
   const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);

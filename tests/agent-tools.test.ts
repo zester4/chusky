@@ -20,3 +20,12 @@ test("scheduled tools expose required parameters", () => {
   assert.deepEqual(reminder?.function.parameters.required, ["text"]);
   assert.deepEqual(job?.function.parameters.required, ["text", "cron"]);
 });
+
+test("native media tools expose explicit Telegram and Daytona destinations", () => {
+  for (const name of ["CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO"]) {
+    const tool = chuckTools.find((item) => item.function.name === name);
+    const properties = tool?.function.parameters.properties as Record<string, { enum?: string[] }>;
+    assert.deepEqual(properties.destination?.enum, ["telegram", "daytona", "both"]);
+    assert.equal("workspacePath" in properties, true);
+  }
+});
