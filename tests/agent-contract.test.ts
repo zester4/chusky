@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getSession, initStore } from "../src/store.js";
-import { cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -10,6 +10,12 @@ function chatResponse(message: any) {
 function toolResponse(name: string, args: string) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
+
+test("preview links are included exactly once even when the model omits them", () => {
+  const url = "https://preview.test/app";
+  assert.equal(appendPreviewLinks("The app is ready.", [url]), `The app is ready.\n\n🔗 Daytona preview: ${url}`);
+  assert.equal(appendPreviewLinks(`The app is ready at ${url}.`, [url]), `The app is ready at ${url}.`);
+});
 
 async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>) {
   const originalFetch = globalThis.fetch;

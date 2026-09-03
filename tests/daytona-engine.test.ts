@@ -1,7 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { DaytonaEngine } from "../src/lib/daytona/engine.js";
-import { initStore, getDaytonaWorkspace } from "../src/store.js";
+import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 
 let sandboxes: Map<string, any>;
 let creates: number;
@@ -20,7 +20,7 @@ function fakeSandbox(id: string, state = "started") {
     archive: async () => { sandbox.state = "archived"; },
     delete: async () => { sandbox.state = "destroyed"; sandboxes.delete(id); },
     process: {
-      executeCommand: async (command: string) => ({ exitCode: 0, result: `ran:${command}` }),
+      executeCommand: async (command: string) => ({ exitCode: sandbox.commandExitCode ?? 0, result: sandbox.commandResult ?? `ran:${command}` }),
       createPty: async ({ id: ptyId, onData }: any) => { ptyOutputs.set(ptyId, onData); onData(new TextEncoder().encode("$ ")); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       connectPty: async (ptyId: string, { onData }: any) => { ptyOutputs.set(ptyId, onData); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       listPtySessions: async () => [...ptyOutputs.keys()].map((ptyId) => ({ id: ptyId, active: true })),
@@ -43,7 +43,7 @@ function fakeSandbox(id: string, state = "started") {
       moveFiles: async () => undefined,
       deleteFile: async () => undefined,
     },
-    getPreviewLink: async (port: number) => ({ url: `https://preview.test/${port}` }),
+    getPreviewLink: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/${port}` }),
     createSnapshot: async () => undefined,
     computerUse: {
       start: async () => undefined,
@@ -175,6 +175,14 @@ test("browser navigation persists safe URL state and rejects embedded credential
   await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
 });
 
+test("returns a browser-accessible preview URL and rejects provider URL failures", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820014) as any;
+  assert.deepEqual(await e.preview(820014, 3003), { sandboxId: sandbox.id, port: 3003, url: "https://preview.test/3003" });
+  sandbox.previewUrl = "localhost:3003";
+  await assert.rejects(() => e.preview(820014, 3003), /invalid preview URL/);
+});
+
 test("creates and persists a text artifact without placing bytes in session history", async () => {
   const e = engine();
   const result = await e.artifact(820011, { action: "create", type: "report", name: "findings.md", content: "# Findings\n\nVerified." }) as any;
@@ -185,4 +193,22 @@ test("creates and persists a text artifact without placing bytes in session hist
   assert.equal(session.history.length, 0);
   const listed = await e.artifact(820011, { action: "list" }) as any[];
   assert.equal(listed[0].id, result.id);
+});
+
+test("registers DOCX as a first-class artifact after Daytona structure validation", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820012) as any;
+  const result = await e.artifact(820012, { action: "register", type: "docx", path: "workspace/artifacts/brief.docx" }) as any;
+  assert.equal(result.__chuskyArtifactReady, true);
+  assert.equal(result.type, "docx");
+  assert.equal(result.contentType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+});
+
+test("does not persist a structured artifact when Daytona validation fails", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820013) as any;
+  sandbox.commandExitCode = 2;
+  sandbox.commandResult = "invalid Office Open XML package";
+  await assert.rejects(() => e.artifact(820013, { action: "register", type: "docx", path: "workspace/artifacts/broken.docx" }), /DOCX validation failed/);
+  assert.equal((await getSession(820013)).artifacts?.length ?? 0, 0);
 });

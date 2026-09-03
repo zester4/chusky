@@ -299,10 +299,19 @@ tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an ex
 Redis metadata. Chusky can create Markdown reports and HTML websites directly, register verified
 files generated in Daytona (DOCX, PDF, PPTX, XLSX, images, and videos), list or retrieve prior
 artifacts, delete registry entries, and package verified workspace files into ZIP archives.
-Registered artifacts are downloaded from Daytona only after metadata validation and delivered to
-Telegram as documents. Large binary contents are never written into conversation history. Binary
+Registered artifacts are downloaded from Daytona only after metadata and deterministic structure
+validation, then delivered to Telegram as documents. DOCX, PDF, PPTX, and XLSX packages are checked
+for the expected file structure and corrupt ZIP members before they enter the registry; PDFs are
+checked for a valid header and EOF marker. This is a structural quality gate, not a visual review:
+when layout fidelity matters, the agent should render or preview the file in Daytona and correct it
+before registration. Large binary contents are never written into conversation history. Binary
 formats must be generated and checked in Daytona before registration; an artifact record is not
 created from a text claim alone.
+
+For running sites and apps, the agent starts the process inside Daytona, verifies the service is
+listening, calls `CHUCK_DAYTONA_PREVIEW`, and includes the returned temporary HTTPS URL in its
+reply. Daytona filesystem paths and localhost URLs are private to the workspace and are never
+presented as if the user could open them directly.
 
 Chusky also accepts these requests naturally, without slash commands:
 
@@ -370,6 +379,8 @@ The group receives a confirmation and uses its own shared conversation history. 
 Only the linked owner can activate, change access for, or unlink the group. Group linking requires the Sendblue webhook, Redis, QStash, and HTTPS webhook-mode deployment described above.
 
 The adapter verifies timestamped HMAC signatures when present and supports the legacy signing-secret header for compatibility. It claims provider event IDs before workflow enqueue, stores only bounded event data, hydrates permitted media, and sends replies through the durable outbox.
+
+Apple inline voice notes arrive as Opus-in-CAF (`audio/x-caf`). Chusky accepts that documented Sendblue format and converts it privately to Ogg/Opus before transcription; install `ffmpeg` on the Oracle host (`sudo apt-get install -y ffmpeg`). For outbound attachments, Sendblue relies on a real filename extension: Chusky maps MP3 to `.mp3`, M4A to `.m4a`, and CAF to `.caf` rather than deriving invalid extensions from MIME subtypes. A `.caf` file is required for an inline iMessage voice-note bubble; MP3/M4A are regular audio attachments.
 
 #### Outbound FaceTime voice calls
 

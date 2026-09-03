@@ -72,12 +72,58 @@ function boundedText(value: unknown, label: string, max: number): string {
   return text;
 }
 
-const ARTIFACT_TYPES = new Set<ArtifactType>(["website", "report", "presentation", "pdf", "spreadsheet", "image", "video", "zip", "project"]);
+const ARTIFACT_TYPES = new Set<ArtifactType>(["website", "report", "docx", "presentation", "pdf", "spreadsheet", "image", "video", "zip", "project"]);
 const ARTIFACT_MIME: Record<ArtifactType, string> = {
-  website: "text/html", report: "text/markdown", presentation: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  website: "text/html", report: "text/markdown", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  presentation: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   pdf: "application/pdf", spreadsheet: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", image: "image/png",
   video: "video/mp4", zip: "application/zip", project: "application/zip",
 };
+
+const STRUCTURED_ARTIFACT_TYPES = new Set<ArtifactType>(["docx", "presentation", "pdf", "spreadsheet"]);
+
+function artifactValidationScript(type: ArtifactType, path: string): string {
+  const officeRoots: Partial<Record<ArtifactType, string>> = {
+    docx: "word/document.xml",
+    presentation: "ppt/presentation.xml",
+    spreadsheet: "xl/workbook.xml",
+  };
+  const root = officeRoots[type];
+  return [
+    "import os, sys, zipfile, xml.etree.ElementTree as ET",
+    `path=${JSON.stringify(path)}`,
+    `kind=${JSON.stringify(type)}`,
+    "def fail(message):",
+    "    print(message, file=sys.stderr)",
+    "    raise SystemExit(2)",
+    "if not os.path.isfile(path): fail('artifact file does not exist')",
+    "if kind == 'pdf':",
+    "    with open(path, 'rb') as f:",
+    "        header = f.read(5)",
+    "        f.seek(max(0, os.path.getsize(path) - 4096))",
+    "        tail = f.read()",
+    "    if header != b'%PDF-': fail('invalid PDF header')",
+    "    if b'%%EOF' not in tail: fail('PDF is missing an EOF marker')",
+    "else:",
+    "    try:",
+    "        with zipfile.ZipFile(path) as archive:",
+    "            bad = archive.testzip()",
+    "            names = set(archive.namelist())",
+    "    except (OSError, zipfile.BadZipFile) as error:",
+    "        fail('invalid Office Open XML package: ' + str(error))",
+    "    if bad: fail('Office Open XML package has a corrupt member: ' + bad)",
+    `    required = ['[Content_Types].xml', ${JSON.stringify(root ?? "")} ]`,
+    "    missing = [name for name in required if name and name not in names]",
+    "    if missing: fail('Office Open XML package is missing: ' + ', '.join(missing))",
+    "    try:",
+    "        with zipfile.ZipFile(path) as archive:",
+    "            for name in required:",
+    "                if name: ET.fromstring(archive.read(name))",
+    "    except (KeyError, ET.ParseError, OSError) as error:",
+    "        fail('Office Open XML package contains invalid XML: ' + str(error))",
+    "print('artifact structure validated')",
+  ].join("\n");
+}
 
 function artifactType(value: unknown): ArtifactType {
   const type = String(value ?? "").trim() as ArtifactType;
@@ -269,7 +315,9 @@ export class DaytonaEngine {
     const normalizedPort = boundedInt(port, 3000, 65535);
     const sandbox = await this.getOrCreateWorkspace(userId);
     const result = await sandbox.getPreviewLink(normalizedPort);
-    return { sandboxId: sandbox.id, port: normalizedPort, url: result.url };
+    const url = String(result.url ?? "").trim();
+    if (!/^https?:\/\//i.test(url)) throw new DaytonaInputError("Daytona returned an invalid preview URL");
+    return { sandboxId: sandbox.id, port: normalizedPort, url };
   }
 
   async createSnapshot(userId: number, name: string): Promise<DaytonaSnapshotResult> {
@@ -442,6 +490,16 @@ export class DaytonaEngine {
     await saveSession(userId, session);
   }
 
+  private async validateArtifactStructure(sandbox: Sandbox, path: string, type: ArtifactType): Promise<void> {
+    if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
+    const script = artifactValidationScript(type, path);
+    const encoded = Buffer.from(script, "utf8").toString("base64");
+    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 120);
+    if (result.exitCode !== 0) {
+      throw new DaytonaInputError(`${type.toUpperCase()} validation failed: ${String(result.result ?? "unknown validation error").slice(0, 500)}`);
+    }
+  }
+
   async artifact(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const session = await getSession(userId);
@@ -495,6 +553,7 @@ export class DaytonaEngine {
     const size = Number(details.size ?? 0);
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
+    await this.validateArtifactStructure(sandbox, path, type);
     const now = Date.now();
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name, type, path, contentType, size, status: "available", createdAt: now, updatedAt: now };
     await this.saveArtifact(userId, artifact);

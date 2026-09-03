@@ -31,6 +31,14 @@ test("Daytona tools are present and uniquely named", () => {
   ]) assert.equal(names.includes(name), true, name);
 });
 
+test("artifact tool exposes DOCX and its validation contract", () => {
+  const artifact = chuckTools.find((tool) => tool.function.name === "CHUCK_ARTIFACT");
+  assert.ok(artifact);
+  const type = (artifact.function.parameters as any).properties.type;
+  assert.equal(type.enum.includes("docx"), true);
+  assert.match(artifact.function.description, /structural validation/);
+});
+
 test("private Daytona computer and sandbox tools do not require approval", () => {
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_EXECUTE"), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_WRITE_FILE"), false);

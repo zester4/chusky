@@ -360,6 +360,14 @@ export interface AgentRunOptions {
   temporalContext?: TemporalContext;
 }
 
+export function appendPreviewLinks(text: string, links: string[]): string {
+  const cleaned = cleanModelText(text);
+  const missing = [...new Set(links)].filter((url) => !cleaned.includes(url));
+  if (!missing.length) return cleaned;
+  const suffix = missing.map((url) => `🔗 Daytona preview: ${url}`).join("\n");
+  return [cleaned, suffix].filter(Boolean).join("\n\n");
+}
+
 // ── Core agentic loop ─────────────────────────────────────────────────────────
 
 export async function runAgent(
@@ -452,6 +460,7 @@ export async function runAgent(
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
+  const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
 
   for (let round = 0; round < config.maxToolRounds; round++) {
@@ -486,7 +495,7 @@ export async function runAgent(
     if (toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
-      return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages, generatedFiles };
+      return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -544,6 +553,10 @@ export async function runAgent(
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""));
         } else if (slug.startsWith("CHUCK_")) {
           execResult = await nativeTool(userId, slug, args);
+          if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
+            const url = String((execResult as { url?: unknown }).url ?? "").trim();
+            if (url) previewLinks.push(url);
+          }
           if (slug === "CHUCK_ARTIFACT" && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
             const delivered = await daytonaEngine.downloadArtifact(userId, artifact.id);
@@ -586,7 +599,7 @@ export async function runAgent(
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
-  return { text: typeof text === "string" ? cleanModelText(text) : "", toolsUsed, cost: totalCost, generatedImages, generatedFiles };
+  return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, generatedFiles };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

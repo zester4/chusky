@@ -95,7 +95,7 @@ export interface SdkThreadRecord {
   updatedAt: number;
 }
 export interface SdkFileRecord { id: string; key: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
-export type ArtifactType = "website" | "report" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project";
+export type ArtifactType = "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project";
 export interface ArtifactRecord { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; size: number; status: "available"; createdAt: number; updatedAt: number; }
 
 export interface DaytonaWorkspaceRecord {
