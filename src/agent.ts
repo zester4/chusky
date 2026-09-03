@@ -416,9 +416,13 @@ export async function runAgent(
       const modality = requiredModality(userMessage);
       const inputs = architecture.input_modalities ?? [];
       if (modality && inputs.length && !inputs.includes(modality)) {
-        requestModel = config.visionModel;
-        if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
-        logger.info({ requestedModel: model, requestModel, modality }, "Using modality-capable model");
+        // OpenRouter's metadata is useful for diagnostics, but it is not a
+        // reliable authority for every provider's document representation.
+        // Some models accept a PDF/file even when the metadata only advertises
+        // text or image input. Try the user's selected model first; the chat
+        // request below is the source of truth and can trigger the fallback if
+        // the provider actually rejects the modality.
+        logger.debug({ model, modality, advertisedInputs: inputs }, "Selected model metadata does not advertise modality; trying selected model");
       }
       if (composioTools.length && Object.keys(supported).length && !supported.tools) {
         logger.warn({ model }, "Selected model metadata does not advertise tool calling");

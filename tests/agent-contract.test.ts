@@ -209,7 +209,7 @@ test("agent retries transient OpenRouter responses with a bounded retry", async 
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("agent routes unsupported image input to the configured vision model", async () => {
+test("agent keeps the selected model when it accepts media despite incomplete metadata", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830006);
   const originalFetch = globalThis.fetch;
@@ -223,6 +223,28 @@ test("agent routes unsupported image input to the configured vision model", asyn
   try {
     const result = await runAgent(830006, [{ type: "image_url", image_url: { url: "data:image/png;base64,AA==" } }], [], "test/model");
     assert.equal(result.text, "image understood");
-    assert.equal(models[0], "openai/gpt-5.6-luna");
+    assert.deepEqual(models, ["test/model"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("agent falls back only after the selected model rejects the media modality", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830015);
+  const originalFetch = globalThis.fetch;
+  const models: string[] = [];
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const body = JSON.parse(String(init?.body));
+    models.push(body.model);
+    if (body.model === "test/model") return new Response("No endpoints found that support image input", { status: 400 });
+    return chatResponse({ role: "assistant", content: "image understood by fallback" });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "fallback-session", tools: async () => [], execute: async () => undefined }) } });
+  try {
+    const result = await runAgent(830015, [{ type: "image_url", image_url: { url: "data:image/png;base64,AA==" } }], [], "test/model");
+    assert.equal(result.text, "image understood by fallback");
+    // orChat retries the selected model for transient/provider failures before
+    // runAgent makes the modality fallback decision.
+    assert.deepEqual(models, ["test/model", "test/model", "openai/gpt-5.6-luna"]);
   } finally { globalThis.fetch = originalFetch; }
 });
