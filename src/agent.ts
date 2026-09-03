@@ -383,14 +383,14 @@ export async function runAgent(
   options?: AgentRunOptions
 ): Promise<AgentResult> {
 
-  if (onStatus) await onStatus("👂 I’m listening to your message…");
+  if (onStatus) await onStatus("📜 I’m reading your message……");
 
   let requestModel = model;
 
   // Get Composio session for this user
   const { sessionObj } = await getOrCreateComposioSession(userId);
 
-  if (onStatus) await onStatus("🧭 I’m finding the right tools for you…");
+  if (onStatus) await onStatus("🧭 I’m getting the right tools for you…");
 
   // Fetch the full tool list from Composio (1000+ tools + meta tools)
   // These are OpenAI-compatible function descriptors
