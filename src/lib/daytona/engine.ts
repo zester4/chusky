@@ -1,4 +1,4 @@
-import { type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
+import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
 import { randomUUID } from "node:crypto";
 import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
@@ -18,6 +18,7 @@ const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;
 const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
+const DAYTONA_MAX_EXECUTION_SECONDS = 900;
 
 function boundedInt(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
@@ -230,15 +231,30 @@ export class DaytonaEngine {
       throw new DaytonaInputError(`command must be 1-${DAYTONA_MAX_COMMAND_LENGTH} characters`);
     }
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const result = await sandbox.process.executeCommand(
-      normalized,
-      cwd ? safeDaytonaPath(cwd, "cwd") : undefined,
-      undefined,
-      boundedInt(timeoutSeconds, 60, 900),
-    );
+    const normalizedCwd = cwd ? safeDaytonaPath(cwd, "cwd") : undefined;
+    const normalizedTimeout = boundedInt(timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS);
+    let result: { exitCode?: number; result?: string; artifacts?: { stdout?: string } };
+    try {
+      result = await sandbox.process.executeCommand(normalized, normalizedCwd, undefined, normalizedTimeout);
+    } catch (error) {
+      const code = String((error as { code?: unknown })?.code ?? "");
+      if (error instanceof DaytonaProcessExecutionTimeoutError || code === "PROCESS_EXECUTION_TIMEOUT") {
+        return {
+          sandboxId: sandbox.id,
+          command: normalized,
+          cwd: normalizedCwd,
+          exitCode: 124,
+          output: `Command exceeded the ${normalizedTimeout}-second execution limit. Use CHUCK_DAYTONA_PTY for long-running processes, or split the work into smaller verified commands.`,
+          truncated: false,
+          timedOut: true,
+          timeoutSeconds: normalizedTimeout,
+        };
+      }
+      throw error;
+    }
     const raw = String(result.result ?? result.artifacts?.stdout ?? "");
     const output = raw.slice(0, DAYTONA_MAX_OUTPUT_CHARS);
-    return { sandboxId: sandbox.id, command: normalized, cwd, exitCode: result.exitCode, output, truncated: raw.length > output.length };
+    return { sandboxId: sandbox.id, command: normalized, cwd: normalizedCwd, exitCode: result.exitCode ?? 1, output, truncated: raw.length > output.length, timeoutSeconds: normalizedTimeout };
   }
 
   async listFiles(userId: number, path?: string, depth?: number): Promise<DaytonaFileInfo[]> {

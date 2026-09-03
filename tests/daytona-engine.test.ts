@@ -20,7 +20,7 @@ function fakeSandbox(id: string, state = "started") {
     archive: async () => { sandbox.state = "archived"; },
     delete: async () => { sandbox.state = "destroyed"; sandboxes.delete(id); },
     process: {
-      executeCommand: async (command: string) => ({ exitCode: sandbox.commandExitCode ?? 0, result: sandbox.commandResult ?? `ran:${command}` }),
+      executeCommand: async (command: string) => { if (sandbox.commandError) throw sandbox.commandError; return { exitCode: sandbox.commandExitCode ?? 0, result: sandbox.commandResult ?? `ran:${command}` }; },
       createPty: async ({ id: ptyId, onData }: any) => { ptyOutputs.set(ptyId, onData); onData(new TextEncoder().encode("$ ")); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       connectPty: async (ptyId: string, { onData }: any) => { ptyOutputs.set(ptyId, onData); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       listPtySessions: async () => [...ptyOutputs.keys()].map((ptyId) => ({ id: ptyId, active: true })),
@@ -101,6 +101,17 @@ test("reconnects after pause and refreshes activity", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(sandbox.state, "started");
   assert.equal(creates, 1);
+});
+
+test("turns Daytona execution timeouts into an actionable bounded result", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820015) as any;
+  sandbox.commandError = { code: "PROCESS_EXECUTION_TIMEOUT", message: "command execution timeout" };
+  const result = await e.execute(820015, "npm run build", "workspace", 3600);
+  assert.equal(result.exitCode, 124);
+  assert.equal(result.timedOut, true);
+  assert.equal(result.timeoutSeconds, 900);
+  assert.match(result.output, /CHUCK_DAYTONA_PTY/);
 });
 
 test("recovers a recoverable sandbox instead of creating a replacement", async () => {

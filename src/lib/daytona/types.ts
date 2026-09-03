@@ -22,6 +22,8 @@ export interface DaytonaCommandResult {
   exitCode: number;
   output: string;
   truncated: boolean;
+  timedOut?: boolean;
+  timeoutSeconds?: number;
 }
 
 export interface DaytonaFileInfo {
