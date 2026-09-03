@@ -31,7 +31,7 @@ VOICE_BRIDGE_MAX_ACTIVE_CALLS=4
 ## Oracle installation
 
 ```bash
-cd ~/chusky/voice-bridge
+cd ~/chusky/chusky-voice
 cp .env.example .env
 # Edit .env: set the same FACETIME_MEDIA_BRIDGE_SECRET as Chusky and a Deepgram key.
 python3 -m venv .venv
@@ -84,7 +84,7 @@ handshake with Twilio's official Python helper, including Twilio's documented
 trailing-slash compatibility check. Neither credentials nor audio are sent to
 a browser or persisted in Chusky.
 
-Add these to `voice-bridge/.env`:
+Add these to `chusky-voice/.env`:
 
 ```ini
 TWILIO_AUTH_TOKEN=<same root Twilio auth token>

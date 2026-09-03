@@ -1,7 +1,7 @@
 /** PM2 definition for the isolated FaceTime media bridge. */
 module.exports = {
   apps: [{
-    name: "chusky-voice-bridge",
+    name: "chusky-voice",
     cwd: __dirname,
     script: "app.py",
     interpreter: "./.venv/bin/python",
