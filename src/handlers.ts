@@ -805,7 +805,7 @@ export function registerHandlers(bot: Bot): void {
     await acquireQueuedLock(userId, lockToken, controller.signal);
 
     // Post the live status message
-    const statusMsg = await ctx.reply("👂 <b>I’m listening to you…</b>", { parse_mode: "HTML" });
+    const statusMsg = await ctx.reply("🐶 <b>Alright, just a sec…</b>", { parse_mode: "HTML" });
 
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
