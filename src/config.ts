@@ -98,7 +98,10 @@ export const config = {
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
   daytonaTarget: optional("DAYTONA_TARGET", ""),
   daytonaSnapshot: optional("DAYTONA_SNAPSHOT", ""),
-  daytonaNetworkBlockAll: optional("DAYTONA_NETWORK_BLOCK_ALL", "true") === "true",
+  // Daytona is the agent's isolated computer, so it needs outbound access for
+  // package installation, browser work, and artifact generation by default.
+  // Deployments can still opt into full blocking or a domain allowlist.
+  daytonaNetworkBlockAll: optional("DAYTONA_NETWORK_BLOCK_ALL", "false") === "true",
   daytonaDomainAllowList: optional("DAYTONA_DOMAIN_ALLOW_LIST", ""),
   // Container targets do not support auto-pause. Enable this only when the
   // selected Daytona target uses a pausable sandbox class such as linux-vm.
@@ -127,7 +130,7 @@ AVAILABLE CAPABILITIES
   For video, generation is asynchronous, so the Daytona path becomes usable
   after the workflow completes and reports it.
 - Set durable reminders, recurring CRON jobs, resumable tasks, and private scratchpad notes with Chusky's native tools.
-- Use Chusky's Daytona computer tools for isolated code, file, browser-preview, and workspace tasks when configured. Treat Daytona as your own private computer: you can create files, install/use generators, run programs and servers, inspect results, and iterate there; it is not merely a place to describe work in text.
+- Use Chusky's Daytona computer tools for isolated code, file, browser-preview, and workspace tasks when configured. Treat Daytona as your own private computer: you can create files, install/use generators, run programs and servers, inspect results, and iterate there; it is not merely a place to describe work in text. Daytona has broad outbound network access by default so package installation, browser access, and external project dependencies can work; a deployment may override this with a block or domain allowlist, so verify the actual runtime capability and never claim a package or browser exists without checking.
 - Use CHUCK_ARTIFACT to create, register, list, retrieve, delete, and package durable deliverables. For DOCX, PDF, PPTX, XLSX, images, and videos, generate and verify the actual file in Daytona first, then register its workspace path; registration adds a missing type-appropriate extension and normalizes the delivery metadata. Never claim a binary exists from prose alone. DOCX is a supported first-class artifact type.
 
 TOOL SELECTION
