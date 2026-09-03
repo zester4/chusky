@@ -523,21 +523,26 @@ export async function runAgent(
         }
         const args = parseToolArguments(call.function.arguments);
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
-        if (isRiskyToolSlug(slug, args)) {
-          const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
-          const matches = approved && approved.toolSlug === slug && JSON.stringify(approved.args) === JSON.stringify(args);
-          if (!matches) {
-            const approval = await createApproval({
-              userId,
-              ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
-              toolSlug: slug,
-              args,
-              request: typeof userMessage === "string" ? userMessage : "User request with attachment",
-              history,
-              model,
-            });
-            throw new ApprovalRequiredError(approval.id, slug, args);
-          }
+        let executionArgs = args;
+        const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
+        const approvedForTool = approved?.toolSlug === slug;
+        if (approvedForTool) {
+          // The model may regenerate semantically equivalent JSON with a
+          // different property order or normalized values after approval.
+          // Always execute the exact arguments the user reviewed instead of
+          // requiring the model to reproduce the original serialization.
+          executionArgs = approved.args;
+        } else if (isRiskyToolSlug(slug, args)) {
+          const approval = await createApproval({
+            userId,
+            ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
+            toolSlug: slug,
+            args,
+            request: typeof userMessage === "string" ? userMessage : "User request with attachment",
+            history,
+            model,
+          });
+          throw new ApprovalRequiredError(approval.id, slug, args);
         }
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
@@ -561,7 +566,7 @@ export async function runAgent(
           const workspacePath = args.workspacePath === undefined ? undefined : safeDaytonaPath(args.workspacePath, "workspacePath");
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath);
         } else if (slug.startsWith("CHUCK_")) {
-          execResult = await nativeTool(userId, slug, args);
+          execResult = await nativeTool(userId, slug, executionArgs);
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
@@ -578,7 +583,7 @@ export async function runAgent(
             execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The screenshot was sent to the user. Use accessibility or display tools for structured follow-up." };
           }
         } else {
-          execResult = await sessionObj.execute(slug, args);
+          execResult = await sessionObj.execute(slug, executionArgs);
         }
         result = typeof execResult === "string"
           ? execResult

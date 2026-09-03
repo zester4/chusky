@@ -19,10 +19,17 @@ import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 
 const MAX_TEXT = 1000;
+const MAX_DAYTONA_COMMAND = 8000;
 
 function text(value: unknown): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > MAX_TEXT) throw new Error(`Text must be 1-${MAX_TEXT} characters`);
+  return result;
+}
+
+function daytonaCommand(value: unknown): string {
+  const result = String(value ?? "").trim();
+  if (!result || result.length > MAX_DAYTONA_COMMAND) throw new Error(`Command must be 1-${MAX_DAYTONA_COMMAND} characters`);
   return result;
 }
 
@@ -262,7 +269,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return await getTask(userId, id);
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status");
-    case "CHUCK_DAYTONA_EXECUTE": return daytonaEngine.execute(userId, text(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds));
+    case "CHUCK_DAYTONA_EXECUTE": return daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds));
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars));
     case "CHUCK_DAYTONA_WRITE_FILE": return daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content));

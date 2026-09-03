@@ -17,7 +17,7 @@ test("preview links are included exactly once even when the model omits them", (
   assert.equal(appendPreviewLinks(`The app is ready at ${url}.`, [url]), `The app is ready at ${url}.`);
 });
 
-async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>) {
+async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false) {
   const originalFetch = globalThis.fetch;
   let index = 0;
   const session = {
@@ -28,6 +28,11 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
     ],
     execute,
   };
+  if (includeMultiExecute) session.tools = async () => [
+    { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
+    { type: "function", function: { name: "GMAIL_SEND_EMAIL", description: "Test-only risky tool", parameters: { type: "object" } } },
+    { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Test-only multi tool", parameters: { type: "object" } } },
+  ];
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -92,6 +97,27 @@ test("risky tool calls stop before execution and approved exact calls execute on
     });
     assert.equal(executions, 1);
   });
+});
+
+test("approved multi-tool calls execute the stored arguments when the model regenerates different JSON", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830014);
+  const reviewedArgs = { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "user@example.com" } }] };
+  const regeneratedArgs = { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "different@example.com" } }] };
+  const executed: any[] = [];
+  await withAgentMocks([toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify(reviewedArgs))], async (slug, args) => { executed.push({ slug, args }); }, async () => {
+    await assert.rejects(() => runAgent(830014, "send it", [], "test/model"), (error: unknown) => error instanceof ApprovalRequiredError);
+    const approval = (await getSession(830014)).approvals[0];
+    await import("../src/store.js").then(({ setApprovalStatus }) => setApprovalStatus(830014, approval.id, "approved"));
+    await withAgentMocks([
+      toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify(regeneratedArgs)),
+      chatResponse({ role: "assistant", content: "sent" }),
+    ], async (slug, args) => { executed.push({ slug, args }); }, async () => {
+      const result = await runAgent(830014, approval.request, approval.history, approval.model, undefined, undefined, undefined, approval.id);
+      assert.equal(result.text, "sent");
+    }, true);
+  }, true);
+  assert.deepEqual(executed, [{ slug: "COMPOSIO_MULTI_EXECUTE_TOOL", args: reviewedArgs }]);
 });
 
 test("malformed tool JSON becomes a controlled tool error and the loop continues", async () => {

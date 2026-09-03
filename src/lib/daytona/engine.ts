@@ -27,9 +27,12 @@ function boundedInt(value: unknown, fallback: number, max: number): number {
 }
 
 export function safeDaytonaPath(value: unknown, label = "path"): string {
-  const path = String(value ?? "").trim();
-  if (!path || path.includes("\0") || path.split(/[\\/]+/).includes("..")) {
-    throw new DaytonaInputError(`${label} must be a non-empty workspace-relative path without '..'`);
+  let path = String(value ?? "").trim();
+  const daytonaHome = "/home/user/";
+  if (path.toLowerCase().startsWith(daytonaHome)) path = path.slice(daytonaHome.length);
+  const absolute = path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path);
+  if (!path || absolute || path.includes("\0") || path.split(/[\\/]+/).includes("..")) {
+    throw new DaytonaInputError(`${label} must be a non-empty workspace-relative path without '..'; /home/user/... is normalized automatically`);
   }
   return path;
 }
