@@ -80,6 +80,10 @@ const ARTIFACT_MIME: Record<ArtifactType, string> = {
   pdf: "application/pdf", spreadsheet: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", image: "image/png",
   video: "video/mp4", zip: "application/zip", project: "application/zip",
 };
+const ARTIFACT_EXTENSION: Record<ArtifactType, string> = {
+  website: "html", report: "md", docx: "docx", presentation: "pptx", pdf: "pdf",
+  spreadsheet: "xlsx", image: "png", video: "mp4", zip: "zip", project: "zip",
+};
 
 const STRUCTURED_ARTIFACT_TYPES = new Set<ArtifactType>(["docx", "presentation", "pdf", "spreadsheet"]);
 
@@ -136,6 +140,24 @@ function artifactName(value: unknown): string {
   const name = String(value ?? "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
   if (!name || name.length > 120) throw new DaytonaInputError("name must be 1-120 safe characters");
   return name;
+}
+
+function artifactNameForType(value: unknown, type: ArtifactType): string {
+  const name = artifactName(value);
+  const extension = `.${ARTIFACT_EXTENSION[type]}`;
+  if (name.toLowerCase().endsWith(extension)) return name;
+  const maxBaseLength = 120 - extension.length;
+  return `${name.slice(0, maxBaseLength)}${extension}`;
+}
+
+function isBinaryFile(path: string, bytes: Buffer): string | undefined {
+  const lowerPath = path.toLowerCase();
+  const knownBinaryExtensions = [".pdf", ".docx", ".pptx", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".m4a", ".wav", ".ogg", ".mp4"];
+  if (knownBinaryExtensions.some((extension) => lowerPath.endsWith(extension))) return "binary";
+  if (bytes.subarray(0, 5).toString("ascii") === "%PDF-") return "PDF";
+  if (bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]))) return "archive";
+  if (bytes.subarray(0, Math.min(bytes.length, 4096)).includes(0)) return "binary";
+  return undefined;
 }
 
 function boundedNumber(value: unknown, fallback: number, max: number): number {
@@ -271,10 +293,13 @@ export class DaytonaEngine {
 
   async readFile(userId: number, path: string, maxChars?: number): Promise<{ path: string; content: string; truncated: boolean }> {
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const bytes = await sandbox.fs.downloadFile(safeDaytonaPath(path));
+    const normalizedPath = safeDaytonaPath(path);
+    const bytes = await sandbox.fs.downloadFile(normalizedPath);
+    const binaryKind = isBinaryFile(normalizedPath, bytes);
+    if (binaryKind) throw new DaytonaInputError(`${normalizedPath} is a ${binaryKind} file and cannot be read as text. Register it with CHUCK_ARTIFACT or inspect it with the Daytona computer tool.`);
     const limit = boundedInt(maxChars, DAYTONA_MAX_OUTPUT_CHARS, DAYTONA_MAX_OUTPUT_CHARS);
     const content = bytes.toString("utf8");
-    return { path, content: content.slice(0, limit), truncated: content.length > limit };
+    return { path: normalizedPath, content: content.slice(0, limit), truncated: content.length > limit };
   }
 
   async writeFile(userId: number, path: string, content: string): Promise<{ path: string; bytes: number }> {
@@ -547,7 +572,7 @@ export class DaytonaEngine {
     if (action === "package") {
       const files = Array.isArray(args.files) ? args.files.map((file) => safeDaytonaPath(file, "file")) : [];
       if (!files.length || files.length > 100) throw new DaytonaInputError("files must contain 1-100 workspace-relative paths");
-      const name = artifactName(args.name ?? "chusky-project.zip");
+      const name = artifactNameForType(args.name ?? "chusky-project.zip", "zip");
       const path = safeDaytonaPath(`artifacts/${name}`, "output path");
       const script = `import zipfile\nz=zipfile.ZipFile(${JSON.stringify(path)},'w',zipfile.ZIP_DEFLATED)\n[z.write(p) for p in ${JSON.stringify(files)}]\nz.close()`;
       const encoded = Buffer.from(script, "utf8").toString("base64");
@@ -557,30 +582,37 @@ export class DaytonaEngine {
     }
     const type = artifactType(args.type);
     if (action === "create") {
-      if (args.path) return this.registerArtifact(userId, sandbox, safeDaytonaPath(args.path, "path"), artifactName(args.name), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      if (args.path) {
+        const path = safeDaytonaPath(args.path, "path");
+        return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      }
       if (typeof args.content !== "string") throw new DaytonaInputError("create requires content for text artifacts or path for generated binary artifacts");
       if (!["website", "report"].includes(type)) throw new DaytonaInputError("Binary artifacts must be generated in Daytona and passed by path; only website and report accept text content directly");
       if (args.content.length > DAYTONA_MAX_FILE_CONTENT) throw new DaytonaInputError(`content must be at most ${DAYTONA_MAX_FILE_CONTENT} characters`);
-      const name = artifactName(args.name ?? (type === "website" ? "website.html" : "report.md"));
+      const name = artifactNameForType(args.name ?? (type === "website" ? "website.html" : "report.md"), type);
       const path = safeDaytonaPath(`artifacts/${name}`, "output path");
       await sandbox.fs.uploadFile(Buffer.from(args.content, "utf8"), path);
       return this.registerArtifact(userId, sandbox, path, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
     }
     if (action === "register") {
       const path = safeDaytonaPath(args.path, "path");
-      return this.registerArtifact(userId, sandbox, path, artifactName(args.name ?? String(path).split(/[\\/]/).pop()), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      return this.registerArtifact(userId, sandbox, path, String(args.name ?? String(path).split(/[\\/]/).pop() ?? "artifact"), type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
     }
     throw new DaytonaInputError(`Unsupported artifact action: ${action}`);
   }
 
   private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
-    const details = await sandbox.fs.getFileDetails(path) as { size?: number; isDir?: boolean };
+    const extension = `.${ARTIFACT_EXTENSION[type]}`;
+    const normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
+    if (normalizedPath !== path) await sandbox.fs.moveFiles(path, normalizedPath);
+    const normalizedName = artifactNameForType(name, type);
+    const details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
     const size = Number(details.size ?? 0);
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
-    await this.validateArtifactStructure(sandbox, path, type);
+    await this.validateArtifactStructure(sandbox, normalizedPath, type);
     const now = Date.now();
-    const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name, type, path, contentType, size, status: "available", createdAt: now, updatedAt: now };
+    const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
     await this.saveArtifact(userId, artifact);
     return { ...artifact, __chuskyArtifactReady: true };
   }

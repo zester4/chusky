@@ -6,6 +6,7 @@ import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 let sandboxes: Map<string, any>;
 let creates: number;
 let lastCreateParams: Record<string, unknown> | undefined;
+let movedFiles: Array<{ source: string; destination: string }>;
 
 function fakeSandbox(id: string, state = "started") {
   const ptyOutputs = new Map<string, (data: Uint8Array) => void>();
@@ -40,7 +41,7 @@ function fakeSandbox(id: string, state = "started") {
       searchFiles: async () => ({ files: [] }),
       getFileDetails: async () => ({ name: "file.txt", path: "file.txt", size: 10 }),
       createFolder: async () => undefined,
-      moveFiles: async () => undefined,
+      moveFiles: async (source: string, destination: string) => { movedFiles.push({ source, destination }); },
       deleteFile: async () => undefined,
     },
     getPreviewLink: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/${port}` }),
@@ -64,6 +65,7 @@ beforeEach(async () => {
   sandboxes = new Map();
   creates = 0;
   lastCreateParams = undefined;
+  movedFiles = [];
 });
 
 function engine() {
@@ -218,7 +220,24 @@ test("registers DOCX as a first-class artifact after Daytona structure validatio
   const result = await e.artifact(820012, { action: "register", type: "docx", path: "workspace/artifacts/brief.docx" }) as any;
   assert.equal(result.__chuskyArtifactReady, true);
   assert.equal(result.type, "docx");
+  assert.equal(result.name, "brief.docx");
   assert.equal(result.contentType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+});
+
+test("normalizes generated PDF paths and names before delivery", async () => {
+  const e = engine();
+  const result = await e.artifact(820016, { action: "register", type: "pdf", path: "workspace/artifacts/brief" }) as any;
+  assert.equal(result.name, "brief.pdf");
+  assert.equal(result.path, "workspace/artifacts/brief.pdf");
+  assert.equal(result.contentType, "application/pdf");
+  assert.deepEqual(movedFiles, [{ source: "workspace/artifacts/brief", destination: "workspace/artifacts/brief.pdf" }]);
+});
+
+test("does not decode binary Daytona files as text", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820017) as any;
+  sandbox.fs.downloadFile = async () => Buffer.from("%PDF-1.7\n", "ascii");
+  await assert.rejects(() => e.readFile(820017, "workspace/artifacts/brief"), /PDF file and cannot be read as text/);
 });
 
 test("does not persist a structured artifact when Daytona validation fails", async () => {

@@ -13,4 +13,5 @@ test("Sendblue media URLs retain documented audio filename extensions", () => {
   assert.equal(sendblueFileExtensionForMime("audio/mpeg"), "mp3");
   assert.equal(sendblueFileExtensionForMime("audio/mp4"), "m4a");
   assert.equal(sendblueFileExtensionForMime("audio/x-caf"), "caf");
+  assert.equal(sendblueFileExtensionForMime("application/pdf"), "pdf");
 });
