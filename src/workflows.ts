@@ -10,6 +10,7 @@ export interface WorkflowDependencies {
   updateJob(userId: number, id: string, patch: Partial<JobRecord>): Promise<boolean>;
   getTelegramChatId(userId: number): Promise<number | undefined>;
   sendMessage(chatId: number, text: string, options: { parse_mode: "HTML" }): Promise<unknown>;
+  runAgent?(job: JobRecord): Promise<{ text: string; cost?: number }>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery?(key: string, ttlSeconds: number): Promise<void>;
 }
@@ -66,7 +67,9 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     return { delivered: false };
   }
   try {
-    await deps.sendMessage(chatId, `🔁 <b>Chusky scheduled job</b>\n\n${escapeHtml(job.text)}`, { parse_mode: "HTML" });
+    const result = deps.runAgent ? await deps.runAgent(job) : { text: job.text };
+    const response = result.text.trim() || "Scheduled job completed.";
+    await deps.sendMessage(chatId, `🔁 <b>Chusky scheduled job</b>\n\n${escapeHtml(response)}`, { parse_mode: "HTML" });
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {
     await deps.updateJob(payload.userId, payload.jobId, { deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });

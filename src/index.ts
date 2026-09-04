@@ -841,7 +841,27 @@ async function main(): Promise<void> {
       let payload;
       try { payload = parseJobWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid job workflow payload"); }
       const occurrenceId = workflow.workflowRunId ?? `run-${Date.now()}`;
-      await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
+      await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, {
+        getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
+        runAgent: async (job) => withCliLock(payload.userId, undefined, async () => {
+          const session = await getSession(payload.userId);
+          try {
+            const result = await runAgent(payload.userId, job.text, session.history, session.model);
+            await appendMessages(payload.userId, [
+              { role: "user", content: `[Scheduled job ${job.id}] ${job.text}` },
+              { role: "assistant", content: result.text },
+            ]);
+            if (result.cost) await addUsage(payload.userId, result.cost);
+            return { text: result.text, cost: result.cost };
+          } catch (error) {
+            if (error instanceof ApprovalRequiredError) {
+              return { text: `Approval required for ${error.toolSlug}. Approve request ${error.approvalId} in Telegram, then the next scheduled occurrence will continue.` };
+            }
+            throw error;
+          }
+        }),
+        sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
+      }));
     }));
 
     app.post("/workflows/task", serveWorkflow(async (workflow) => {

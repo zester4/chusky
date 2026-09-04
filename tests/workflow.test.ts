@@ -61,6 +61,14 @@ test("recurring job delivery escapes content and sends only to the mapped owner"
   assert.match(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
+test("recurring job delivery runs the agent before sending its response", async () => {
+  const state = deps({ runAgent: async (job) => ({ text: `Agent result for ${job.id}` }) });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-agent" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.match(state.sent[0].text, /Agent result for job-1/);
+  assert.doesNotMatch(state.sent[0].text, /Run &lt;task&gt;/);
+});
+
 test("recurring jobs do not deliver without a Telegram mapping", async () => {
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
