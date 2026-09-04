@@ -1,4 +1,5 @@
 import type { JobRecord, ReminderRecord } from "./store.js";
+import { splitHtml } from "./markdown.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; }
@@ -69,7 +70,10 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
   try {
     const result = deps.runAgent ? await deps.runAgent(job) : { text: job.text };
     const response = result.text.trim() || "Scheduled job completed.";
-    await deps.sendMessage(chatId, `🔁 <b>Chusky scheduled job</b>\n\n${escapeHtml(response)}`, { parse_mode: "HTML" });
+    const header = "🔁 <b>Chusky scheduled job</b>\n\n";
+    for (const chunk of splitHtml(escapeHtml(response), 3900)) {
+      await deps.sendMessage(chatId, `${header}${chunk}`, { parse_mode: "HTML" });
+    }
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {
     await deps.updateJob(payload.userId, payload.jobId, { deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });

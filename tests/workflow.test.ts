@@ -76,6 +76,16 @@ test("recurring job delivery runs the agent before sending its response", async 
   assert.doesNotMatch(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
+test("recurring job delivery splits long agent responses for Telegram", async () => {
+  const response = "paragraph\n\n".repeat(700);
+  const state = deps({ runAgent: async () => ({ text: response }) });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-long" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.ok(state.sent.length > 1);
+  assert.ok(state.sent.every((message) => message.text.length <= 4096));
+  assert.ok(state.sent.every((message) => message.text.startsWith("🔁 <b>Chusky scheduled job</b>")));
+});
+
 test("recurring jobs do not deliver without a Telegram mapping", async () => {
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverJob({ jobId: "job-1", userId: 1 }, state);
