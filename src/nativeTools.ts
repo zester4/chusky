@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, listJobs, listReminders,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
-  forgetMemory, searchMemories, upsertMemory,
+  forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind,
@@ -215,8 +215,24 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
     case "CHUCK_SCRATCHPAD_READ": return readScratchpad(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_SCRATCHPAD_CLEAR": await clearScratchpad(userId, args.key ? text(args.key) : undefined); return { cleared: true };
-    case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), confidence: Number(args.confidence ?? 1) });
-    case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined);
+    case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity === "sensitive" ? "sensitive" : "normal", projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+    case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
+    case "CHUCK_UPDATE_MEMORY": {
+      if (!args.id && !args.key) throw new Error("CHUCK_UPDATE_MEMORY requires id or key");
+      const updated = await updateMemory(userId, { id: args.id ? text(args.id) : undefined, key: args.key ? text(args.key) : undefined, category: args.category as any }, {
+        category: args.newCategory as any,
+        key: args.newKey ? text(args.newKey) : undefined,
+        value: text(args.value),
+        source: args.source ? text(args.source) : undefined,
+        confidence: args.confidence === undefined ? undefined : Number(args.confidence),
+        sensitivity: args.sensitivity === "sensitive" ? "sensitive" : args.sensitivity === "normal" ? "normal" : undefined,
+        projectId: args.projectId ? text(args.projectId) : undefined,
+        personKey: args.personKey ? text(args.personKey) : undefined,
+        reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt),
+        expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt),
+      });
+      return updated ?? { updated: false, reason: "Memory not found" };
+    }
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_START_FACETIME_CALL": return startFaceTimeCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });

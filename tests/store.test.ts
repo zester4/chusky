@@ -4,7 +4,7 @@ import {
   addHistorySummary, appendMessages, acquireUserLock, addReminder, claimTriggerEvent, clearHistory, clearSession,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
   listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
-  upsertMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
+  upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
   claimDelivery, completeDelivery,
   type DaytonaWorkspaceRecord, type TriggerEventRecord,
@@ -89,6 +89,19 @@ test("memory and scratchpad remain private and searchable", async () => {
   await clearScratchpad(userId, "deploy");
   assert.deepEqual(await readScratchpad(userId), {});
   assert.equal(await forgetMemory(userId, "timezone"), true);
+});
+
+test("memory categories, scopes, expiry, and bounded retrieval are enforced", async () => {
+  const userId = 810050;
+  await upsertMemory(userId, { category: "business", key: "carrier", value: "Acme Logistics", confidence: 0.9, source: "user", projectId: "freight", personKey: "ops" });
+  await upsertMemory(userId, { category: "negative", key: "do-not-email", value: "the carrier before approval", confidence: 1, source: "user", projectId: "freight", expiresAt: Date.now() - 1 });
+  await upsertMemory(userId, { category: "personal", key: "language", value: "English", confidence: 1, source: "user" });
+  assert.equal((await searchMemories(userId, "carrier", { category: "business", projectId: "freight", personKey: "ops" })).length, 1);
+  assert.equal((await searchMemories(userId, "before approval", { category: "negative" })).length, 0);
+  assert.equal((await searchMemories(userId, undefined, { limit: 1 })).length, 1);
+  const updated = await updateMemory(userId, { key: "carrier", category: "business" }, { value: "New Logistics", confidence: 1 });
+  assert.equal(updated?.value, "New Logistics");
+  assert.equal((await searchMemories(userId, "New Logistics"))[0].value, "New Logistics");
 });
 
 test("reminder ownership and active listing are enforced", async () => {

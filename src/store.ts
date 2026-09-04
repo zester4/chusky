@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
+import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -207,10 +208,17 @@ export interface ScratchpadEntry {
 
 export interface MemoryFact {
   id: string;
-  category: "preference" | "profile" | "fact" | "instruction";
+  category: "profile" | "personal" | "preference" | "business" | "relationship" | "project" | "procedural" | "episodic" | "document" | "negative" | "fact" | "instruction";
   key: string;
   value: string;
   confidence: number;
+  source: string;
+  sensitivity: "normal" | "sensitive";
+  projectId?: string;
+  personKey?: string;
+  reviewAt?: number;
+  expiresAt?: number;
+  createdAt: number;
   updatedAt: number;
 }
 
@@ -1347,6 +1355,7 @@ function fresh(): UserSession {
 }
 
 let backend: Backend;
+const memoryVectorBackfillUsers = new Set<number>();
 
 export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
   const production = process.env.NODE_ENV === "production";
@@ -1381,9 +1390,30 @@ export function isDurableStore(): boolean {
   return backend instanceof RedisBackend;
 }
 
+const memoryCategories: MemoryFact["category"][] = ["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction"];
+
+function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
+  const now = Date.now();
+  return {
+    id: String(memory.id ?? `mem_legacy_${now}`),
+    category: memoryCategories.includes(memory.category as MemoryFact["category"]) ? memory.category as MemoryFact["category"] : "fact",
+    key: String(memory.key ?? "memory"),
+    value: String(memory.value ?? ""),
+    confidence: typeof memory.confidence === "number" && Number.isFinite(memory.confidence) ? Math.max(0, Math.min(1, memory.confidence)) : 1,
+    source: String(memory.source ?? "legacy"),
+    sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
+    reviewAt: typeof memory.reviewAt === "number" ? memory.reviewAt : undefined,
+    expiresAt: typeof memory.expiresAt === "number" ? memory.expiresAt : undefined,
+    createdAt: typeof memory.createdAt === "number" ? memory.createdAt : (typeof memory.updatedAt === "number" ? memory.updatedAt : now),
+    updatedAt: typeof memory.updatedAt === "number" ? memory.updatedAt : now,
+  };
+}
+
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -1864,29 +1894,99 @@ export async function clearScratchpad(uid: number, key?: string): Promise<void> 
   await saveSession(uid, s);
 }
 
-export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | "updatedAt"> & { id?: string }): Promise<MemoryFact> {
+export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | "updatedAt" | "createdAt" | "source" | "sensitivity"> & Partial<Pick<MemoryFact, "id" | "createdAt" | "source" | "sensitivity">>): Promise<MemoryFact> {
   const s = await getSession(uid);
-  const existing = s.memories.find((m) => (memory.id && m.id === memory.id) || (!memory.id && m.key === memory.key));
-  const value: MemoryFact = { id: existing?.id ?? memory.id ?? `mem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, category: memory.category, key: memory.key, value: memory.value, confidence: Math.max(0, Math.min(1, memory.confidence)), updatedAt: Date.now() };
-  s.memories = [...s.memories.filter((m) => m.id !== value.id && m.key !== value.key), value].slice(-200);
+  const now = Date.now();
+  const existing = s.memories.find((m) => (memory.id && m.id === memory.id) || (!memory.id && m.category === memory.category && m.key === memory.key));
+  const value: MemoryFact = {
+    id: existing?.id ?? memory.id ?? `mem_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    category: memory.category,
+    key: memory.key,
+    value: memory.value,
+    confidence: Math.max(0, Math.min(1, memory.confidence)),
+    source: memory.source || "user",
+    sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
+    reviewAt: Number.isFinite(memory.reviewAt) ? memory.reviewAt : undefined,
+    expiresAt: Number.isFinite(memory.expiresAt) ? memory.expiresAt : undefined,
+    createdAt: existing?.createdAt ?? memory.createdAt ?? now,
+    updatedAt: now,
+  };
+  s.memories = [...s.memories.filter((m) => m.id !== value.id && !(m.category === value.category && m.key === value.key)), value].slice(-200);
   await saveSession(uid, s);
+  if (vectorConfigured()) {
+    const vector = new UpstashKnowledgeStore();
+    void vector.upsertMemory({ userId: String(uid), id: value.id, category: value.category, key: value.key, value: value.value, projectId: value.projectId, personKey: value.personKey }).then(async () => {
+      if (existing?.projectId && existing.projectId !== value.projectId) await vector.deleteMemory(String(uid), existing.id, existing.projectId);
+    }).catch((error) => logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"));
+  }
   return value;
 }
 
-export async function searchMemories(uid: number, query?: string): Promise<MemoryFact[]> {
-  const memories = (await getSession(uid)).memories;
-  if (!query?.trim()) return memories;
-  const tokens = query.toLowerCase().split(/\s+/).filter((t) => t.length > 1);
-  return memories.map((m) => ({ m, score: tokens.reduce((n, t) => n + (`${m.category} ${m.key} ${m.value}`.toLowerCase().includes(t) ? 1 : 0), 0) }))
-    .filter((x) => x.score > 0).sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt).map((x) => x.m);
+export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
+  const session = await getSession(uid);
+  const existing = session.memories.find((memory) => target.id ? memory.id === target.id : memory.key === target.key && (!target.category || memory.category === target.category));
+  if (!existing) return undefined;
+  const changed = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<MemoryFact>;
+  return upsertMemory(uid, {
+    ...existing,
+    ...changed,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    source: changed.source ?? existing.source,
+    sensitivity: changed.sensitivity ?? existing.sensitivity,
+  });
+}
+
+export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; personKey?: string; limit?: number } = {}): Promise<MemoryFact[]> {
+  const now = Date.now();
+  const memories = (await getSession(uid)).memories.filter((m) => !m.expiresAt || m.expiresAt > now)
+    .filter((m) => !options.category || m.category === options.category)
+    .filter((m) => !options.projectId || m.projectId === options.projectId)
+    .filter((m) => !options.personKey || m.personKey === options.personKey);
+  const limit = Math.max(1, Math.min(options.limit ?? 8, 20));
+  const tokens = (query ?? "").toLowerCase().split(/\s+/).filter((t) => t.length > 1);
+  if (!tokens.length) return memories.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+  const lexical = memories.map((m) => ({ m, score: tokens.reduce((n, t) => n + (`${m.category} ${m.key} ${m.value}`.toLowerCase().includes(t) ? 1 : 0), 0) }))
+    .filter((x) => x.score > 0).sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt);
+  const ranked = new Map<string, { memory: MemoryFact; score: number }>(lexical.map((item) => [item.m.id, { memory: item.m, score: item.score * 2 }]));
+  if (vectorConfigured()) {
+    if (!memoryVectorBackfillUsers.has(uid)) {
+      memoryVectorBackfillUsers.add(uid);
+      const allMemories = (await getSession(uid)).memories;
+      void new UpstashKnowledgeStore().upsertMemories(allMemories.map((memory) => ({ userId: String(uid), id: memory.id, category: memory.category, key: memory.key, value: memory.value, projectId: memory.projectId, personKey: memory.personKey }))).catch((error) => {
+        memoryVectorBackfillUsers.delete(uid);
+        logger.warn({ err: error, userId: uid }, "Memory vector backfill unavailable; structured search remains authoritative");
+      });
+    }
+    try {
+        const matches = await new UpstashKnowledgeStore().queryMemories(String(uid), query ?? "", { category: options.category, projectId: options.projectId, personKey: options.personKey, topK: limit });
+      for (const [index, match] of matches.entries()) {
+        const memoryId = typeof match.metadata?.memoryId === "string" ? match.metadata.memoryId : match.id.replace(/^memory:/, "").replace(/:0$/, "");
+        const memory = memories.find((item) => item.id === memoryId);
+        if (!memory) continue;
+        const semanticScore = typeof match.score === "number" ? match.score : 0;
+        const current = ranked.get(memory.id);
+        ranked.set(memory.id, { memory, score: (current?.score ?? 0) + semanticScore + Math.max(0, limit - index) / limit });
+      }
+    } catch (error) { logger.warn({ err: error, userId: uid }, "Semantic memory search unavailable; using structured search"); }
+  }
+  return [...ranked.values()].sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt).slice(0, limit).map((item) => item.memory);
 }
 
 export async function forgetMemory(uid: number, key: string): Promise<boolean> {
   const s = await getSession(uid);
   const before = s.memories.length;
+  const removed = s.memories.filter((m) => m.key === key || m.id === key);
   s.memories = s.memories.filter((m) => m.key !== key && m.id !== key);
   if (s.memories.length === before) return false;
   await saveSession(uid, s);
+  if (vectorConfigured()) {
+    for (const memory of removed) {
+      void new UpstashKnowledgeStore().deleteMemory(String(uid), memory.id, memory.projectId).catch((error) => logger.warn({ err: error, userId: uid, memoryId: memory.id }, "Memory vector deletion unavailable; structured memory removed"));
+    }
+  }
   return true;
 }
 
