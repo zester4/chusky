@@ -37,6 +37,8 @@ import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
+import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
+import { normalizeImageCount, resolveImageWorkspacePath } from "./image.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -553,21 +555,23 @@ export async function runAgent(
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
         let execResult: unknown;
         if (slug === "CHUCK_GENERATE_IMAGE") {
-          const image = await generateImage(String(args.prompt ?? ""));
-          const destination = String(args.destination ?? "telegram");
-          let daytona;
+          const images = await generateImages(String(args.prompt ?? ""), normalizeImageCount(args.count));
+          const destination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
+          const daytona = [];
           if (destination === "daytona" || destination === "both") {
-            const extension = image.mediaType === "image/jpeg" ? "jpg" : image.mediaType === "image/webp" ? "webp" : "png";
-            const workspacePath = String(args.workspacePath ?? `generated/images/${randomUUID()}.${extension}`);
-            daytona = await daytonaEngine.writeBinaryFile(userId, workspacePath, image.data);
+            for (const [index, image] of images.entries()) {
+              const extension = image.mediaType === "image/jpeg" ? "jpg" : image.mediaType === "image/webp" ? "webp" : "png";
+              const workspacePath = resolveImageWorkspacePath(args.workspacePath, index, images.length, extension);
+              daytona.push(await daytonaEngine.writeBinaryFile(userId, workspacePath, image.data));
+            }
           }
-          if (destination === "telegram" || destination === "both") generatedImages.push(image);
-          execResult = { imageGenerated: true, destination, ...(daytona ? { daytona } : {}), note: destination === "daytona" ? "Image saved in Daytona; it was not sent as a separate Telegram image." : "Image generated and delivered through the normal channel." };
+          if (destination === "telegram" || destination === "both") generatedImages.push(...images);
+          execResult = { imageGenerated: true, imageCount: images.length, destination, ...(daytona.length ? { daytona } : {}), note: destination === "daytona" ? "Images saved in Daytona; they were not sent as separate Telegram images." : "Images generated and delivered through the normal channel." };
         } else if (slug === "CHUCK_CREATE_TRIGGER") {
           execResult = await createTrigger(userId, String(args.slug ?? ""), { triggerConfig: args.triggerConfig ?? {} });
         } else if (slug === "CHUCK_GENERATE_VIDEO") {
-          const destination: MediaDestination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
-          const workspacePath = args.workspacePath === undefined ? undefined : safeDaytonaPath(args.workspacePath, "workspacePath");
+          const destination = normalizeVideoDestination(args.destination);
+          const workspacePath = resolveVideoWorkspacePath(destination, args.workspacePath);
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath);
         } else if (slug.startsWith("CHUCK_")) {
           execResult = await nativeTool(userId, slug, executionArgs);
@@ -750,20 +754,31 @@ export async function generateSpeech(text: string): Promise<{ data: Buffer; medi
   return { data, mediaType: res.headers.get("content-type")?.split(";")[0] || "audio/mpeg", generationId: res.headers.get("x-generation-id") ?? undefined };
 }
 
-export async function generateImage(prompt: string): Promise<{ data: Buffer; mediaType: string; cost?: number }> {
+export interface GeneratedImage {
+  data: Buffer;
+  mediaType: string;
+  cost?: number;
+}
+
+export async function generateImages(prompt: string, count = 1): Promise<GeneratedImage[]> {
+  const normalizedCount = normalizeImageCount(count);
   const res = await fetch("https://openrouter.ai/api/v1/images", {
     method: "POST",
     headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: config.imageModel, prompt }),
+    body: JSON.stringify({ model: config.imageModel, prompt, ...(normalizedCount > 1 ? { n: normalizedCount } : {}) }),
   });
   if (!res.ok) throw new Error(`OpenRouter image generation ${res.status}: ${await res.text()}`);
   const result = await res.json() as { data?: { b64_json?: string; media_type?: string }[]; usage?: { cost?: number } };
-  const image = result.data?.[0];
-  if (!image?.b64_json) throw new Error("Image generation returned no image");
-  return { data: Buffer.from(image.b64_json, "base64"), mediaType: image.media_type || "image/png", cost: result.usage?.cost };
+  const images = (result.data ?? []).filter((image) => typeof image.b64_json === "string" && image.b64_json.length > 0).map((image, index) => ({ data: Buffer.from(image.b64_json!, "base64"), mediaType: image.media_type || "image/png", ...(index === 0 && result.usage?.cost !== undefined ? { cost: result.usage.cost } : {}) }));
+  if (!images.length) throw new Error("Image generation returned no images");
+  return images;
 }
 
-export type MediaDestination = "telegram" | "daytona" | "both";
+export async function generateImage(prompt: string): Promise<GeneratedImage> {
+  return (await generateImages(prompt, 1))[0]!;
+}
+
+export type MediaDestination = VideoDestination;
 
 export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string): Promise<{ started: true; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
   if (!config.qstashToken || !config.videoWorkflowUrl) {

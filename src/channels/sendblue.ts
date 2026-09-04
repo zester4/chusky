@@ -221,6 +221,7 @@ export class SendblueAdapter implements ChannelAdapter {
     if (!this.apiKey || !this.apiSecret || !this.fromNumber) throw new Error("Sendblue API credentials and sending number are required");
     const groupId = message.target.metadata?.groupId;
     const isGroup = Boolean(groupId);
+    const attachments = message.attachments?.filter((item) => item.url).slice(0, 10) ?? [];
     const body: Record<string, unknown> = {
       from_number: this.fromNumber,
       content: formatSendblueText(message.text ?? "").slice(0, this.capabilities.maxTextLength),
@@ -228,16 +229,22 @@ export class SendblueAdapter implements ChannelAdapter {
       ...(groupId ? { group_id: groupId } : { number: message.target.conversationId }),
       ...(message.target.metadata?.messageHandle ? { reply_to: { message_handle: message.target.metadata.messageHandle } } : {}),
     };
-    const attachment = message.attachments?.find((item) => item.url);
-    if (attachment) body.media_url = await this.providerMediaUrl(attachment);
-    const response = await this.fetchImpl(`https://api.sendblue.com/api/${isGroup ? "send-group-message" : "send-message"}`, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-    });
-    const value = await response.json() as any;
-    if (!response.ok || value.error_message || value.error) throw new Error(`Sendblue message failed: ${value.error_message ?? value.error ?? response.statusText}`);
-    return { providerMessageId: value.message_handle ? String(value.message_handle) : undefined, deliveredAt: Date.now() };
+    if (message.template || message.interactive) throw new Error("Sendblue interactive or template messages cannot include media");
+    let lastMessageId: string | undefined;
+    for (const [index, attachment] of attachments.entries()) {
+      const mediaUrl = await this.providerMediaUrl(attachment);
+      const response = await this.fetchImpl(`https://api.sendblue.com/api/${isGroup ? "send-group-message" : "send-message"}`, { method: "POST", headers: this.headers(), body: JSON.stringify({ ...body, content: index === 0 ? body.content : "", media_url: mediaUrl }) });
+      const value = await response.json() as any;
+      if (!response.ok || value.error_message || value.error) throw new Error(`Sendblue message failed: ${value.error_message ?? value.error ?? response.statusText}`);
+      if (value.message_handle) lastMessageId = String(value.message_handle);
+    }
+    if (!attachments.length) {
+      const response = await this.fetchImpl(`https://api.sendblue.com/api/${isGroup ? "send-group-message" : "send-message"}`, { method: "POST", headers: this.headers(), body: JSON.stringify(body) });
+      const value = await response.json() as any;
+      if (!response.ok || value.error_message || value.error) throw new Error(`Sendblue message failed: ${value.error_message ?? value.error ?? response.statusText}`);
+      if (value.message_handle) lastMessageId = String(value.message_handle);
+    }
+    return { providerMessageId: lastMessageId, deliveredAt: Date.now() };
   }
 
   /** Download Sendblue CDN media into the bounded format consumed by the agent handler. */

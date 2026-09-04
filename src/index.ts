@@ -52,6 +52,7 @@ import { createLinkCode, listLinkedChannels, setProactivePreference } from "./ch
 import { setVoiceReplies } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
+import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -748,18 +749,18 @@ async function main(): Promise<void> {
       });
       const videoId = submitted.id ?? submitted.video_id ?? submitted.data?.id;
       if (!videoId) throw new Error("Video API returned no job ID");
+      const pollingUrl = videoPollingUrl(submitted as VideoStatusResponse, String(videoId));
       for (let attempt = 0; attempt < 30; attempt++) {
         await workflow.sleep(`wait-${attempt}`, 20);
         const status = await workflow.run(`poll-${attempt}`, async () => {
-          const res = await fetch(`https://openrouter.ai/api/v1/videos/${encodeURIComponent(videoId)}`, { headers: { Authorization: `Bearer ${config.openRouterApiKey}` } });
+          const res = await fetch(pollingUrl, { headers: { Authorization: `Bearer ${config.openRouterApiKey}` } });
           if (!res.ok) throw new Error(`Video status failed: ${res.status}`);
-          return await res.json() as any;
+          return await res.json() as VideoStatusResponse;
         });
         const state = status.status ?? status.data?.status;
         if (state === "completed" || state === "succeeded") {
-          const url = status.url ?? status.video_url ?? status.data?.url ?? status.data?.video_url;
-          if (!url) throw new Error("Completed video has no download URL");
-          const file = await fetch(url);
+          const download = videoDownloadUrl(status, String(videoId));
+          const file = await fetch(download.url, download.authenticated ? { headers: { Authorization: `Bearer ${config.openRouterApiKey}` } } : undefined);
           if (!file.ok) throw new Error(`Video download failed: ${file.status}`);
           const bytes = Buffer.from(await file.arrayBuffer());
           let saved;
@@ -775,7 +776,10 @@ async function main(): Promise<void> {
           }
           return { delivered: Boolean(chatId && (destination === "telegram" || destination === "both")), saved: saved ? { path: saved.path, bytes: saved.bytes } : undefined };
         }
-        if (state === "failed" || state === "error") throw new Error(status.error?.message ?? "Video generation failed");
+        if (state === "failed" || state === "error" || state === "cancelled") {
+          const detail = typeof status.error === "string" ? status.error : status.error && typeof status.error === "object" && "message" in status.error ? String((status.error as { message?: unknown }).message) : "Video generation failed";
+          throw new Error(detail);
+        }
       }
       throw new Error("Video generation timed out");
     }));

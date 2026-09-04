@@ -29,3 +29,11 @@ test("native media tools expose explicit Telegram and Daytona destinations", () 
     assert.equal("workspacePath" in properties, true);
   }
 });
+
+test("image generation exposes a bounded multiple-image count", () => {
+  const tool = chuckTools.find((item) => item.function.name === "CHUCK_GENERATE_IMAGE");
+  const properties = tool?.function.parameters.properties as Record<string, { type?: string; minimum?: number; maximum?: number }>;
+  assert.equal(properties.count?.type, "integer");
+  assert.equal(properties.count?.minimum, 1);
+  assert.equal(properties.count?.maximum, 10);
+});

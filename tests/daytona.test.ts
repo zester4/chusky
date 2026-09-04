@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { chuckTools } from "../src/agentTools.js";
 import { isRiskyToolSlug } from "../src/policy.js";
 import { safeDaytonaPath } from "../src/lib/daytona/index.js";
+import { normalizeImageCount, resolveImageWorkspacePath } from "../src/image.js";
 
 test("Daytona tools are present and uniquely named", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -61,4 +62,12 @@ test("Daytona paths reject traversal and NUL bytes", () => {
   assert.equal(safeDaytonaPath("/home/user/workspace/resume.html"), "workspace/resume.html");
   assert.throws(() => safeDaytonaPath("/tmp/resume.html"), /workspace-relative/);
   assert.throws(() => safeDaytonaPath("C:\\Users\\user\\resume.html"), /workspace-relative/);
+});
+
+test("image output paths remain safe and unique for multiple images", () => {
+  assert.equal(normalizeImageCount(undefined), 1);
+  assert.equal(normalizeImageCount(10), 10);
+  assert.throws(() => normalizeImageCount(11), /from 1 to 10/);
+  assert.equal(resolveImageWorkspacePath("/home/user/generated/set.png", 0, 2, "png"), "generated/set-1.png");
+  assert.equal(resolveImageWorkspacePath("generated/set.png", 1, 2, "png"), "generated/set-2.png");
 });

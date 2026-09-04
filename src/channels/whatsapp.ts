@@ -3,8 +3,10 @@ import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, ChannelTemplate, DeliveryReceipt, InboundMessage, OutboundMessage } from "./contracts.js";
 import { formatWhatsAppText } from "./whatsappFormatting.js";
+import { readR2Object } from "../lib/storage/r2.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+type MediaLoader = (key: string) => Promise<Buffer>;
 
 function header(headers: Headers | Record<string, string | undefined>, name: string): string {
   if (headers instanceof Headers) return headers.get(name) ?? headers.get(name.toLowerCase()) ?? "";
@@ -90,8 +92,21 @@ export class WhatsAppAdapter implements ChannelAdapter {
   readonly capabilities = CHANNEL_CAPABILITIES.whatsapp;
   private readonly fetchImpl: FetchLike;
 
-  constructor(private readonly accessToken: string, private readonly phoneNumberId: string, private readonly graphVersion = "v23.0", fetchImpl: FetchLike = fetch) {
+  constructor(private readonly accessToken: string, private readonly phoneNumberId: string, private readonly graphVersion = "v23.0", fetchImpl: FetchLike = fetch, private readonly mediaLoader: MediaLoader = readR2Object) {
     this.fetchImpl = fetchImpl;
+  }
+
+  private async providerMediaId(attachment: ChannelAttachment): Promise<string | undefined> {
+    if (!attachment.id.startsWith("whatsapp/")) return undefined;
+    const bytes = await this.mediaLoader(attachment.id);
+    if (!bytes.length || bytes.length > 12 * 1024 * 1024) throw new Error("WhatsApp outbound media is empty or too large");
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("file", new Blob([bytes], { type: attachment.mimeType || "application/octet-stream" }), attachment.filename || `chusky.${attachment.mimeType?.split("/")[1] || "bin"}`);
+    const response = await this.fetchImpl(`https://graph.facebook.com/${this.graphVersion}/${this.phoneNumberId}/media`, { method: "POST", headers: { Authorization: `Bearer ${this.accessToken}` }, body: form });
+    const value = await response.json().catch(() => ({})) as any;
+    if (!response.ok || !value.id) throw new Error(`WhatsApp media upload failed: ${value.error?.message ?? response.statusText}`);
+    return String(value.id);
   }
 
   private templateBody(template: ChannelTemplate): Record<string, unknown> {
@@ -113,6 +128,13 @@ export class WhatsAppAdapter implements ChannelAdapter {
   async send(message: OutboundMessage): Promise<DeliveryReceipt> {
     if (!this.accessToken || !this.phoneNumberId) throw new Error("WhatsApp access token and phone number ID are required");
     if (message.template && message.interactive) throw new Error("WhatsApp template cannot be combined with interactive message");
+    if (message.attachments?.length && (message.template || message.interactive)) throw new Error("WhatsApp interactive or template messages cannot include media");
+    const send = async (body: Record<string, unknown>): Promise<string | undefined> => {
+      const response = await this.fetchImpl(`https://graph.facebook.com/${this.graphVersion}/${this.phoneNumberId}/messages`, { method: "POST", headers: { Authorization: `Bearer ${this.accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const value = await response.json() as any;
+      if (!response.ok || value.error) throw new Error(`WhatsApp message failed: ${value.error?.message ?? response.statusText}`);
+      return Array.isArray(value.messages) ? String(value.messages[0]?.id ?? "") : undefined;
+    };
     const body = message.template ? {
       messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "template",
       template: this.templateBody(message.template),
@@ -120,14 +142,16 @@ export class WhatsAppAdapter implements ChannelAdapter {
       messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "interactive",
       interactive: { type: "button", body: { text: message.interactive.body.slice(0, 1024) }, action: { buttons: message.interactive.buttons.slice(0, 3).map((button) => ({ type: "reply", reply: { id: button.id.slice(0, 256), title: button.title.slice(0, 20) } })) } },
     } : { messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type: "text", text: { preview_url: false, body: formatWhatsAppText(message.text ?? "") } };
-    const response = await this.fetchImpl(`https://graph.facebook.com/${this.graphVersion}/${this.phoneNumberId}/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${this.accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const value = await response.json() as any;
-    if (!response.ok || value.error) throw new Error(`WhatsApp message failed: ${value.error?.message ?? response.statusText}`);
-    return { providerMessageId: Array.isArray(value.messages) ? String(value.messages[0]?.id ?? "") : undefined, deliveredAt: Date.now() };
+    let lastMessageId: string | undefined;
+    if (!message.attachments?.length || message.text?.trim()) lastMessageId = await send(body);
+    for (const attachment of (message.attachments ?? []).slice(0, 10)) {
+      const mediaId = await this.providerMediaId(attachment);
+      const media = mediaId ? { id: mediaId } : { link: attachment.url };
+      if (!attachment.url && !mediaId) throw new Error("WhatsApp outbound media requires an HTTPS URL");
+      const type = attachment.kind;
+      lastMessageId = await send({ messaging_product: "whatsapp", recipient_type: "individual", to: message.target.conversationId, type, [type]: media });
+    }
+    return { providerMessageId: lastMessageId, deliveredAt: Date.now() };
   }
 
   /** Resolve a provider media ID into a bounded data URL for the agent. */

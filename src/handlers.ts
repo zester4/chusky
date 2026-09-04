@@ -855,8 +855,11 @@ export function registerHandlers(bot: Bot): void {
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
       await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
-      for (const image of result.generatedImages ?? []) {
-      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
+      const generatedImages = result.generatedImages ?? [];
+      if (generatedImages.length > 1) {
+        await ctx.replyWithMediaGroup(generatedImages.map((image, index) => ({ type: "photo" as const, media: new InputFile(image.data, image.mediaType.includes("jpeg") ? `chusky-${index + 1}.jpg` : `chusky-${index + 1}.png`) })));
+      } else for (const image of generatedImages) {
+        await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);
       }
 

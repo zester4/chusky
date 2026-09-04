@@ -133,6 +133,23 @@ test("Sendblue uploads private R2 media before sending instead of passing a sign
   assert.deepEqual(JSON.parse(String(requests[1].body)).media_url, "https://cdn.sendblue.example/chusky.mp3");
 });
 
+test("Sendblue sends every generated attachment as a separate iMessage", async () => {
+  const requests: any[] = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: `sb-${requests.length}` }), { status: 200 });
+  }) as typeof fetch);
+  await adapter.send({ accountId: "account_42", userId: 42, target: { provider: "sendblue", conversationId: "+15550001" }, text: "Here are the images", attachments: [
+    { id: "image-1", kind: "image", mimeType: "image/png", url: "https://cdn.example/1.png" },
+    { id: "image-2", kind: "image", mimeType: "image/png", url: "https://cdn.example/2.png" },
+  ], idempotencyKey: "sb-images-1" });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].body.content, "Here are the images");
+  assert.equal(requests[0].body.media_url, "https://cdn.example/1.png");
+  assert.equal(requests[1].body.content, "");
+  assert.equal(requests[1].body.media_url, "https://cdn.example/2.png");
+});
+
 test("Sendblue converts Markdown into readable iMessage text", () => {
   const result = formatSendblueText("**Today**\n\n- Check email\n- [Open dashboard](https://example.com)\n\n`npm test`");
   assert.equal(result, "Today\n\n• Check email\n• Open dashboard: https://example.com\n\nnpm test");
@@ -355,6 +372,26 @@ test("WhatsApp sends approved templates with Meta's documented payload", async (
     template: { name: "hello_world", language: { code: "en_US" }, components: [{ type: "body", parameters: [{ type: "text", text: "Seyyid" }] }] },
   });
   assert.deepEqual((await getOutbox(record.id))?.template, { name: "hello_world", languageCode: "en_US", components: [{ type: "body", parameters: [{ type: "text", text: "Seyyid" }] }] });
+});
+
+test("WhatsApp sends every generated attachment as a separate media message", async () => {
+  const requests: any[] = [];
+  const fetcher = (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ messages: [{ id: `wamid.${requests.length}` }] }), { status: 200 });
+  }) as typeof fetch;
+  const adapter = new WhatsAppAdapter("token", "P1", "v23.0", fetcher);
+  const result = await adapter.send({ accountId: "account_1", userId: 1, target: { provider: "whatsapp", conversationId: "1555" }, text: "Here are the images", attachments: [
+    { id: "image-1", kind: "image", mimeType: "image/png", url: "https://cdn.example/1.png" },
+    { id: "image-2", kind: "image", mimeType: "image/png", url: "https://cdn.example/2.png" },
+  ], idempotencyKey: "wa-images-1" });
+  assert.equal(requests.length, 3);
+  assert.equal(requests[0].body.type, "text");
+  assert.equal(requests[1].body.type, "image");
+  assert.deepEqual(requests[1].body.image, { link: "https://cdn.example/1.png" });
+  assert.equal(requests[2].body.type, "image");
+  assert.deepEqual(requests[2].body.image, { link: "https://cdn.example/2.png" });
+  assert.equal(result.providerMessageId, "wamid.3");
 });
 
 test("WhatsApp rejects unsafe or conflicting template messages", async () => {
