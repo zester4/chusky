@@ -28,7 +28,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, getSession, saveSession, setApprovalStatus, setComposioSessionId } from "./store.js";
+import { createApproval, createVideoJob, getSession, saveSession, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { Message } from "./store.js";
 import { nativeTool } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
@@ -780,16 +780,23 @@ export async function generateImage(prompt: string): Promise<GeneratedImage> {
 
 export type MediaDestination = VideoDestination;
 
-export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string): Promise<{ started: true; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
+export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string): Promise<{ started: true; jobId: string; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
   if (!config.qstashToken || !config.videoWorkflowUrl) {
     throw new Error("Video workflows are not configured. Set QSTASH_TOKEN and VIDEO_WORKFLOW_URL.");
   }
   const resolvedPath = destination === "daytona" || destination === "both"
     ? (workspacePath ? safeDaytonaPath(workspacePath, "workspacePath") : `generated/videos/${randomUUID()}.mp4`)
     : undefined;
+  const job = await createVideoJob({ userId, prompt, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) });
   const client = new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
-  const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath } });
-  return { started: true, workflowId: result.workflowRunId, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) };
+  try {
+    const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath, jobId: job.id } });
+    await updateVideoJob(userId, job.id, { workflowRunId: result.workflowRunId, status: "running" });
+    return { started: true, jobId: job.id, workflowId: result.workflowRunId, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) };
+  } catch (error) {
+    await updateVideoJob(userId, job.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
 }
 
 // ── Trigger webhook handler ───────────────────────────────────────────────────

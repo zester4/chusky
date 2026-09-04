@@ -39,8 +39,27 @@ export interface UserSession {
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
   sdkProjects?: SdkProjectRecord[];
   faceTimeCalls?: FaceTimeCallRecord[];
+  videoJobs?: VideoJobRecord[];
   createdAt: number;
   updatedAt: number;
+}
+
+export type VideoJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export interface VideoJobRecord {
+  id: string;
+  userId: number;
+  prompt: string;
+  destination: "telegram" | "daytona" | "both";
+  workspacePath?: string;
+  workflowRunId?: string;
+  status: VideoJobStatus;
+  pollCount: number;
+  error?: string;
+  resultPath?: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
 }
 /** Safe control-plane record. It deliberately excludes Agora credentials and media. */
 export interface FaceTimeCallRecord {
@@ -1272,7 +1291,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], artifacts: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -1312,7 +1331,7 @@ export function isDurableStore(): boolean {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: s.memories ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -1405,6 +1424,35 @@ export async function setModel(uid: number, model: string): Promise<void> {
 
 export async function getModel(uid: number): Promise<string> {
   return (await getSession(uid)).model;
+}
+
+export async function createVideoJob(input: Pick<VideoJobRecord, "userId" | "prompt" | "destination"> & Partial<Pick<VideoJobRecord, "workspacePath">>): Promise<VideoJobRecord> {
+  const session = await getSession(input.userId);
+  const now = Date.now();
+  const job: VideoJobRecord = { id: `vid_${randomUUID()}`, userId: input.userId, prompt: input.prompt.slice(0, 4000), destination: input.destination, workspacePath: input.workspacePath, status: "queued", pollCount: 0, createdAt: now, updatedAt: now };
+  session.videoJobs = [...(session.videoJobs ?? []), job].slice(-20);
+  await saveSession(input.userId, session);
+  return job;
+}
+
+export async function getVideoJob(userId: number, id: string): Promise<VideoJobRecord | undefined> {
+  return (await getSession(userId)).videoJobs?.find((job) => job.id === id);
+}
+
+export async function listVideoJobs(userId: number): Promise<VideoJobRecord[]> {
+  return [...((await getSession(userId)).videoJobs ?? [])].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function updateVideoJob(userId: number, id: string, patch: Partial<Omit<VideoJobRecord, "id" | "userId" | "createdAt">>): Promise<VideoJobRecord | undefined> {
+  const session = await getSession(userId);
+  const jobs = session.videoJobs ?? [];
+  const index = jobs.findIndex((job) => job.id === id);
+  if (index < 0) return undefined;
+  const next = { ...jobs[index]!, ...patch, id, userId, createdAt: jobs[index]!.createdAt, updatedAt: Date.now() };
+  jobs[index] = next;
+  session.videoJobs = jobs;
+  await saveSession(userId, session);
+  return next;
 }
 
 export async function setVoiceReplies(uid: number, enabled: boolean): Promise<void> {

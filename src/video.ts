@@ -63,5 +63,5 @@ export function videoDownloadUrl(status: VideoStatusResponse, videoId: string): 
     ?? stringUrl(status.data?.url)
     ?? stringUrl(status.data?.video_url);
   if (directUrl) return { url: directUrl, authenticated: false };
-  return { url: `https://openrouter.ai/api/v1/videos/${encodeURIComponent(videoId)}/content`, authenticated: true };
+  return { url: `https://openrouter.ai/api/v1/videos/${encodeURIComponent(videoId)}/content?index=0`, authenticated: true };
 }

@@ -19,5 +19,5 @@ test("video polling uses OpenRouter's returned polling URL", () => {
 
 test("video download supports unsigned URLs and the content fallback", () => {
   assert.deepEqual(videoDownloadUrl({ unsigned_urls: ["https://storage.example/video.mp4"] }, "job-1"), { url: "https://storage.example/video.mp4", authenticated: false });
-  assert.deepEqual(videoDownloadUrl({}, "job-1"), { url: "https://openrouter.ai/api/v1/videos/job-1/content", authenticated: true });
+  assert.deepEqual(videoDownloadUrl({}, "job-1"), { url: "https://openrouter.ai/api/v1/videos/job-1/content?index=0", authenticated: true });
 });

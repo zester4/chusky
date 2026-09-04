@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -735,9 +735,11 @@ async function main(): Promise<void> {
     });
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string };
+      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string };
+      try {
       const destination = payload.destination ?? "telegram";
       const workspacePath = payload.workspacePath ? safeDaytonaPath(payload.workspacePath, "workspacePath") : undefined;
+      if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "running", workflowRunId: workflow.workflowRunId });
       const submitted = await workflow.run("submit-video", async () => {
         const res = await fetch("https://openrouter.ai/api/v1/videos", {
           method: "POST",
@@ -754,9 +756,14 @@ async function main(): Promise<void> {
         await workflow.sleep(`wait-${attempt}`, 20);
         const status = await workflow.run(`poll-${attempt}`, async () => {
           const res = await fetch(pollingUrl, { headers: { Authorization: `Bearer ${config.openRouterApiKey}` } });
+          // OpenRouter can briefly return 404 while the asynchronous job is
+          // being registered. Keep the workflow's own bounded poll loop alive
+          // instead of throwing and making QStash retry the entire step later.
+          if (res.status === 404) return { status: "pending" } as VideoStatusResponse;
           if (!res.ok) throw new Error(`Video status failed: ${res.status}`);
           return await res.json() as VideoStatusResponse;
         });
+        if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "running", pollCount: attempt + 1 });
         const state = status.status ?? status.data?.status;
         if (state === "completed" || state === "succeeded") {
           const download = videoDownloadUrl(status, String(videoId));
@@ -774,14 +781,21 @@ async function main(): Promise<void> {
           if (chatId && saved) {
             await bot.api.sendMessage(chatId, `📁 Video saved in Daytona at <code>${xmlEscape(saved.path)}</code>.`, { parse_mode: "HTML" });
           }
+          if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "completed", resultPath: saved?.path, completedAt: Date.now() });
           return { delivered: Boolean(chatId && (destination === "telegram" || destination === "both")), saved: saved ? { path: saved.path, bytes: saved.bytes } : undefined };
         }
         if (state === "failed" || state === "error" || state === "cancelled") {
           const detail = typeof status.error === "string" ? status.error : status.error && typeof status.error === "object" && "message" in status.error ? String((status.error as { message?: unknown }).message) : "Video generation failed";
+          if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "failed", error: detail });
           throw new Error(detail);
         }
       }
+      if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "failed", error: "Video generation timed out" });
       throw new Error("Video generation timed out");
+      } catch (error) {
+        if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+        throw error;
+      }
     }));
 
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {

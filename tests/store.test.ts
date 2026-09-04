@@ -10,9 +10,31 @@ import {
   type DaytonaWorkspaceRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
   createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
+  createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
 } from "../src/store.js";
+import { nativeTool } from "../src/nativeTools.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("video jobs persist owner-scoped lifecycle and progress", async () => {
+  const job = await createVideoJob({ userId: 810099, prompt: "A red kite", destination: "telegram" });
+  assert.equal(job.status, "queued");
+  await updateVideoJob(810099, job.id, { workflowRunId: "wf-1", status: "running", pollCount: 3 });
+  const running = await getVideoJob(810099, job.id);
+  assert.equal(running?.status, "running");
+  assert.equal(running?.pollCount, 3);
+  assert.equal(await getVideoJob(810100, job.id), undefined);
+  await updateVideoJob(810099, job.id, { status: "completed", completedAt: Date.now() });
+  assert.equal((await listVideoJobs(810099))[0]?.status, "completed");
+});
+
+test("video status native tool is read-only and owner-scoped", async () => {
+  const job = await createVideoJob({ userId: 810101, prompt: "A blue train", destination: "telegram" });
+  await updateVideoJob(810101, job.id, { status: "running", pollCount: 2 });
+  const result = await nativeTool(810101, "CHUCK_VIDEO_STATUS", { id: job.id }) as Array<{ id: string; status: string; pollCount: number }>;
+  assert.deepEqual(result, [{ ...job, status: "running", pollCount: 2, updatedAt: result[0]!.updatedAt }]);
+  assert.deepEqual(await nativeTool(810102, "CHUCK_VIDEO_STATUS", { id: job.id }), []);
+});
 
 test("normalizes old sessions while preserving new durable defaults", async () => {
   const userId = 810001;

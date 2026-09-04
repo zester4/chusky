@@ -9,7 +9,7 @@ test("native tool catalog has unique names", () => {
 
 test("native catalog includes core agent capabilities", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
-  for (const name of ["CHUCK_SET_REMINDER", "CHUCK_SCHEDULE_JOB", "CHUCK_SAVE_MEMORY", "CHUCK_SCRATCHPAD_WRITE", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO"]) {
+  for (const name of ["CHUCK_SET_REMINDER", "CHUCK_SCHEDULE_JOB", "CHUCK_SAVE_MEMORY", "CHUCK_SCRATCHPAD_WRITE", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO", "CHUCK_VIDEO_STATUS"]) {
     assert.equal(names.has(name), true, name);
   }
 });

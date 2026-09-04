@@ -13,6 +13,7 @@ import {
   type TaskStatus,
   type JobRecord, type ReminderRecord,
   listFaceTimeCalls,
+  listVideoJobs,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
@@ -227,6 +228,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_LIST_FACETIME_CALLS": return listFaceTimeCalls(userId);
     case "CHUCK_START_PHONE_CALL": return startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
+    case "CHUCK_VIDEO_STATUS": {
+      const id = args.id ? text(args.id) : undefined;
+      const limit = args.limit === undefined ? 5 : Math.max(1, Math.min(10, Math.floor(Number(args.limit))));
+      const jobs = await listVideoJobs(userId);
+      return jobs.filter((job) => !id || job.id === id).slice(0, limit);
+    }
     case "CHUCK_TASK_CREATE": return createTask(userId, { title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
     case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));
     case "CHUCK_TASK_GET": {
