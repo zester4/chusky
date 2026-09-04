@@ -1,6 +1,6 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { config } from "./config.js";
-import { getSession } from "./store.js";
+import { listAllJobs } from "./store.js";
 import { workflowFailureUrl } from "./triggerWorkflow.js";
 import { workflowUrl } from "./nativeTools.js";
 import type { JobRecord } from "./store.js";
@@ -25,7 +25,7 @@ interface ReconciliationDependencies {
 export async function reconcileUserSchedules(userId: number, overrides?: Partial<ReconciliationDependencies>): Promise<ScheduleReconciliationResult> {
   let client: QStashClient | undefined;
   const qstash = () => client ??= new QStashClient({ token: config.qstashToken });
-  const jobs = overrides?.jobs ?? (async () => (await getSession(userId)).jobs);
+  const jobs = overrides?.jobs ?? (() => listAllJobs(userId));
   const schedules = overrides?.schedules ?? (async () => qstash().schedules.list());
   const create = overrides?.create ?? (async (job) => {
     await qstash().schedules.create({

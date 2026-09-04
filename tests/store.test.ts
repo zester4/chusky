@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   addHistorySummary, appendMessages, acquireUserLock, addReminder, claimTriggerEvent, clearHistory, clearSession,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
-  listReminders, releaseUserLock, saveDaytonaWorkspace, setApprovalStatus, setComposioSessionId, setModel,
+  listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
   claimDelivery, completeDelivery,
@@ -97,6 +97,16 @@ test("reminder ownership and active listing are enforced", async () => {
   await addReminder(userId, reminder);
   assert.equal((await listReminders(userId)).length, 1);
   assert.equal(await (await import("../src/store.js")).getReminder(810007, reminder.id).then((v) => v === undefined), true);
+});
+
+test("scheduling records survive ordinary session writes", async () => {
+  const userId = 810007;
+  await addReminder(userId, { id: "rem-durable", userId, text: "long-term", runAt: Date.now() + 31 * 24 * 60 * 60 * 1000, status: "scheduled", createdAt: Date.now() });
+  const session = await getSession(userId);
+  session.reminders = [];
+  session.jobs = [];
+  await saveSession(userId, session);
+  assert.equal((await listReminders(userId)).some((item) => item.id === "rem-durable"), true);
 });
 
 test("approvals require exact ownership, expiry, and one-time state transitions", async () => {

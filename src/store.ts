@@ -477,6 +477,10 @@ interface Backend {
   clearDaytonaWorkspace(userId: number): Promise<void>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   saveTasks(userId: number, tasks: TaskRecord[]): Promise<void>;
+  getReminders(userId: number): Promise<ReminderRecord[]>;
+  saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
+  getJobs(userId: number): Promise<JobRecord[]>;
+  saveJobs(userId: number, jobs: JobRecord[]): Promise<void>;
   getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]>;
   mutateAttentionRecords(userId: number, collection: AttentionCollection, mutate: (records: AttentionRecord[]) => AttentionRecord[]): Promise<AttentionRecord[]>;
   claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined>;
@@ -531,6 +535,8 @@ class RedisBackend implements Backend {
   private rk = (id: number) => `chuck:rate:${id}`;
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
+  private reminderk = (id: number) => `chuck:reminders:${id}`;
+  private jobk = (id: number) => `chuck:jobs:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
   private pk = (hash: string) => `chuck:cli:pairing:${hash}`;
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
@@ -637,6 +643,34 @@ class RedisBackend implements Backend {
   async saveTasks(userId: number, tasks: TaskRecord[]): Promise<void> {
     // Intentionally no expiry: task recovery must outlive conversational context.
     await this.r.set(this.taskk(userId), JSON.stringify(tasks));
+  }
+  async getReminders(userId: number): Promise<ReminderRecord[]> {
+    const raw = await this.r.get(this.reminderk(userId));
+    if (raw) {
+      try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+    }
+    // Lazy migration keeps existing reminders created before dedicated keys
+    // were introduced, without extending the session key's expiry.
+    const legacy = (await this.getSession(userId)).reminders ?? [];
+    if (legacy.length) await this.saveReminders(userId, legacy);
+    return legacy;
+  }
+  async saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void> {
+    // Scheduling state must outlive the conversational session TTL.
+    await this.r.set(this.reminderk(userId), JSON.stringify(reminders.slice(-100)));
+  }
+  async getJobs(userId: number): Promise<JobRecord[]> {
+    const raw = await this.r.get(this.jobk(userId));
+    if (raw) {
+      try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+    }
+    const legacy = (await this.getSession(userId)).jobs ?? [];
+    if (legacy.length) await this.saveJobs(userId, legacy);
+    return legacy;
+  }
+  async saveJobs(userId: number, jobs: JobRecord[]): Promise<void> {
+    // Scheduling state must outlive the conversational session TTL.
+    await this.r.set(this.jobk(userId), JSON.stringify(jobs.slice(-100)));
   }
   async getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]> {
     const raw = await this.r.get(this.attentionKey(userId, collection));
@@ -1022,9 +1056,27 @@ class MemoryBackend implements Backend {
   private deliveryClaims = new Map<string, number>();
   private completedDeliveries = new Map<string, number>();
   private attention = new Map<string, AttentionRecord[]>();
+  private reminders = new Map<number, ReminderRecord[]>();
+  private jobs = new Map<number, JobRecord[]>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async getReminders(userId: number) {
+    const existing = this.reminders.get(userId);
+    if (existing) return existing;
+    const legacy = (this.sessions.get(userId) ?? fresh()).reminders ?? [];
+    this.reminders.set(userId, legacy);
+    return legacy;
+  }
+  async saveReminders(userId: number, reminders: ReminderRecord[]) { this.reminders.set(userId, reminders.slice(-100)); }
+  async getJobs(userId: number) {
+    const existing = this.jobs.get(userId);
+    if (existing) return existing;
+    const legacy = (this.sessions.get(userId) ?? fresh()).jobs ?? [];
+    this.jobs.set(userId, legacy);
+    return legacy;
+  }
+  async saveJobs(userId: number, jobs: JobRecord[]) { this.jobs.set(userId, jobs.slice(-100)); }
   async createTriggerEvent(record: TriggerEventRecord) { return this.triggerEvents.get(record.eventId) ?? (this.triggerEvents.set(record.eventId, record), record); }
   async getTriggerEvent(eventId: string) { return this.triggerEvents.get(eventId); }
   async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>) {
@@ -1746,48 +1798,50 @@ export async function updateTriggerEvent(eventId: string, patch: Partial<Trigger
 }
 
 export async function addReminder(uid: number, reminder: ReminderRecord): Promise<void> {
-  const s = await getSession(uid);
-  s.reminders = [...s.reminders.filter((r) => r.id !== reminder.id), reminder].slice(-100);
-  await saveSession(uid, s);
+  const reminders = await backend.getReminders(uid);
+  await backend.saveReminders(uid, [...reminders.filter((r) => r.id !== reminder.id), reminder]);
 }
 
 export async function listReminders(uid: number): Promise<ReminderRecord[]> {
-  return (await getSession(uid)).reminders.filter((r) => r.status === "scheduled").sort((a, b) => a.runAt - b.runAt);
+  return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled").sort((a, b) => a.runAt - b.runAt);
 }
 
 export async function getReminder(uid: number, id: string): Promise<ReminderRecord | undefined> {
-  return (await getSession(uid)).reminders.find((r) => r.id === id);
+  return (await backend.getReminders(uid)).find((r) => r.id === id);
 }
 
 export async function updateReminder(uid: number, id: string, patch: Partial<ReminderRecord>): Promise<boolean> {
-  const s = await getSession(uid);
-  const r = s.reminders.find((item) => item.id === id);
+  const reminders = await backend.getReminders(uid);
+  const r = reminders.find((item) => item.id === id);
   if (!r) return false;
   Object.assign(r, patch);
-  await saveSession(uid, s);
+  await backend.saveReminders(uid, reminders);
   return true;
 }
 
 export async function addJob(uid: number, job: JobRecord): Promise<void> {
-  const s = await getSession(uid);
-  s.jobs = [...s.jobs.filter((j) => j.id !== job.id), job].slice(-100);
-  await saveSession(uid, s);
+  const jobs = await backend.getJobs(uid);
+  await backend.saveJobs(uid, [...jobs.filter((j) => j.id !== job.id), job]);
 }
 
 export async function listJobs(uid: number): Promise<JobRecord[]> {
-  return (await getSession(uid)).jobs.filter((j) => j.status === "active");
+  return (await backend.getJobs(uid)).filter((j) => j.status === "active");
+}
+
+export async function listAllJobs(uid: number): Promise<JobRecord[]> {
+  return backend.getJobs(uid);
 }
 
 export async function getJob(uid: number, id: string): Promise<JobRecord | undefined> {
-  return (await getSession(uid)).jobs.find((j) => j.id === id);
+  return (await backend.getJobs(uid)).find((j) => j.id === id);
 }
 
 export async function updateJob(uid: number, id: string, patch: Partial<JobRecord>): Promise<boolean> {
-  const s = await getSession(uid);
-  const j = s.jobs.find((item) => item.id === id);
+  const jobs = await backend.getJobs(uid);
+  const j = jobs.find((item) => item.id === id);
   if (!j) return false;
   Object.assign(j, patch);
-  await saveSession(uid, s);
+  await backend.saveJobs(uid, jobs);
   return true;
 }
 

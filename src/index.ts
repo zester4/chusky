@@ -424,7 +424,8 @@ async function main(): Promise<void> {
       const totalPages = Math.max(1, Math.ceil(s.history.length / pageSize));
       const historyPage = Math.min(page, totalPages);
       const start = (historyPage - 1) * pageSize;
-      return c.json({ ok: true, userId: device.userId, device: device.name, model: s.model, history: s.history.slice(start, start + pageSize), historyPage, historyPageSize: pageSize, historyCount: s.history.length, historyTotalPages: totalPages, summaries: s.summaries.slice(-3), memoryCount: s.memories.length, scratchpadCount: Object.keys(s.scratchpad).length, approvals: s.approvals.filter((a) => a.status === "pending" && a.expiresAt > Date.now()), reminders: s.reminders.filter((r) => r.status === "scheduled"), jobs: s.jobs.filter((j) => j.status === "active"), tasks: (await listTasks(device.userId)).slice(0, 50) });
+      const [reminders, jobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
+      return c.json({ ok: true, userId: device.userId, device: device.name, model: s.model, history: s.history.slice(start, start + pageSize), historyPage, historyPageSize: pageSize, historyCount: s.history.length, historyTotalPages: totalPages, summaries: s.summaries.slice(-3), memoryCount: s.memories.length, scratchpadCount: Object.keys(s.scratchpad).length, approvals: s.approvals.filter((a) => a.status === "pending" && a.expiresAt > Date.now()), reminders, jobs, tasks: (await listTasks(device.userId)).slice(0, 50) });
     });
 
     app.get("/cli/collection/:kind", async (c) => {
@@ -454,8 +455,9 @@ async function main(): Promise<void> {
       const session = await getSession(device.userId);
       const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > since).slice(0, 20);
       const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > since).slice(-20);
-      const reminders = session.reminders.filter((reminder) => reminder.createdAt > since).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
-      const jobs = session.jobs.filter((job) => job.createdAt > since).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
+      const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
+      const reminders = storedReminders.filter((reminder) => reminder.createdAt > since).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
+      const jobs = storedJobs.filter((job) => job.createdAt > since).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
       return c.json({ ok: true, since, now: Date.now(), tasks, approvals, reminders, jobs });
     });
 
@@ -468,8 +470,9 @@ async function main(): Promise<void> {
           const session = await getSession(device.userId);
           const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > cursor).slice(0, 20);
           const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > cursor).slice(-20);
-          const reminders = session.reminders.filter((reminder) => reminder.createdAt > cursor).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
-          const jobs = session.jobs.filter((job) => job.createdAt > cursor).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
+          const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
+          const reminders = storedReminders.filter((reminder) => reminder.createdAt > cursor).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
+          const jobs = storedJobs.filter((job) => job.createdAt > cursor).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
           const now = Date.now();
           if (tasks.length || approvals.length || reminders.length || jobs.length) {
             await stream.writeSSE({ event: "notification", data: JSON.stringify({ tasks, approvals, reminders, jobs, now }) });
