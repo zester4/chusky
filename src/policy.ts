@@ -3,7 +3,7 @@ export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|SEND|POST|PUBLISH
 export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
-  "CHUCK_ARTIFACT", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
+  "CHUCK_ARTIFACT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
   "CHUCK_ATTENTION_STATE",
@@ -99,6 +99,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
   CHUCK_DAYTONA_BROWSER: "🌐 I’m browsing with my private computer workspace…",
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
+  CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking your presentation…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",
   CHUCK_TASK_LIST: "📋 I’m checking your tasks…",
   CHUCK_TASK_GET: "📋 I’m checking that task…",

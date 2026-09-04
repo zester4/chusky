@@ -262,3 +262,54 @@ test("runs the visual renderability gate after structural artifact validation", 
   assert.equal(commands.length, 2);
   assert.match(commands[1], /base64\.b64decode/);
 });
+
+test("creates a presentation through the guarded python-pptx generator before delivery", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820020) as any;
+  const commands: string[] = [];
+  const originalExecute = sandbox.process.executeCommand;
+  sandbox.process.executeCommand = async (command: string, ...rest: unknown[]) => {
+    commands.push(command);
+    return originalExecute.call(sandbox.process, command, ...rest);
+  };
+  const result = await e.createPresentation(820020, {
+    title: "Quarterly review",
+    slides: [{
+      title: "Overview",
+      bullets: ["Revenue grew"],
+      table: [["Metric", "Value"], ["Revenue", "10"]],
+    }],
+  }) as any;
+  assert.equal(result.__chuskyArtifactReady, true);
+  assert.equal(result.generated, true);
+  assert.equal(result.type, "presentation");
+  assert.equal(result.slideCount, 2);
+  assert.equal(commands.length, 3);
+  assert.match(commands[0], /python3 -c/);
+  assert.match(commands[0], /base64\.b64decode/);
+});
+
+test("rejects an overlapping table and chart in a generated presentation", async () => {
+  const e = engine();
+  await assert.rejects(
+    () => e.createPresentation(820021, {
+      title: "Invalid layout",
+      slides: [{
+        title: "One slide",
+        table: [["A"]],
+        chart: { categories: ["Q1"], series: [{ name: "Revenue", values: [1] }] },
+      }],
+    }),
+    /cannot include both table and chart/,
+  );
+});
+
+test("turns a missing artifact path into an actionable input error", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820019) as any;
+  sandbox.fs.getFileDetails = async () => { throw new Error("stat workspace/missing.pptx: no such file or directory"); };
+  await assert.rejects(
+    () => e.artifact(820019, { action: "register", type: "presentation", path: "workspace/missing.pptx" }),
+    /Artifact file was not found.*Generate the file in Daytona/,
+  );
+});

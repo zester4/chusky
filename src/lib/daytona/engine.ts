@@ -132,10 +132,16 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "            # when a slide, media target, or relationship is missing.",
     "            for name in names:",
     "                if name.lower().endswith('.xml') or name.lower().endswith('.rels'):",
-    "                    ET.fromstring(archive.read(name))",
+    "                    try:",
+    "                        ET.fromstring(archive.read(name))",
+    "                    except ET.ParseError as error:",
+    "                        fail('invalid XML in ' + name + ': ' + str(error))",
     "            rel_ns='{http://schemas.openxmlformats.org/package/2006/relationships}'",
     "            for rels_name in [name for name in names if name.endswith('.rels')]:",
-    "                rels=ET.fromstring(archive.read(rels_name))",
+    "                try:",
+    "                    rels=ET.fromstring(archive.read(rels_name))",
+    "                except ET.ParseError as error:",
+    "                    fail('invalid relationships XML in ' + rels_name + ': ' + str(error))",
     "                source_dir='' if rels_name == '_rels/.rels' else posixpath.dirname(rels_name).rsplit('/_rels', 1)[0]",
     "                for rel in rels.findall(rel_ns + 'Relationship'):",
     "                    target=rel.attrib.get('Target', '')",
@@ -229,6 +235,137 @@ function boundedNumber(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
   if (!Number.isFinite(n) || n < 1) return fallback;
   return Math.min(Math.floor(n), max);
+}
+
+type PresentationSlideInput = {
+  title: string;
+  body?: string;
+  bullets?: string[];
+  imagePaths?: string[];
+  table?: string[][];
+  chart?: { categories: string[]; series: Array<{ name: string; values: number[] }> };
+};
+
+function presentationText(value: unknown, label: string, max: number, required = false): string | undefined {
+  if (value === undefined || value === null) {
+    if (required) throw new DaytonaInputError(`${label} is required`);
+    return undefined;
+  }
+  if (typeof value !== "string") throw new DaytonaInputError(`${label} must be text`);
+  const result = value.trim();
+  if ((required && !result) || result.length > max) throw new DaytonaInputError(`${label} must be ${required ? "1-" : "0-"}${max} characters`);
+  return result || undefined;
+}
+
+function presentationSlides(value: unknown): PresentationSlideInput[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new DaytonaInputError("slides must contain 1-30 slide definitions");
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`slides[${index}] must be an object`);
+    const slide = raw as Record<string, unknown>;
+    const bullets = slide.bullets === undefined ? undefined : Array.isArray(slide.bullets)
+      ? slide.bullets.slice(0, 12).map((item, bulletIndex) => presentationText(item, `slides[${index}].bullets[${bulletIndex}]`, 500, true)!)
+      : (() => { throw new DaytonaInputError(`slides[${index}].bullets must be an array`); })();
+    const imagePaths = slide.imagePaths === undefined ? undefined : Array.isArray(slide.imagePaths)
+      ? slide.imagePaths.slice(0, 4).map((item, imageIndex) => safeDaytonaPath(presentationText(item, `slides[${index}].imagePaths[${imageIndex}]`, 500, true)!))
+      : (() => { throw new DaytonaInputError(`slides[${index}].imagePaths must be an array`); })();
+    const table = slide.table === undefined ? undefined : Array.isArray(slide.table) && slide.table.length >= 1 && slide.table.length <= 20
+      ? slide.table.map((row, rowIndex) => {
+        if (!Array.isArray(row) || row.length < 1 || row.length > 10) throw new DaytonaInputError(`slides[${index}].table[${rowIndex}] must contain 1-10 cells`);
+        return row.map((cell, cellIndex) => presentationText(cell, `slides[${index}].table[${rowIndex}][${cellIndex}]`, 400, false) ?? "");
+      })
+      : (() => { throw new DaytonaInputError(`slides[${index}].table must contain 1-20 rows`); })();
+    const rawChart = slide.chart;
+    let chart: PresentationSlideInput["chart"];
+    if (rawChart !== undefined) {
+      if (!rawChart || typeof rawChart !== "object" || Array.isArray(rawChart)) throw new DaytonaInputError(`slides[${index}].chart must be an object`);
+      const input = rawChart as Record<string, unknown>;
+      if (!Array.isArray(input.categories) || input.categories.length < 1 || input.categories.length > 12 || !Array.isArray(input.series) || input.series.length < 1 || input.series.length > 6) throw new DaytonaInputError(`slides[${index}].chart needs 1-12 categories and 1-6 series`);
+      const categories = input.categories as unknown[];
+      chart = {
+        categories: categories.map((item, categoryIndex) => presentationText(item, `slides[${index}].chart.categories[${categoryIndex}]`, 100, true)!),
+        series: input.series.map((item, seriesIndex) => {
+          if (!item || typeof item !== "object" || Array.isArray(item)) throw new DaytonaInputError(`slides[${index}].chart.series[${seriesIndex}] must be an object`);
+          const series = item as Record<string, unknown>;
+          if (!Array.isArray(series.values) || series.values.length !== categories.length || series.values.some((number) => typeof number !== "number" || !Number.isFinite(number))) throw new DaytonaInputError(`slides[${index}].chart.series[${seriesIndex}].values must match category count`);
+          return { name: presentationText(series.name, `slides[${index}].chart.series[${seriesIndex}].name`, 100, true)!, values: series.values };
+        }),
+      };
+    }
+    // The standard layout deliberately reserves the lower portion of a slide
+    // for one data component. Keeping tables and charts on separate slides
+    // prevents valid files that nevertheless have overlapping content.
+    if (table && chart) {
+      throw new DaytonaInputError(`slides[${index}] cannot include both table and chart; use separate slides`);
+    }
+    return { title: presentationText(slide.title, `slides[${index}].title`, 200, true)!, body: presentationText(slide.body, `slides[${index}].body`, 2000), bullets, imagePaths, table, chart };
+  });
+}
+
+function presentationGenerationScript(title: string, slides: PresentationSlideInput[], path: string): string {
+  const payload = Buffer.from(JSON.stringify({ title, slides, path }), "utf8").toString("base64");
+  return [
+    "import base64, json, os, subprocess, sys",
+    `payload=json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
+    "try:",
+    "    from pptx import Presentation",
+    "except ImportError:",
+    "    install=subprocess.run([sys.executable, '-m', 'pip', 'install', '--user', '--disable-pip-version-check', 'python-pptx'], text=True, capture_output=True, timeout=180)",
+    "    if install.returncode != 0: raise RuntimeError('python-pptx installation failed: ' + (install.stderr or install.stdout)[-600:])",
+    "    from pptx import Presentation",
+    "from pptx.util import Inches, Pt",
+    "from pptx.enum.text import PP_ALIGN",
+    "from pptx.enum.chart import XL_CHART_TYPE",
+    "from pptx.chart.data import CategoryChartData",
+    "from pptx.dml.color import RGBColor",
+    "path=payload['path']",
+    "os.makedirs(os.path.dirname(path) or '.', exist_ok=True)",
+    "prs=Presentation()",
+    "prs.slide_width=Inches(13.333)",
+    "prs.slide_height=Inches(7.5)",
+    "def add_text(slide, value, left, top, width, height, size, bold=False, color=(20,35,55)):",
+    "    box=slide.shapes.add_textbox(Inches(left), Inches(top), Inches(width), Inches(height))",
+    "    tf=box.text_frame; tf.clear(); tf.word_wrap=True",
+    "    p=tf.paragraphs[0]; p.text=value; p.font.size=Pt(size); p.font.bold=bold; p.font.color.rgb=RGBColor(*color)",
+    "    return box",
+    "cover=prs.slides.add_slide(prs.slide_layouts[6])",
+    "cover.background.fill.solid(); cover.background.fill.fore_color.rgb=RGBColor(246,249,252)",
+    "add_text(cover, payload['title'], 0.9, 2.4, 11.5, 1.3, 32, True)",
+    "add_text(cover, 'Created by Chusky', 0.95, 3.85, 5.0, 0.4, 14, False, (73,101,128))",
+    "for spec in payload['slides']:",
+    "    slide=prs.slides.add_slide(prs.slide_layouts[6])",
+    "    slide.background.fill.solid(); slide.background.fill.fore_color.rgb=RGBColor(255,255,255)",
+    "    add_text(slide, spec['title'], 0.7, 0.45, 11.9, 0.6, 24, True)",
+    "    images=spec.get('imagePaths') or []",
+    "    text_width=7.1 if images else 11.8",
+    "    cursor=1.3",
+    "    if spec.get('body'):",
+    "        add_text(slide, spec['body'], 0.8, cursor, text_width, 1.0, 16)",
+    "        cursor += 1.05",
+    "    if spec.get('bullets'):",
+    "        box=slide.shapes.add_textbox(Inches(0.9), Inches(cursor), Inches(text_width), Inches(4.8-cursor))",
+    "        tf=box.text_frame; tf.clear(); tf.word_wrap=True",
+    "        for i, bullet in enumerate(spec['bullets']):",
+    "            p=tf.paragraphs[0] if i == 0 else tf.add_paragraph(); p.text=bullet; p.level=0; p.font.size=Pt(15); p.space_after=Pt(8)",
+    "    if spec.get('table'):",
+    "        rows=spec['table']; cols=max(len(row) for row in rows)",
+    "        table=slide.shapes.add_table(len(rows), cols, Inches(0.8), Inches(3.8), Inches(text_width), Inches(2.8)).table",
+    "        for r,row in enumerate(rows):",
+    "            for c in range(cols): table.cell(r,c).text=row[c] if c < len(row) else ''",
+    "    if spec.get('chart'):",
+    "        data=CategoryChartData(); data.categories=spec['chart']['categories']",
+    "        for series in spec['chart']['series']: data.add_series(series['name'], series['values'])",
+    "        slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(6.8 if not images else 0.8), Inches(3.7), Inches(5.5), Inches(2.8), data)",
+    "    for i,image in enumerate(images):",
+    "        if not os.path.isfile(image): raise FileNotFoundError('slide image does not exist: ' + image)",
+    "        top=1.35 + i * (5.4 / max(1, len(images))); height=max(1.1, 5.0 / max(1, len(images)))",
+    "        slide.shapes.add_picture(image, Inches(8.25), Inches(top), width=Inches(4.3), height=Inches(height))",
+    "prs.save(path)",
+    "# Re-open before returning. This catches a bad write before registration.",
+    "check=Presentation(path)",
+    "if len(check.slides) != len(payload['slides']) + 1: raise RuntimeError('presentation slide count verification failed')",
+    "if not os.path.isfile(path) or os.path.getsize(path) < 1024: raise RuntimeError('presentation output was not written')",
+    "print(json.dumps({'path': path, 'slides': len(check.slides), 'bytes': os.path.getsize(path)}))",
+  ].join("\n");
 }
 
 function collectPtyOutput(): { chunks: string[]; onData: (data: Uint8Array) => void } {
@@ -629,6 +766,22 @@ export class DaytonaEngine {
     }
   }
 
+  async createPresentation(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; slideCount: number }> {
+    const title = presentationText(args.title, "title", 200, true)!;
+    const slides = presentationSlides(args.slides);
+    const requestedPath = args.path === undefined
+      ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "presentation"}`, "presentation")}`
+      : safeDaytonaPath(args.path, "path");
+    const path = requestedPath.toLowerCase().endsWith(".pptx") ? requestedPath : `${requestedPath}.pptx`;
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const script = presentationGenerationScript(title, slides, path);
+    const encoded = Buffer.from(script, "utf8").toString("base64");
+    const generated = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 300);
+    if (generated.exitCode !== 0) throw new DaytonaInputError(`Presentation generation failed: ${String(generated.result ?? "unknown generator error").slice(0, 700)}`);
+    const result = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation);
+    return { ...result, generated: true, slideCount: slides.length + 1 };
+  }
+
   async artifact(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const session = await getSession(userId);
@@ -685,7 +838,16 @@ export class DaytonaEngine {
     const normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
     if (normalizedPath !== path) await sandbox.fs.moveFiles(path, normalizedPath);
     const normalizedName = artifactNameForType(name, type);
-    const details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
+    let details: { size?: number; isDir?: boolean };
+    try {
+      details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/not found|no such file|does not exist/i.test(message)) {
+        throw new DaytonaInputError(`Artifact file was not found at '${normalizedPath}'. Generate the file in Daytona and verify that exact path before registering it.`);
+      }
+      throw error;
+    }
     const size = Number(details.size ?? 0);
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
