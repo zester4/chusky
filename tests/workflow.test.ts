@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "../src/workflows.js";
 import type { JobRecord, ReminderRecord } from "../src/store.js";
+import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
@@ -22,6 +23,12 @@ function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   };
   return { ...base, ...overrides, sent, updates, jobUpdates, reminder, job };
 }
+
+test("workflow endpoints always use the configured public HTTPS URL", () => {
+  assert.equal(resolveWorkflowEndpoint("", "https://chusky.example", "/workflows/job", "Job workflows"), "https://chusky.example/workflows/job");
+  assert.equal(resolveWorkflowEndpoint("https://jobs.example/workflows/job", "https://chusky.example", "/workflows/job", "Job workflows"), "https://jobs.example/workflows/job");
+  assert.throws(() => resolveWorkflowEndpoint("http://chusky.example/workflows/job", "https://chusky.example", "/workflows/job", "Job workflows"), /HTTPS URL/);
+});
 
 test("reminder delivery is idempotent for cancelled or already-sent records", async () => {
   const state = deps({ getReminder: async () => ({ ...deps().reminder, status: "cancelled" }) });

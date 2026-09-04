@@ -1,11 +1,12 @@
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { getTriggerEvent } from "./store.js";
+import { resolveWorkflowEndpoint } from "./workflowUrls.js";
+
+export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
 export function triggerWorkflowUrl(): string {
-  const url = config.triggerWorkflowUrl || `${config.webhookUrl.replace(/\/+$/, "")}/workflows/trigger-event`;
-  if (!url || !/^https:\/\//i.test(url)) throw new Error("Trigger workflows require TRIGGER_WORKFLOW_URL or an HTTPS WEBHOOK_URL");
-  return url;
+  return resolveWorkflowEndpoint(config.triggerWorkflowUrl, config.webhookUrl, "/workflows/trigger-event", "Trigger workflows");
 }
 
 export function workflowClient(): WorkflowClient {

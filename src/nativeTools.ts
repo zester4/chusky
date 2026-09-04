@@ -1,6 +1,7 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
+import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
@@ -82,14 +83,8 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
   return createAttentionRecord(userId, kind, input);
 }
 
-function requireUrl(url: string, label: string): string {
-  if (!url) throw new Error(`${label} is not configured`);
-  if (!/^https:\/\//i.test(url)) throw new Error(`${label} must be an HTTPS URL`);
-  return url;
-}
-
 export function workflowUrl(configured: string, label: string, path: string): string {
-  return requireUrl(configured || (config.webhookUrl ? `${config.webhookUrl.replace(/\/+$/, "")}${path}` : ""), label);
+  return resolveWorkflowEndpoint(configured, config.webhookUrl, path, label);
 }
 
 export function validateCronExpression(value: string): string {

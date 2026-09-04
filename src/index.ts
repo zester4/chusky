@@ -23,6 +23,7 @@ import { SendblueAdapter } from "./channels/sendblue.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
@@ -160,7 +161,7 @@ async function main(): Promise<void> {
             throw error;
           }
         });
-      }));
+      }, { url: resolveWorkflowEndpoint(config.sendblueWorkflowUrl, config.webhookUrl, "/workflows/sendblue-event", "Sendblue workflows") }));
     }
     channelGateway.startRecovery();
     if (config.apiKey || config.betterAuthEnabled) {
@@ -799,13 +800,13 @@ async function main(): Promise<void> {
         if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
         throw error;
       }
-    }));
+    }, { url: resolveWorkflowEndpoint(config.videoWorkflowUrl, config.webhookUrl, "/workflows/video", "Video workflows") }));
 
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {
       let payload;
       try { payload = parseReminderWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid reminder workflow payload"); }
       await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
-    }));
+    }, { url: resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows") }));
 
     // QStash failure callbacks are authenticated separately from Workflow
     // requests. Persist the useful owner-facing state, while keeping the raw
@@ -862,7 +863,7 @@ async function main(): Promise<void> {
         }),
         sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
       }));
-    }));
+    }, { url: resolveWorkflowEndpoint(config.jobWorkflowUrl, config.webhookUrl, "/workflows/job", "Job workflows") }));
 
     app.post("/workflows/task", serveWorkflow(async (workflow) => {
       const payload = workflow.requestPayload as { taskId: string; userId: number };
@@ -894,7 +895,7 @@ async function main(): Promise<void> {
         if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
       }
-    }));
+    }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/task", "Task workflows") }));
 
     app.post("/workflows/trigger-event", serveWorkflow(async (workflow) => {
       const payload = workflow.requestPayload as { eventId: string; userId: number };
@@ -958,7 +959,7 @@ async function main(): Promise<void> {
         await updateTriggerEvent(event.eventId, { status: "failed", error: String(error).slice(0, 2000) });
         throw error;
       }
-    }));
+    }, { url: triggerWorkflowUrl() }));
 
     app.get("/", (c) => c.json({ ok: true, agent: "Chusky", mode: "webhook", ts: Date.now() }));
 
