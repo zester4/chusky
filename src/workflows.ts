@@ -1,5 +1,5 @@
 import type { JobRecord, ReminderRecord } from "./store.js";
-import { splitHtml } from "./markdown.js";
+import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; }
@@ -32,10 +32,6 @@ export function parseJobWorkflowPayload(value: unknown): JobWorkflowPayload {
   return { jobId: payload.jobId, userId: Number(payload.userId), ...(typeof payload.occurrenceId === "string" ? { occurrenceId: payload.occurrenceId } : {}) };
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 export async function deliverReminder(payload: ReminderWorkflowPayload, deps: WorkflowDependencies): Promise<{ skipped?: boolean; delivered: boolean }> {
   const reminder = await deps.getReminder(payload.userId, payload.reminderId);
   if (!reminder || reminder.status !== "scheduled") return { skipped: true, delivered: false };
@@ -47,7 +43,7 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
     return { delivered: false };
   }
   try {
-    await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${escapeHtml(reminder.text)}`, { parse_mode: "HTML" });
+    await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(reminder.text)}`, { parse_mode: "HTML" });
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent" });
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {
@@ -71,7 +67,7 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     const result = deps.runAgent ? await deps.runAgent(job) : { text: job.text };
     const response = result.text.trim() || "Scheduled job completed.";
     const header = "🔁 <b>Chusky scheduled job</b>\n\n";
-    for (const chunk of splitHtml(escapeHtml(response), 3900)) {
+    for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {
       await deps.sendMessage(chatId, `${header}${chunk}`, { parse_mode: "HTML" });
     }
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);

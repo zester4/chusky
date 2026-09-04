@@ -45,6 +45,13 @@ test("reminder delivery escapes Telegram HTML and marks sent after delivery", as
   assert.deepEqual(state.updates, [{ status: "sent" }]);
 });
 
+test("reminder delivery renders Markdown as Telegram HTML", async () => {
+  const state = deps({ getReminder: async () => ({ ...deps().reminder, text: "**Bring this up** and `check it`" }) });
+  await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.match(state.sent[0].text, /<b>Bring this up<\/b>/);
+  assert.match(state.sent[0].text, /<code>check it<\/code>/);
+});
+
 test("reminders without a Telegram mapping fail without attempting delivery", async () => {
   const state = deps({ getTelegramChatId: async () => undefined });
   const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
@@ -69,10 +76,10 @@ test("recurring job delivery escapes content and sends only to the mapped owner"
 });
 
 test("recurring job delivery runs the agent before sending its response", async () => {
-  const state = deps({ runAgent: async (job) => ({ text: `Agent result for ${job.id}` }) });
+  const state = deps({ runAgent: async (job) => ({ text: `**Agent result for ${job.id}**` }) });
   const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-agent" }, state);
   assert.deepEqual(result, { delivered: true });
-  assert.match(state.sent[0].text, /Agent result for job-1/);
+  assert.match(state.sent[0].text, /<b>Agent result for job-1<\/b>/);
   assert.doesNotMatch(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
