@@ -62,6 +62,8 @@ export function videoDownloadUrl(status: VideoStatusResponse, videoId: string): 
     ?? stringUrl(status.video_url)
     ?? stringUrl(status.data?.url)
     ?? stringUrl(status.data?.video_url);
-  if (directUrl) return { url: directUrl, authenticated: false };
+  // OpenRouter may return its own authenticated content endpoint inside
+  // `unsigned_urls`. Only provider/storage URLs are truly unsigned.
+  if (directUrl) return { url: directUrl, authenticated: directUrl.startsWith("https://openrouter.ai/api/") };
   return { url: `https://openrouter.ai/api/v1/videos/${encodeURIComponent(videoId)}/content?index=0`, authenticated: true };
 }
