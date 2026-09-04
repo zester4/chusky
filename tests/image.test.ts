@@ -28,3 +28,38 @@ test("image generation requests the requested count and returns every image", as
     globalThis.fetch = originalFetch;
   }
 });
+
+test("image generation forwards studio controls and references", async () => {
+  const originalFetch = globalThis.fetch;
+  let request: any;
+  globalThis.fetch = (async (_input, init) => {
+    request = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("edited").toString("base64"), media_type: "image/png" }] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    await generateImages("refresh the brand mark", 1, {
+      inputReferences: [{ type: "image_url", image_url: { url: "https://example.com/logo.png" } }],
+      aspectRatio: "9:16",
+      resolution: "2K",
+      size: "1024x1792",
+      quality: "high",
+      outputFormat: "webp",
+      background: "transparent",
+      seed: 42,
+    });
+    assert.deepEqual(request, {
+      model: request.model,
+      prompt: "refresh the brand mark",
+      input_references: [{ type: "image_url", image_url: { url: "https://example.com/logo.png" } }],
+      aspect_ratio: "9:16",
+      resolution: "2K",
+      size: "1024x1792",
+      quality: "high",
+      output_format: "webp",
+      background: "transparent",
+      seed: 42,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

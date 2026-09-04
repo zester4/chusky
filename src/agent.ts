@@ -28,7 +28,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getSession, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getImageAsset, getSession, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { Message } from "./store.js";
 import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
-import { normalizeImageCount, resolveImageWorkspacePath } from "./image.js";
+import { normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -382,6 +382,52 @@ function currentImageRuntime(message: string | ContentPart[]): NativeToolRuntime
   return currentImages.length ? { currentImages } : {};
 }
 
+type ImageReference = { type: "image_url"; image_url: { url: string } };
+
+function imageSize(value: unknown): string {
+  const size = String(value ?? "").trim();
+  const match = size.match(/^(\d{2,5})x(\d{2,5})$/i);
+  if (!match || Number(match[1]) < 256 || Number(match[2]) < 256 || Number(match[1]) > 8192 || Number(match[2]) > 8192) throw new Error("size must be WIDTHxHEIGHT between 256x256 and 8192x8192");
+  return `${Number(match[1])}x${Number(match[2])}`;
+}
+
+function imageSeed(value: unknown): number {
+  const seed = Number(value);
+  if (!Number.isInteger(seed) || seed < 0) throw new Error("seed must be a non-negative integer");
+  return seed;
+}
+
+function videoInteger(value: unknown, name: string, min: number, max: number): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < min || number > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  return number;
+}
+
+async function resolveImageReferences(userId: number, rawSelectors: unknown, defaults: string[] | undefined, currentImages?: NativeToolRuntime["currentImages"], generatedImages?: AgentResult["generatedImages"]): Promise<ImageReference[]> {
+  const selectors = Array.isArray(rawSelectors) ? rawSelectors.map((item) => String(item).trim()).filter(Boolean) : (defaults ?? []);
+  const references: ImageReference[] = [];
+  for (const selector of selectors.slice(0, 8)) {
+    const current = selector.match(/^current:(\d+)$/i);
+    const generated = selector.match(/^generated:(\d+)$/i);
+    if (current) {
+      const image = currentImages?.[Number(current[1])];
+      if (!image) throw new Error(`Current image reference ${selector} is not available`);
+      references.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${Buffer.from(image.data).toString("base64")}` } });
+      continue;
+    }
+    if (generated) {
+      const image = generatedImages?.[Number(generated[1])];
+      if (!image) throw new Error(`Generated image reference ${selector} is not available`);
+      references.push({ type: "image_url", image_url: { url: `data:${image.mediaType};base64,${image.data.toString("base64")}` } });
+      continue;
+    }
+    const asset = await getImageAsset(userId, selector);
+    if (!asset) throw new Error(`Saved image asset not found: ${selector}`);
+    references.push({ type: "image_url", image_url: { url: asset.downloadUrl } });
+  }
+  return references;
+}
+
 // ── Core agentic loop ─────────────────────────────────────────────────────────
 
 export async function runAgent(
@@ -481,6 +527,10 @@ export async function runAgent(
   const toolsUsed: string[] = [];
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
+  // Keep generated media available as an in-turn reference even when the
+  // user asked for Daytona-only delivery. `generatedImages` is the outward
+  // delivery list, so it must not be used for this purpose directly.
+  const generatedReferenceImages: AgentResult["generatedImages"] = [];
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const previewLinks: string[] = [];
@@ -572,7 +622,19 @@ export async function runAgent(
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
         if (slug === "CHUCK_GENERATE_IMAGE") {
-          const images = await generateImages(String(args.prompt ?? ""), normalizeImageCount(args.count));
+          const imageRuntime = currentImageRuntime(userMessage);
+          const mode = args.mode === "edit" || args.mode === "reference_variations" ? args.mode : "generate";
+          const references = await resolveImageReferences(userId, args.references, mode === "edit" && !args.references ? ["current:0"] : undefined, imageRuntime.currentImages, generatedReferenceImages);
+          const images = await generateImages(String(args.prompt ?? ""), normalizeImageCount(args.count), {
+            inputReferences: references,
+            aspectRatio: normalizeImageAspectRatio(args.aspectRatio),
+            resolution: normalizeImageResolution(args.resolution),
+            size: args.size === undefined ? undefined : imageSize(args.size),
+            quality: normalizeImageQuality(args.quality),
+            outputFormat: normalizeImageOutputFormat(args.outputFormat),
+            background: args.background === "transparent" || args.background === "opaque" || args.background === "auto" ? args.background : undefined,
+            seed: args.seed === undefined ? undefined : imageSeed(args.seed),
+          });
           const destination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
           const daytona = [];
           if (destination === "daytona" || destination === "both") {
@@ -582,6 +644,7 @@ export async function runAgent(
               daytona.push(await daytonaEngine.writeBinaryFile(userId, workspacePath, image.data));
             }
           }
+          generatedReferenceImages.push(...images);
           if (destination === "telegram" || destination === "both") generatedImages.push(...images);
           execResult = { imageGenerated: true, imageCount: images.length, destination, ...(daytona.length ? { daytona } : {}), note: destination === "daytona" ? "Images saved in Daytona; they were not sent as separate Telegram images." : "Images generated and delivered through the normal channel." };
         } else if (slug === "CHUCK_CREATE_TRIGGER") {
@@ -589,10 +652,20 @@ export async function runAgent(
         } else if (slug === "CHUCK_GENERATE_VIDEO") {
           const destination = normalizeVideoDestination(args.destination);
           const workspacePath = resolveVideoWorkspacePath(destination, args.workspacePath);
-          execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath);
+          const imageRuntime = currentImageRuntime(userMessage);
+          const references = await resolveImageReferences(userId, args.references, undefined, imageRuntime.currentImages, generatedReferenceImages);
+          execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath, {
+            duration: args.duration === undefined ? undefined : videoInteger(args.duration, "duration", 1, 30),
+            aspectRatio: args.aspectRatio ? String(args.aspectRatio) : undefined,
+            resolution: args.resolution ? String(args.resolution) : undefined,
+            size: args.size === undefined ? undefined : imageSize(args.size),
+            generateAudio: args.generateAudio === undefined ? undefined : Boolean(args.generateAudio),
+            frameMode: args.frameMode === "first_frame" || args.frameMode === "last_frame" ? args.frameMode : "reference",
+            inputReferences: references,
+          });
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages });
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
@@ -791,12 +864,23 @@ export interface GeneratedImage {
   cost?: number;
 }
 
-export async function generateImages(prompt: string, count = 1): Promise<GeneratedImage[]> {
+export interface ImageGenerationOptions {
+  inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }>;
+  aspectRatio?: string;
+  resolution?: string;
+  size?: string;
+  quality?: string;
+  outputFormat?: string;
+  background?: string;
+  seed?: number;
+}
+
+export async function generateImages(prompt: string, count = 1, options: ImageGenerationOptions = {}): Promise<GeneratedImage[]> {
   const normalizedCount = normalizeImageCount(count);
   const res = await fetch("https://openrouter.ai/api/v1/images", {
     method: "POST",
     headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: config.imageModel, prompt, ...(normalizedCount > 1 ? { n: normalizedCount } : {}) }),
+    body: JSON.stringify({ model: config.imageModel, prompt, ...(normalizedCount > 1 ? { n: normalizedCount } : {}), ...(options.inputReferences?.length ? { input_references: options.inputReferences } : {}), ...(options.aspectRatio ? { aspect_ratio: options.aspectRatio } : {}), ...(options.resolution ? { resolution: options.resolution } : {}), ...(options.size ? { size: options.size } : {}), ...(options.quality ? { quality: options.quality } : {}), ...(options.outputFormat ? { output_format: options.outputFormat } : {}), ...(options.background ? { background: options.background } : {}), ...(options.seed !== undefined ? { seed: options.seed } : {}) }),
   });
   if (!res.ok) throw new Error(`OpenRouter image generation ${res.status}: ${await res.text()}`);
   const result = await res.json() as { data?: { b64_json?: string; media_type?: string }[]; usage?: { cost?: number } };
@@ -811,7 +895,17 @@ export async function generateImage(prompt: string): Promise<GeneratedImage> {
 
 export type MediaDestination = VideoDestination;
 
-export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string): Promise<{ started: true; jobId: string; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
+export interface VideoGenerationOptions {
+  duration?: number;
+  aspectRatio?: string;
+  resolution?: string;
+  size?: string;
+  generateAudio?: boolean;
+  frameMode?: "reference" | "first_frame" | "last_frame";
+  inputReferences?: ImageReference[];
+}
+
+export async function queueVideoWorkflow(userId: number, prompt: string, destination: MediaDestination = "telegram", workspacePath?: string, options: VideoGenerationOptions = {}): Promise<{ started: true; jobId: string; workflowId: string; destination: MediaDestination; workspacePath?: string }> {
   if (!config.qstashToken || !config.videoWorkflowUrl) {
     throw new Error("Video workflows are not configured. Set QSTASH_TOKEN and VIDEO_WORKFLOW_URL.");
   }
@@ -821,7 +915,7 @@ export async function queueVideoWorkflow(userId: number, prompt: string, destina
   const job = await createVideoJob({ userId, prompt, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) });
   const client = new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
   try {
-    const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath, jobId: job.id } });
+    const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath, jobId: job.id, ...options } });
     await updateVideoJob(userId, job.id, { workflowRunId: result.workflowRunId, status: "running" });
     return { started: true, jobId: job.id, workflowId: result.workflowRunId, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) };
   } catch (error) {

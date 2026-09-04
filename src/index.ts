@@ -739,7 +739,7 @@ async function main(): Promise<void> {
     });
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string };
+      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string; duration?: number; aspectRatio?: string; resolution?: string; size?: string; generateAudio?: boolean; frameMode?: "reference" | "first_frame" | "last_frame"; inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }> };
       try {
       const destination = payload.destination ?? "telegram";
       const workspacePath = payload.workspacePath ? safeDaytonaPath(payload.workspacePath, "workspacePath") : undefined;
@@ -748,7 +748,20 @@ async function main(): Promise<void> {
         const res = await fetch("https://openrouter.ai/api/v1/videos", {
           method: "POST",
           headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: config.videoModel, prompt: payload.prompt }),
+          body: JSON.stringify({
+            model: config.videoModel,
+            prompt: payload.prompt,
+            ...(payload.duration !== undefined ? { duration: payload.duration } : {}),
+            ...(payload.aspectRatio ? { aspect_ratio: payload.aspectRatio } : {}),
+            ...(payload.resolution ? { resolution: payload.resolution } : {}),
+            ...(payload.size ? { size: payload.size } : {}),
+            ...(payload.generateAudio !== undefined ? { generate_audio: payload.generateAudio } : {}),
+            ...(payload.inputReferences?.length ? {
+              ...(payload.frameMode === "first_frame" || payload.frameMode === "last_frame"
+                ? { frame_images: payload.inputReferences.map((reference) => ({ type: "image_url", image_url: reference.image_url, frame_type: payload.frameMode })) }
+                : { input_references: payload.inputReferences }),
+            } : {}),
+          }),
         });
         if (!res.ok) throw new Error(`Video submission failed: ${res.status} ${await res.text()}`);
         return await res.json() as any;
