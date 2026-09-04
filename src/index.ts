@@ -22,7 +22,7 @@ import { WhatsAppAdapter } from "./channels/whatsapp.js";
 import { SendblueAdapter } from "./channels/sendblue.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { triggerWorkflowUrl, workflowClient } from "./triggerWorkflow.js";
+import { triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
@@ -810,9 +810,12 @@ async function main(): Promise<void> {
     app.post("/workflows/failure", async (c) => {
       const signature = c.req.header("upstash-signature");
       const raw = await c.req.text();
-      if (!signature || !config.qstashCurrentSigningKey || !config.qstashNextSigningKey) return c.json({ ok: false, error: "QStash callback verification is not configured" }, 503);
+      const verificationUrl = workflowFailureUrl();
+      if (!signature || !config.qstashCurrentSigningKey || !config.qstashNextSigningKey || !verificationUrl) return c.json({ ok: false, error: "QStash callback verification is not configured" }, 503);
       try {
-        await new Receiver({ currentSigningKey: config.qstashCurrentSigningKey, nextSigningKey: config.qstashNextSigningKey }).verify({ signature, body: raw, url: c.req.url, clockTolerance: 30 });
+        // Railway may expose the request as an internal http URL even though
+        // QStash signed the configured public https URL.
+        await new Receiver({ currentSigningKey: config.qstashCurrentSigningKey, nextSigningKey: config.qstashNextSigningKey }).verify({ signature, body: raw, url: verificationUrl, clockTolerance: 30 });
       } catch (error) {
         recordFailure("workflow_failure", error, { workflow: "qstash-failure-callback" });
         return c.json({ ok: false, error: "invalid callback signature" }, 401);

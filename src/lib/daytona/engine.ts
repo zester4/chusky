@@ -403,7 +403,11 @@ export class DaytonaEngine {
       case "keyboard_press": await computer.keyboard.press(boundedText(args.key, "key", 40), Array.isArray(args.modifiers) ? args.modifiers.map((m) => boundedText(m, "modifier", 20)) : []); return { pressed: true };
       case "keyboard_hotkey": await computer.keyboard.hotkey(boundedText(args.keys, "keys", 100)); return { pressed: true };
       case "accessibility_tree": return computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) });
-      case "accessibility_find": return computer.accessibility.findNodes({ scope: "all", role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch: args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined, limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) });
+      case "accessibility_find": {
+        const nameMatch = args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined;
+        if (nameMatch && !["exact", "substring", "regex"].includes(nameMatch)) throw new DaytonaInputError("nameMatch must be exact, substring, or regex");
+        return computer.accessibility.findNodes({ scope: "all", role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) });
+      }
       case "accessibility_focus": await computer.accessibility.focusNode(boundedText(args.nodeId, "nodeId", 200)); return { focused: true };
       case "accessibility_invoke": await computer.accessibility.invokeNode(boundedText(args.nodeId, "nodeId", 200), args.nodeAction ? boundedText(args.nodeAction, "nodeAction", 80) : undefined); return { invoked: true };
       case "accessibility_set_value": await computer.accessibility.setNodeValue(boundedText(args.nodeId, "nodeId", 200), boundedText(args.value, "value", 4000)); return { updated: true };
