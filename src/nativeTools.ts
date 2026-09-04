@@ -13,7 +13,7 @@ import {
   type AttentionEntityKind,
   type TaskStatus,
   type JobRecord, type ReminderRecord,
-  listFaceTimeCalls,
+  listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
@@ -22,6 +22,8 @@ import { startTwilioCallForUser } from "./calls/twilio.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 8000;
+
+export interface NativeToolRuntime { currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; generatedImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; }
 
 function text(value: unknown): string {
   const result = String(value ?? "").trim();
@@ -204,7 +206,7 @@ export async function cancelJob(userId: number, id: string): Promise<string> {
   return `Recurring job ${id} cancelled.`;
 }
 
-export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>): Promise<unknown> {
+export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   switch (slug) {
     case "CHUCK_SET_REMINDER": return setReminder(userId, args);
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
@@ -233,6 +235,22 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       });
       return updated ?? { updated: false, reason: "Memory not found" };
     }
+    case "CHUCK_SAVE_IMAGE_ASSET": {
+      const images = args.source === "generated" ? runtime.generatedImages : runtime.currentImages;
+      const image = images?.[Math.max(0, Math.floor(Number(args.sourceIndex ?? 0)))];
+      if (!image) throw new Error("No current image is available to save");
+      const contentType = image.mediaType.toLowerCase();
+      if (contentType !== "image/jpeg" && contentType !== "image/png" && contentType !== "image/webp") throw new Error("Only JPEG, PNG, and WebP images can be saved");
+      const tags = Array.isArray(args.tags) ? args.tags.filter((tag): tag is string => typeof tag === "string") : [];
+      return { imageAssetSaved: true, asset: await saveImageAsset(userId, { name: text(args.name), purpose: text(args.purpose), description: args.description ? text(args.description) : undefined, tags, contentType }, image.data) };
+    }
+    case "CHUCK_SEARCH_IMAGE_ASSETS": return searchImageAssets(userId, args.query ? text(args.query) : undefined, args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_GET_IMAGE_ASSET": {
+      const asset = await getImageAsset(userId, text(args.id));
+      if (!asset) return { found: false };
+      return { __chuskyImageAsset: true, ...asset };
+    }
+    case "CHUCK_FORGET_IMAGE_ASSET": return { forgotten: await forgetImageAsset(userId, text(args.id)) };
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_START_FACETIME_CALL": return startFaceTimeCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });

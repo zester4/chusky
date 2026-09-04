@@ -30,7 +30,7 @@ import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.
 import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getSession, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { Message } from "./store.js";
-import { nativeTool } from "./nativeTools.js";
+import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
@@ -370,6 +370,17 @@ export function appendPreviewLinks(text: string, links: string[]): string {
   return [cleaned, suffix].filter(Boolean).join("\n\n");
 }
 
+function currentImageRuntime(message: string | ContentPart[]): NativeToolRuntime {
+  if (typeof message === "string") return {};
+  const currentImages = message.flatMap((part) => {
+    const encoded = part.type === "image_url" ? part.image_url.url : part.type === "file" && part.file.file_data.startsWith("data:image/") ? part.file.file_data : undefined;
+    if (!encoded?.startsWith("data:image/")) return [];
+    const match = encoded.match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/i);
+    return match ? [{ data: Buffer.from(match[2], "base64"), mediaType: match[1].toLowerCase() }] : [];
+  });
+  return currentImages.length ? { currentImages } : {};
+}
+
 // ── Core agentic loop ─────────────────────────────────────────────────────────
 
 export async function runAgent(
@@ -523,6 +534,7 @@ export async function runAgent(
       logger.debug({ slug, args: call.function.arguments }, "Tool call");
 
       let result: string;
+      let execResult: unknown;
       try {
         const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug);
         if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
@@ -557,7 +569,6 @@ export async function runAgent(
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
-        let execResult: unknown;
         if (slug === "CHUCK_GENERATE_IMAGE") {
           const images = await generateImages(String(args.prompt ?? ""), normalizeImageCount(args.count));
           const destination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
@@ -578,7 +589,8 @@ export async function runAgent(
           const workspacePath = resolveVideoWorkspacePath(destination, args.workspacePath);
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath);
         } else if (slug.startsWith("CHUCK_")) {
-          execResult = await nativeTool(userId, slug, executionArgs);
+          const imageRuntime = currentImageRuntime(userMessage);
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages });
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
@@ -614,6 +626,12 @@ export async function runAgent(
         tool_call_id: call.id,
         content: result,
       });
+      if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
+        const asset = execResult as { downloadUrl?: unknown; name?: unknown };
+        if (typeof asset.downloadUrl === "string" && /^https:\/\//i.test(asset.downloadUrl)) {
+          messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: asset.downloadUrl } }] });
+        }
+      }
     }
   }
 

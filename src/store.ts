@@ -9,6 +9,7 @@ import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
+import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -30,6 +31,7 @@ export interface UserSession {
   jobs: JobRecord[];
   scratchpad: Record<string, ScratchpadEntry>;
   memories: MemoryFact[];
+  imageAssets: ImageAsset[];
   summaries: string[];
   approvals: ApprovalRecord[];
   sdkThreads?: SdkThreadRecord[];
@@ -218,6 +220,20 @@ export interface MemoryFact {
   personKey?: string;
   reviewAt?: number;
   expiresAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ImageAsset {
+  id: string;
+  userId: number;
+  name: string;
+  purpose: string;
+  description: string;
+  tags: string[];
+  r2Key: string;
+  contentType: "image/jpeg" | "image/png" | "image/webp";
+  size: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -1351,7 +1367,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -1413,7 +1429,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -1987,6 +2003,69 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
       void new UpstashKnowledgeStore().deleteMemory(String(uid), memory.id, memory.projectId).catch((error) => logger.warn({ err: error, userId: uid, memoryId: memory.id }, "Memory vector deletion unavailable; structured memory removed"));
     }
   }
+  return true;
+}
+
+function imageExtension(contentType: ImageAsset["contentType"]): string { return contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png"; }
+
+export async function saveImageAsset(uid: number, input: { name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"] }, bytes: Uint8Array): Promise<ImageAsset> {
+  if (!r2Configured()) throw new Error("R2 storage is not configured");
+  const now = Date.now();
+  const id = `img_${now}_${randomUUID().slice(0, 8)}`;
+  const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: `images/${uid}/${id}.${imageExtension(input.contentType)}`, contentType: input.contentType, size: bytes.byteLength, createdAt: now, updatedAt: now };
+  await putR2Object(asset.r2Key, bytes, asset.contentType);
+  const session = await getSession(uid);
+  const previous = session.imageAssets.find((item) => item.name === asset.name);
+  session.imageAssets = [...session.imageAssets.filter((item) => item.name !== asset.name), asset].slice(-100);
+  await saveSession(uid, session);
+  if (previous) {
+    void deleteR2Object(previous.r2Key).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset cleanup failed"));
+    if (vectorConfigured()) void new UpstashKnowledgeStore().deleteDocument(String(uid), `image_asset:${previous.id}`).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset vector cleanup failed"));
+  }
+  if (vectorConfigured()) {
+    void new UpstashKnowledgeStore().upsert([{
+      id: `image_asset:${asset.id}:0`,
+      data: `${asset.name}\n${asset.purpose}\n${asset.description}\n${asset.tags.join(" ")}`,
+      metadata: { userId: String(uid), documentId: asset.id, sourceType: "image_asset", contentType: asset.contentType, chunkIndex: 0, visibility: "private", assetId: asset.id, assetName: asset.name, purpose: asset.purpose },
+    }]).catch((error) => logger.warn({ err: error, userId: uid, assetId: asset.id }, "Image asset vector indexing unavailable; R2 asset retained"));
+  }
+  return asset;
+}
+
+export async function searchImageAssets(uid: number, query?: string, limit = 5): Promise<ImageAsset[]> {
+  const session = await getSession(uid);
+  const assets = session.imageAssets;
+  const bounded = Math.max(1, Math.min(Math.floor(limit) || 5, 10));
+  const tokens = (query ?? "").toLowerCase().split(/\s+/).filter((token) => token.length > 1);
+  if (!tokens.length) return assets.slice(-bounded).reverse();
+  const lexical = assets.map((asset) => ({ asset, score: tokens.reduce((score, token) => score + (`${asset.name} ${asset.purpose} ${asset.description} ${asset.tags.join(" ")}`.toLowerCase().includes(token) ? 1 : 0), 0) })).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || b.asset.updatedAt - a.asset.updatedAt);
+  const ranked = new Map(lexical.map((item) => [item.asset.id, item.score]));
+  if (vectorConfigured()) {
+    try {
+      const matches = await new UpstashKnowledgeStore().query(uid.toString(), query ?? "", { topK: bounded, filter: "sourceType = 'image_asset'" });
+      for (const [index, match] of matches.entries()) {
+        const id = typeof match.metadata?.assetId === "string" ? match.metadata.assetId : match.id.replace(/^image_asset:/, "").replace(/:0$/, "");
+        if (assets.some((asset) => asset.id === id)) ranked.set(id, (ranked.get(id) ?? 0) + (typeof match.score === "number" ? match.score : 0) + bounded - index);
+      }
+    } catch (error) { logger.warn({ err: error, userId: uid }, "Image asset semantic search unavailable; using structured search"); }
+  }
+  return [...ranked.entries()].sort((a, b) => b[1] - a[1]).slice(0, bounded).map(([id]) => assets.find((asset) => asset.id === id)!).filter(Boolean);
+}
+
+export async function getImageAsset(uid: number, idOrName: string): Promise<(ImageAsset & { downloadUrl: string }) | undefined> {
+  const asset = (await getSession(uid)).imageAssets.find((item) => item.id === idOrName || item.name.toLowerCase() === idOrName.toLowerCase());
+  if (!asset || !r2Configured()) return undefined;
+  return { ...asset, downloadUrl: await signR2Download(asset.r2Key) };
+}
+
+export async function forgetImageAsset(uid: number, idOrName: string): Promise<boolean> {
+  const session = await getSession(uid);
+  const asset = session.imageAssets.find((item) => item.id === idOrName || item.name.toLowerCase() === idOrName.toLowerCase());
+  if (!asset) return false;
+  if (r2Configured()) await deleteR2Object(asset.r2Key);
+  session.imageAssets = session.imageAssets.filter((item) => item.id !== asset.id);
+  await saveSession(uid, session);
+  if (vectorConfigured()) void new UpstashKnowledgeStore().deleteDocument(String(uid), `image_asset:${asset.id}`).catch((error) => logger.warn({ err: error, userId: uid, assetId: asset.id }, "Image asset vector deletion unavailable; R2 asset removed"));
   return true;
 }
 
