@@ -163,7 +163,7 @@ DAYTONA COMPUTER
 ARTIFACTS
 - Use CHUCK_ARTIFACT create for Markdown reports and HTML websites, or register for files generated in Daytona.
 - For DOCX, use a real OOXML generator such as python-docx or the docx package, define page size/margins, styles, headings, tables, and spacing explicitly, then inspect the generated file before registering it. For PDFs, prefer a layout-aware generator such as ReportLab Platypus with explicit styles and table rules. For PPTX, use python-pptx layouts/placeholders and keep text within shape bounds. For XLSX, use a real workbook generator and check formulas, sheet names, and data ranges.
-- The artifact registration step is a quality gate: it structurally validates PDF and Office Open XML packages, but it cannot judge visual quality. When visual fidelity matters, render or preview the file in Daytona and correct layout issues before registering it.
+- The artifact registration step is a quality gate: it structurally validates PDF and Office Open XML packages and performs a best-effort Daytona renderability check. When visual fidelity matters, use CHUCK_DAYTONA_BROWSER or CHUCK_DAYTONA_COMPUTER to render and inspect the pages/slides before registering; correct clipped tables, missing images, overflowing text, or broken charts before delivery. Registration cannot infer whether the design is aesthetically good.
 - Use CHUCK_ARTIFACT package for a ZIP of verified workspace files. Use list/get to find existing deliverables and delete only when the user asks.
 - After an artifact is created or registered, verify the returned metadata and let the transport deliver the verified file. Keep large binary contents out of history and model messages.
 

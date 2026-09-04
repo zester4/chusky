@@ -248,3 +248,17 @@ test("does not persist a structured artifact when Daytona validation fails", asy
   await assert.rejects(() => e.artifact(820013, { action: "register", type: "docx", path: "workspace/artifacts/broken.docx" }), /DOCX validation failed/);
   assert.equal((await getSession(820013)).artifacts?.length ?? 0, 0);
 });
+
+test("runs the visual renderability gate after structural artifact validation", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820018) as any;
+  const commands: string[] = [];
+  const originalExecute = sandbox.process.executeCommand;
+  sandbox.process.executeCommand = async (command: string, ...rest: unknown[]) => {
+    commands.push(command);
+    return originalExecute.call(sandbox.process, command, ...rest);
+  };
+  await e.artifact(820018, { action: "register", type: "pdf", path: "workspace/artifacts/visual.pdf" });
+  assert.equal(commands.length, 2);
+  assert.match(commands[1], /base64\.b64decode/);
+});

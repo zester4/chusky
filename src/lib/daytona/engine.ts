@@ -98,7 +98,7 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
   };
   const root = officeRoots[type];
   return [
-    "import os, sys, zipfile, xml.etree.ElementTree as ET",
+    "import os, posixpath, sys, zipfile, xml.etree.ElementTree as ET",
     `path=${JSON.stringify(path)}`,
     `kind=${JSON.stringify(type)}`,
     "def fail(message):",
@@ -127,9 +127,71 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "        with zipfile.ZipFile(path) as archive:",
     "            for name in required:",
     "                if name: ET.fromstring(archive.read(name))",
+    "            # Validate every XML part and every internal OOXML relationship.",
+    "            # A ZIP with presentation.xml can still be unreadable by Office",
+    "            # when a slide, media target, or relationship is missing.",
+    "            for name in names:",
+    "                if name.lower().endswith('.xml') or name.lower().endswith('.rels'):",
+    "                    ET.fromstring(archive.read(name))",
+    "            rel_ns='{http://schemas.openxmlformats.org/package/2006/relationships}'",
+    "            for rels_name in [name for name in names if name.endswith('.rels')]:",
+    "                rels=ET.fromstring(archive.read(rels_name))",
+    "                source_dir='' if rels_name == '_rels/.rels' else posixpath.dirname(rels_name).rsplit('/_rels', 1)[0]",
+    "                for rel in rels.findall(rel_ns + 'Relationship'):",
+    "                    target=rel.attrib.get('Target', '')",
+    "                    if not target or rel.attrib.get('TargetMode') == 'External': continue",
+    "                    target_path=posixpath.normpath(posixpath.join(source_dir, target))",
+    "                    if target_path.startswith('../') or target_path not in names:",
+    "                        fail('OOXML relationship target is missing: ' + rels_name + ' -> ' + target)",
     "    except (KeyError, ET.ParseError, OSError) as error:",
     "        fail('Office Open XML package contains invalid XML: ' + str(error))",
     "print('artifact structure validated')",
+  ].join("\n");
+}
+
+function artifactVisualQaScript(type: ArtifactType, path: string): string {
+  return [
+    "import os, shutil, subprocess, sys, tempfile",
+    `path=${JSON.stringify(path)}`,
+    `kind=${JSON.stringify(type)}`,
+    "if not os.path.isfile(path):",
+    "    print('visual QA failed: artifact file does not exist', file=sys.stderr)",
+    "    raise SystemExit(2)",
+    "tmp=tempfile.mkdtemp(prefix='chusky-artifact-qa-')",
+    "try:",
+    "    pdf=path",
+    "    if kind != 'pdf':",
+    "        office=shutil.which('libreoffice') or shutil.which('soffice')",
+    "        if not office:",
+    "            print('visual QA skipped: LibreOffice renderer is not installed')",
+    "            raise SystemExit(0)",
+    "        converted=subprocess.run([office, '--headless', '--convert-to', 'pdf', '--outdir', tmp, path], text=True, capture_output=True, timeout=120)",
+    "        if converted.returncode != 0:",
+    "            print('visual QA failed: Office-to-PDF rendering failed: ' + (converted.stderr or converted.stdout)[-800:], file=sys.stderr)",
+    "            raise SystemExit(2)",
+    "        pdf=os.path.join(tmp, os.path.splitext(os.path.basename(path))[0] + '.pdf')",
+    "    if not os.path.isfile(pdf) or os.path.getsize(pdf) < 10:",
+    "        print('visual QA failed: renderer produced no PDF output', file=sys.stderr)",
+    "        raise SystemExit(2)",
+    "    pdfinfo=shutil.which('pdfinfo')",
+    "    if pdfinfo:",
+    "        info=subprocess.run([pdfinfo, pdf], text=True, capture_output=True, timeout=30)",
+    "        if info.returncode != 0 or not any(line.startswith('Pages:') and int(line.split(':', 1)[1].strip()) > 0 for line in info.stdout.splitlines() if ':' in line and line.startswith('Pages:')):",
+    "            print('visual QA failed: PDF has no readable pages', file=sys.stderr)",
+    "            raise SystemExit(2)",
+    "    raster=shutil.which('pdftoppm')",
+    "    if raster:",
+    "        png=os.path.join(tmp, 'page')",
+    "        rendered=subprocess.run([raster, '-f', '1', '-l', '1', '-png', '-singlefile', pdf, png], capture_output=True, timeout=120)",
+    "        preview=png + '.png'",
+    "        if rendered.returncode != 0 or not os.path.isfile(preview) or os.path.getsize(preview) < 100:",
+    "            print('visual QA failed: first page could not be rasterized', file=sys.stderr)",
+    "            raise SystemExit(2)",
+    "        print('visual QA passed: rendered first page (' + str(os.path.getsize(preview)) + ' bytes)')",
+    "    else:",
+    "        print('visual QA passed: PDF page structure verified; pixel renderer unavailable')",
+    "finally:",
+    "    shutil.rmtree(tmp, ignore_errors=True)",
   ].join("\n");
 }
 
@@ -557,6 +619,16 @@ export class DaytonaEngine {
     }
   }
 
+  private async validateArtifactVisual(sandbox: Sandbox, path: string, type: ArtifactType): Promise<void> {
+    if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
+    const script = artifactVisualQaScript(type, path);
+    const encoded = Buffer.from(script, "utf8").toString("base64");
+    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 180);
+    if (result.exitCode !== 0) {
+      throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed: ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
+    }
+  }
+
   async artifact(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const session = await getSession(userId);
@@ -618,6 +690,7 @@ export class DaytonaEngine {
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
     await this.validateArtifactStructure(sandbox, normalizedPath, type);
+    await this.validateArtifactVisual(sandbox, normalizedPath, type);
     const now = Date.now();
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
     await this.saveArtifact(userId, artifact);
