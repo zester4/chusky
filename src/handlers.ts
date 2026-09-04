@@ -167,7 +167,7 @@ function telegramMessageReceivedAt(ctx: Context): number {
   return typeof date === "number" && Number.isFinite(date) && date > 0 ? date * 1000 : Date.now();
 }
 
-async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string): Promise<void> {
+async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string, afterAgent?: () => Promise<void>): Promise<void> {
   if (!(await guard(ctx))) return;
   if (!(await checkRateLimit(ctx.from!.id))) {
     await ctx.reply(`⏱ Easy there. Max ${config.rateLimit} messages per ${config.rateWindowSeconds}s.`);
@@ -206,6 +206,9 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
     }
+    // Keep enrichment out of the conversational turn so it cannot create a
+    // second, description-like experience before the selected model replies.
+    if (afterAgent) void afterAgent().catch((error) => logger.warn({ err: error, userId }, "Background media indexing failed"));
   } catch (e) {
     logger.error({ err: e, userId }, "Chusky media error");
     await ctx.api.editMessageText(ctx.chat!.id, status.message_id, e instanceof DOMException && e.name === "AbortError" ? "🛑 Request cancelled." : `❌ ${String(e).slice(0, 500)}`);
@@ -911,14 +914,12 @@ export function registerHandlers(bot: Bot): void {
       const file = await downloadTelegramFile(ctx, photo.file_id);
       const mime = file.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
       const caption = ctx.message.caption?.trim() || "Describe and analyze this image.";
-      if (vectorConfigured()) {
-        try { await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime), sourceType: "telegram_image" }); }
-        catch (error) { logger.warn({ err: error, userId: ctx.from?.id }, "Could not index Telegram image"); }
-      }
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "image_url", image_url: { url: `data:${mime};base64,${file.data.toString("base64")}` } },
-      ], `[Image attached] ${caption}`);
+      ], `[Image attached] ${caption}`, vectorConfigured() ? async () => {
+        await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime), sourceType: "telegram_image" });
+      } : undefined);
     } catch (e) {
       await ctx.reply(`❌ Could not download the image: ${String(e).slice(0, 300)}`);
     }
