@@ -129,7 +129,8 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
     const result = await runAgent(conversation.userId, approval.request, approval.history, approval.model, undefined, undefined, undefined, approvalId, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId });
     await saveConversation(conversation, message, approval.request, result.text);
     if (result.cost) await addUsage(conversation.userId, result.cost);
-    const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, result.generatedImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, result.generatedImages, result.generatedFiles) : [];
+    const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
+    const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
     return reply(conversation, result.text, message.providerEventId, { kind: "approval", correlationId: approvalId, ...(attachments.length ? { attachments } : {}) });
   } catch (error) {
     return reply(conversation, `I approved the action, but it failed before completion: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), message.providerEventId, { kind: "approval", correlationId: approvalId });
@@ -150,7 +151,8 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
       const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
-      const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, result.generatedImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, result.generatedImages, result.generatedFiles) : [];
+      const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
+      const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
       return reply(conversation, result.text, message.providerEventId, { kind: "message", ...(attachments.length ? { attachments } : {}) });
     } catch (error) {
       if (error instanceof ApprovalRequiredError) {

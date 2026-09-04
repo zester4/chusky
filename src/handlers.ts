@@ -206,6 +206,9 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
     }
+    for (const image of result.retrievedImages ?? []) {
+      await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "saved-image.jpg" : "saved-image.png"), { caption: image.name ? `Saved image: ${image.name}` : "Saved image" });
+    }
     // Keep enrichment out of the conversational turn so it cannot create a
     // second, description-like experience before the selected model replies.
     if (afterAgent) void afterAgent().catch((error) => logger.warn({ err: error, userId }, "Background media indexing failed"));
@@ -880,6 +883,9 @@ export function registerHandlers(bot: Bot): void {
       } else for (const image of generatedImages) {
         await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
         if (image.cost) await addUsage(userId, image.cost);
+      }
+      for (const image of result.retrievedImages ?? []) {
+        await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "saved-image.jpg" : "saved-image.png"), { caption: image.name ? `Saved image: ${image.name}` : "Saved image" });
       }
 
     } catch (e) {

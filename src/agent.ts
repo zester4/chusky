@@ -343,6 +343,7 @@ export interface AgentResult {
   toolsUsed: string[];
   cost?: number;
   generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
+  retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
 }
@@ -480,6 +481,7 @@ export async function runAgent(
   const toolsUsed: string[] = [];
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
+  const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
@@ -516,7 +518,7 @@ export async function runAgent(
     if (toolCalls.length === 0) {
       const text = assistantMsg.content ?? "";
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
-      return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, generatedFiles };
+      return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -627,8 +629,15 @@ export async function runAgent(
         content: result,
       });
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
-        const asset = execResult as { downloadUrl?: unknown; name?: unknown };
+        const asset = execResult as { downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.downloadUrl === "string" && /^https:\/\//i.test(asset.downloadUrl)) {
+          const download = await fetch(asset.downloadUrl);
+          if (!download.ok) throw new Error(`Saved image download failed (${download.status})`);
+          const mediaType = typeof asset.contentType === "string" ? asset.contentType.toLowerCase().split(";", 1)[0] : (download.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0];
+          if (!["image/jpeg", "image/png", "image/webp"].includes(mediaType)) throw new Error("Saved image has an unsupported format");
+          const bytes = Buffer.from(await download.arrayBuffer());
+          if (!bytes.length || bytes.length > 12 * 1024 * 1024) throw new Error("Saved image is empty or too large to deliver");
+          retrievedImages.push({ data: bytes, mediaType, name: typeof asset.name === "string" ? asset.name : undefined });
           messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: asset.downloadUrl } }] });
         }
       }
@@ -643,7 +652,7 @@ export async function runAgent(
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
-  return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, generatedFiles };
+  return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────
