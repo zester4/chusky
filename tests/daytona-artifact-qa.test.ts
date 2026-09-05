@@ -12,15 +12,11 @@ function runQa(scenario: string, type: "pdf" | "docx" = "pdf") {
     "installed=False",
     "calls=[]",
     "def which(name):",
-    "    if name in ('apt-get', 'sudo'): return name",
     "    return name if installed or scenario not in ('setup', 'setup-failed') else None",
     "def run(args, **kwargs):",
-    "    global installed",
     "    calls.append(args)",
-    "    if 'apt-get' in args:",
-    "        if scenario == 'setup-failed': return subprocess.CompletedProcess(args, 1)",
-    "        if 'install' in args: installed=True",
-    "    elif args[0] in ('libreoffice', 'soffice'):",
+    "    if args[0] in ('apt-get', 'sudo'): raise AssertionError('QA must never install packages')",
+    "    if args[0] in ('libreoffice', 'soffice'):",
     "        if scenario != 'conversion-failed':",
     "            with open(os.path.join(args[args.index('--outdir')+1], 'source.pdf'), 'wb') as f: f.write(b'%PDF-test')",
     "    elif args[0] == 'pdfinfo':",
@@ -51,7 +47,7 @@ test("emitted QA renders every parsed PDF page", () => {
   assert.match(result.stdout, /RENDER_CALLS=3/);
 });
 
-for (const scenario of ["bad-pdf", "empty", "partial", "setup-failed"]) {
+for (const scenario of ["bad-pdf", "empty", "partial"]) {
   test("QA fails closed for " + scenario, () => {
     const result = runQa(scenario);
     assert.equal(result.status, 2, result.stderr);
@@ -59,10 +55,11 @@ for (const scenario of ["bad-pdf", "empty", "partial", "setup-failed"]) {
   });
 }
 
-test("missing DOCX dependencies are installed before conversion and all-page rendering", () => {
+test("missing DOCX dependencies request isolated rendering without attempting installation", () => {
   const result = runQa("setup", "docx");
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /RENDER_CALLS=3/);
+  assert.equal(result.status, 3, result.stderr);
+  assert.match(result.stderr, /CHUSKY_RENDERER_UNAVAILABLE/);
+  assert.match(result.stdout, /RENDER_CALLS=0/);
 });
 
 test("successful Office exit without a converted PDF fails validation", () => {

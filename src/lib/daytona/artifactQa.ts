@@ -2,7 +2,8 @@ import type { ArtifactType } from "../../store.js";
 
 // Run in the sandbox user's home, the same base used by the filesystem SDK.
 // Count pages with a parser and render each page; PDF markers are not evidence
-// that a file can be opened. Dependencies are repaired in the sandbox, not host.
+// that a file can be opened. Never install packages during registration.
+// Exit 3 requests an isolated renderer; exit 2 means the document failed QA.
 export function artifactVisualQaScript(type: ArtifactType, path: string): string {
   return `path=${JSON.stringify(path)}\nkind=${JSON.stringify(type)}\nrequire_renderer=${["pdf", "docx"].includes(type) ? "True" : "False"}\n` + String.raw`
 import os, shutil, subprocess, sys, tempfile
@@ -26,25 +27,10 @@ path=os.path.abspath(path)
 if not os.path.isfile(path):
     fail('artifact file does not exist: ' + path)
 packages=missing_packages()
-if packages and require_renderer:
-    # Recheck on every registration: failed setup must not poison future retries.
-    apt=shutil.which('apt-get')
-    prefix=[] if os.geteuid() == 0 else ['sudo', '-n']
-    if not apt or (prefix and not shutil.which('sudo')):
-        fail('Renderer setup unavailable. Install ' + ' '.join(packages) + ' in the Daytona sandbox and retry registration of the same file; complete-page inspection is required.')
-    env=os.environ.copy()
-    env['DEBIAN_FRONTEND']='noninteractive'
-    try:
-        for args in [['update'], ['install', '-y', '--no-install-recommends'] + packages]:
-            setup=subprocess.run(prefix + [apt, '-o', 'DPkg::Lock::Timeout=60'] + args, env=env, capture_output=True, timeout=180)
-            if setup.returncode != 0:
-                fail('Renderer setup failed. Install ' + ' '.join(packages) + ' in the Daytona sandbox and retry registration of the same file.')
-    except subprocess.TimeoutExpired:
-        fail('Renderer setup timed out. Retry registration of the same file after sandbox package installation finishes.')
-    packages=missing_packages()
 if packages:
     if require_renderer:
-        fail('Renderer setup incomplete: missing ' + ' '.join(packages))
+        print('CHUSKY_RENDERER_UNAVAILABLE: ' + ' '.join(packages), file=sys.stderr)
+        raise SystemExit(3)
     print('visual QA skipped: renderer dependencies unavailable')
     raise SystemExit(0)
 

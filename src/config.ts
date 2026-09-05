@@ -98,6 +98,7 @@ export const config = {
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
   daytonaTarget: optional("DAYTONA_TARGET", ""),
   daytonaSnapshot: optional("DAYTONA_SNAPSHOT", ""),
+  daytonaRendererSnapshot: optional("DAYTONA_RENDERER_SNAPSHOT", ""),
   // Daytona is the agent's isolated computer, so it needs outbound access for
   // package installation, browser work, and artifact generation by default.
   // Deployments can still opt into full blocking or a domain allowlist.

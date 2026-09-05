@@ -7,6 +7,7 @@ import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
+import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
 import type { DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
@@ -1341,9 +1342,52 @@ export class DaytonaEngine {
     if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
     const script = artifactVisualQaScript(type, path);
     const encoded = Buffer.from(script, "utf8").toString("base64");
-    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 900);
+    let result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 900);
+    if (result.exitCode === 3) result = await this.validateInRenderer(sandbox, path, type);
     if (result.exitCode !== 0) {
       throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed for '${path}': ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
+    }
+  }
+
+  private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType) {
+    const bytes = Buffer.from(await source.fs.downloadFile(path));
+    if (!bytes.length || bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) {
+      throw new DaytonaInputError("Artifact is empty or exceeds the rendering size limit");
+    }
+    let renderer: Sandbox | undefined;
+    try {
+      const params = {
+        name: "chusky-qa-" + randomUUID(),
+        language: "python",
+        networkBlockAll: true,
+        public: false,
+        autoStopInterval: 15,
+        autoDeleteInterval: 0,
+        ttlMinutes: 30,
+        labels: { agent: "chusky", purpose: "artifact-qa", source_sandbox: source.id },
+      };
+      renderer = config.daytonaRendererSnapshot
+        ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
+        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 10 } }, { timeout: 900 });
+      const renderPath = "document." + ARTIFACT_EXTENSION[type];
+      await renderer.fs.uploadFile(bytes, renderPath);
+      const encoded = Buffer.from(artifactVisualQaScript(type, renderPath), "utf8").toString("base64");
+      const result = await renderer.process.executeCommand(
+        'python3 -c "import base64;exec(base64.b64decode(\'' + encoded + '\'))"',
+        await renderer.getUserHomeDir(), undefined, 900,
+      );
+      if (result.exitCode === 3) {
+        throw new DaytonaInputError("The rendering snapshot lacks required tools. Rebuild DAYTONA_RENDERER_SNAPSHOT with Python 3, LibreOffice and Poppler.");
+      }
+      return result;
+    } catch (error) {
+      // Do not disclose provider responses that might contain credentials.
+      const reason = error instanceof DaytonaInputError ? error.message : "Daytona could not prepare or run the isolated renderer. Check provider build logs, quota and snapshot configuration.";
+      throw new DaytonaInputError("Rendering infrastructure failed for '" + path + "': " + reason + " The original file is preserved; retry registration, not generation.");
+    } finally {
+      if (renderer) {
+        try { await renderer.delete(); } catch { /* TTL and auto-delete bound orphan lifetime. */ }
+      }
     }
   }
 

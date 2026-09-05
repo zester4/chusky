@@ -282,7 +282,7 @@ test("requires complete-page DOCX rendering instead of silently skipping QA", as
   const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   // require_renderer is now emitted as a real Python boolean (capital True/False)
   assert.match(visualScript, /require_renderer=True/);
-  assert.match(visualScript, /complete-page inspection/);
+  assert.match(visualScript, /CHUSKY_RENDERER_UNAVAILABLE/);
   assert.match(visualScript, /libreoffice-profile/);
 });
 
@@ -477,6 +477,61 @@ test("does not collapse distinct case-sensitive files during path recovery", asy
   sandbox.fs.listFiles = async () => [{ path: "a/Form.pdf" }, { path: "a/form.pdf" }];
   await assert.rejects(() => e.artifact(820032, { action: "register", type: "pdf", path: "form.pdf" }), /matched multiple/);
 });
+
+for (const outcome of ["success", "invalid-document", "missing-tools", "create-failed", "upload-failed"]) {
+  test("isolated renderer " + outcome + " preserves the workspace and cleans up", async () => {
+    const source = fakeSandbox("owned-source");
+    const renderer = fakeSandbox("temporary-renderer");
+    let rendererCreated = false;
+    let uploaded = false;
+    source.process.executeCommand = async (command: string) => {
+      const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
+      return { exitCode: script.includes("require_renderer") ? 3 : 0, result: "CHUSKY_RENDERER_UNAVAILABLE" };
+    };
+    source.fs.downloadFile = async (path: string) => {
+      assert.equal(path, "workspace/form.docx");
+      return Buffer.from("original document");
+    };
+    renderer.fs.uploadFile = async (bytes: Buffer, path: string) => {
+      assert.equal(bytes.toString(), "original document");
+      assert.equal(path, "document.docx");
+      if (outcome === "upload-failed") throw new Error("upload failed");
+      uploaded = true;
+    };
+    renderer.process.executeCommand = async () => ({
+      exitCode: outcome === "invalid-document" ? 2 : outcome === "missing-tools" ? 3 : 0,
+      result: outcome === "success" ? "visual QA passed: rendered all 2 page(s)" : "renderer failure",
+    });
+    const e = new DaytonaEngine(() => ({
+      get: async () => source,
+      create: async (params: any) => {
+        if (params.labels.purpose !== "artifact-qa") return source;
+        assert.equal(params.networkBlockAll, true);
+        assert.equal(params.autoDeleteInterval, 0);
+        assert.equal(params.ttlMinutes, 30);
+        assert.equal(params.labels.source_sandbox, source.id);
+        assert.match(params.image.dockerfile, /libreoffice-writer/);
+        assert.match(params.image.dockerfile, /poppler-utils/);
+        if (outcome === "create-failed") throw new Error("provider failure");
+        rendererCreated = true;
+        return renderer;
+      },
+    } as any));
+    const call = () => e.artifact(820040, { action: "register", type: "docx", path: "workspace/form.docx" });
+    if (outcome === "success") {
+      const artifact = await call() as any;
+      assert.equal(artifact.sandboxId, source.id);
+      assert.equal(artifact.path, "workspace/form.docx");
+      assert.equal(uploaded, true);
+    } else {
+      await assert.rejects(call, /visual QA failed|Rendering infrastructure failed/);
+      assert.equal((await getSession(820040)).artifacts?.length ?? 0, 0);
+    }
+    assert.equal((await getDaytonaWorkspace(820040))?.sandboxId, source.id);
+    assert.equal(source.state, "started");
+    if (rendererCreated) assert.equal(renderer.state, "destroyed");
+  });
+}
 
 test("turns a missing artifact path into an actionable input error", async () => {
   const e = engine();
