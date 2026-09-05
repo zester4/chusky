@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
-import { isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
+import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -629,7 +629,11 @@ export async function runAgent(
             inputReferences: references,
             aspectRatio: normalizeImageAspectRatio(args.aspectRatio),
             resolution: normalizeImageResolution(args.resolution),
-            size: args.size === undefined ? undefined : imageSize(args.size),
+            // Muse and Grok do not accept exact pixel sizes. Do not run the
+            // generic WIDTHxHEIGHT validator for those models: the model may
+            // emit a ratio or a provider-specific size hint, and that value
+            // is already converted into prompt guidance by generateImages.
+            size: args.size === undefined || !imageModelAcceptsExactSize(config.imageModel) ? undefined : imageSize(args.size),
             quality: normalizeImageQuality(args.quality),
             outputFormat: normalizeImageOutputFormat(args.outputFormat),
             background: args.background === "transparent" || args.background === "opaque" || args.background === "auto" ? args.background : undefined,

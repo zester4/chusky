@@ -24,6 +24,10 @@ export function isGrokImagineImageModel(model: string): boolean {
   return model.trim().toLowerCase() === GROK_IMAGINE_IMAGE_MODEL;
 }
 
+export function imageModelAcceptsExactSize(model: string): boolean {
+  return !isMuseImageModel(model) && !isGrokImagineImageModel(model);
+}
+
 export function normalizeImageCount(value: unknown): number {
   if (value === undefined || value === null || String(value).trim() === "") return 1;
   const count = Number(value);

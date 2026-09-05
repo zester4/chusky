@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { generateImages } from "../src/agent.js";
+import { imageModelAcceptsExactSize } from "../src/image.js";
+
+test("provider size capabilities are explicit", () => {
+  assert.equal(imageModelAcceptsExactSize("x-ai/grok-imagine-image-2.0"), false);
+  assert.equal(imageModelAcceptsExactSize("meta/muse-image"), false);
+  assert.equal(imageModelAcceptsExactSize("openai/gpt-image-1"), true);
+});
 
 test("image generation requests the requested count and returns every image", async () => {
   const originalFetch = globalThis.fetch;
