@@ -263,15 +263,17 @@ test("runs the visual renderability gate after structural artifact validation", 
   assert.match(commands[1], /base64\.b64decode/);
 });
 
-test("creates a presentation through the guarded python-pptx generator before delivery", async () => {
+test("creates a presentation with the built-in generator before Daytona delivery", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820020) as any;
   const commands: string[] = [];
+  let uploadedPresentation: Buffer | undefined;
   const originalExecute = sandbox.process.executeCommand;
   sandbox.process.executeCommand = async (command: string, ...rest: unknown[]) => {
     commands.push(command);
     return originalExecute.call(sandbox.process, command, ...rest);
   };
+  sandbox.fs.uploadFile = async (contents: Buffer) => { uploadedPresentation = Buffer.from(contents); };
   const result = await e.createPresentation(820020, {
     title: "Quarterly review",
     slides: [{
@@ -284,14 +286,22 @@ test("creates a presentation through the guarded python-pptx generator before de
   assert.equal(result.generated, true);
   assert.equal(result.type, "presentation");
   assert.equal(result.slideCount, 2);
-  assert.equal(commands.length, 3);
-  assert.match(commands[0], /python3 -c/);
-  assert.match(commands[0], /base64\.b64decode/);
-  const encodedScript = commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1];
-  assert.ok(encodedScript);
-  const script = Buffer.from(encodedScript, "base64").toString("utf8");
-  assert.match(script, /--target/);
-  assert.doesNotMatch(script, /--user/);
+  assert.equal(commands.length, 2);
+  assert.ok(uploadedPresentation?.subarray(0, 2).equals(Buffer.from("PK")));
+  assert.doesNotMatch(commands.join("\n"), /python-pptx|pip install/);
+});
+
+test("normalizes empty and header-row table shapes without aborting a presentation", async () => {
+  const e = engine();
+  const result = await e.createPresentation(820022, {
+    title: "Table compatibility",
+    slides: [
+      { title: "Narrative", table: [] },
+      { title: "Metrics", table: { headers: ["Metric", "Value"], rows: [["Revenue", 10_000_000]] } },
+    ],
+  }) as any;
+  assert.equal(result.generated, true);
+  assert.equal(result.slideCount, 3);
 });
 
 test("rejects an overlapping table and chart in a generated presentation", async () => {

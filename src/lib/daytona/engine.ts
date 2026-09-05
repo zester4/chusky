@@ -1,5 +1,6 @@
 import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
 import { randomUUID } from "node:crypto";
+import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
@@ -257,6 +258,45 @@ function presentationText(value: unknown, label: string, max: number, required =
   return result || undefined;
 }
 
+function presentationTableCell(value: unknown, label: string): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return String(value);
+  return presentationText(value, label, 400) ?? "";
+}
+
+function presentationTable(value: unknown, slideIndex: number): string[][] | undefined {
+  if (value === undefined || value === null) return undefined;
+  let rows: unknown[];
+  if (Array.isArray(value)) {
+    // Models often include an empty optional table field on narrative slides.
+    // Treat it as absent instead of rejecting the entire deck.
+    if (value.length === 0) return undefined;
+    rows = value;
+  } else if (typeof value === "object") {
+    // Accept the common LLM-friendly { headers, rows } form as well as the
+    // documented matrix form. Both are normalized before presentation output.
+    const table = value as Record<string, unknown>;
+    const headers = table.headers;
+    const body = table.rows;
+    if (headers !== undefined && !Array.isArray(headers)) throw new DaytonaInputError(`slides[${slideIndex}].table.headers must be an array`);
+    if (body !== undefined && !Array.isArray(body)) throw new DaytonaInputError(`slides[${slideIndex}].table.rows must be an array`);
+    if (headers === undefined && body === undefined) throw new DaytonaInputError(`slides[${slideIndex}].table must be a matrix or { headers, rows } object`);
+    rows = [
+      ...(headers === undefined ? [] : [headers]),
+      ...(body ?? []),
+    ];
+    if (rows.length === 0) return undefined;
+  } else {
+    throw new DaytonaInputError(`slides[${slideIndex}].table must be a matrix or { headers, rows } object`);
+  }
+  if (rows.length > 20) throw new DaytonaInputError(`slides[${slideIndex}].table has ${rows.length} rows; split it across slides so each table has at most 20 rows`);
+  return rows.map((row, rowIndex) => {
+    if (!Array.isArray(row) || row.length < 1 || row.length > 10) throw new DaytonaInputError(`slides[${slideIndex}].table[${rowIndex}] must contain 1-10 cells`);
+    return row.map((cell, cellIndex) => presentationTableCell(cell, `slides[${slideIndex}].table[${rowIndex}][${cellIndex}]`));
+  });
+}
+
 function presentationSlides(value: unknown): PresentationSlideInput[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 30) throw new DaytonaInputError("slides must contain 1-30 slide definitions");
   return value.map((raw, index) => {
@@ -268,12 +308,7 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
     const imagePaths = slide.imagePaths === undefined ? undefined : Array.isArray(slide.imagePaths)
       ? slide.imagePaths.slice(0, 4).map((item, imageIndex) => safeDaytonaPath(presentationText(item, `slides[${index}].imagePaths[${imageIndex}]`, 500, true)!))
       : (() => { throw new DaytonaInputError(`slides[${index}].imagePaths must be an array`); })();
-    const table = slide.table === undefined ? undefined : Array.isArray(slide.table) && slide.table.length >= 1 && slide.table.length <= 20
-      ? slide.table.map((row, rowIndex) => {
-        if (!Array.isArray(row) || row.length < 1 || row.length > 10) throw new DaytonaInputError(`slides[${index}].table[${rowIndex}] must contain 1-10 cells`);
-        return row.map((cell, cellIndex) => presentationText(cell, `slides[${index}].table[${rowIndex}][${cellIndex}]`, 400, false) ?? "");
-      })
-      : (() => { throw new DaytonaInputError(`slides[${index}].table must contain 1-20 rows`); })();
+    const table = presentationTable(slide.table, index);
     const rawChart = slide.chart;
     let chart: PresentationSlideInput["chart"];
     if (rawChart !== undefined) {
@@ -382,6 +417,81 @@ function presentationGenerationScript(title: string, slides: PresentationSlideIn
     "if not os.path.isfile(path) or os.path.getsize(path) < 1024: raise RuntimeError('presentation output was not written')",
     "print(json.dumps({'path': path, 'slides': len(check.slides), 'bytes': os.path.getsize(path)}))",
   ].join("\n");
+}
+
+function presentationImageMime(path: string): string {
+  const extension = path.split(".").pop()?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  if (extension === "gif") return "image/gif";
+  return "image/png";
+}
+
+async function presentationBytes(sandbox: Sandbox, title: string, slides: PresentationSlideInput[]): Promise<Buffer> {
+  const pptx = new PptxGenJS();
+  pptx.layout = "LAYOUT_WIDE";
+  pptx.author = "Chusky";
+  pptx.company = "Chusky";
+  pptx.subject = title;
+  pptx.title = title;
+  pptx.theme = {
+    headFontFace: "Aptos Display",
+    bodyFontFace: "Aptos",
+  };
+
+  const cover = pptx.addSlide();
+  cover.background = { color: "F6F9FC" };
+  cover.addText(title, { x: 0.9, y: 2.35, w: 11.5, h: 1.25, fontSize: 32, bold: true, color: "142337", breakLine: false, margin: 0 });
+  cover.addText("Created by Chusky", { x: 0.95, y: 3.9, w: 5, h: 0.35, fontSize: 14, color: "496580", margin: 0 });
+
+  for (const spec of slides) {
+    const slide = pptx.addSlide();
+    slide.background = { color: "FFFFFF" };
+    slide.addText(spec.title, { x: 0.7, y: 0.45, w: 11.9, h: 0.55, fontSize: 24, bold: true, color: "142337", margin: 0 });
+    const images = spec.imagePaths ?? [];
+    const textWidth = images.length ? 7.1 : 11.8;
+    let cursor = 1.3;
+    if (spec.body) {
+      slide.addText(spec.body, { x: 0.8, y: cursor, w: textWidth, h: 1, fontSize: 16, color: "142337", breakLine: false, margin: 0.03, valign: "top" });
+      cursor += 1.05;
+    }
+    if (spec.bullets?.length) {
+      slide.addText(spec.bullets.map((bullet) => `• ${bullet}`).join("\n"), { x: 0.9, y: cursor, w: textWidth, h: Math.max(1.2, 5.2 - cursor), fontSize: 15, color: "142337", breakLine: false, margin: 0.04, valign: "top" });
+    }
+    if (spec.table) {
+      slide.addTable(spec.table as PptxGenJS.TableRow[], {
+        x: 0.8, y: 3.8, w: textWidth, h: 2.8, fontSize: 12, color: "142337",
+        border: { type: "solid", color: "CBD5E1", pt: 1 },
+        fill: { color: "FFFFFF" }, bold: false, margin: 0.05,
+        autoPage: false,
+      });
+    }
+    if (spec.chart) {
+      slide.addChart("bar", spec.chart.series.map((series) => ({ name: series.name, labels: spec.chart!.categories, values: series.values })), {
+        x: images.length ? 0.8 : 6.8, y: 3.7, w: 5.5, h: 2.8,
+        catAxisLabelFontSize: 10, valAxisLabelFontSize: 10, showLegend: spec.chart.series.length > 1,
+        showTitle: false, showValue: true, chartColors: ["0F766E", "0284C7", "EA580C", "7C3AED"],
+      });
+    }
+    for (let index = 0; index < images.length; index += 1) {
+      const imagePath = images[index]!;
+      let bytes: Buffer;
+      try {
+        bytes = Buffer.from(await sandbox.fs.downloadFile(imagePath));
+      } catch (error) {
+        throw new DaytonaInputError(`Unable to read slide image ${imagePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!bytes.length) throw new DaytonaInputError(`Slide image is empty: ${imagePath}`);
+      const top = 1.35 + index * (5.4 / Math.max(1, images.length));
+      const height = Math.max(1.1, 5 / Math.max(1, images.length));
+      slide.addImage({ data: `data:${presentationImageMime(imagePath)};base64,${bytes.toString("base64")}`, x: 8.25, y: top, w: 4.3, h: height, sizing: { type: "contain", x: 8.25, y: top, w: 4.3, h: height } });
+    }
+  }
+  const output = await pptx.write({ outputType: "nodebuffer", compression: true });
+  const bytes = Buffer.from(output as Uint8Array);
+  if (bytes.length < 1024 || !bytes.subarray(0, 2).equals(Buffer.from("PK"))) throw new DaytonaInputError("Presentation generator returned an invalid Office Open XML package");
+  if (bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Presentation is larger than the ${Math.floor(DAYTONA_MAX_ARTIFACT_BYTES / 1024 / 1024)} MB delivery limit`);
+  return bytes;
 }
 
 function collectPtyOutput(): { chunks: string[]; onData: (data: Uint8Array) => void } {
@@ -790,13 +900,8 @@ export class DaytonaEngine {
       : safeDaytonaPath(args.path, "path");
     const path = requestedPath.toLowerCase().endsWith(".pptx") ? requestedPath : `${requestedPath}.pptx`;
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const script = presentationGenerationScript(title, slides, path);
-    const encoded = Buffer.from(script, "utf8").toString("base64");
-    const generated = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 300);
-    if (generated.exitCode !== 0) {
-      const raw = String(generated.result ?? "unknown generator error").replace(/base64\.b64decode\('\S*?'\)/g, "base64.b64decode('[payload redacted]')");
-      throw new DaytonaInputError(`Presentation generation failed: ${raw.slice(-900)}`);
-    }
+    const bytes = await presentationBytes(sandbox, title, slides);
+    await sandbox.fs.uploadFile(bytes, path);
     const result = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation);
     return { ...result, generated: true, slideCount: slides.length + 1 };
   }
