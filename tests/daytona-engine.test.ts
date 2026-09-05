@@ -316,6 +316,34 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(visualScript, /require_renderer=True/);
 });
 
+test("moves PDF generation to the isolated renderer when the workspace lacks ReportLab", async () => {
+  const source = fakeSandbox("source-pdf");
+  const renderer = fakeSandbox("renderer-pdf");
+  const generated = Buffer.from("%PDF-1.4\n1 0 obj\n%%EOF");
+  source.process.executeCommand = async (command: string) => command.includes("pdf-generator-")
+    ? { exitCode: 1, result: "ReportLab is unavailable" }
+    : { exitCode: 0, result: "validated" };
+  source.fs.uploadFile = async (bytes: Buffer, path: string) => {
+    if (path.endsWith(".py")) return;
+    assert.equal(path, "artifacts/Renderer_Fallback.pdf");
+    assert.deepEqual(bytes, generated);
+  };
+  renderer.process.executeCommand = async () => ({ exitCode: 0, result: "generated" });
+  renderer.fs.downloadFile = async (path: string) => path.endsWith(".pdf") ? generated : Buffer.from("script");
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async (params: any) => {
+      if (params.labels?.purpose !== "artifact-pdf-generation") return source;
+      assert.equal(params.labels.purpose, "artifact-pdf-generation");
+      return renderer;
+    },
+  } as any));
+  const result = await e.createPdf(820026, { title: "Renderer Fallback", sections: [{ body: "Generated in renderer" }] });
+  assert.equal(result.generated, true);
+  assert.equal(result.type, "pdf");
+  assert.equal(renderer.state, "destroyed");
+});
+
 test("creates a presentation with the built-in generator before Daytona delivery", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820020) as any;

@@ -1405,12 +1405,41 @@ export class DaytonaEngine {
     await sandbox.fs.uploadFile(Buffer.from(script, "utf8"), scriptPath);
     try {
       const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, await sandbox.getUserHomeDir(), undefined, 240);
-      if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed: ${String(result.result ?? "unknown PDF generation error").slice(0, 800)}`);
+      if (result.exitCode !== 0) {
+        const output = String(result.result ?? "");
+        if (/ReportLab is unavailable|No module named ['"]?(reportlab|pypdf)/i.test(output)) {
+          await this.generatePdfInRenderer(sandbox, script, path);
+        } else {
+          throw new DaytonaInputError(`PDF generation failed: ${output.slice(0, 800)}`);
+        }
+      }
     } finally {
       try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
     }
     const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf);
     return { ...artifact, generated: true };
+  }
+
+  private async generatePdfInRenderer(source: Sandbox, script: string, path: string): Promise<void> {
+    let renderer: Sandbox | undefined;
+    try {
+      const params = { name: `chusky-pdf-${randomUUID()}`, language: "python", networkBlockAll: false, public: false, autoStopInterval: 15, autoDeleteInterval: 0, ttlMinutes: 30, labels: { agent: "chusky", purpose: "artifact-pdf-generation", source_sandbox: source.id } };
+      renderer = config.daytonaRendererSnapshot
+        ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
+        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 10 } }, { timeout: 900 });
+      const rendererScriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
+      const rendererScript = script.replace(/dependency_dir=os\.path\.abspath\(os\.path\.join\('workspace', '\.chusky', 'python-reportlab'\)\)/, "dependency_dir='/tmp/chusky-reportlab'");
+      await renderer.fs.uploadFile(Buffer.from(rendererScript, "utf8"), rendererScriptPath);
+      const result = await renderer.process.executeCommand(`python3 ${rendererScriptPath}`, await renderer.getUserHomeDir(), undefined, 900);
+      if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed in isolated renderer: ${String(result.result ?? "unknown error").slice(0, 800)}`);
+      const generated = Buffer.from(await renderer.fs.downloadFile(path));
+      if (!generated.length) throw new DaytonaInputError("PDF renderer produced an empty file");
+      await source.fs.uploadFile(generated, path);
+    } finally {
+      if (renderer) {
+        try { await renderer.delete(); } catch { /* bounded by TTL if provider cleanup is unavailable */ }
+      }
+    }
   }
 
   async createPresentation(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; slideCount: number }> {
