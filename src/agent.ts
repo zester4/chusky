@@ -102,7 +102,7 @@ export function parseToolArguments(raw: unknown): Record<string, unknown> {
   let value = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   const first = value.indexOf("{");
   const last = value.lastIndexOf("}");
-  if (first > 0 || last >= 0 && last < value.length - 1) value = value.slice(Math.max(0, first), last + 1).trim();
+  if (first >= 0 && last >= first && (first > 0 || last < value.length - 1)) value = value.slice(first, last + 1).trim();
   try {
     const parsed = JSON.parse(value) as unknown;
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
@@ -122,9 +122,15 @@ export function parseToolArguments(raw: unknown): Record<string, unknown> {
       } else if (ch === "'") {
         repaired += '"'; single = false;
       } else if (ch === '"') repaired += '\\"';
+      else if (ch === "\n") repaired += "\\n";
+      else if (ch === "\r") repaired += "\\r";
+      else if (ch === "\t") repaired += "\\t";
       else repaired += ch;
     } else if (double) {
-      repaired += ch;
+      if (ch === "\n") repaired += "\\n";
+      else if (ch === "\r") repaired += "\\r";
+      else if (ch === "\t") repaired += "\\t";
+      else repaired += ch;
       if (ch === "\\") repaired += value[++i] ?? "";
       else if (ch === '"') double = false;
     } else if (ch === "'") { repaired += '"'; single = true; }
@@ -133,7 +139,14 @@ export function parseToolArguments(raw: unknown): Record<string, unknown> {
   repaired = repaired
     .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":')
     .replace(/,\s*([}\]])/g, "$1");
-  const parsed = JSON.parse(repaired) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(repaired) as unknown;
+  } catch {
+    // Never leak a provider SyntaxError/stack trace. The surrounding tool
+    // loop feeds this bounded error back to the model for a clean retry.
+    throw new Error("Tool arguments are malformed or truncated JSON");
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Tool arguments must be a JSON object");
   return parsed as Record<string, unknown>;
 }

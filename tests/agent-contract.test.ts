@@ -137,6 +137,14 @@ test("tool argument parser accepts fenced and single-quoted JSON-like objects sa
   assert.throws(() => parseToolArguments("{action: create, value: process.exit(1)}"));
 });
 
+test("tool argument parser reports truncated JSON without leaking a SyntaxError", () => {
+  assert.throws(() => parseToolArguments('{"type":"report","content":"unterminated'), /malformed or truncated JSON/);
+});
+
+test("tool argument parser repairs literal newlines inside model strings", () => {
+  assert.deepEqual(parseToolArguments('{"content":"line one\nline two"}'), { content: "line one\nline two" });
+});
+
 test("repeated provider tool-call IDs execute only once", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830009);
