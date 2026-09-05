@@ -16,7 +16,7 @@ import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
 import { acquireUserLock, createChannelLinkCode, createSendblueGroupLinkCode, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
-import type { ChannelAdapter, DeliveryReceipt, OutboundMessage } from "../src/channels/contracts.js";
+import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
@@ -276,7 +276,26 @@ test("a Sendblue link command sends confirmation without entering the agent loop
   const result = await gateway.processInbound(message!);
   assert.equal(result.linked, true);
   assert.equal(sent.length, 1);
-  assert.match(String(sent[0].content), /account is now linked to Chusky/i);
+  assert.match(String(sent[0].content), /iMessage account is now connected to Chusky/i);
+});
+
+test("all linked channels receive a provider-specific confirmation", async () => {
+  for (const provider of ["slack", "whatsapp", "sendblue"] as const) {
+    const code = await createChannelLinkCode(42, provider);
+    const sent: OutboundMessage[] = [];
+    const adapter: ChannelAdapter = {
+      provider,
+      capabilities: CHANNEL_CAPABILITIES[provider],
+      async send(message) { sent.push(message); return { providerMessageId: `${provider}-linked`, deliveredAt: Date.now() }; },
+    };
+    const gateway = new ChannelGateway(async () => { throw new Error("agent loop should not run for /link"); });
+    gateway.register(adapter);
+    const message: InboundMessage = { provider, providerEventId: `${provider}-link`, providerUserId: `${provider}-user`, providerConversationId: `${provider}-conversation`, ...(provider !== "sendblue" ? { providerWorkspaceId: `${provider}-workspace` } : {}), text: `/link ${code}`, attachments: [], receivedAt: Date.now(), scope: "private" };
+    const result = await gateway.processInbound(message);
+    assert.equal(result.linked, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0].text ?? "", provider === "sendblue" ? /iMessage account is now connected/i : new RegExp(`${provider} account is now connected`, "i"));
+  }
 });
 
 test("a linked owner can authorize a Sendblue group for all participants and unlink it", async () => {

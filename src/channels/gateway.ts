@@ -15,6 +15,11 @@ export interface ChannelProcessResult {
   delivered: string[];
 }
 
+function linkedConfirmation(provider: InboundMessage["provider"]): string {
+  const label = provider === "sendblue" ? "iMessage" : provider === "whatsapp" ? "WhatsApp" : provider === "slack" ? "Slack" : provider;
+  return `✅ Your ${label} account is now connected to Chusky. You can send messages here and Chusky will use your linked workspace.`;
+}
+
 export class ChannelGateway {
   private readonly adapters = new Map<string, ChannelAdapter>();
   private readonly outbox: ChannelOutbox;
@@ -103,7 +108,7 @@ export class ChannelGateway {
             accountId: identity.accountId,
             userId: identity.userId,
             target: buildReplyTarget(message),
-            text: `✅ Your ${message.provider} account is now linked to Chusky. You can send messages here and Chusky will use your linked workspace.`,
+            text: linkedConfirmation(message.provider),
             idempotencyKey: `${message.provider}:${message.providerEventId}:linked`,
             kind: "notification",
           }, adapter);
