@@ -279,7 +279,8 @@ test("requires complete-page DOCX rendering instead of silently skipping QA", as
   };
   await e.artifact(820019, { action: "register", type: "docx", path: "workspace/artifacts/brief.docx" });
   const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
-  assert.match(visualScript, /require_renderer=true/);
+  // require_renderer is now emitted as a real Python boolean (capital True/False)
+  assert.match(visualScript, /require_renderer=True/);
   assert.match(visualScript, /complete-page inspection/);
   assert.match(visualScript, /libreoffice-profile/);
 });
@@ -309,7 +310,8 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(commands[0], /^python3 artifacts\/\.chusky\/pdf-generator-/);
   const visualScript = Buffer.from(commands[2].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   assert.match(visualScript, /kind="pdf"/);
-  assert.match(visualScript, /require_renderer=true/);
+  // require_renderer is now emitted as a real Python boolean (capital True/False)
+  assert.match(visualScript, /require_renderer=True/);
 });
 
 test("creates a presentation with the built-in generator before Daytona delivery", async () => {
@@ -341,7 +343,11 @@ test("creates a presentation with the built-in generator before Daytona delivery
   const structureScript = Buffer.from(commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   assert.match(structureScript, /target\.startswith\('\/'\)/);
-  assert.match(visualScript, /workspace_path=os\.path\.join\('\/home\/user', path\)/);
+  // Dual-path probe now checks both /home/user and /home/user/workspace before failing.
+  assert.match(visualScript, /os\.path\.join\('\/home\/user', path\)/);
+  assert.match(visualScript, /os\.path\.join\('\/home\/user\/workspace', path\)/);
+  // require_renderer is emitted as a real Python boolean False for non-required types.
+  assert.match(visualScript, /require_renderer=False/);
 });
 
 test("creates chart-heavy decks with complete root-relative OOXML chart relationships", async () => {

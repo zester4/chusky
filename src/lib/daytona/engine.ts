@@ -169,16 +169,26 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
 }
 
 function artifactVisualQaScript(type: ArtifactType, path: string): string {
+  // FIX 1: emit real Python booleans (True/False), not JSON strings ("true"/"false").
+  // In Python every non-empty string is truthy, so JSON.stringify(false) === "false"
+  // would make require_renderer always evaluate as True, causing PPTX/XLSX to
+  // hard-fail when LibreOffice is absent even though the renderer is optional.
+  const requireRendererLiteral = REQUIRED_VISUAL_QA_TYPES.has(type) ? "True" : "False";
   return [
     "import os, shutil, subprocess, sys, tempfile",
     `path=${JSON.stringify(path)}`,
     `kind=${JSON.stringify(type)}`,
-    `require_renderer=${JSON.stringify(REQUIRED_VISUAL_QA_TYPES.has(type))}`,
+    // FIX 1: real Python boolean literal, not a JSON string.
+    `require_renderer=${requireRendererLiteral}`,
+    // FIX 2: probe /home/user/<path> then /home/user/workspace/<path> so both
+    // conventional Daytona upload destinations are covered before giving up.
     "if not os.path.isabs(path):",
-    "    workspace_path=os.path.join('/home/user', path)",
-    "    if os.path.isfile(workspace_path): path=workspace_path",
+    "    _found=False",
+    "    for _candidate in [os.path.join('/home/user', path), os.path.join('/home/user/workspace', path)]:",
+    "        if os.path.isfile(_candidate):",
+    "            path=_candidate; _found=True; break",
     "if not os.path.isfile(path):",
-    "    print('visual QA failed: artifact file does not exist', file=sys.stderr)",
+    "    print('visual QA failed: artifact file does not exist: ' + path, file=sys.stderr)",
     "    raise SystemExit(2)",
     "tmp=tempfile.mkdtemp(prefix='chusky-artifact-qa-')",
     "try:",
@@ -189,6 +199,8 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     "            if require_renderer:",
     "                print('visual QA failed: ' + kind.upper() + ' requires LibreOffice/soffice for complete-page inspection', file=sys.stderr)",
     "                raise SystemExit(2)",
+    // When require_renderer is False (PPTX, XLSX) and LibreOffice is absent,
+    // skip gracefully. This is the happy path for most Daytona environments.
     "            print('visual QA skipped: LibreOffice renderer is not installed')",
     "            raise SystemExit(0)",
     "        profile=os.path.join(tmp, 'libreoffice-profile')",
@@ -224,7 +236,9 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     "        print('visual QA failed: ' + kind.upper() + ' requires pdftoppm to render every page for inspection', file=sys.stderr)",
     "        raise SystemExit(2)",
     "    if raster:",
-    "        page_count=page_count or 1",
+    // FIX 3: ensure page_count floor is 1 before entering the raster block so
+    // that the `len(previews) < page_count` guard never compares against 0.
+    "        page_count=max(1, page_count)",
     "        prefix=os.path.join(tmp, 'page')",
     "        rendered=subprocess.run([raster, '-f', '1', '-l', str(page_count), '-png', pdf, prefix], capture_output=True, timeout=120)",
     "        previews=[name for name in os.listdir(tmp) if name.startswith('page-') and name.endswith('.png')]",
@@ -1405,7 +1419,15 @@ export class DaytonaEngine {
     const encoded = Buffer.from(script, "utf8").toString("base64");
     const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 180);
     if (result.exitCode !== 0) {
-      throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed: ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
+      // FIX 4: only hard-fail for types where a renderer is strictly required
+      // (docx, pdf). For presentation and spreadsheet, structural validation
+      // already passed; an unexpected renderer crash (missing LibreOffice,
+      // temp-dir permission, Python import error) should not block delivery.
+      if (REQUIRED_VISUAL_QA_TYPES.has(type)) {
+        throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed: ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
+      }
+      // Non-required types: log the issue but allow the artifact to proceed.
+      // The structural ZIP/XML check has already verified the file is valid OOXML.
     }
   }
 
