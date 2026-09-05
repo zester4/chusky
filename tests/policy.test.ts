@@ -19,6 +19,7 @@ test("uses explicit native policies and inspects Composio multi-tool calls", () 
   assert.equal(toolApprovalPolicy("CHUCK_START_FACETIME_CALL"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_LIST_FACETIME_CALLS"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PRESENTATION"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_CREATE_PDF"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
@@ -34,6 +35,7 @@ test("renders human tool progress", () => {
   assert.equal(humanToolStatus("CHUCK_DAYTONA_WORKSPACE"), "🖥️ I’m opening my private computer workspace…");
   assert.equal(humanToolStatus("CHUCK_DAYTONA_COMPUTER"), "🖥️ I’m using my private computer…");
   assert.equal(humanToolStatus("CHUCK_CREATE_PRESENTATION"), "📊 I’m building and checking your presentation…");
+  assert.equal(humanToolStatus("CHUCK_CREATE_PDF"), "📄 I’m building and checking your PDF…");
   assert.doesNotMatch(humanToolStatus("CHUCK_DAYTONA_EXECUTE"), /CHUCK|Daytona|sandbox|isolated/i);
   assert.doesNotMatch(humanToolStatus("CHUCK_NEW_INTERNAL_TOOL"), /CHUCK|NEW_INTERNAL_TOOL/i);
 });

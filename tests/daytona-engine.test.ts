@@ -264,6 +264,51 @@ test("runs the visual renderability gate after structural artifact validation", 
   assert.ok(validationScript);
   assert.match(Buffer.from(validationScript, "base64").toString("utf8"), /target\.lstrip\('\/'\)/);
   assert.match(commands[1], /base64\.b64decode/);
+  assert.match(Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8"), /rendered all/);
+});
+
+test("requires complete-page DOCX rendering instead of silently skipping QA", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820019) as any;
+  const commands: string[] = [];
+  const originalExecute = sandbox.process.executeCommand;
+  sandbox.process.executeCommand = async (command: string, ...rest: unknown[]) => {
+    commands.push(command);
+    return originalExecute.call(sandbox.process, command, ...rest);
+  };
+  await e.artifact(820019, { action: "register", type: "docx", path: "workspace/artifacts/brief.docx" });
+  const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
+  assert.match(visualScript, /require_renderer=true/);
+  assert.match(visualScript, /complete-page inspection/);
+  assert.match(visualScript, /libreoffice-profile/);
+});
+
+test("creates a structured PDF in Daytona before registering it", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820025) as any;
+  let generatorScript = "";
+  const commands: string[] = [];
+  sandbox.fs.uploadFile = async (contents: Buffer, path: string) => {
+    if (path.endsWith(".py")) generatorScript = Buffer.from(contents).toString("utf8");
+  };
+  sandbox.process.executeCommand = async (command: string) => {
+    commands.push(command);
+    return { exitCode: 0, result: "ok" };
+  };
+  const result = await e.createPdf(820025, {
+    title: "Quarterly Report",
+    sections: [{ heading: "Summary", body: "Verified.", bullets: ["One"], table: { headers: ["Metric", "Value"], rows: [["Revenue", "100"]] }, chart: undefined }],
+  });
+  assert.equal(result.__chuskyArtifactReady, true);
+  assert.equal(result.type, "pdf");
+  assert.match(generatorScript, /from reportlab\.platypus/);
+  assert.match(generatorScript, /LongTable/);
+  assert.match(generatorScript, /ImageReader/);
+  assert.match(generatorScript, /PdfReader/);
+  assert.match(commands[0], /^python3 artifacts\/\.chusky\/pdf-generator-/);
+  const visualScript = Buffer.from(commands[2].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
+  assert.match(visualScript, /kind="pdf"/);
+  assert.match(visualScript, /require_renderer=true/);
 });
 
 test("creates a presentation with the built-in generator before Daytona delivery", async () => {

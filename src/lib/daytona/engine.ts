@@ -90,6 +90,11 @@ const ARTIFACT_EXTENSION: Record<ArtifactType, string> = {
 };
 
 const STRUCTURED_ARTIFACT_TYPES = new Set<ArtifactType>(["docx", "presentation", "pdf", "spreadsheet"]);
+// PDF and DOCX layout is especially sensitive to renderer differences. These
+// types must never be registered as verified when their complete-page render
+// could not run. Keep the existing best-effort behavior for PPTX/XLSX so a
+// deployment without LibreOffice does not regress those established paths.
+const REQUIRED_VISUAL_QA_TYPES = new Set<ArtifactType>(["docx", "pdf"]);
 
 function artifactValidationScript(type: ArtifactType, path: string): string {
   const officeRoots: Partial<Record<ArtifactType, string>> = {
@@ -162,6 +167,7 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     "import os, shutil, subprocess, sys, tempfile",
     `path=${JSON.stringify(path)}`,
     `kind=${JSON.stringify(type)}`,
+    `require_renderer=${JSON.stringify(REQUIRED_VISUAL_QA_TYPES.has(type))}`,
     "if not os.path.isfile(path):",
     "    print('visual QA failed: artifact file does not exist', file=sys.stderr)",
     "    raise SystemExit(2)",
@@ -171,9 +177,16 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     "    if kind != 'pdf':",
     "        office=shutil.which('libreoffice') or shutil.which('soffice')",
     "        if not office:",
+    "            if require_renderer:",
+    "                print('visual QA failed: ' + kind.upper() + ' requires LibreOffice/soffice for complete-page inspection', file=sys.stderr)",
+    "                raise SystemExit(2)",
     "            print('visual QA skipped: LibreOffice renderer is not installed')",
     "            raise SystemExit(0)",
-    "        converted=subprocess.run([office, '--headless', '--convert-to', 'pdf', '--outdir', tmp, path], text=True, capture_output=True, timeout=120)",
+    "        profile=os.path.join(tmp, 'libreoffice-profile')",
+    "        os.makedirs(profile, exist_ok=True)",
+    "        render_env=os.environ.copy()",
+    "        render_env['HOME']=profile",
+    "        converted=subprocess.run([office, '--headless', '--norestore', '--nofirststartwizard', '-env:UserInstallation=file://' + profile, '--convert-to', 'pdf', '--outdir', tmp, path], env=render_env, text=True, capture_output=True, timeout=120)",
     "        if converted.returncode != 0:",
     "            print('visual QA failed: Office-to-PDF rendering failed: ' + (converted.stderr or converted.stdout)[-800:], file=sys.stderr)",
     "            raise SystemExit(2)",
@@ -181,21 +194,35 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     "    if not os.path.isfile(pdf) or os.path.getsize(pdf) < 10:",
     "        print('visual QA failed: renderer produced no PDF output', file=sys.stderr)",
     "        raise SystemExit(2)",
+    "    page_count=0",
     "    pdfinfo=shutil.which('pdfinfo')",
+    "    if not pdfinfo and require_renderer:",
+    "        print('visual QA failed: ' + kind.upper() + ' requires pdfinfo to verify the complete page count', file=sys.stderr)",
+    "        raise SystemExit(2)",
     "    if pdfinfo:",
     "        info=subprocess.run([pdfinfo, pdf], text=True, capture_output=True, timeout=30)",
-    "        if info.returncode != 0 or not any(line.startswith('Pages:') and int(line.split(':', 1)[1].strip()) > 0 for line in info.stdout.splitlines() if ':' in line and line.startswith('Pages:')):",
+    "        if info.returncode == 0:",
+    "            for line in info.stdout.splitlines():",
+    "                if line.startswith('Pages:'):",
+    "                    try: page_count=int(line.split(':', 1)[1].strip())",
+    "                    except ValueError: page_count=0",
+    "                    break",
+    "        if page_count < 1:",
     "            print('visual QA failed: PDF has no readable pages', file=sys.stderr)",
     "            raise SystemExit(2)",
     "    raster=shutil.which('pdftoppm')",
+    "    if not raster and require_renderer:",
+    "        print('visual QA failed: ' + kind.upper() + ' requires pdftoppm to render every page for inspection', file=sys.stderr)",
+    "        raise SystemExit(2)",
     "    if raster:",
-    "        png=os.path.join(tmp, 'page')",
-    "        rendered=subprocess.run([raster, '-f', '1', '-l', '1', '-png', '-singlefile', pdf, png], capture_output=True, timeout=120)",
-    "        preview=png + '.png'",
-    "        if rendered.returncode != 0 or not os.path.isfile(preview) or os.path.getsize(preview) < 100:",
-    "            print('visual QA failed: first page could not be rasterized', file=sys.stderr)",
+    "        page_count=page_count or 1",
+    "        prefix=os.path.join(tmp, 'page')",
+    "        rendered=subprocess.run([raster, '-f', '1', '-l', str(page_count), '-png', pdf, prefix], capture_output=True, timeout=120)",
+    "        previews=[name for name in os.listdir(tmp) if name.startswith('page-') and name.endswith('.png')]",
+    "        if rendered.returncode != 0 or len(previews) < page_count or any(os.path.getsize(os.path.join(tmp, name)) < 100 for name in previews):",
+    "            print('visual QA failed: one or more pages could not be rasterized', file=sys.stderr)",
     "            raise SystemExit(2)",
-    "        print('visual QA passed: rendered first page (' + str(os.path.getsize(preview)) + ' bytes)')",
+    "        print('visual QA passed: rendered all ' + str(page_count) + ' page(s)')",
     "    else:",
     "        print('visual QA passed: PDF page structure verified; pixel renderer unavailable')",
     "finally:",
@@ -277,6 +304,28 @@ type PresentationStyle = {
   footer?: string;
   includeSlideNumbers: boolean;
   logoPath?: string;
+};
+
+type PdfSectionInput = {
+  heading?: string;
+  body?: string;
+  bullets?: string[];
+  table?: string[][];
+  imagePath?: string;
+  imageAltText?: string;
+  imageWidth?: number;
+  chart?: { categories: string[]; series: Array<{ name: string; values: number[] }> };
+  pageBreakBefore?: boolean;
+};
+
+type PdfStyleInput = {
+  pageSize: "A4" | "LETTER" | "LEGAL";
+  margin: number;
+  primary: string;
+  accent: string;
+  text: string;
+  muted: string;
+  fontSize: number;
 };
 
 const PRESENTATION_LAYOUTS = new Set<PresentationLayout>([
@@ -414,6 +463,97 @@ function presentationTable(value: unknown, slideIndex: number): string[][] | und
     if (!Array.isArray(row) || row.length < 1 || row.length > 10) throw new DaytonaInputError(`slides[${slideIndex}].table[${rowIndex}] must contain 1-10 cells`);
     return row.map((cell, cellIndex) => presentationTableCell(cell, `slides[${slideIndex}].table[${rowIndex}][${cellIndex}]`));
   });
+}
+
+function pdfTable(value: unknown, label: string): string[][] | undefined {
+  if (value === undefined || value === null) return undefined;
+  let rows: unknown[];
+  if (Array.isArray(value)) {
+    if (value.length === 0) return undefined;
+    rows = value;
+  } else if (typeof value === "object") {
+    const table = value as Record<string, unknown>;
+    const headers = table.headers;
+    const body = table.rows;
+    if (headers !== undefined && !Array.isArray(headers)) throw new DaytonaInputError(`${label}.headers must be an array`);
+    if (body !== undefined && !Array.isArray(body)) throw new DaytonaInputError(`${label}.rows must be an array`);
+    if (headers === undefined && body === undefined) throw new DaytonaInputError(`${label} must be a matrix or { headers, rows } object`);
+    rows = [...(headers === undefined ? [] : [headers]), ...(body ?? [])];
+  } else {
+    throw new DaytonaInputError(`${label} must be a matrix or { headers, rows } object`);
+  }
+  if (rows.length === 0) return undefined;
+  if (rows.length > 100) throw new DaytonaInputError(`${label} must contain at most 100 rows; split large data across sections`);
+  const width = Math.max(...rows.map((row) => Array.isArray(row) ? row.length : 0));
+  if (width < 1 || width > 12) throw new DaytonaInputError(`${label} rows must contain 1-12 cells`);
+  return rows.map((row, rowIndex) => {
+    if (!Array.isArray(row) || row.length < 1 || row.length > 12) throw new DaytonaInputError(`${label}[${rowIndex}] must contain 1-12 cells`);
+    return row.map((cell, cellIndex) => presentationTableCell(cell, `${label}[${rowIndex}][${cellIndex}]`));
+  });
+}
+
+function pdfChart(value: unknown, label: string): PdfSectionInput["chart"] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new DaytonaInputError(`${label} must be an object`);
+  const input = value as Record<string, unknown>;
+  if (!Array.isArray(input.categories) || input.categories.length < 1 || input.categories.length > 20 || !Array.isArray(input.series) || input.series.length < 1 || input.series.length > 6) {
+    throw new DaytonaInputError(`${label} needs 1-20 categories and 1-6 series`);
+  }
+  const categories = input.categories.map((item, index) => presentationText(item, `${label}.categories[${index}]`, 100, true)!);
+  const series = input.series.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new DaytonaInputError(`${label}.series[${index}] must be an object`);
+    const raw = item as Record<string, unknown>;
+    if (!Array.isArray(raw.values) || raw.values.length !== categories.length || raw.values.some((number) => typeof number !== "number" || !Number.isFinite(number))) {
+      throw new DaytonaInputError(`${label}.series[${index}].values must match category count`);
+    }
+    return { name: presentationText(raw.name, `${label}.series[${index}].name`, 100, true)!, values: raw.values as number[] };
+  });
+  return { categories, series };
+}
+
+function pdfSections(value: unknown): PdfSectionInput[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 50) throw new DaytonaInputError("sections must contain 1-50 section definitions");
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`sections[${index}] must be an object`);
+    const section = raw as Record<string, unknown>;
+    const bullets = section.bullets === undefined ? undefined : Array.isArray(section.bullets)
+      ? section.bullets.slice(0, 30).map((item, bulletIndex) => presentationText(item, `sections[${index}].bullets[${bulletIndex}]`, 500, true)!)
+      : (() => { throw new DaytonaInputError(`sections[${index}].bullets must be an array`); })();
+    const imagePath = section.imagePath === undefined ? undefined : safeDaytonaPath(presentationText(section.imagePath, `sections[${index}].imagePath`, 500, true)!);
+    const imageWidth = section.imageWidth === undefined ? undefined : boundedNumber(section.imageWidth, 5.5, 7.0);
+    const table = pdfTable(section.table, `sections[${index}].table`);
+    const chart = pdfChart(section.chart, `sections[${index}].chart`);
+    return {
+      heading: presentationText(section.heading, `sections[${index}].heading`, 200),
+      body: presentationText(section.body, `sections[${index}].body`, 8000),
+      bullets,
+      table,
+      imagePath,
+      imageAltText: presentationText(section.imageAltText, `sections[${index}].imageAltText`, 300),
+      imageWidth,
+      chart,
+      pageBreakBefore: section.pageBreakBefore === true,
+    };
+  });
+}
+
+function pdfStyle(value: unknown): PdfStyleInput {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const pageSize = input.pageSize === undefined ? "A4" : String(input.pageSize).toUpperCase();
+  if (pageSize !== "A4" && pageSize !== "LETTER" && pageSize !== "LEGAL") throw new DaytonaInputError("style.pageSize must be A4, LETTER, or LEGAL");
+  const margin = input.margin === undefined ? 0.65 : Number(input.margin);
+  if (!Number.isFinite(margin) || margin < 0.35 || margin > 1.25) throw new DaytonaInputError("style.margin must be between 0.35 and 1.25 inches");
+  const fontSize = input.fontSize === undefined ? 10.5 : Number(input.fontSize);
+  if (!Number.isFinite(fontSize) || fontSize < 8 || fontSize > 18) throw new DaytonaInputError("style.fontSize must be between 8 and 18 points");
+  return {
+    pageSize: pageSize as PdfStyleInput["pageSize"],
+    margin,
+    primary: presentationColor(input.primary, "style.primary", "123B5D"),
+    accent: presentationColor(input.accent, "style.accent", "0F766E"),
+    text: presentationColor(input.text, "style.text", "243B53"),
+    muted: presentationColor(input.muted, "style.muted", "52606D"),
+    fontSize,
+  };
 }
 
 function presentationSlides(value: unknown): PresentationSlideInput[] {
@@ -563,6 +703,101 @@ function presentationGenerationScript(title: string, slides: PresentationSlideIn
     "if len(check.slides) != len(payload['slides']) + 1: raise RuntimeError('presentation slide count verification failed')",
     "if not os.path.isfile(path) or os.path.getsize(path) < 1024: raise RuntimeError('presentation output was not written')",
     "print(json.dumps({'path': path, 'slides': len(check.slides), 'bytes': os.path.getsize(path)}))",
+  ].join("\n");
+}
+
+function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: PdfStyleInput, path: string): string {
+  const payload = Buffer.from(JSON.stringify({ title, sections, style, path }), "utf8").toString("base64");
+  return [
+    "import base64, importlib, json, os, re, subprocess, sys",
+    `payload=json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
+    "dependency_dir=os.path.abspath(os.path.join('workspace', '.chusky', 'python-reportlab'))",
+    "if dependency_dir not in sys.path: sys.path.insert(0, dependency_dir)",
+    "def load_reportlab():",
+    "    try:",
+    "        from reportlab.lib import colors",
+    "        from pypdf import PdfReader",
+    "        return colors",
+    "    except ImportError:",
+    "        return None",
+    "colors=load_reportlab()",
+    "if colors is None:",
+    "    os.makedirs(dependency_dir, exist_ok=True)",
+    "    install_args=[sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '--target', dependency_dir, 'reportlab', 'pypdf']",
+    "    install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
+    "    if install.returncode != 0:",
+    "        detail=(install.stderr or install.stdout or 'unknown pip error').strip().replace('\\n', ' ')",
+    "        raise RuntimeError('ReportLab could not be installed in this Daytona workspace: ' + detail[-500:])",
+    "    importlib.invalidate_caches()",
+    "    colors=load_reportlab()",
+    "    if colors is None: raise RuntimeError('ReportLab was installed but cannot be imported from the workspace dependency directory')",
+    "from xml.sax.saxutils import escape",
+    "from reportlab.lib.enums import TA_LEFT, TA_CENTER",
+    "from reportlab.lib.pagesizes import A4, LETTER, LEGAL",
+    "from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet",
+    "from reportlab.lib.units import inch",
+    "from reportlab.lib.utils import ImageReader",
+    "from reportlab.platypus import Image, KeepTogether, LongTable, Paragraph, PageBreak, SimpleDocTemplate, Spacer, TableStyle",
+    "from reportlab.graphics.charts.barcharts import VerticalBarChart",
+    "from reportlab.graphics.shapes import Drawing, String",
+    "from pypdf import PdfReader",
+    "page_sizes={'A4': A4, 'LETTER': LETTER, 'LEGAL': LEGAL}",
+    "style=payload['style']; primary=colors.HexColor('#' + style['primary']); accent=colors.HexColor('#' + style['accent']); text=colors.HexColor('#' + style['text']); muted=colors.HexColor('#' + style['muted'])",
+    "margin=float(style['margin'])*inch",
+    "path=payload['path']; os.makedirs(os.path.dirname(path) or '.', exist_ok=True)",
+    "doc=SimpleDocTemplate(path, pagesize=page_sizes[style['pageSize']], leftMargin=margin, rightMargin=margin, topMargin=margin+0.15*inch, bottomMargin=margin+0.2*inch, title=payload['title'], author='Chusky')",
+    "styles=getSampleStyleSheet()",
+    "styles.add(ParagraphStyle(name='ChuskyTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=24, leading=29, textColor=primary, alignment=TA_LEFT, spaceAfter=14, keepWithNext=True))",
+    "styles.add(ParagraphStyle(name='ChuskyHeading', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=15, leading=19, textColor=primary, spaceBefore=12, spaceAfter=7, keepWithNext=True, keepTogether=True))",
+    "styles.add(ParagraphStyle(name='ChuskyBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.4, textColor=text, spaceAfter=8, widowControl=True))",
+    "styles.add(ParagraphStyle(name='ChuskyBullet', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.35, leftIndent=14, firstLineIndent=-8, textColor=text, spaceAfter=4, widowControl=True))",
+    "styles.add(ParagraphStyle(name='ChuskyCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=8.5, leading=10.5, textColor=text, spaceAfter=0, widowControl=True))",
+    "styles.add(ParagraphStyle(name='ChuskyCaption', parent=styles['Caption'], fontName='Helvetica-Oblique', fontSize=8.5, leading=11, textColor=muted, alignment=TA_CENTER, spaceBefore=4, spaceAfter=10, keepWithNext=False))",
+    "def rich(value):",
+    "    value=escape(str(value)).replace('\\n', '<br/>')",
+    "    value=re.sub(r'\\*\\*(.+?)\\*\\*', r'<b>\\1</b>', value)",
+    "    value=re.sub(r'(?<!\\*)\\*([^*]+)\\*(?!\\*)', r'<i>\\1</i>', value)",
+    "    value=re.sub(r'`([^`]+)`', r'<font name=\"Courier\">\\1</font>', value)",
+    "    return value",
+    "def para(value, paragraph_style='ChuskyBody'): return Paragraph(rich(value), styles[paragraph_style])",
+    "def draw_page(canvas, document):",
+    "    canvas.saveState(); width,height=page_sizes[style['pageSize']]",
+    "    canvas.setStrokeColor(accent); canvas.setLineWidth(1.2); canvas.line(margin, height-margin-0.04*inch, width-margin, height-margin-0.04*inch)",
+    "    canvas.setFont('Helvetica', 8); canvas.setFillColor(muted); canvas.drawString(margin, 0.35*inch, 'Created by Chusky'); canvas.drawRightString(width-margin, 0.35*inch, 'Page ' + str(document.page)); canvas.restoreState()",
+    "def add_image(story, section):",
+    "    image_path=section['imagePath']",
+    "    if not os.path.isfile(image_path): raise FileNotFoundError('PDF image does not exist: ' + image_path)",
+    "    native_w,native_h=ImageReader(image_path).getSize()",
+    "    if native_w <= 0 or native_h <= 0: raise RuntimeError('PDF image has invalid dimensions: ' + image_path)",
+    "    max_w=doc.width; requested=min(float(section.get('imageWidth') or max_w/inch), max_w/inch); image_w=max(1.0, min(requested, max_w/inch))*inch; image_h=image_w*native_h/native_w",
+    "    max_h=6.2*inch",
+    "    if image_h > max_h: image_h=max_h; image_w=image_h*native_w/native_h",
+    "    image=Image(image_path, width=image_w, height=image_h, hAlign='CENTER'); image.hAlign='CENTER'",
+    "    caption=section.get('imageAltText') or os.path.basename(image_path)",
+    "    story.append(KeepTogether([image, Paragraph(escape(str(caption)), styles['ChuskyCaption'])]))",
+    "def add_chart(story, chart_data):",
+    "    drawing=Drawing(doc.width, 235); chart=VerticalBarChart(); chart.x=45; chart.y=35; chart.width=doc.width-65; chart.height=170; chart.data=[series['values'] for series in chart_data['series']]; chart.categoryAxis.categoryNames=chart_data['categories']; chart.categoryAxis.labels.fontName='Helvetica'; chart.categoryAxis.labels.fontSize=8; chart.valueAxis.labels.fontName='Helvetica'; chart.valueAxis.labels.fontSize=8; chart.valueAxis.valueMin=0; chart.valueAxis.valueMax=max(1, max(max(series['values']) for series in chart_data['series'])*1.15); chart.valueAxis.valueStep=max(1, chart.valueAxis.valueMax/5); chart.bars[0].fillColor=accent; chart.bars[0].strokeColor=accent; drawing.add(chart); drawing.add(String(0, 220, chart_data['series'][0]['name'], fontName='Helvetica-Bold', fontSize=9, fillColor=primary)); story.append(drawing); story.append(Spacer(1, 8))",
+    "story=[Paragraph(escape(payload['title']), styles['ChuskyTitle'])]",
+    "story.append(Spacer(1, 3))",
+    "for section in payload['sections']:",
+    "    if section.get('pageBreakBefore'): story.append(PageBreak())",
+    "    block=[]",
+    "    if section.get('heading'): block.append(para(section['heading'], 'ChuskyHeading'))",
+    "    if section.get('body'): block.append(para(section['body']))",
+    "    for bullet in section.get('bullets') or []: block.append(para('- ' + str(bullet), 'ChuskyBullet'))",
+    "    if block: story.extend(block)",
+    "    if section.get('table'):",
+    "        data=[]",
+    "        for row_index,row in enumerate(section['table']): data.append([para(cell, 'ChuskyCell') for cell in row])",
+    "        cols=max(len(row) for row in section['table']); widths=[doc.width/cols]*cols; table=LongTable(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign='LEFT')",
+    "        table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),primary),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,muted),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)])); story.append(table); story.append(Spacer(1, 10))",
+    "    if section.get('chart'): add_chart(story, section['chart'])",
+    "    if section.get('imagePath'): add_image(story, section)",
+    "doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)",
+    "if not os.path.isfile(path) or os.path.getsize(path) < 1024: raise RuntimeError('PDF output was not written or is too small')",
+    "check=PdfReader(path)",
+    "if len(check.pages) < 1: raise RuntimeError('PDF output contains no pages')",
+    "print(json.dumps({'path': path, 'pages': len(check.pages), 'bytes': os.path.getsize(path)}))",
   ].join("\n");
 }
 
@@ -1135,6 +1370,28 @@ export class DaytonaEngine {
     if (result.exitCode !== 0) {
       throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed: ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
     }
+  }
+
+  async createPdf(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; pageCount?: number }> {
+    const title = presentationText(args.title, "title", 240, true)!;
+    const sections = pdfSections(args.sections);
+    const style = pdfStyle(args.style);
+    const requestedPath = args.path === undefined
+      ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "document"}`, "pdf")}`
+      : safeDaytonaPath(args.path, "path");
+    const path = requestedPath.toLowerCase().endsWith(".pdf") ? requestedPath : `${requestedPath}.pdf`;
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const scriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
+    const script = pdfGenerationScript(title, sections, style, path);
+    await sandbox.fs.uploadFile(Buffer.from(script, "utf8"), scriptPath);
+    try {
+      const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, undefined, undefined, 240);
+      if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed: ${String(result.result ?? "unknown PDF generation error").slice(0, 800)}`);
+    } finally {
+      try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
+    }
+    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf);
+    return { ...artifact, generated: true };
   }
 
   async createPresentation(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; slideCount: number }> {
