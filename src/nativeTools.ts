@@ -14,16 +14,26 @@ import {
   type TaskStatus,
   type JobRecord, type ReminderRecord,
   listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
-  listVideoJobs,
+  listVideoJobs, listHandoffRecords, saveHandoffRecord,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
+import { executeDelegation } from "./subagents/executor.js";
+import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
 
-export interface NativeToolRuntime { currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; generatedImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; }
+export interface NativeToolRuntime {
+  currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
+  generatedImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
+  model?: string;
+  historySummary?: string;
+  onStatus?: (statusText: string) => Promise<void> | void;
+  approvedApprovalId?: string;
+  signal?: AbortSignal;
+}
 
 function text(value: unknown): string {
   const result = String(value ?? "").trim();
@@ -51,6 +61,26 @@ function taskStatuses(value: unknown): TaskStatus[] | undefined {
   const statuses = value.map((item) => String(item));
   if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as TaskStatus))) throw new Error("Invalid task status filter");
   return [...new Set(statuses)] as TaskStatus[];
+}
+
+function stringList(value: unknown, label: string, maxItems = 12): string[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  const items = [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
+  if (!items.length || items.length > maxItems || items.some((item) => item.length > 200)) {
+    throw new Error(`${label} must contain 1-${maxItems} non-empty items of at most 200 characters`);
+  }
+  return items;
+}
+
+async function runDelegationWithDurableContinuation(
+  userId: number,
+  contract: Parameters<typeof executeDelegation>[1],
+  runtime: NativeToolRuntime,
+): Promise<unknown> {
+  const result = await executeDelegation(userId, contract, runtime);
+  if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
+  const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
+  return { ...result, durableContinuation: { queued: true, ...continuation } };
 }
 
 function attentionKind(value: unknown): AttentionEntityKind {
@@ -326,6 +356,52 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_CREATE_PDF": return daytonaEngine.createPdf(userId, args);
     case "CHUCK_CREATE_PRESENTATION": return daytonaEngine.createPresentation(userId, args);
     case "CHUCK_ARTIFACT": return daytonaEngine.artifact(userId, args);
+    case "CHUCK_DELEGATE_SUBAGENT":
+      return runDelegationWithDurableContinuation(userId, args as any, runtime);
+    case "CHUCK_HANDOFF_SUBAGENT":
+      return runDelegationWithDurableContinuation(userId, {
+        worker: args.targetWorker as any,
+        objective: text(args.objective),
+        context: (args.context as any) ?? {},
+        expectedOutput: args.expectedOutput ? String(args.expectedOutput) : undefined,
+      }, runtime);
+    case "CHUCK_REQUEST_ADDITIONAL_TOOLS":
+      return {
+        requested: true,
+        intent: text(args.intent),
+        reason: text(args.reason),
+        preferredToolkit: args.preferredToolkit ? text(args.preferredToolkit) : undefined,
+        note: "Request recorded for Chusky. It does not grant or execute any additional tool.",
+      };
+    case "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST":
+      return resolveSubagentToolRequest(userId, text(args.handoffId), stringList(args.allowedComposioTools, "allowedComposioTools"));
+    case "CHUCK_LIST_SUBAGENTS": {
+      const limit = args.limit === undefined ? 20 : Math.max(1, Math.min(50, Math.floor(Number(args.limit))));
+      const records = await listHandoffRecords(userId);
+      return records.slice(0, limit).map((r) => ({
+        id: r.id, worker: r.to, objective: r.objective, status: r.status,
+        taskId: r.taskId, timestamp: r.timestamp,
+      }));
+    }
+    case "CHUCK_GET_SUBAGENT_STATUS": {
+      const id = text(args.id);
+      const records = await listHandoffRecords(userId);
+      const record = records.find((r) => r.id === id);
+      if (!record) throw new Error("Handoff record not found or not owned by you");
+      const task = record.taskId ? await getTask(userId, record.taskId) : undefined;
+      return { ...record, task };
+    }
+    case "CHUCK_CANCEL_SUBAGENT": {
+      const id = text(args.id);
+      const reason = args.reason ? String(args.reason) : "Cancelled by supervisor";
+      const records = await listHandoffRecords(userId);
+      const record = records.find((r) => r.id === id);
+      if (!record) throw new Error("Handoff record not found or not owned by you");
+      if (record.taskId) await cancelTask(userId, record.taskId);
+      const updated = { ...record, status: "cancelled" as const };
+      await saveHandoffRecord(userId, updated);
+      return { cancelled: true, id, worker: record.to, reason, taskId: record.taskId };
+    }
     default: throw new Error(`Unknown native tool: ${slug}`);
   }
 }

@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
+import type { HandoffRecord } from "./subagents/contracts.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 
@@ -43,6 +44,7 @@ export interface UserSession {
   sdkProjects?: SdkProjectRecord[];
   faceTimeCalls?: FaceTimeCallRecord[];
   videoJobs?: VideoJobRecord[];
+  handoffRecords?: HandoffRecord[];
   createdAt: number;
   updatedAt: number;
 }
@@ -210,12 +212,14 @@ export interface ScratchpadEntry {
 
 export interface MemoryFact {
   id: string;
-  category: "profile" | "personal" | "preference" | "business" | "relationship" | "project" | "procedural" | "episodic" | "document" | "negative" | "fact" | "instruction";
+  category: "profile" | "personal" | "preference" | "business" | "relationship" | "project" | "procedural" | "episodic" | "document" | "negative" | "fact" | "instruction" | "asset";
   key: string;
   value: string;
   confidence: number;
   source: string;
   sensitivity: "normal" | "sensitive";
+  status?: "active" | "superseded" | "deleted";
+  supersedesId?: string;
   projectId?: string;
   personKey?: string;
   reviewAt?: number;
@@ -1406,7 +1410,7 @@ export function isDurableStore(): boolean {
   return backend instanceof RedisBackend;
 }
 
-const memoryCategories: MemoryFact["category"][] = ["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction"];
+const memoryCategories: MemoryFact["category"][] = ["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"];
 
 function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
   const now = Date.now();
@@ -1418,6 +1422,8 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
     confidence: typeof memory.confidence === "number" && Number.isFinite(memory.confidence) ? Math.max(0, Math.min(1, memory.confidence)) : 1,
     source: String(memory.source ?? "legacy"),
     sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    status: memory.status === "superseded" || memory.status === "deleted" ? memory.status : "active",
+    supersedesId: typeof memory.supersedesId === "string" ? memory.supersedesId : undefined,
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
     personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
     reviewAt: typeof memory.reviewAt === "number" ? memory.reviewAt : undefined,
@@ -1429,7 +1435,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -1455,6 +1461,26 @@ export async function updateFaceTimeCall(uid: number, id: string, patch: Partial
 
 export async function listFaceTimeCalls(uid: number): Promise<FaceTimeCallRecord[]> {
   return (await getSession(uid)).faceTimeCalls ?? [];
+}
+
+export async function saveHandoffRecord(uid: number, record: HandoffRecord): Promise<HandoffRecord> {
+  const s = await getSession(uid);
+  const existingIndex = (s.handoffRecords ?? []).findIndex((h) => h.id === record.id);
+  if (existingIndex >= 0 && s.handoffRecords) {
+    s.handoffRecords[existingIndex] = record;
+  } else {
+    s.handoffRecords = [record, ...(s.handoffRecords ?? [])].slice(0, 100);
+  }
+  await saveSession(uid, s);
+  return record;
+}
+
+export async function listHandoffRecords(uid: number): Promise<HandoffRecord[]> {
+  return (await getSession(uid)).handoffRecords ?? [];
+}
+
+export async function getHandoffRecord(uid: number, id: string): Promise<HandoffRecord | undefined> {
+  return (await getSession(uid)).handoffRecords?.find((record) => record.id === id);
 }
 
 export async function getFaceTimeCall(uid: number, id: string): Promise<FaceTimeCallRecord | undefined> {

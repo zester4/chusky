@@ -16,6 +16,9 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_TASK_LIST", "CHUCK_TASK_RETRY", "CHUCK_TASK_SCHEDULE",
   "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS",
   "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
+  "CHUCK_LIST_SUBAGENTS", "CHUCK_GET_SUBAGENT_STATUS", "CHUCK_CANCEL_SUBAGENT",
+  "CHUCK_DELEGATE_SUBAGENT", "CHUCK_HANDOFF_SUBAGENT", "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+  "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
 ]);
 
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
@@ -122,10 +125,25 @@ const STATUSES: Record<string, string> = {
   CHUCK_SCHEDULE_JOB: "🗓️ I’m scheduling that recurring task…",
   CHUCK_LIST_JOBS: "🗓️ I’m checking your scheduled tasks…",
   CHUCK_CANCEL_JOB: "🗓️ I’m cancelling that scheduled task…",
+  CHUCK_DELEGATE_SUBAGENT: "🤖 I’m delegating to a domain specialist…",
+  CHUCK_LIST_SUBAGENTS: "🤖 I’m checking your worker agents…",
+  CHUCK_GET_SUBAGENT_STATUS: "🔍 I’m fetching that delegation status…",
+  CHUCK_CANCEL_SUBAGENT: "🛑 I’m cancelling that worker delegation…",
+  CHUCK_HANDOFF_SUBAGENT: "🤝 I’m handing off to a specialist…",
+  CHUCK_REQUEST_ADDITIONAL_TOOLS: "🧩 A specialist is requesting an additional capability…",
+  CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST: "🧩 I’m resuming that specialist with the verified capability…",
 };
 
 export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): boolean {
   return toolApprovalPolicy(slug, args) === "approval_required";
+}
+
+export function isReadOnlyToolSlug(slug: string): boolean {
+  if (slug === "CHUCK_ATTENTION_STATE" || slug === "CHUCK_DAYTONA_FILE_DETAILS") return true;
+  if (slug.includes("READ") || slug.includes("LIST") || slug.includes("SEARCH") || slug.includes("FIND") || slug.includes("STATUS") || slug.includes("GET")) {
+    return !slug.includes("WRITE") && !slug.includes("CREATE") && !slug.includes("DELETE") && !slug.includes("CANCEL") && !slug.includes("START");
+  }
+  return false;
 }
 
 export function humanToolStatus(slug: string): string {

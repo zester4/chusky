@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getHandoffRecord, saveHandoffRecord, updateTask } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -32,6 +32,9 @@ import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCa
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { executeDelegation } from "./subagents/executor.js";
+import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
+import type { CapabilityWorkerName } from "./memory/types.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -902,6 +905,102 @@ async function main(): Promise<void> {
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
       }
     }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/task", "Task workflows") }));
+
+    // A worker may stop at a capability boundary. This workflow is the durable
+    // continuation: it waits for Chusky's verified, role-scoped decision, then
+    // resumes the original task and handoff record rather than starting over.
+    app.post("/workflows/subagent", serveWorkflow(async (workflow) => {
+      const payload = workflow.requestPayload as { userId?: unknown; handoffId?: unknown };
+      const userId = Number(payload.userId);
+      const handoffId = typeof payload.handoffId === "string" ? payload.handoffId.trim() : "";
+      if (!Number.isSafeInteger(userId) || userId <= 0 || !handoffId) {
+        throw new WorkflowNonRetryableError("Invalid subagent workflow payload");
+      }
+
+      const waiting = await workflow.run("load-tool-request", async () => {
+        const record = await getHandoffRecord(userId, handoffId);
+        if (!record || record.status !== "requires_tool_request" || !record.taskId || !record.toolRequestEventId) {
+          throw new WorkflowNonRetryableError("Subagent tool request is missing, no longer pending, or is not owned by this user");
+        }
+        if (record.workflowRunId && workflow.workflowRunId && record.workflowRunId !== workflow.workflowRunId) {
+          throw new WorkflowNonRetryableError("Subagent workflow run does not match the persisted continuation");
+        }
+        return { eventId: record.toolRequestEventId, taskId: record.taskId };
+      });
+
+      const decision = await workflow.waitForEvent<SubagentToolDecision>(
+        "wait-for-supervisor-tool-decision",
+        waiting.eventId,
+        { timeout: SUBAGENT_TOOL_WAIT_TIMEOUT },
+      );
+
+      if (decision.timeout || !Array.isArray(decision.eventData?.allowedComposioTools) || !decision.eventData.allowedComposioTools.length) {
+        await workflow.run("expire-tool-request", async () => {
+          const record = await getHandoffRecord(userId, handoffId);
+          if (!record || record.status === "cancelled") return;
+          const reason = "Worker capability request expired without a supervisor decision.";
+          await updateTask(userId, waiting.taskId, { status: "failed", error: reason, nextAction: "Start a new delegation if the capability is still needed." });
+          await saveHandoffRecord(userId, { ...record, status: "failed" });
+        });
+        return;
+      }
+
+      const resumed = await workflow.run("resume-worker-with-scoped-tools", async () => {
+        const record = await getHandoffRecord(userId, handoffId);
+        if (!record || record.status === "cancelled") return undefined;
+        if (record.status !== "requires_tool_request" || !record.taskId || !record.delegation) {
+          throw new WorkflowNonRetryableError("Subagent continuation is no longer eligible to resume");
+        }
+        await updateTask(userId, record.taskId, { status: "running", error: undefined, nextAction: "Resuming after supervisor granted a verified scoped capability." });
+        // A direct test/action payload may have been what caused the original
+        // request. It is historical evidence, not an instruction to replay on
+        // the resumed turn; otherwise a worker would immediately ask again.
+        const resumedContext: Record<string, unknown> = { ...record.context, previousToolRequest: record.toolRequest };
+        delete resumedContext.toolCall;
+        return executeDelegation(userId, {
+          worker: record.to as CapabilityWorkerName,
+          objective: record.objective,
+          context: resumedContext,
+          expectedOutput: record.expectedOutput,
+          model: record.delegation.model,
+          allowedTools: record.delegation.allowedTools,
+          allowedComposioTools: decision.eventData!.allowedComposioTools,
+          approvalPolicy: record.delegation.approvalPolicy,
+          timeoutSeconds: record.delegation.timeoutSeconds,
+          maxToolCalls: record.delegation.maxToolCalls,
+        }, {
+          resume: {
+            handoffId: record.id,
+            taskId: record.taskId,
+            workflowRunId: workflow.workflowRunId,
+            resumeCount: (record.resumeCount ?? 0) + 1,
+          },
+        });
+      });
+
+      if (!resumed) return;
+      if (resumed.status === "requires_tool_request" && resumed.handoffRecord) {
+        await workflow.run("queue-next-tool-request", async () => enqueueSubagentToolContinuation(userId, resumed.handoffRecord!.id));
+        return;
+      }
+
+      await workflow.run("deliver-resumed-worker-result", async () => {
+        const chatId = await getTelegramChatId(userId);
+        if (!chatId || !resumed.output.trim()) return;
+        const title = resumed.status === "success" ? "✅ Worker task completed" : "⚠️ Worker task update";
+        for (const [index, chunk] of splitHtml(mdToTelegramHtml(`${title}\n\n${resumed.output}`), 3900).entries()) {
+          await channelGateway.send({
+            accountId: `account_${userId}`,
+            userId,
+            target: { provider: "telegram", conversationId: String(chatId) },
+            text: chunk,
+            idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:telegram:${chatId}:${index}`,
+            correlationId: handoffId,
+            kind: "notification",
+          });
+        }
+      });
+    }, { url: subagentWorkflowUrl() }));
 
     app.post("/workflows/trigger-event", serveWorkflow(async (workflow) => {
       const payload = workflow.requestPayload as { eventId: string; userId: number };
