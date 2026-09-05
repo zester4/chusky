@@ -8,7 +8,8 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
-import type { HandoffRecord } from "./subagents/contracts.js";
+import type { ApprovalPolicy, HandoffRecord } from "./subagents/contracts.js";
+import type { CapabilityWorkerName } from "./memory/types.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 
@@ -194,6 +195,22 @@ export interface ReminderRecord {
   createdAt: number;
 }
 
+/**
+ * Optional execution identity for recurring jobs created by a specialist.
+ * Legacy jobs omit this and continue through Chusky's normal agent loop.
+ */
+export interface ScheduledWorkerBinding {
+  worker: Exclude<CapabilityWorkerName, "chusky">;
+  objective: string;
+  expectedOutput: string;
+  model?: string;
+  allowedTools: string[];
+  allowedComposioTools: string[];
+  approvalPolicy: ApprovalPolicy;
+  timeoutSeconds: number;
+  maxToolCalls: number;
+}
+
 export interface JobRecord {
   id: string;
   userId: number;
@@ -201,6 +218,7 @@ export interface JobRecord {
   cron: string;
   scheduleId: string;
   status: "active" | "cancelled";
+  workerBinding?: ScheduledWorkerBinding;
   deliveryError?: string;
   createdAt: number;
 }

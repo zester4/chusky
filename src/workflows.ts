@@ -12,6 +12,7 @@ export interface WorkflowDependencies {
   getTelegramChatId(userId: number): Promise<number | undefined>;
   sendMessage(chatId: number, text: string, options: { parse_mode: "HTML" }): Promise<unknown>;
   runAgent?(job: JobRecord): Promise<{ text: string; cost?: number }>;
+  runWorker?(job: JobRecord): Promise<{ text: string; cost?: number }>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery?(key: string, ttlSeconds: number): Promise<void>;
 }
@@ -64,7 +65,11 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     return { delivered: false };
   }
   try {
-    const result = deps.runAgent ? await deps.runAgent(job) : { text: job.text };
+    const result = job.workerBinding && deps.runWorker
+      ? await deps.runWorker(job)
+      : deps.runAgent
+        ? await deps.runAgent(job)
+        : { text: job.text };
     const response = result.text.trim() || "Scheduled job completed.";
     const header = "🔁 <b>Chusky scheduled job</b>\n\n";
     for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {

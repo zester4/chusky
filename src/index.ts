@@ -870,6 +870,44 @@ async function main(): Promise<void> {
             throw error;
           }
         }),
+        runWorker: async (job) => withCliLock(payload.userId, undefined, async () => {
+          const binding = job.workerBinding;
+          if (!binding) return { text: job.text };
+          const session = await getSession(payload.userId);
+          try {
+            // This is intentionally a direct specialist invocation. The
+            // schedule's persisted binding is the authority for the worker,
+            // scope, model, and Composio actions on every recurrence.
+            const result = await executeDelegation(payload.userId, {
+              worker: binding.worker,
+              objective: binding.objective,
+              expectedOutput: binding.expectedOutput,
+              model: binding.model,
+              allowedTools: binding.allowedTools,
+              allowedComposioTools: binding.allowedComposioTools,
+              approvalPolicy: binding.approvalPolicy,
+              timeoutSeconds: binding.timeoutSeconds,
+              maxToolCalls: binding.maxToolCalls,
+            }, { model: binding.model, historySummary: session.summaries.slice(-2).join("\n") });
+            if (result.status === "requires_tool_request" && result.handoffRecord) {
+              const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
+              return { text: `The scheduled ${binding.worker} task paused for a verified capability request. Handoff ${result.handoffRecord.id} is waiting; continuation ${continuation.workflowRunId} was queued.` };
+            }
+            if (result.status === "requires_approval") {
+              return { text: `The scheduled ${binding.worker} task needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}; the next scheduled occurrence will retry it.` };
+            }
+            await appendMessages(payload.userId, [
+              { role: "user", content: `[Scheduled ${binding.worker} job ${job.id}] ${job.text}` },
+              { role: "assistant", content: result.output },
+            ]);
+            return { text: result.output };
+          } catch (error) {
+            if (error instanceof ApprovalRequiredError) {
+              return { text: `The scheduled ${binding.worker} task needs approval for ${error.toolSlug}. Approve request ${error.approvalId}; the next scheduled occurrence will retry it.` };
+            }
+            throw error;
+          }
+        }),
         sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
       }));
     }, { url: resolveWorkflowEndpoint(config.jobWorkflowUrl, config.webhookUrl, "/workflows/job", "Job workflows") }));

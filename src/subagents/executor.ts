@@ -30,6 +30,9 @@ export async function executeDelegation(
   if (!manifest) {
     throw new Error(`Unknown capability worker: ${workerName}`);
   }
+  if (workerName === "chusky") {
+    throw new Error("Subagent delegation must target a specialist worker, not the Chusky supervisor.");
+  }
 
   // Reject invalid requested tools that are not in the manifest allowlist
   if (contractInput.allowedTools && contractInput.allowedTools.length > 0) {
@@ -226,6 +229,15 @@ export async function executeDelegation(
                     validateNativeToolArguments(actionPayload.name, executionArgs);
                     return nativeTool(userId, actionPayload.name, executionArgs, {
                       model,
+                      worker: workerName,
+                      workerBinding: {
+                        expectedOutput: contract.expectedOutput,
+                        allowedTools: contract.allowedTools,
+                        allowedComposioTools: contract.allowedComposioTools,
+                        approvalPolicy: contract.approvalPolicy,
+                        timeoutSeconds: contract.timeoutSeconds,
+                        maxToolCalls: contract.maxToolCalls,
+                      },
                       approvedApprovalId: options?.approvedApprovalId,
                       onStatus: options?.onStatus,
                       signal: activeSignal,
@@ -440,6 +452,15 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
                   validateNativeToolArguments(slug, executionArgs);
                   return nativeTool(userId, slug, executionArgs, {
                     model,
+                    worker: workerName,
+                    workerBinding: {
+                      expectedOutput: contract.expectedOutput,
+                      allowedTools: contract.allowedTools,
+                      allowedComposioTools: contract.allowedComposioTools,
+                      approvalPolicy: contract.approvalPolicy,
+                      timeoutSeconds: contract.timeoutSeconds,
+                      maxToolCalls: contract.maxToolCalls,
+                    },
                     approvedApprovalId: options?.approvedApprovalId,
                     onStatus: options?.onStatus,
                     signal: activeSignal,

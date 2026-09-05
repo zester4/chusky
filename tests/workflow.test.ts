@@ -83,6 +83,31 @@ test("recurring job delivery runs the agent before sending its response", async 
   assert.doesNotMatch(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
+test("worker-bound recurring jobs invoke the specialist runner instead of the supervisor runner", async () => {
+  const calls: string[] = [];
+  const state = deps({
+    getJob: async () => ({
+      ...deps().job,
+      workerBinding: {
+        worker: "maya",
+        objective: "Publish the weekly campaign update",
+        expectedOutput: "Published campaign update result",
+        allowedTools: ["CHUCK_SCHEDULE_JOB"],
+        allowedComposioTools: ["LINKEDIN_CREATE_POST"],
+        approvalPolicy: "auto" as const,
+        timeoutSeconds: 60,
+        maxToolCalls: 10,
+      },
+    }),
+    runAgent: async () => { calls.push("chusky"); return { text: "wrong runner" }; },
+    runWorker: async (job) => { calls.push(job.workerBinding!.worker); return { text: "**Maya completed it**" }; },
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-worker" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(calls, ["maya"]);
+  assert.match(state.sent[0].text, /<b>Maya completed it<\/b>/);
+});
+
 test("recurring job delivery splits long agent responses for Telegram", async () => {
   const response = "paragraph\n\n".repeat(700);
   const state = deps({ runAgent: async () => ({ text: response }) });

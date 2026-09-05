@@ -12,7 +12,7 @@ import {
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind,
   type TaskStatus,
-  type JobRecord, type ReminderRecord,
+  type JobRecord, type ReminderRecord, type ScheduledWorkerBinding,
   listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord,
 } from "./store.js";
@@ -33,6 +33,9 @@ export interface NativeToolRuntime {
   onStatus?: (statusText: string) => Promise<void> | void;
   approvedApprovalId?: string;
   signal?: AbortSignal;
+  /** Present only when a specialist is executing its own native tool call. */
+  worker?: Exclude<import("./memory/types.js").CapabilityWorkerName, "chusky">;
+  workerBinding?: Omit<ScheduledWorkerBinding, "worker" | "objective">;
 }
 
 function text(value: unknown): string {
@@ -199,9 +202,13 @@ export async function cancelReminder(userId: number, id: string): Promise<string
   return `Reminder ${id} cancelled.`;
 }
 
-export async function scheduleJob(userId: number, args: Record<string, unknown>): Promise<JobRecord> {
+export async function scheduleJob(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<JobRecord> {
   const cron = validateCronExpression(text(args.cron));
-  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: text(args.text), cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", createdAt: Date.now() };
+  const jobText = text(args.text);
+  const workerBinding: ScheduledWorkerBinding | undefined = runtime.worker && runtime.workerBinding
+    ? { worker: runtime.worker, objective: jobText, ...runtime.workerBinding }
+    : undefined;
+  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: jobText, cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", ...(workerBinding ? { workerBinding } : {}), createdAt: Date.now() };
   const client = new QStashClient({ token: requireQStash() });
   await addJob(userId, job);
   try { await client.schedules.create({
@@ -241,7 +248,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SET_REMINDER": return setReminder(userId, args);
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
     case "CHUCK_CANCEL_REMINDER": return cancelReminder(userId, text(args.id));
-    case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args);
+    case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args, runtime);
     case "CHUCK_LIST_JOBS": return listJobs(userId);
     case "CHUCK_CANCEL_JOB": return cancelJob(userId, text(args.id));
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
