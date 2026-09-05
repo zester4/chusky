@@ -54,6 +54,7 @@ import { setVoiceReplies } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
+import { processSendblueWorkflow } from "./sendblueWorkflow.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -146,20 +147,12 @@ async function main(): Promise<void> {
     if (config.sendblueEnabled) {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
         const payload = workflow.requestPayload as { eventId: string };
-        const event = await getChannelInboundEvent(payload.eventId);
-        if (!event || event.provider !== "sendblue") throw new Error("Sendblue event is missing or invalid");
-        if (event.status === "completed") return;
-        await workflow.run("process-sendblue-message", async () => {
-          try {
-            await updateChannelInboundEvent(event.eventId, { status: "running", workflowRunId: workflow.workflowRunId });
-            const hydrated = await sendblueAdapter.hydrateInbound(event.message);
-            await channelGateway.processInbound(hydrated);
-            await updateChannelInboundEvent(event.eventId, { status: "completed" });
-          } catch (error) {
-            await updateChannelInboundEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
-            recordFailure("workflow_failure", error, { workflow: "sendblue-event", eventId: event.eventId });
-            throw error;
-          }
+        await processSendblueWorkflow(workflow, payload.eventId, {
+          getEvent: getChannelInboundEvent,
+          updateEvent: updateChannelInboundEvent,
+          hydrate: (message) => sendblueAdapter.hydrateInbound(message),
+          process: (message) => channelGateway.processInbound(message),
+          recordFailure: (error, context) => recordFailure("workflow_failure", error, context),
         });
       }, { url: resolveWorkflowEndpoint(config.sendblueWorkflowUrl, config.webhookUrl, "/workflows/sendblue-event", "Sendblue workflows") }));
     }
