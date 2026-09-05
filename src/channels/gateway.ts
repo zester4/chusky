@@ -99,6 +99,16 @@ export class ChannelGateway {
       if (match) {
         try {
           identity = await redeemLinkCode(message.provider, match[1], message.providerUserId, message.providerWorkspaceId, message.displayName);
+          await this.outbox.send({
+            accountId: identity.accountId,
+            userId: identity.userId,
+            target: buildReplyTarget(message),
+            text: `✅ Your ${message.provider} account is now linked to Chusky. You can send messages here and Chusky will use your linked workspace.`,
+            idempotencyKey: `${message.provider}:${message.providerEventId}:linked`,
+            kind: "notification",
+          }, adapter);
+          await completeChannelEvent(message.provider, message.providerEventId);
+          return { duplicate: false, linked: true, delivered: [] };
         } catch (error) {
           await this.outbox.send({
             accountId: "unlinked",

@@ -15,7 +15,7 @@ import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, createSendblueGroupLinkCode, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
+import { acquireUserLock, createChannelLinkCode, createSendblueGroupLinkCode, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, OutboundMessage } from "../src/channels/contracts.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -261,6 +261,22 @@ test("a Sendblue identity linked in a direct chat can use Chusky in a group", as
     group_id: "group-1",
     reply_to: { message_handle: "sb-group-in-1" },
   });
+});
+
+test("a Sendblue link command sends confirmation without entering the agent loop", async () => {
+  const code = await createChannelLinkCode(42, "sendblue");
+  const sent: OutboundMessage[] = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (_url: string | URL, init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body)) as OutboundMessage);
+    return new Response(JSON.stringify({ message_handle: "sb-linked" }), { status: 200 });
+  }) as typeof fetch);
+  const gateway = new ChannelGateway(async () => { throw new Error("agent loop should not run for /link"); });
+  gateway.register(adapter);
+  const message = normalizeSendblueMessage({ message_handle: "sb-link", from_number: "+15550001", sendblue_number: "+15550002", content: `/link ${code}` });
+  const result = await gateway.processInbound(message!);
+  assert.equal(result.linked, true);
+  assert.equal(sent.length, 1);
+  assert.match(String(sent[0].content), /account is now linked to Chusky/i);
 });
 
 test("a linked owner can authorize a Sendblue group for all participants and unlink it", async () => {
