@@ -1,7 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { executeDelegation } from "../src/subagents/executor.js";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker } from "../src/subagents/capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -29,6 +29,30 @@ test("gives Lucas a complete private engineering loop while keeping provider too
   assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_SEARCH_TOOL"), false);
   assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_REMOTE_BASH_TOOL"), false);
   assert.equal(isComposioToolAllowedForWorker("leo", "GITHUB_CREATE_PULL_REQUEST"), false);
+});
+
+test("rejects high-confidence engineering work routed to Leo", () => {
+  assert.throws(
+    () => validateDelegationTarget("leo", "Fix the backend TypeScript bug and run the test suite"),
+    /matches Lucas.*worker=lucas.*not worker=leo/
+  );
+});
+
+test("rejects high-confidence visual work routed to Lucas", () => {
+  assert.throws(
+    () => validateDelegationTarget("lucas", "Create a new logo and marketing image"),
+    /matches Leo.*worker=leo.*not worker=lucas/
+  );
+});
+
+test("does not persist a task when semantic routing is invalid", async () => {
+  const userId = 991012;
+  await assert.rejects(
+    () => executeDelegation(userId, { worker: "leo", objective: "Debug the backend API failure" }),
+    /Delegation routing rejected.*worker=lucas/
+  );
+  assert.equal((await listTasks(userId)).length, 0);
+  assert.equal((await listHandoffRecords(userId)).length, 0);
 });
 
 test("rejects a Composio action outside the worker's scoped integration family", async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker } from "./capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "./capabilities.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
@@ -47,6 +47,8 @@ export async function executeDelegation(
       throw new Error(`Invalid delegation contract: Composio tool(s) [${invalidTools.join(", ")}] are not permitted for worker capability '${workerName}'. Select only an exact action from its approved toolkit family.`);
     }
   }
+
+  validateDelegationTarget(workerName, contractInput.objective, contractInput.allowedTools ?? []);
 
   // Inherit model from options/contract or fallback to default
   const model = options?.model || contractInput.model || config.defaultModel;

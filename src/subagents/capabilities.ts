@@ -234,3 +234,26 @@ export function isComposioToolAllowedForWorker(worker: CapabilityWorkerName, slu
   if (!normalized || normalized.startsWith("COMPOSIO_")) return false;
   return WORKER_CAPABILITIES[worker].allowedComposioPrefixes.some((prefix) => normalized.startsWith(prefix));
 }
+
+/** Reject high-confidence semantic worker mismatches before persisting a task. */
+export function validateDelegationTarget(worker: CapabilityWorkerName, objective: string, allowedTools: string[] = []): void {
+  const text = objective.trim().toLowerCase();
+  // A supervisor may temporarily run an orchestration handoff through the
+  // current worker; the target worker in that payload is validated separately.
+  if (/\b(hand off|handoff|delegate|delegation)\b/.test(text)) return;
+  const tools = allowedTools.map((tool) => tool.toUpperCase());
+  const engineering = /\b(code|coding|software|backend|frontend|api|bug|debug|fix|refactor|implement|typescript|javascript|python|build|compile|test suite|unit test|deploy|daytona|server|database|redis|r2|cloudflare worker)\b/.test(text) ||
+    tools.some((tool) => /CHUCK_(DAYTONA_(WORKSPACE|EXECUTE|LIST_FILES|READ_FILE|WRITE_FILE|FIND_FILES|SEARCH_FILES|FILE_DETAILS|CREATE_FOLDER|MOVE_FILES|GIT|PTY|PREVIEW)|CREATE_PDF|CREATE_PRESENTATION|ARTIFACT)/.test(tool));
+  const creative = /\b(logo|image|video|visual|brand|branding|marketing|copywriting|campaign|ad creative|thumbnail|illustration|design asset)\b/.test(text) ||
+    tools.some((tool) => /CHUCK_(GENERATE_IMAGE|GENERATE_VIDEO|VIDEO_STATUS|SAVE_IMAGE_ASSET|SEARCH_IMAGE_ASSETS|GET_IMAGE_ASSET|FORGET_IMAGE_ASSET)/.test(tool));
+  const social = /\b(social media|publish|post to|linkedin|instagram|facebook|twitter|x post|slack|discord|webhook|integration|trigger)\b/.test(text);
+  const voice = /\b(phone call|telephone|call vendor|call customer|facetime|twilio|appointment by phone|voice call)\b/.test(text) || tools.some((tool) => /CHUCK_START_(PHONE|FACETIME)_CALL/.test(tool));
+  const computer = /\b(browser|gui|desktop|computer use|click|fill a form|web app navigation|screenshot)\b/.test(text) || tools.some((tool) => /CHUCK_DAYTONA_(COMPUTER|BROWSER|PREVIEW)/.test(tool));
+  const workflow = /\b(reminder|recurring|cron|schedule|durable task|checkpoint|attention loop|background task)\b/.test(text) || tools.some((tool) => /CHUCK_(TASK_|SET_REMINDER|LIST_REMINDERS|CANCEL_REMINDER|SCHEDULE_JOB|LIST_JOBS|CANCEL_JOB|ATTENTION_STATE)/.test(tool));
+
+  const expected: CapabilityWorkerName | undefined = engineering ? "lucas" : creative ? "leo" : voice ? "sofia" : computer ? "dexter" : workflow ? "elena" : social ? "maya" : undefined;
+  if (expected && worker !== expected) {
+    const display = WORKER_CAPABILITIES[expected].displayName;
+    throw new Error(`Delegation routing rejected: this objective matches ${display}. Reissue the delegation with worker=${expected}, not worker=${worker}. Split mixed objectives into separate delegations.`);
+  }
+}
