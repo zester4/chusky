@@ -8,6 +8,7 @@ import {
   getChannelConversation,
   getSession,
   setApprovalStatus,
+  registerImageAsset,
 } from "../store.js";
 import { approvalBlocks } from "./slack.js";
 import type { ChannelMessageHandler } from "./gateway.js";
@@ -16,6 +17,7 @@ import type { ContentPart } from "../types.js";
 import { notifyTriggerApproval } from "../triggerWorkflow.js";
 import { persistSendblueMedia, persistWhatsAppMedia } from "./sendblueMedia.js";
 import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
+import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -54,6 +56,22 @@ function dataUrlBytes(url: string): { mimeType: string; bytes: Buffer; dataUrl: 
   const match = url.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/);
   if (!match) return undefined;
   return { mimeType: match[1], bytes: Buffer.from(match[2], "base64"), dataUrl: url };
+}
+
+async function persistInboundImages(message: InboundMessage, userId: number): Promise<void> {
+  if (!r2Configured()) return;
+  for (const attachment of message.attachments.filter((item) => item.kind === "image").slice(0, 5)) {
+    const decoded = attachment.url ? dataUrlBytes(attachment.url) : undefined;
+    if (!decoded || !["image/jpeg", "image/png", "image/webp"].includes(decoded.mimeType.toLowerCase())) continue;
+    try {
+      const extension = decoded.mimeType === "image/jpeg" ? "jpg" : decoded.mimeType === "image/webp" ? "webp" : "png";
+      const r2Key = `channels/${message.provider}/${userId}/${message.providerEventId}-${attachment.id}.${extension}`.replace(/[^a-zA-Z0-9_./-]/g, "_").slice(0, 240);
+      await putR2Object(r2Key, decoded.bytes, decoded.mimeType);
+      await registerImageAsset(userId, { name: `${message.provider}-${attachment.id}`.slice(0, 120), purpose: `Image uploaded through ${message.provider}`, description: message.text?.slice(0, 500), tags: [message.provider, "uploaded-image"], contentType: decoded.mimeType as "image/jpeg" | "image/png" | "image/webp", r2Key, size: decoded.bytes.length });
+    } catch {
+      // Asset persistence is best-effort; the current message still proceeds.
+    }
+  }
 }
 
 function mediaFailureText(error: ChannelMediaError): string {
@@ -148,6 +166,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     const { history, model } = await privateOrSharedHistory(conversation);
     try {
       const prepared = await buildAgentInput(message);
+      await persistInboundImages(message, conversation.userId);
       const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);

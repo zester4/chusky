@@ -2052,18 +2052,17 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
 
 function imageExtension(contentType: ImageAsset["contentType"]): string { return contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png"; }
 
-export async function saveImageAsset(uid: number, input: { name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"] }, bytes: Uint8Array): Promise<ImageAsset> {
+export async function registerImageAsset(uid: number, input: { id?: string; name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"]; r2Key: string; size: number }): Promise<ImageAsset> {
   if (!r2Configured()) throw new Error("R2 storage is not configured");
   const now = Date.now();
-  const id = `img_${now}_${randomUUID().slice(0, 8)}`;
-  const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: `images/${uid}/${id}.${imageExtension(input.contentType)}`, contentType: input.contentType, size: bytes.byteLength, createdAt: now, updatedAt: now };
-  await putR2Object(asset.r2Key, bytes, asset.contentType);
+  const id = input.id ?? `img_${now}_${randomUUID().slice(0, 8)}`;
+  const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: input.r2Key, contentType: input.contentType, size: input.size, createdAt: now, updatedAt: now };
   const session = await getSession(uid);
-  const previous = session.imageAssets.find((item) => item.name === asset.name);
+  const previous = session.imageAssets.find((item) => item.name === asset.name || item.r2Key === asset.r2Key);
   session.imageAssets = [...session.imageAssets.filter((item) => item.name !== asset.name), asset].slice(-100);
   await saveSession(uid, session);
   if (previous) {
-    void deleteR2Object(previous.r2Key).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset cleanup failed"));
+    if (previous.r2Key !== asset.r2Key) void deleteR2Object(previous.r2Key).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset cleanup failed"));
     if (vectorConfigured()) void new UpstashKnowledgeStore().deleteDocument(String(uid), `image_asset:${previous.id}`).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset vector cleanup failed"));
   }
   if (vectorConfigured()) {
@@ -2074,6 +2073,14 @@ export async function saveImageAsset(uid: number, input: { name: string; purpose
     }]).catch((error) => logger.warn({ err: error, userId: uid, assetId: asset.id }, "Image asset vector indexing unavailable; R2 asset retained"));
   }
   return asset;
+}
+
+export async function saveImageAsset(uid: number, input: { name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"] }, bytes: Uint8Array): Promise<ImageAsset> {
+  if (!r2Configured()) throw new Error("R2 storage is not configured");
+  const id = `img_${Date.now()}_${randomUUID().slice(0, 8)}`;
+  const r2Key = `images/${uid}/${id}.${imageExtension(input.contentType)}`;
+  await putR2Object(r2Key, bytes, input.contentType);
+  return registerImageAsset(uid, { ...input, id, r2Key, size: bytes.byteLength });
 }
 
 export async function searchImageAssets(uid: number, query?: string, limit = 5): Promise<ImageAsset[]> {

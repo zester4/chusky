@@ -9,7 +9,7 @@ import {
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
-  setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs,
+  setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
@@ -989,6 +989,13 @@ function toolFooterLabel(slug: string): string {
       const file = await downloadTelegramFile(ctx, photo.file_id);
       const mime = file.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
       const caption = ctx.message.caption?.trim() || "Describe and analyze this image.";
+      if (r2Configured()) {
+        try {
+          const r2Key = `telegram/${ctx.from!.id}/images/${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`;
+          await putR2Object(r2Key, file.data, mime);
+          await registerImageAsset(ctx.from!.id, { name: `telegram-${photo.file_id}`, purpose: "Image uploaded from Telegram", description: caption, tags: ["telegram", "uploaded-image"], contentType: mime, r2Key, size: file.data.length });
+        } catch (error) { logger.warn({ err: error, userId: ctx.from?.id }, "Could not persist Telegram image asset"); }
+      }
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "image_url", image_url: { url: `data:${mime};base64,${file.data.toString("base64")}` } },
