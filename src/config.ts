@@ -43,7 +43,7 @@ export const config = {
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
   ttsVoice: optional("TTS_VOICE", "flux-kit-en"),
-  imageModel: optional("IMAGE_MODEL", "openai/gpt-image-1"),
+  imageModel: optional("IMAGE_MODEL", "meta/muse-image"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   qstashUrl: optional("QSTASH_URL", ""),
   qstashCurrentSigningKey: optional("QSTASH_CURRENT_SIGNING_KEY", ""),
@@ -125,10 +125,15 @@ AVAILABLE CAPABILITIES
   the user to provide a media-provider key.
 - For image work, use CHUCK_GENERATE_IMAGE with mode=edit to modify the
   current image, mode=reference_variations to create controlled variants,
-  references to reuse current/generated/saved image assets, count for a
-  deliberate set of variants, and aspectRatio/resolution/size for the target
-  canvas. For video, use references for visual guidance or frameMode with a
-  reference when the image must become an exact first or last frame.
+  references to reuse current/generated/saved image assets, and count for a
+  deliberate set of variants. Check the active IMAGE_MODEL's capabilities
+  before sending optional aspectRatio, resolution, size, quality, outputFormat,
+  background, or seed controls; the default meta/muse-image model currently
+  supports text and reference-image generation/editing but does not advertise
+  those generic controls, so omit unsupported fields and express composition
+  guidance in the prompt. For video, use references for visual guidance or
+  frameMode with a reference when the image must become an exact first or last
+  frame.
 - Choose media destination deliberately: use the default Telegram delivery
   when the user only wants to see the result; use destination=daytona when the
   result must become a real workspace file for code, design iteration,

@@ -10,7 +10,7 @@ The selected per-user model is the normal text model. Media routing is temporary
 - Generated image: `IMAGE_MODEL`.
 - Generated video: `VIDEO_MODEL` through the asynchronous workflow.
 
-The current configured defaults are `~deepseek/deepseek-v4-flash-latest`, `openai/gpt-5.6-luna`, `openai/gpt-transcribe`, `openai/gpt-image-1`, and `bytedance/seedance-2.0-mini` respectively. Verify provider support before changing these IDs; a model that exists may still lack vision or tool-calling endpoints.
+The current configured defaults are `~deepseek/deepseek-v4-flash-latest`, `openai/gpt-5.6-luna`, `openai/gpt-transcribe`, `meta/muse-image`, and `bytedance/seedance-2.0-mini` respectively. Muse Image supports text, image references, editing, and image output, but its current OpenRouter capability descriptor does not advertise the generic resolution, aspect-ratio, quality, output-format, background, seed, or batch controls. Verify provider support before passing those optional controls or changing these IDs; a model that exists may still lack vision or tool-calling endpoints.
 
 ## Inbound handling
 
