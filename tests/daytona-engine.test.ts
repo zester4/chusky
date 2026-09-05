@@ -307,6 +307,20 @@ test("normalizes empty and header-row table shapes without aborting a presentati
   assert.equal(result.slideCount, 3);
 });
 
+test("applies presentation themes and layout-aware slide primitives", async () => {
+  const e = engine();
+  const result = await e.createPresentation(820023, {
+    title: "Designed review",
+    style: { preset: "modern", primary: "123456", accent: "D946EF", footer: "Confidential", includeSlideNumbers: true },
+    slides: [
+      { title: "Highlights", layout: "metrics", metrics: [{ label: "Growth", value: "42%", detail: "Year over year" }, { label: "Customers", value: "128" }] },
+      { title: "What matters", layout: "quote", quote: "Make the next decision obvious.", body: "A concise operating principle." },
+    ],
+  }) as any;
+  assert.equal(result.generated, true);
+  assert.equal(result.slideCount, 3);
+});
+
 test("rejects an overlapping table and chart in a generated presentation", async () => {
   const e = engine();
   await assert.rejects(

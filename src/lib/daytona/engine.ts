@@ -244,9 +244,102 @@ type PresentationSlideInput = {
   body?: string;
   bullets?: string[];
   imagePaths?: string[];
+  imageAltTexts?: string[];
   table?: string[][];
   chart?: { categories: string[]; series: Array<{ name: string; values: number[] }> };
+  layout?: PresentationLayout;
+  eyebrow?: string;
+  accent?: string;
+  quote?: string;
+  metrics?: Array<{ label: string; value: string; detail?: string }>;
+  notes?: string;
 };
+
+type PresentationLayout = "auto" | "title" | "section" | "two_column" | "hero" | "metrics" | "comparison" | "timeline" | "image_focus" | "chart" | "table" | "quote" | "closing";
+
+type PresentationStyle = {
+  preset: "executive" | "modern" | "bold" | "minimal" | "brand";
+  primary: string;
+  accent: string;
+  secondary: string;
+  background: string;
+  surface: string;
+  text: string;
+  muted: string;
+  fontFace: string;
+  headingFontFace: string;
+  footer?: string;
+  includeSlideNumbers: boolean;
+  logoPath?: string;
+};
+
+const PRESENTATION_LAYOUTS = new Set<PresentationLayout>([
+  "auto", "title", "section", "two_column", "hero", "metrics", "comparison", "timeline", "image_focus", "chart", "table", "quote", "closing",
+]);
+
+const PRESENTATION_STYLE_PRESETS: Record<PresentationStyle["preset"], Omit<PresentationStyle, "preset" | "footer" | "includeSlideNumbers" | "logoPath">> = {
+  executive: { primary: "102A43", accent: "0F766E", secondary: "2563EB", background: "F7FAFC", surface: "E6FFFA", text: "102A43", muted: "52606D", fontFace: "Aptos", headingFontFace: "Aptos Display" },
+  modern: { primary: "312E81", accent: "DB2777", secondary: "0891B2", background: "FAFAFF", surface: "EEF2FF", text: "1F2937", muted: "64748B", fontFace: "Aptos", headingFontFace: "Aptos Display" },
+  bold: { primary: "111827", accent: "F97316", secondary: "14B8A6", background: "F8FAFC", surface: "FFF7ED", text: "111827", muted: "475569", fontFace: "Aptos", headingFontFace: "Aptos Display" },
+  minimal: { primary: "334155", accent: "2563EB", secondary: "64748B", background: "FFFFFF", surface: "F1F5F9", text: "0F172A", muted: "64748B", fontFace: "Aptos", headingFontFace: "Aptos Display" },
+  brand: { primary: "0F766E", accent: "0284C7", secondary: "EA580C", background: "F8FAFC", surface: "ECFEFF", text: "142337", muted: "496580", fontFace: "Aptos", headingFontFace: "Aptos Display" },
+};
+
+function presentationColor(value: unknown, label: string, fallback: string): string {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string") throw new DaytonaInputError(`${label} must be a six-digit hex color`);
+  const color = value.trim().replace(/^#/, "").toUpperCase();
+  if (!/^[0-9A-F]{6}$/.test(color)) throw new DaytonaInputError(`${label} must be a six-digit hex color`);
+  return color;
+}
+
+function presentationStyle(value: unknown): PresentationStyle {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const requestedPreset = input.preset === undefined ? "executive" : String(input.preset).toLowerCase();
+  if (!(requestedPreset in PRESENTATION_STYLE_PRESETS)) throw new DaytonaInputError("style.preset must be executive, modern, bold, minimal, or brand");
+  const preset = requestedPreset as PresentationStyle["preset"];
+  const defaults = PRESENTATION_STYLE_PRESETS[preset];
+  const fontFace = input.fontFace === undefined ? defaults.fontFace : presentationText(input.fontFace, "style.fontFace", 80, true)!;
+  const headingFontFace = input.headingFontFace === undefined ? defaults.headingFontFace : presentationText(input.headingFontFace, "style.headingFontFace", 80, true)!;
+  const footer = input.footer === undefined ? undefined : presentationText(input.footer, "style.footer", 160);
+  const logoPath = input.logoPath === undefined ? undefined : safeDaytonaPath(presentationText(input.logoPath, "style.logoPath", 500, true)!);
+  return {
+    preset,
+    primary: presentationColor(input.primary, "style.primary", defaults.primary),
+    accent: presentationColor(input.accent, "style.accent", defaults.accent),
+    secondary: presentationColor(input.secondary, "style.secondary", defaults.secondary),
+    background: presentationColor(input.background, "style.background", defaults.background),
+    surface: presentationColor(input.surface, "style.surface", defaults.surface),
+    text: presentationColor(input.text, "style.text", defaults.text),
+    muted: presentationColor(input.muted, "style.muted", defaults.muted),
+    fontFace,
+    headingFontFace,
+    footer,
+    includeSlideNumbers: input.includeSlideNumbers === undefined ? true : input.includeSlideNumbers === true,
+    logoPath,
+  };
+}
+
+function presentationLayout(value: unknown, index: number): PresentationLayout {
+  if (value === undefined || value === null || value === "") return "auto";
+  const layout = String(value).toLowerCase() as PresentationLayout;
+  if (!PRESENTATION_LAYOUTS.has(layout)) throw new DaytonaInputError(`slides[${index}].layout must be one of ${Array.from(PRESENTATION_LAYOUTS).join(", ")}`);
+  return layout;
+}
+
+function presentationMetrics(value: unknown, index: number): PresentationSlideInput["metrics"] {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length < 1 || value.length > 4) throw new DaytonaInputError(`slides[${index}].metrics must contain 1-4 metrics`);
+  return value.map((raw, metricIndex) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`slides[${index}].metrics[${metricIndex}] must be an object`);
+    const metric = raw as Record<string, unknown>;
+    return {
+      label: presentationText(metric.label, `slides[${index}].metrics[${metricIndex}].label`, 80, true)!,
+      value: presentationText(metric.value, `slides[${index}].metrics[${metricIndex}].value`, 80, true)!,
+      detail: presentationText(metric.detail, `slides[${index}].metrics[${metricIndex}].detail`, 160),
+    };
+  });
+}
 
 function presentationText(value: unknown, label: string, max: number, required = false): string | undefined {
   if (value === undefined || value === null) {
@@ -309,6 +402,9 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
     const imagePaths = slide.imagePaths === undefined ? undefined : Array.isArray(slide.imagePaths)
       ? slide.imagePaths.slice(0, 4).map((item, imageIndex) => safeDaytonaPath(presentationText(item, `slides[${index}].imagePaths[${imageIndex}]`, 500, true)!))
       : (() => { throw new DaytonaInputError(`slides[${index}].imagePaths must be an array`); })();
+    const imageAltTexts = slide.imageAltTexts === undefined ? undefined : Array.isArray(slide.imageAltTexts)
+      ? slide.imageAltTexts.slice(0, 4).map((item, imageIndex) => presentationText(item, `slides[${index}].imageAltTexts[${imageIndex}]`, 300, true)!)
+      : (() => { throw new DaytonaInputError(`slides[${index}].imageAltTexts must be an array`); })();
     const table = presentationTable(slide.table, index);
     const rawChart = slide.chart;
     let chart: PresentationSlideInput["chart"];
@@ -333,7 +429,21 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
     if (table && chart) {
       throw new DaytonaInputError(`slides[${index}] cannot include both table and chart; use separate slides`);
     }
-    return { title: presentationText(slide.title, `slides[${index}].title`, 200, true)!, body: presentationText(slide.body, `slides[${index}].body`, 2000), bullets, imagePaths, table, chart };
+    return {
+      title: presentationText(slide.title, `slides[${index}].title`, 200, true)!,
+      body: presentationText(slide.body, `slides[${index}].body`, 2000),
+      bullets,
+      imagePaths,
+      imageAltTexts,
+      table,
+      chart,
+      layout: presentationLayout(slide.layout, index),
+      eyebrow: presentationText(slide.eyebrow, `slides[${index}].eyebrow`, 80),
+      accent: slide.accent === undefined ? undefined : presentationColor(slide.accent, `slides[${index}].accent`, "0F766E"),
+      quote: presentationText(slide.quote, `slides[${index}].quote`, 1000),
+      metrics: presentationMetrics(slide.metrics, index),
+      notes: presentationText(slide.notes, `slides[${index}].notes`, 3000),
+    };
   });
 }
 
@@ -428,65 +538,144 @@ function presentationImageMime(path: string): string {
   return "image/png";
 }
 
-async function presentationBytes(sandbox: Sandbox, title: string, slides: PresentationSlideInput[]): Promise<Buffer> {
+function presentationChosenLayout(spec: PresentationSlideInput): PresentationLayout {
+  if (spec.layout && spec.layout !== "auto") return spec.layout;
+  if (spec.metrics?.length) return "metrics";
+  if (spec.quote) return "quote";
+  if (spec.table) return "table";
+  if (spec.chart) return "chart";
+  if (spec.imagePaths?.length && spec.bullets?.length) return "hero";
+  if (spec.imagePaths?.length) return "image_focus";
+  if (spec.bullets?.length && spec.body) return "two_column";
+  return "title";
+}
+
+function presentationShape(slide: PptxGenJS.Slide, color: string, x: number, y: number, w: number, h: number, transparency = 0): void {
+  slide.addShape("rect", { x, y, w, h, fill: { color, transparency }, line: { color, transparency: 100 } });
+}
+
+async function presentationBytes(sandbox: Sandbox, title: string, slides: PresentationSlideInput[], style: PresentationStyle): Promise<Buffer> {
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
   pptx.author = "Chusky";
   pptx.company = "Chusky";
   pptx.subject = title;
   pptx.title = title;
-  pptx.theme = {
-    headFontFace: "Aptos Display",
-    bodyFontFace: "Aptos",
+  pptx.theme = { headFontFace: style.headingFontFace, bodyFontFace: style.fontFace };
+
+  pptx.defineSlideMaster({
+    title: "CHUSKY_CONTENT",
+    background: { color: style.background },
+    objects: [
+      { rect: { x: 0, y: 0, w: 13.333, h: 0.12, fill: { color: style.primary }, line: { color: style.primary } } },
+      ...(style.footer ? [{ text: { text: style.footer, options: { x: 0.7, y: 7.08, w: 10.5, h: 0.2, fontFace: style.fontFace, fontSize: 8, color: style.muted, margin: 0 } } }] : []),
+    ],
+    slideNumber: style.includeSlideNumbers ? { x: 12.2, y: 7.03, w: 0.45, h: 0.2, fontFace: style.fontFace, fontSize: 8, color: style.muted, align: "right", margin: 0 } : undefined,
+  });
+  pptx.defineSlideMaster({
+    title: "CHUSKY_COVER",
+    background: { color: style.primary },
+    objects: [
+      { rect: { x: 0, y: 0, w: 13.333, h: 0.16, fill: { color: style.accent }, line: { color: style.accent } } },
+    ],
+  });
+
+  const imageData = new Map<string, string>();
+  const loadImage = async (imagePath: string): Promise<string> => {
+    const cached = imageData.get(imagePath);
+    if (cached) return cached;
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(await sandbox.fs.downloadFile(imagePath));
+    } catch (error) {
+      throw new DaytonaInputError(`Unable to read slide image ${imagePath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!bytes.length) throw new DaytonaInputError(`Slide image is empty: ${imagePath}`);
+    const data = `data:${presentationImageMime(imagePath)};base64,${bytes.toString("base64")}`;
+    imageData.set(imagePath, data);
+    return data;
   };
 
-  const cover = pptx.addSlide();
-  cover.background = { color: "F6F9FC" };
-  cover.addText(title, { x: 0.9, y: 2.35, w: 11.5, h: 1.25, fontSize: 32, bold: true, color: "142337", breakLine: false, margin: 0 });
-  cover.addText("Created by Chusky", { x: 0.95, y: 3.9, w: 5, h: 0.35, fontSize: 14, color: "496580", margin: 0 });
+  const cover = pptx.addSlide({ masterName: "CHUSKY_COVER" });
+  cover.addText(title, { x: 0.9, y: 2.05, w: 11.3, h: 1.5, fontFace: style.headingFontFace, fontSize: 34, bold: true, color: "FFFFFF", fit: "shrink", margin: 0 });
+  presentationShape(cover, style.accent, 0.95, 3.78, 1.1, 0.08);
+  cover.addText(style.footer ?? "Created by Chusky", { x: 0.95, y: 4.03, w: 8.5, h: 0.35, fontFace: style.fontFace, fontSize: 14, color: "E6FFFA", margin: 0 });
+  if (style.logoPath) {
+    cover.addImage({ data: await loadImage(style.logoPath), x: 10.9, y: 0.75, w: 1.6, h: 1.1, sizing: { type: "contain", x: 10.9, y: 0.75, w: 1.6, h: 1.1 }, altText: "Presentation brand logo" });
+  }
 
   for (const spec of slides) {
-    const slide = pptx.addSlide();
-    slide.background = { color: "FFFFFF" };
-    slide.addText(spec.title, { x: 0.7, y: 0.45, w: 11.9, h: 0.55, fontSize: 24, bold: true, color: "142337", margin: 0 });
+    const slide = pptx.addSlide({ masterName: "CHUSKY_CONTENT" });
+    const layout = presentationChosenLayout(spec);
     const images = spec.imagePaths ?? [];
-    const textWidth = images.length ? 7.1 : 11.8;
-    let cursor = 1.3;
-    if (spec.body) {
-      slide.addText(spec.body, { x: 0.8, y: cursor, w: textWidth, h: 1, fontSize: 16, color: "142337", breakLine: false, margin: 0.03, valign: "top" });
-      cursor += 1.05;
+    const titleY = spec.eyebrow ? 0.73 : 0.48;
+    if (spec.eyebrow) slide.addText(spec.eyebrow.toUpperCase(), { x: 0.78, y: 0.38, w: 7.5, h: 0.2, fontFace: style.fontFace, fontSize: 9, bold: true, charSpacing: 1.4, color: style.accent, margin: 0 });
+    slide.addText(spec.title, { x: 0.78, y: titleY, w: 11.75, h: 0.58, fontFace: style.headingFontFace, fontSize: 26, bold: true, color: style.text, fit: "shrink", margin: 0 });
+    presentationShape(slide, spec.accent ?? style.accent, 0.8, 1.28, layout === "section" || layout === "closing" ? 1.4 : 0.65, 0.07);
+
+    if (layout === "section" || layout === "closing") {
+      slide.addText(spec.body ?? spec.title, { x: 1.25, y: 2.55, w: 10.8, h: 1.15, fontFace: style.headingFontFace, fontSize: 30, bold: true, color: style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.08 });
+      if (spec.bullets?.length) slide.addText(spec.bullets.join("  •  "), { x: 1.5, y: 4.05, w: 10.3, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: style.muted, align: "center", fit: "shrink", margin: 0.05 });
+      continue;
     }
-    if (spec.bullets?.length) {
-      slide.addText(spec.bullets.map((bullet) => `• ${bullet}`).join("\n"), { x: 0.9, y: cursor, w: textWidth, h: Math.max(1.2, 5.2 - cursor), fontSize: 15, color: "142337", breakLine: false, margin: 0.04, valign: "top" });
+
+    if (layout === "metrics" && spec.metrics?.length) {
+      const gap = 0.22;
+      const cardW = (11.7 - gap * (spec.metrics.length - 1)) / spec.metrics.length;
+      spec.metrics.forEach((metric, index) => {
+        const x = 0.8 + index * (cardW + gap);
+        presentationShape(slide, style.surface, x, 2.05, cardW, 2.2);
+        slide.addText(metric.value, { x: x + 0.2, y: 2.35, w: cardW - 0.4, h: 0.58, fontFace: style.headingFontFace, fontSize: 28, bold: true, color: style.primary, fit: "shrink", margin: 0 });
+        slide.addText(metric.label, { x: x + 0.2, y: 3.08, w: cardW - 0.4, h: 0.3, fontFace: style.fontFace, fontSize: 13, bold: true, color: style.text, fit: "shrink", margin: 0 });
+        if (metric.detail) slide.addText(metric.detail, { x: x + 0.2, y: 3.48, w: cardW - 0.4, h: 0.45, fontFace: style.fontFace, fontSize: 10, color: style.muted, fit: "shrink", margin: 0 });
+      });
+      continue;
+    }
+
+    if (layout === "quote" && spec.quote) {
+      slide.addText(`“${spec.quote}”`, { x: 1.15, y: 2.05, w: 10.95, h: 2.3, fontFace: style.headingFontFace, fontSize: 28, italic: true, color: style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.12 });
+      if (spec.body) slide.addText(spec.body, { x: 2, y: 4.8, w: 9.3, h: 0.45, fontFace: style.fontFace, fontSize: 13, color: style.muted, align: "center", fit: "shrink", margin: 0 });
+      continue;
+    }
+
+    const imageFocus = layout === "image_focus" || layout === "hero";
+    const hasSideImage = images.length > 0 && imageFocus;
+    const textWidth = hasSideImage ? 6.15 : 11.65;
+    let cursor = 1.68;
+    if (spec.body) {
+      slide.addText(spec.body, { x: 0.86, y: cursor, w: textWidth, h: layout === "two_column" || layout === "comparison" ? 3.85 : 1.15, fontFace: style.fontFace, fontSize: 18, color: style.text, fit: "shrink", valign: "top", margin: 0.03 });
+      cursor += layout === "two_column" || layout === "comparison" ? 0 : 1.22;
+    }
+    if (spec.bullets?.length && layout !== "timeline") {
+      const bulletText = spec.bullets.map((bullet) => `• ${bullet}`).join("\n");
+      const bulletX = layout === "two_column" || layout === "comparison" ? 6.95 : 0.92;
+      const bulletW = layout === "two_column" || layout === "comparison" ? 5.25 : textWidth;
+      slide.addText(bulletText, { x: bulletX, y: layout === "two_column" || layout === "comparison" ? 1.78 : cursor, w: bulletW, h: 4.75, fontFace: style.fontFace, fontSize: 17, color: style.text, fit: "shrink", valign: "top", breakLine: false, margin: 0.04, paraSpaceAfter: 9 });
+    }
+    if (layout === "timeline" && spec.bullets?.length) {
+      presentationShape(slide, style.accent, 1.05, 1.85, 0.06, 4.35);
+      spec.bullets.forEach((item, index) => {
+        const y = 1.82 + index * Math.min(1.05, 4.35 / spec.bullets!.length);
+        presentationShape(slide, style.accent, 0.94, y + 0.08, 0.28, 0.28);
+        slide.addText(item, { x: 1.55, y, w: 10.5, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: style.text, fit: "shrink", margin: 0 });
+      });
     }
     if (spec.table) {
-      slide.addTable(spec.table as PptxGenJS.TableRow[], {
-        x: 0.8, y: 3.8, w: textWidth, h: 2.8, fontSize: 12, color: "142337",
-        border: { type: "solid", color: "CBD5E1", pt: 1 },
-        fill: { color: "FFFFFF" }, bold: false, margin: 0.05,
-        autoPage: false,
-      });
+      const tableRows = spec.table.map((row, rowIndex) => row.map((cell) => ({ text: cell, options: { bold: rowIndex === 0, color: rowIndex === 0 ? "FFFFFF" : style.text, fill: { color: rowIndex === 0 ? style.primary : rowIndex % 2 === 0 ? style.surface : style.background }, margin: 0.07 } })));
+      slide.addTable(tableRows as PptxGenJS.TableRow[], { x: 0.82, y: spec.body ? 3.05 : 1.8, w: textWidth, h: 3.6, fontFace: style.fontFace, fontSize: 13, color: style.text, border: { type: "solid", color: style.muted, pt: 0.6 }, fill: { color: style.background }, margin: 0.05, autoPage: false });
     }
     if (spec.chart) {
-      slide.addChart("bar", spec.chart.series.map((series) => ({ name: series.name, labels: spec.chart!.categories, values: series.values })), {
-        x: images.length ? 0.8 : 6.8, y: 3.7, w: 5.5, h: 2.8,
-        catAxisLabelFontSize: 10, valAxisLabelFontSize: 10, showLegend: spec.chart.series.length > 1,
-        showTitle: false, showValue: true, chartColors: ["0F766E", "0284C7", "EA580C", "7C3AED"],
-      });
+      slide.addChart("bar", spec.chart.series.map((series) => ({ name: series.name, labels: spec.chart!.categories, values: series.values })), { x: images.length ? 0.8 : 6.45, y: 1.82, w: images.length ? 6.0 : 6.4, h: 4.55, catAxisLabelFontSize: 11, valAxisLabelFontSize: 11, showLegend: spec.chart.series.length > 1, showTitle: false, showValue: true, chartColors: [style.primary, style.accent, style.secondary, "7C3AED"], altText: `${spec.title} chart` });
     }
     for (let index = 0; index < images.length; index += 1) {
       const imagePath = images[index]!;
-      let bytes: Buffer;
-      try {
-        bytes = Buffer.from(await sandbox.fs.downloadFile(imagePath));
-      } catch (error) {
-        throw new DaytonaInputError(`Unable to read slide image ${imagePath}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (!bytes.length) throw new DaytonaInputError(`Slide image is empty: ${imagePath}`);
-      const top = 1.35 + index * (5.4 / Math.max(1, images.length));
-      const height = Math.max(1.1, 5 / Math.max(1, images.length));
-      slide.addImage({ data: `data:${presentationImageMime(imagePath)};base64,${bytes.toString("base64")}`, x: 8.25, y: top, w: 4.3, h: height, sizing: { type: "contain", x: 8.25, y: top, w: 4.3, h: height } });
+      const x = imageFocus ? 7.35 : 8.25;
+      const y = imageFocus ? 1.78 + index * (4.9 / Math.max(1, images.length)) : 1.55 + index * (5.15 / Math.max(1, images.length));
+      const w = imageFocus ? 5.15 : 4.3;
+      const h = imageFocus ? Math.max(1.25, 4.6 / Math.max(1, images.length)) : Math.max(1.1, 4.8 / Math.max(1, images.length));
+      slide.addImage({ data: await loadImage(imagePath), x, y, w, h, sizing: { type: imageFocus ? "cover" : "contain", x, y, w, h }, altText: spec.imageAltTexts?.[index] ?? `Image ${index + 1} for ${spec.title}` });
     }
+    if (spec.notes) slide.addNotes(spec.notes);
   }
   const output = await pptx.write({ outputType: "nodebuffer", compression: true });
   const bytes = Buffer.from(output as Uint8Array);
@@ -896,12 +1085,13 @@ export class DaytonaEngine {
   async createPresentation(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; slideCount: number }> {
     const title = presentationText(args.title, "title", 200, true)!;
     const slides = presentationSlides(args.slides);
+    const style = presentationStyle(args.style);
     const requestedPath = args.path === undefined
       ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "presentation"}`, "presentation")}`
       : safeDaytonaPath(args.path, "path");
     const path = requestedPath.toLowerCase().endsWith(".pptx") ? requestedPath : `${requestedPath}.pptx`;
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const bytes = await presentationBytes(sandbox, title, slides);
+    const bytes = await presentationBytes(sandbox, title, slides, style);
     await sandbox.fs.uploadFile(bytes, path);
     const result = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation);
     return { ...result, generated: true, slideCount: slides.length + 1 };
