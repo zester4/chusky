@@ -16,7 +16,7 @@ const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterv
 const DAYTONA_AUTO_PAUSE_MINUTES = Number.isInteger(configuredAutoPauseMinutes) && configuredAutoPauseMinutes > 0
   ? configuredAutoPauseMinutes
   : 0;
-const DAYTONA_MAX_COMMAND_LENGTH = 8000;
+const DAYTONA_MAX_COMMAND_LENGTH = 64000;
 const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;

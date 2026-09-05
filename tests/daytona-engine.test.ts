@@ -463,3 +463,17 @@ test("recovers a unique artifact basename when the model adds a workspace prefix
   assert.equal(result.path, "chart.png");
   assert.equal(result.type, "image");
 });
+
+test("supports long commands up to 64000 characters and rejects commands exceeding limit", async () => {
+  const e = engine();
+  const longCmd = "echo " + "a".repeat(12000);
+  const result = await e.execute(820030, longCmd, "workspace");
+  assert.equal(result.command, longCmd);
+
+  const tooLongCmd = "echo " + "a".repeat(65000);
+  await assert.rejects(
+    () => e.execute(820030, tooLongCmd, "workspace"),
+    /command must be 1-64000 characters/,
+  );
+});
+

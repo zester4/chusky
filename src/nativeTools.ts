@@ -21,7 +21,7 @@ import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 
 const MAX_TEXT = 1000;
-const MAX_DAYTONA_COMMAND = 8000;
+const MAX_DAYTONA_COMMAND = 64000;
 
 export interface NativeToolRuntime { currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; generatedImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>; }
 
