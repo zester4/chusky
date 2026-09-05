@@ -1,5 +1,7 @@
 import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
 import { randomUUID } from "node:crypto";
+import { posix as pathPosix } from "node:path";
+import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
@@ -110,6 +112,9 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "def fail(message):",
     "    print(message, file=sys.stderr)",
     "    raise SystemExit(2)",
+    "if not os.path.isabs(path):",
+    "    workspace_path=os.path.join('/home/user', path)",
+    "    if os.path.isfile(workspace_path): path=workspace_path",
     "if not os.path.isfile(path): fail('artifact file does not exist')",
     "if kind == 'pdf':",
     "    with open(path, 'rb') as f:",
@@ -152,8 +157,9 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "                for rel in rels.findall(rel_ns + 'Relationship'):",
     "                    target=rel.attrib.get('Target', '')",
     "                    if not target or rel.attrib.get('TargetMode') == 'External': continue",
-    "                    # OOXML package targets are package-relative even when they begin with '/'.",
-    "                    target_path=posixpath.normpath(posixpath.join(source_dir, target.lstrip('/'))) ",
+    "                    # A leading slash means an OOXML package-root target;",
+    "                    # otherwise the target is relative to the .rels source.",
+    "                    target_path=posixpath.normpath(target.lstrip('/')) if target.startswith('/') else posixpath.normpath(posixpath.join(source_dir, target))",
     "                    if target_path.startswith('../') or target_path not in names:",
     "                        fail('OOXML relationship target is missing: ' + rels_name + ' -> ' + target)",
     "    except (KeyError, ET.ParseError, OSError) as error:",
@@ -168,6 +174,9 @@ function artifactVisualQaScript(type: ArtifactType, path: string): string {
     `path=${JSON.stringify(path)}`,
     `kind=${JSON.stringify(type)}`,
     `require_renderer=${JSON.stringify(REQUIRED_VISUAL_QA_TYPES.has(type))}`,
+    "if not os.path.isabs(path):",
+    "    workspace_path=os.path.join('/home/user', path)",
+    "    if os.path.isfile(workspace_path): path=workspace_path",
     "if not os.path.isfile(path):",
     "    print('visual QA failed: artifact file does not exist', file=sys.stderr)",
     "    raise SystemExit(2)",
@@ -826,6 +835,33 @@ function presentationShape(slide: PptxGenJS.Slide, color: string, x: number, y: 
   slide.addShape("rect", { x, y, w, h, fill: { color, transparency }, line: { color, transparency: 100 } });
 }
 
+async function validatePresentationPackage(bytes: Buffer): Promise<void> {
+  let archive: JSZip;
+  try {
+    archive = await JSZip.loadAsync(bytes);
+  } catch (error) {
+    throw new DaytonaInputError(`Presentation generator returned an unreadable OOXML package: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const names = new Set(Object.entries(archive.files).filter(([, entry]) => !entry.dir).map(([name]) => name));
+  if (!names.has("[Content_Types].xml") || !names.has("ppt/presentation.xml")) throw new DaytonaInputError("Presentation generator returned an incomplete OOXML package");
+  for (const relsName of [...names].filter((name) => name.endsWith(".rels"))) {
+    const xml = await archive.file(relsName)?.async("text");
+    if (!xml) throw new DaytonaInputError(`Presentation OOXML relationship file is unreadable: ${relsName}`);
+    const sourceDir = relsName === "_rels/.rels" ? "" : pathPosix.dirname(relsName).replace(/\/_rels$/, "");
+    for (const relationship of xml.match(/<Relationship\b[^>]*>/g) ?? []) {
+      const target = relationship.match(/\bTarget=(['"])(.*?)\1/i)?.[2];
+      const targetMode = relationship.match(/\bTargetMode=(['"])(.*?)\1/i)?.[2];
+      if (!target || /^external$/i.test(targetMode ?? "")) continue;
+      const targetPath = target.startsWith("/")
+        ? pathPosix.normalize(target.slice(1))
+        : pathPosix.normalize(pathPosix.join(sourceDir, target));
+      if (targetPath.startsWith("../") || !names.has(targetPath)) {
+        throw new DaytonaInputError(`Presentation generator produced a missing OOXML relationship target: ${relsName} -> ${target}`);
+      }
+    }
+  }
+}
+
 async function presentationBytes(sandbox: Sandbox, title: string, slides: PresentationSlideInput[], style: PresentationStyle): Promise<Buffer> {
   const pptx = new PptxGenJS();
   pptx.layout = "LAYOUT_WIDE";
@@ -954,7 +990,7 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
       slide.addTable(tableRows as PptxGenJS.TableRow[], { x: 0.82, y: spec.body ? 3.05 : 1.8, w: textWidth, h: 3.6, fontFace: style.fontFace, fontSize: 13, color: style.text, border: { type: "solid", color: style.muted, pt: 0.6 }, fill: { color: style.background }, margin: 0.05, autoPage: false });
     }
     if (spec.chart) {
-      slide.addChart("bar", spec.chart.series.map((series) => ({ name: series.name, labels: spec.chart!.categories, values: series.values })), { x: images.length ? 0.8 : 6.45, y: 1.82, w: images.length ? 6.0 : 6.4, h: 4.55, catAxisLabelFontSize: 11, valAxisLabelFontSize: 11, showLegend: spec.chart.series.length > 1, showTitle: false, showValue: true, chartColors: [style.primary, style.accent, style.secondary, "7C3AED"], altText: `${spec.title} chart` });
+      slide.addChart(pptx.ChartType.bar, spec.chart.series.map((series) => ({ name: series.name, labels: spec.chart!.categories, values: series.values })), { x: images.length ? 0.8 : 6.45, y: 1.82, w: images.length ? 6.0 : 6.4, h: 4.55, barDir: "col", barGrouping: "clustered", catAxisLabelFontSize: 11, valAxisLabelFontSize: 11, showLegend: spec.chart.series.length > 1, showTitle: false, showValue: true, chartColors: [style.primary, style.accent, style.secondary, "7C3AED"], altText: `${spec.title} chart` });
     }
     for (let index = 0; index < images.length; index += 1) {
       const imagePath = images[index]!;
@@ -971,6 +1007,7 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
   const bytes = Buffer.from(output as Uint8Array);
   if (bytes.length < 1024 || !bytes.subarray(0, 2).equals(Buffer.from("PK"))) throw new DaytonaInputError("Presentation generator returned an invalid Office Open XML package");
   if (bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Presentation is larger than the ${Math.floor(DAYTONA_MAX_ARTIFACT_BYTES / 1024 / 1024)} MB delivery limit`);
+  await validatePresentationPackage(bytes);
   return bytes;
 }
 
@@ -1462,18 +1499,36 @@ export class DaytonaEngine {
 
   private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
     const extension = `.${ARTIFACT_EXTENSION[type]}`;
-    const normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
-    if (normalizedPath !== path) await sandbox.fs.moveFiles(path, normalizedPath);
+    let normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
     const normalizedName = artifactNameForType(name, type);
-    let details: { size?: number; isDir?: boolean };
-    try {
-      details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/not found|no such file|does not exist/i.test(message)) {
-        throw new DaytonaInputError(`Artifact file was not found at '${normalizedPath}'. Generate the file in Daytona and verify that exact path before registering it.`);
+    let details: { size?: number; isDir?: boolean } | undefined;
+    // Preserve the historical extension-normalization behavior for files
+    // created without an extension, while still allowing a pre-existing
+    // correctly suffixed file to pass through without a move.
+    if (normalizedPath !== path) {
+      try {
+        await sandbox.fs.getFileDetails(path);
+        await sandbox.fs.moveFiles(path, normalizedPath);
+        details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found|no such file|does not exist/i.test(message)) throw error;
       }
-      throw error;
+    }
+    if (!details) {
+      try {
+        details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found|no such file|does not exist/i.test(message)) throw error;
+        const recovered = await this.findUniqueArtifactPath(sandbox, normalizedPath, extension);
+        if (recovered) {
+          normalizedPath = recovered.path;
+          details = recovered.details;
+        } else {
+          throw new DaytonaInputError(`Artifact file was not found at '${normalizedPath}'. Generate the file in Daytona and verify the returned workspace-relative path before registering it.`);
+        }
+      }
     }
     const size = Number(details.size ?? 0);
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
@@ -1484,6 +1539,47 @@ export class DaytonaEngine {
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
     await this.saveArtifact(userId, artifact);
     return { ...artifact, __chuskyArtifactReady: true };
+  }
+
+  private async findUniqueArtifactPath(sandbox: Sandbox, requestedPath: string, extension: string): Promise<{ path: string; details: { size?: number; isDir?: boolean } } | undefined> {
+    const requestedName = requestedPath.replace(/\\/g, "/").split("/").pop()!.toLowerCase();
+    const requestedStem = requestedName.endsWith(extension) ? requestedName.slice(0, -extension.length) : requestedName;
+    const workspaceStrippedPath = requestedPath.replace(/^workspace[\\/]/i, "");
+    if (workspaceStrippedPath !== requestedPath) {
+      try {
+        const details = await sandbox.fs.getFileDetails(workspaceStrippedPath) as { size?: number; isDir?: boolean };
+        return { path: workspaceStrippedPath, details };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/not found|no such file|does not exist/i.test(message)) return undefined;
+      }
+    }
+    try {
+      const files = await sandbox.fs.listFiles(".", { depth: 5 }) as FileInfo[];
+      const candidates = files
+        .filter((file) => !file.isDir && typeof file.path === "string" && file.path.length > 0)
+        .map((file) => ({ path: safeDaytonaPath(file.path!, "artifact candidate"), file }))
+        .filter(({ path: candidatePath }) => {
+          const candidateName = candidatePath.replace(/\\/g, "/").split("/").pop()!.toLowerCase();
+          const candidateStem = candidateName.endsWith(extension) ? candidateName.slice(0, -extension.length) : candidateName;
+          return candidateName === requestedName || candidateStem === requestedStem;
+        });
+      const unique = [...new Map(candidates.map(({ path, file }) => [path.toLowerCase(), { path, file }])).values()];
+      if (unique.length !== 1) {
+        if (unique.length > 1) {
+          throw new DaytonaInputError(`Artifact path '${requestedPath}' was not found and matched multiple workspace files: ${unique.slice(0, 5).map(({ path }) => path).join(", ")}`);
+        }
+        return undefined;
+      }
+      const match = unique[0]!;
+      const details = await sandbox.fs.getFileDetails(match.path) as { size?: number; isDir?: boolean };
+      return { path: match.path, details };
+    } catch (error) {
+      if (error instanceof DaytonaInputError) throw error;
+      // Listing is a recovery aid, not a reason to mask the original missing
+      // path error when the provider temporarily rejects the directory scan.
+      return undefined;
+    }
   }
 
   async downloadArtifact(userId: number, id: string): Promise<DaytonaArtifactDelivery> {

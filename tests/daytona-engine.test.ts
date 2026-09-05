@@ -1,5 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import JSZip from "jszip";
 import { DaytonaEngine } from "../src/lib/daytona/engine.js";
 import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 
@@ -337,6 +338,34 @@ test("creates a presentation with the built-in generator before Daytona delivery
   assert.equal(commands.length, 2);
   assert.ok(uploadedPresentation?.subarray(0, 2).equals(Buffer.from("PK")));
   assert.doesNotMatch(commands.join("\n"), /python-pptx|pip install/);
+  const structureScript = Buffer.from(commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
+  const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
+  assert.match(structureScript, /target\.startswith\('\/'\)/);
+  assert.match(visualScript, /workspace_path=os\.path\.join\('\/home\/user', path\)/);
+});
+
+test("creates chart-heavy decks with complete root-relative OOXML chart relationships", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820025) as any;
+  let uploadedPresentation: Buffer | undefined;
+  sandbox.fs.uploadFile = async (contents: Buffer) => { uploadedPresentation = Buffer.from(contents); };
+  const result = await e.createPresentation(820025, {
+    title: "Chart integrity",
+    slides: Array.from({ length: 8 }, (_, index) => ({
+      title: `Slide ${index + 1}`,
+      ...(index >= 5 ? { chart: { categories: ["Q1", "Q2", "Q3"], series: [{ name: "Revenue", values: [10 + index, 20 + index, 30 + index] }] } } : { body: "Narrative content" }),
+      notes: `Notes for slide ${index + 1}`,
+    })),
+  }) as any;
+  assert.equal(result.generated, true);
+  const archive = await JSZip.loadAsync(uploadedPresentation!);
+  const names = new Set(Object.entries(archive.files).filter(([, entry]) => !entry.dir).map(([name]) => name));
+  for (const slideNumber of [7, 8, 9]) {
+    const rels = await archive.file(`ppt/slides/_rels/slide${slideNumber}.xml.rels`)?.async("text");
+    const target = rels?.match(/Target="(\/ppt\/charts\/chart\d+\.xml)"/)?.[1];
+    assert.ok(target, `slide ${slideNumber} should reference a chart`);
+    assert.ok(names.has(target!.slice(1)), `missing packaged chart target ${target}`);
+  }
 });
 
 test("normalizes empty and header-row table shapes without aborting a presentation", async () => {
@@ -413,4 +442,18 @@ test("turns a missing artifact path into an actionable input error", async () =>
     () => e.artifact(820019, { action: "register", type: "presentation", path: "workspace/missing.pptx" }),
     /Artifact file was not found.*Generate the file in Daytona/,
   );
+});
+
+test("recovers a unique artifact basename when the model adds a workspace prefix", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820018) as any;
+  sandbox.fs.getFileDetails = async (path: string) => {
+    if (path === "workspace/chart.png") throw new Error("stat workspace/chart.png: no such file or directory");
+    if (path === "chart.png") return { name: "chart.png", path: "chart.png", size: 2048, isDir: false };
+    throw new Error(`stat ${path}: no such file or directory`);
+  };
+  sandbox.fs.listFiles = async () => [{ name: "chart.png", path: "chart.png", size: 2048, isDir: false }];
+  const result = await e.artifact(820018, { action: "register", type: "image", path: "workspace/chart.png" }) as any;
+  assert.equal(result.path, "chart.png");
+  assert.equal(result.type, "image");
 });

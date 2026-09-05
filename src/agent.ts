@@ -674,7 +674,7 @@ export async function runAgent(
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
-          if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PRESENTATION") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
+          if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
             const delivered = await daytonaEngine.downloadArtifact(userId, artifact.id);
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
