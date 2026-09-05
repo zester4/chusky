@@ -287,6 +287,11 @@ test("creates a presentation through the guarded python-pptx generator before de
   assert.equal(commands.length, 3);
   assert.match(commands[0], /python3 -c/);
   assert.match(commands[0], /base64\.b64decode/);
+  const encodedScript = commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1];
+  assert.ok(encodedScript);
+  const script = Buffer.from(encodedScript, "base64").toString("utf8");
+  assert.match(script, /--target/);
+  assert.doesNotMatch(script, /--user/);
 });
 
 test("rejects an overlapping table and chart in a generated presentation", async () => {

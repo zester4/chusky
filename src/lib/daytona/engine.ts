@@ -304,14 +304,30 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
 function presentationGenerationScript(title: string, slides: PresentationSlideInput[], path: string): string {
   const payload = Buffer.from(JSON.stringify({ title, slides, path }), "utf8").toString("base64");
   return [
-    "import base64, json, os, subprocess, sys",
+    "import base64, importlib, json, os, subprocess, sys",
     `payload=json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
-    "try:",
-    "    from pptx import Presentation",
-    "except ImportError:",
-    "    install=subprocess.run([sys.executable, '-m', 'pip', 'install', '--user', '--disable-pip-version-check', 'python-pptx'], text=True, capture_output=True, timeout=180)",
-    "    if install.returncode != 0: raise RuntimeError('python-pptx installation failed: ' + (install.stderr or install.stdout)[-600:])",
-    "    from pptx import Presentation",
+    "dependency_dir=os.path.abspath(os.path.join('workspace', '.chusky', 'python-pptx'))",
+    "if dependency_dir not in sys.path: sys.path.insert(0, dependency_dir)",
+    "def load_presentation():",
+    "    try:",
+    "        from pptx import Presentation",
+    "        return Presentation",
+    "    except ImportError:",
+    "        return None",
+    "Presentation=load_presentation()",
+    "if Presentation is None:",
+    "    os.makedirs(dependency_dir, exist_ok=True)",
+    "    install_args=[sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '--target', dependency_dir, 'python-pptx']",
+    "    install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
+    "    if install.returncode != 0 and ('No module named pip' in (install.stderr or '') or 'No module named pip' in (install.stdout or '')):",
+    "        subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'], text=True, capture_output=True, timeout=90)",
+    "        install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
+    "    if install.returncode != 0:",
+    "        detail=(install.stderr or install.stdout or 'unknown pip error').strip().replace('\\n', ' ')",
+    "        raise RuntimeError('python-pptx could not be installed in this Daytona workspace: ' + detail[-500:])",
+    "    importlib.invalidate_caches()",
+    "    Presentation=load_presentation()",
+    "    if Presentation is None: raise RuntimeError('python-pptx was installed but cannot be imported from the workspace dependency directory')",
     "from pptx.util import Inches, Pt",
     "from pptx.enum.text import PP_ALIGN",
     "from pptx.enum.chart import XL_CHART_TYPE",
@@ -777,7 +793,10 @@ export class DaytonaEngine {
     const script = presentationGenerationScript(title, slides, path);
     const encoded = Buffer.from(script, "utf8").toString("base64");
     const generated = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 300);
-    if (generated.exitCode !== 0) throw new DaytonaInputError(`Presentation generation failed: ${String(generated.result ?? "unknown generator error").slice(0, 700)}`);
+    if (generated.exitCode !== 0) {
+      const raw = String(generated.result ?? "unknown generator error").replace(/base64\.b64decode\('\S*?'\)/g, "base64.b64decode('[payload redacted]')");
+      throw new DaytonaInputError(`Presentation generation failed: ${raw.slice(-900)}`);
+    }
     const result = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation);
     return { ...result, generated: true, slideCount: slides.length + 1 };
   }
