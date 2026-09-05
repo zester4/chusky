@@ -36,7 +36,7 @@ import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
-import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
+import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 
@@ -207,7 +207,7 @@ async function readStreamingChat(res: Response, onDelta?: (text: string) => void
   return { choices: [{ finish_reason: calls.size ? "tool_calls" : "stop", message: { role: "assistant", content, ...(calls.size ? { tool_calls: [...calls.values()] } : {}) } }], usage };
 }
 
-async function orChat(
+export async function orChat(
   model: string,
   messages: ApiMessage[],
   tools: unknown[],
@@ -334,6 +334,53 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
 
   logger.info({ userId, sessionId }, "Composio session ready");
   return result;
+}
+
+/**
+ * Return only the exact provider actions a worker contract selected. The
+ * caller must still enforce its worker capability policy and approval gate;
+ * this helper deliberately never exposes the entire ToolRouter catalogue.
+ */
+export async function getScopedComposioTools(userId: number, allowedSlugs: string[]): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tools: any[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  execute: (slug: string, args: Record<string, unknown>) => Promise<any>;
+}> {
+  const unique = [...new Set(allowedSlugs.map((slug) => slug.trim()).filter(Boolean))];
+  if (!unique.length) return { tools: [], execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
+  const { sessionObj } = await getOrCreateComposioSession(userId);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const available: any[] = await sessionObj.tools();
+  const nameOf = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
+  const byName = new Map(available.map((tool) => [nameOf(tool), tool]));
+  const missing = unique.filter((slug) => !byName.has(slug));
+  if (missing.length) {
+    // A typo or stale slug must never silently broaden worker access. This is
+    // a read-only discovery hint; Chusky must still deliberately search and
+    // delegate an exact replacement in a later worker contract.
+    let suggestions: string[] = [];
+    try {
+      const matches = await sessionObj.search({ query: missing.join(" ") });
+      const items = Array.isArray(matches) ? matches : (matches?.items ?? []);
+      suggestions = items
+        .map((tool: any) => String(tool?.slug ?? tool?.tool_slug ?? tool?.name ?? "").trim())
+        .filter(Boolean)
+        .slice(0, 5);
+    } catch {
+      // Provider discovery is advisory. The connection/availability error is
+      // still actionable when the search endpoint is temporarily unavailable.
+    }
+    const hint = suggestions.length ? ` Candidate slugs: ${suggestions.join(", ")}.` : "";
+    throw new Error(`Delegated Composio tool(s) are unavailable in this user's connected session: ${missing.join(", ")}.${hint} Ask Chusky to use COMPOSIO_SEARCH_TOOL with the intended action, verify the user's connection, then delegate the exact resulting slug.`);
+  }
+  return {
+    tools: unique.map((slug) => byName.get(slug)!),
+    execute: (slug, args) => {
+      if (!byName.has(slug)) throw new Error(`Composio tool ${slug} was not delegated to this worker.`);
+      return sessionObj.execute(slug, args);
+    },
+  };
 }
 
 // ── Agent result ──────────────────────────────────────────────────────────────
@@ -566,9 +613,20 @@ export async function runAgent(
 
     // ── Done: no tool calls or explicit stop ──────────────────────────
     if (toolCalls.length === 0) {
-      const text = assistantMsg.content ?? "";
+      const rawText = typeof assistantMsg.content === "string" ? cleanModelText(assistantMsg.content) : "";
+      // Guard: OpenRouter occasionally returns a completion with both empty
+      // content AND no tool calls. Returning an empty string here causes the
+      // next message to contain a blank assistant turn, which OpenRouter then
+      // rejects with "model output must contain either output text or tool calls".
+      // Instead, inject a one-shot nudge and continue the loop.
+      if (!rawText && round < config.maxToolRounds - 1) {
+        logger.warn({ round, model: requestModel }, "Empty model completion — injecting nudge and retrying");
+        messages.push({ role: "assistant", content: "(no response)" });
+        messages.push({ role: "user", content: "Your previous response was empty. Please reply with a helpful message or continue your task." });
+        continue;
+      }
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
-      return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+      return { text: appendPreviewLinks(rawText, previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -669,7 +727,7 @@ export async function runAgent(
           });
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal });
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
@@ -685,6 +743,10 @@ export async function runAgent(
             generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
             execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The screenshot was sent to the user. Use accessibility or display tools for structured follow-up." };
           }
+          if (slug === "CHUCK_DELEGATE_SUBAGENT" && execResult && typeof execResult === "object" && (execResult as any).status === "requires_approval" && (execResult as any).approvalId) {
+            const subResult = execResult as { approvalId: string; proposal?: { actionName: string; payload: Record<string, unknown> } };
+            throw new ApprovalRequiredError(subResult.approvalId, subResult.proposal?.actionName ?? "subagent_risky_action", subResult.proposal?.payload ?? {});
+          }
         } else {
           execResult = await sessionObj.execute(slug, executionArgs);
         }
@@ -698,6 +760,9 @@ export async function runAgent(
         if (e instanceof ApprovalRequiredError) throw e;
         logger.warn({ slug, err: e }, "Tool execution failed");
         result = `Error executing ${slug}: ${String(e)}`;
+        if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_ARTIFACT"].includes(slug)) {
+          result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
+        }
       }
 
       messages.push({

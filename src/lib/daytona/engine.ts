@@ -6,6 +6,7 @@ import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
+import { artifactVisualQaScript } from "./artifactQa.js";
 import { getDaytonaClient } from "./client.js";
 import type { DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
@@ -33,6 +34,7 @@ export function safeDaytonaPath(value: unknown, label = "path"): string {
   let path = String(value ?? "").trim();
   const daytonaHome = "/home/user/";
   if (path.toLowerCase().startsWith(daytonaHome)) path = path.slice(daytonaHome.length);
+  if (path.toLowerCase().startsWith("home/user/")) path = path.slice("home/user/".length);
   const absolute = path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path);
   if (!path || absolute || path.includes("\0") || path.split(/[\\/]+/).includes("..")) {
     throw new DaytonaInputError(`${label} must be a non-empty workspace-relative path without '..'; /home/user/... is normalized automatically`);
@@ -92,11 +94,6 @@ const ARTIFACT_EXTENSION: Record<ArtifactType, string> = {
 };
 
 const STRUCTURED_ARTIFACT_TYPES = new Set<ArtifactType>(["docx", "presentation", "pdf", "spreadsheet"]);
-// PDF and DOCX layout is especially sensitive to renderer differences. These
-// types must never be registered as verified when their complete-page render
-// could not run. Keep the existing best-effort behavior for PPTX/XLSX so a
-// deployment without LibreOffice does not regress those established paths.
-const REQUIRED_VISUAL_QA_TYPES = new Set<ArtifactType>(["docx", "pdf"]);
 
 function artifactValidationScript(type: ArtifactType, path: string): string {
   const officeRoots: Partial<Record<ArtifactType, string>> = {
@@ -112,9 +109,7 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "def fail(message):",
     "    print(message, file=sys.stderr)",
     "    raise SystemExit(2)",
-    "if not os.path.isabs(path):",
-    "    workspace_path=os.path.join('/home/user', path)",
-    "    if os.path.isfile(workspace_path): path=workspace_path",
+    "path=os.path.abspath(path)",
     "if not os.path.isfile(path): fail('artifact file does not exist')",
     "if kind == 'pdf':",
     "    with open(path, 'rb') as f:",
@@ -165,94 +160,6 @@ function artifactValidationScript(type: ArtifactType, path: string): string {
     "    except (KeyError, ET.ParseError, OSError) as error:",
     "        fail('Office Open XML package contains invalid XML: ' + str(error))",
     "print('artifact structure validated')",
-  ].join("\n");
-}
-
-function artifactVisualQaScript(type: ArtifactType, path: string): string {
-  // FIX 1: emit real Python booleans (True/False), not JSON strings ("true"/"false").
-  // In Python every non-empty string is truthy, so JSON.stringify(false) === "false"
-  // would make require_renderer always evaluate as True, causing PPTX/XLSX to
-  // hard-fail when LibreOffice is absent even though the renderer is optional.
-  const requireRendererLiteral = REQUIRED_VISUAL_QA_TYPES.has(type) ? "True" : "False";
-  return [
-    "import os, shutil, subprocess, sys, tempfile",
-    `path=${JSON.stringify(path)}`,
-    `kind=${JSON.stringify(type)}`,
-    // FIX 1: real Python boolean literal, not a JSON string.
-    `require_renderer=${requireRendererLiteral}`,
-    // FIX 2: probe /home/user/<path> then /home/user/workspace/<path> so both
-    // conventional Daytona upload destinations are covered before giving up.
-    "if not os.path.isabs(path):",
-    "    _found=False",
-    "    for _candidate in [os.path.join('/home/user', path), os.path.join('/home/user/workspace', path)]:",
-    "        if os.path.isfile(_candidate):",
-    "            path=_candidate; _found=True; break",
-    "if not os.path.isfile(path):",
-    "    print('visual QA failed: artifact file does not exist: ' + path, file=sys.stderr)",
-    "    raise SystemExit(2)",
-    "tmp=tempfile.mkdtemp(prefix='chusky-artifact-qa-')",
-    "try:",
-    "    pdf=path",
-    "    if kind != 'pdf':",
-    "        office=shutil.which('libreoffice') or shutil.which('soffice')",
-    "        if not office:",
-    "            if require_renderer:",
-    "                print('visual QA failed: ' + kind.upper() + ' requires LibreOffice/soffice for complete-page inspection', file=sys.stderr)",
-    "                raise SystemExit(2)",
-    // When require_renderer is False (PPTX, XLSX) and LibreOffice is absent,
-    // skip gracefully. This is the happy path for most Daytona environments.
-    "            print('visual QA skipped: LibreOffice renderer is not installed')",
-    "            raise SystemExit(0)",
-    "        profile=os.path.join(tmp, 'libreoffice-profile')",
-    "        os.makedirs(profile, exist_ok=True)",
-    "        render_env=os.environ.copy()",
-    "        render_env['HOME']=profile",
-    "        converted=subprocess.run([office, '--headless', '--norestore', '--nofirststartwizard', '-env:UserInstallation=file://' + profile, '--convert-to', 'pdf', '--outdir', tmp, path], env=render_env, text=True, capture_output=True, timeout=120)",
-    "        if converted.returncode != 0:",
-    "            print('visual QA failed: Office-to-PDF rendering failed: ' + (converted.stderr or converted.stdout)[-800:], file=sys.stderr)",
-    "            raise SystemExit(2)",
-    "        pdf=os.path.join(tmp, os.path.splitext(os.path.basename(path))[0] + '.pdf')",
-    "    if not os.path.isfile(pdf) or os.path.getsize(pdf) < 10:",
-    "        print('visual QA failed: renderer produced no PDF output', file=sys.stderr)",
-    "        raise SystemExit(2)",
-    "    page_count=0",
-    "    pdfinfo=shutil.which('pdfinfo')",
-    "    if pdfinfo:",
-    "        info=subprocess.run([pdfinfo, pdf], text=True, capture_output=True, timeout=30)",
-    "        if info.returncode == 0:",
-    "            for line in info.stdout.splitlines():",
-    "                if line.startswith('Pages:'):",
-    "                    try: page_count=int(line.split(':', 1)[1].strip())",
-    "                    except ValueError: page_count=0",
-    "                    break",
-    "    if page_count < 1:",
-    "        try:",
-    "            with open(pdf, 'rb') as _f:",
-    "                _b = _f.read()",
-    "                import re",
-    "                page_count = len(re.findall(rb'/Type\s*/Page\b', _b))",
-    "                if not page_count:",
-    "                    _m = re.search(rb'/Count\s+(\d+)', _b)",
-    "                    if _m: page_count = int(_m.group(1))",
-    "        except Exception:",
-    "            page_count = 0",
-    "    if page_count < 1:",
-    "        print('visual QA failed: PDF has no readable pages', file=sys.stderr)",
-    "        raise SystemExit(2)",
-    "    raster=shutil.which('pdftoppm')",
-    "    if raster:",
-    "        page_count=max(1, page_count)",
-    "        prefix=os.path.join(tmp, 'page')",
-    "        rendered=subprocess.run([raster, '-f', '1', '-l', str(page_count), '-png', pdf, prefix], capture_output=True, timeout=120)",
-    "        previews=[name for name in os.listdir(tmp) if name.startswith('page-') and name.endswith('.png')]",
-    "        if rendered.returncode != 0 or len(previews) < page_count or any(os.path.getsize(os.path.join(tmp, name)) < 100 for name in previews):",
-    "            print('visual QA failed: one or more pages could not be rasterized', file=sys.stderr)",
-    "            raise SystemExit(2)",
-    "        print('visual QA passed: rendered all ' + str(page_count) + ' page(s)')",
-    "    else:",
-    "        print('visual QA passed: PDF page structure verified (' + str(page_count) + ' page(s)); pixel renderer unavailable')",
-    "finally:",
-    "    shutil.rmtree(tmp, ignore_errors=True)",
   ].join("\n");
 }
 
@@ -755,74 +662,8 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "        install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
     "    importlib.invalidate_caches()",
     "    colors=load_reportlab()",
-    "def write_pure_pdf(p, pdf_path):",
-    "    title=p.get('title','Document'); sections=p.get('sections',[]); page_w,page_h=612.0,792.0; margin=54.0; content_w=page_w-2*margin",
-    "    pages=[]; current_ops=[]; y=page_h-margin",
-    "    def esc(s): return str(s).replace('\\\\','\\\\\\\\').replace('(','\\\\(').replace(')','\\\\)')",
-    "    def new_pg():",
-    "        nonlocal y, current_ops",
-    "        if current_ops: pages.append('\\n'.join(current_ops))",
-    "        current_ops=['0.12 0.23 0.54 RG 1.5 w 54.0 ' + str(page_h-margin) + ' m ' + str(page_w-margin) + ' ' + str(page_h-margin) + ' l S']; y=page_h-margin-25",
-    "    new_pg()",
-    "    current_ops.append('BT /F2 20 Tf 0.12 0.23 0.54 rg ' + str(margin) + ' ' + str(y) + ' Td (' + esc(title) + ') Tj ET'); y-=35",
-    "    def wrap(t, max_c):",
-    "        words=str(t).split(); res=[]; cur=[]; cur_l=0",
-    "        for w in words:",
-    "            if cur_l+len(w)+1>max_c:",
-    "                res.append(' '.join(cur)); cur=[w]; cur_l=len(w)",
-    "            else: cur.append(w); cur_l+=len(w)+1",
-    "        if cur: res.append(' '.join(cur))",
-    "        return res or ['']",
-    "    for sec in sections:",
-    "        if sec.get('pageBreakBefore') or y<margin+60: new_pg()",
-    "        if sec.get('heading'):",
-    "            if y<margin+40: new_pg()",
-    "            current_ops.append('BT /F2 14 Tf 0.12 0.23 0.54 rg ' + str(margin) + ' ' + str(y) + ' Td (' + esc(sec['heading']) + ') Tj ET'); y-=22",
-    "        if sec.get('body'):",
-    "            for line in wrap(sec['body'], 80):",
-    "                if y<margin+30: new_pg()",
-    "                current_ops.append('BT /F1 10 Tf 0.2 0.2 0.2 rg ' + str(margin) + ' ' + str(y) + ' Td (' + esc(line) + ') Tj ET'); y-=14",
-    "            y-=6",
-    "        for bullet in sec.get('bullets') or []:",
-    "            for idx,line in enumerate(wrap('- ' + str(bullet), 76)):",
-    "                if y<margin+30: new_pg()",
-    "                x_pos=margin+(10 if idx>0 else 0)",
-    "                current_ops.append('BT /F1 10 Tf 0.2 0.2 0.2 rg ' + str(x_pos) + ' ' + str(y) + ' Td (' + esc(line) + ') Tj ET'); y-=14",
-    "            y-=4",
-    "        if sec.get('table'):",
-    "            cols=max(len(r) for r in sec['table']) if sec['table'] else 1; col_w=content_w/cols; row_h=18.0",
-    "            for r_i,row in enumerate(sec['table']):",
-    "                if y<margin+row_h+10: new_pg()",
-    "                if r_i==0: current_ops.append('0.12 0.23 0.54 rg ' + str(margin) + ' ' + str(y-row_h) + ' ' + str(content_w) + ' ' + str(row_h) + ' re f')",
-    "                for c_i,cell in enumerate(row):",
-    "                    c_x=margin+c_i*col_w; font='/F2' if r_i==0 else '/F1'; color='1 1 1' if r_i==0 else '0.2 0.2 0.2'",
-    "                    current_ops.append('BT ' + font + ' 9 Tf ' + color + ' rg ' + str(c_x+4) + ' ' + str(y-13) + ' Td (' + esc(str(cell)[:int(col_w/6)]) + ') Tj ET')",
-    "                y-=row_h",
-    "            y-=10",
-    "    if current_ops: pages.append('\\n'.join(current_ops))",
-    "    tot=len(pages); final_p=[]",
-    "    for i,p_ops in enumerate(pages,1):",
-    "        f_ops='BT /F1 8 Tf 0.5 0.5 0.5 rg ' + str(margin) + ' 25 Td (Created by Chusky) Tj ET\\nBT /F1 8 Tf 0.5 0.5 0.5 rg ' + str(page_w-margin-50) + ' 25 Td (Page ' + str(i) + ' of ' + str(tot) + ') Tj ET'",
-    "        final_p.append(p_ops + '\\n' + f_ops)",
-    "    objs=['1 0 obj\\n<< /Type /Catalog /Pages 2 0 R >>\\nendobj']",
-    "    p_ids=[5+i*2 for i in range(len(final_p))]; kids=' '.join(str(p)+' 0 R' for p in p_ids)",
-    "    objs.append('2 0 obj\\n<< /Type /Pages /Kids [' + kids + '] /Count ' + str(len(final_p)) + ' >>\\nendobj')",
-    "    objs.append('3 0 obj\\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\\nendobj')",
-    "    objs.append('4 0 obj\\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>\\nendobj')",
-    "    for i,c_str in enumerate(final_p):",
-    "        p_id=p_ids[i]; c_id=p_id+1; s_bytes=c_str.encode('utf-8')",
-    "        objs.append(str(p_id) + ' 0 obj\\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + str(page_w) + ' ' + str(page_h) + '] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ' + str(c_id) + ' 0 R >>\\nendobj')",
-    "        objs.append(str(c_id) + ' 0 obj\\n<< /Length ' + str(len(s_bytes)) + ' >>\\nstream\\n' + c_str + '\\nendstream\\nendobj')",
-    "    os.makedirs(os.path.dirname(pdf_path) or '.', exist_ok=True)",
-    "    with open(pdf_path, 'wb') as f:",
-    "        f.write(b'%PDF-1.4\\n'); offsets=[0]; pos=len(b'%PDF-1.4\\n')",
-    "        for obj in objs:",
-    "            offsets.append(pos); b_obj=obj.encode('utf-8')+b'\\n'; f.write(b_obj); pos+=len(b_obj)",
-    "        xref_pos=pos; f.write(b'xref\\n'); f.write((str(0) + ' ' + str(len(objs)+1) + '\\n').encode('utf-8')); f.write(b'0000000000 65535 f \\n')",
-    "        for off in offsets[1:]: f.write((f'{off:010d} 00000 n \\n').encode('utf-8'))",
-    "        f.write(('trailer\\n<< /Size ' + str(len(objs)+1) + ' /Root 1 0 R >>\\nstartxref\\n' + str(xref_pos) + '\\n%%EOF\\n').encode('utf-8'))",
     "if colors is None:",
-    "    write_pure_pdf(payload, payload['path'])",
+    "    raise RuntimeError('ReportLab is unavailable. Install reportlab and pypdf in the Daytona sandbox, then retry PDF generation.')",
     "else:",
     "    from xml.sax.saxutils import escape",
     "    from reportlab.lib.enums import TA_LEFT, TA_CENTER",
@@ -1490,7 +1331,7 @@ export class DaytonaEngine {
     if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
     const script = artifactValidationScript(type, path);
     const encoded = Buffer.from(script, "utf8").toString("base64");
-    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 120);
+    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 120);
     if (result.exitCode !== 0) {
       throw new DaytonaInputError(`${type.toUpperCase()} validation failed: ${String(result.result ?? "unknown validation error").slice(0, 500)}`);
     }
@@ -1500,17 +1341,9 @@ export class DaytonaEngine {
     if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
     const script = artifactVisualQaScript(type, path);
     const encoded = Buffer.from(script, "utf8").toString("base64");
-    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 180);
+    const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 900);
     if (result.exitCode !== 0) {
-      // FIX 4: only hard-fail for types where a renderer is strictly required
-      // (docx, pdf). For presentation and spreadsheet, structural validation
-      // already passed; an unexpected renderer crash (missing LibreOffice,
-      // temp-dir permission, Python import error) should not block delivery.
-      if (REQUIRED_VISUAL_QA_TYPES.has(type)) {
-        throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed: ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
-      }
-      // Non-required types: log the issue but allow the artifact to proceed.
-      // The structural ZIP/XML check has already verified the file is valid OOXML.
+      throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed for '${path}': ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
     }
   }
 
@@ -1527,7 +1360,7 @@ export class DaytonaEngine {
     const script = pdfGenerationScript(title, sections, style, path);
     await sandbox.fs.uploadFile(Buffer.from(script, "utf8"), scriptPath);
     try {
-      const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, undefined, undefined, 240);
+      const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, await sandbox.getUserHomeDir(), undefined, 240);
       if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed: ${String(result.result ?? "unknown PDF generation error").slice(0, 800)}`);
     } finally {
       try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
@@ -1649,11 +1482,11 @@ export class DaytonaEngine {
   private async findUniqueArtifactPath(sandbox: Sandbox, requestedPath: string, extension: string): Promise<{ path: string; details: { size?: number; isDir?: boolean } } | undefined> {
     const requestedName = requestedPath.replace(/\\/g, "/").split("/").pop()!.toLowerCase();
     const requestedStem = requestedName.endsWith(extension) ? requestedName.slice(0, -extension.length) : requestedName;
-    const workspaceStrippedPath = requestedPath.replace(/^workspace[\\/]/i, "");
-    if (workspaceStrippedPath !== requestedPath) {
+    const alternatePath = /^workspace\//i.test(requestedPath) ? requestedPath.slice(10) : `workspace/${requestedPath}`;
+    {
       try {
-        const details = await sandbox.fs.getFileDetails(workspaceStrippedPath) as { size?: number; isDir?: boolean };
-        return { path: workspaceStrippedPath, details };
+        const details = await sandbox.fs.getFileDetails(alternatePath) as { size?: number; isDir?: boolean };
+        return { path: alternatePath, details };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/not found|no such file|does not exist/i.test(message)) return undefined;
@@ -1669,7 +1502,7 @@ export class DaytonaEngine {
           const candidateStem = candidateName.endsWith(extension) ? candidateName.slice(0, -extension.length) : candidateName;
           return candidateName === requestedName || candidateStem === requestedStem;
         });
-      const unique = [...new Map(candidates.map(({ path, file }) => [path.toLowerCase(), { path, file }])).values()];
+      const unique = [...new Map(candidates.map(({ path, file }) => [path, { path, file }])).values()];
       if (unique.length !== 1) {
         if (unique.length > 1) {
           throw new DaytonaInputError(`Artifact path '${requestedPath}' was not found and matched multiple workspace files: ${unique.slice(0, 5).map(({ path }) => path).join(", ")}`);

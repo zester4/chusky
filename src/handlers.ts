@@ -10,7 +10,7 @@ import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs,
-  claimTelegramUpdate,
+  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -297,6 +297,9 @@ export function registerHandlers(bot: Bot): void {
       `/usage — messages sent, model, turns\n` +
       `/voice on|off|status — control spoken replies\n` +
       `/video-status [job id] — check video generation status\n` +
+      `/agents — list recent worker delegations\n` +
+      `/agent-status <code>handoff-id</code> — inspect one worker run\n` +
+      `/agent-cancel <code>handoff-id</code> — cancel a queued worker run\n` +
       `/call <code>+number purpose</code> — request an approval-gated phone call\n` +
       `/cancel — cancel the active request\n` +
       `/channel link slack|whatsapp|sendblue — link another channel securely\n` +
@@ -481,6 +484,53 @@ export function registerHandlers(bot: Bot): void {
       return `${icon[job.status] ?? "•"} <b>${job.status}</b> — <code>${job.id}</code>\n${escapeTelegramHtml(job.prompt.slice(0, 160))}\n${escapeTelegramHtml(detail)}`;
     });
     await ctx.reply(`<b>Video jobs</b>\n\n${lines.join("\n\n")}`, { parse_mode: "HTML" });
+  });
+
+  // /agents ──────────────────────────────────────────────────────────────────
+  bot.command("agents", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const records = await listHandoffRecords(ctx.from!.id);
+    if (!records.length) { await ctx.reply("No worker delegations recorded yet."); return; }
+    const icon: Record<string, string> = { success: "✅", failed: "❌", timed_out: "⏱️", max_tool_calls_exceeded: "🔢", requires_approval: "⚠️", requires_tool_request: "🧩", fallback_executed: "🔄", cancelled: "🛑" };
+    const lines = records.slice(0, 10).map((r) => {
+      const ago = Math.round((Date.now() - r.timestamp) / 60_000);
+      return `${icon[r.status] ?? "•"} <b>${escapeTelegramHtml(String(r.to))}</b> — <code>${escapeTelegramHtml(r.id)}</code>\n<i>${escapeTelegramHtml(r.status)}</i> · ${ago}m ago\n${escapeTelegramHtml(r.objective.slice(0, 120))}`;
+    });
+    await replyHtml(ctx, `<b>Worker agents</b> (${records.length} total)\n\n${lines.join("\n\n")}`);
+  });
+
+  // /agent-status ─────────────────────────────────────────────────────────────
+  bot.command("agent-status", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const handoffId = ctx.match?.trim();
+    if (!handoffId) { await ctx.reply("Usage: /agent-status <handoff-id>"); return; }
+    const records = await listHandoffRecords(ctx.from!.id);
+    const record = records.find((r) => r.id === handoffId);
+    if (!record) { await ctx.reply(`Handoff <code>${escapeTelegramHtml(handoffId)}</code> not found.`, { parse_mode: "HTML" }); return; }
+    const icon: Record<string, string> = { success: "✅", failed: "❌", timed_out: "⏱️", max_tool_calls_exceeded: "🔢", requires_approval: "⚠️", requires_tool_request: "🧩", fallback_executed: "🔄", cancelled: "🛑" };
+    const ago = Math.round((Date.now() - record.timestamp) / 60_000);
+    let html = `🤖 <b>Worker: ${escapeTelegramHtml(String(record.to))}</b>\n`;
+    html += `ID: <code>${escapeTelegramHtml(record.id)}</code>\n`;
+    html += `Status: ${icon[record.status] ?? "•"} <b>${escapeTelegramHtml(record.status)}</b>\n`;
+    if (record.taskId) html += `Task: <code>${escapeTelegramHtml(record.taskId)}</code>\n`;
+    if (record.toolRequest) html += `Requested capability: <b>${escapeTelegramHtml(record.toolRequest.intent)}</b>\n`;
+    html += `Started: ${ago}m ago\n\n`;
+    html += `<b>Objective:</b>\n${escapeTelegramHtml(record.objective)}`;
+    await replyHtml(ctx, html);
+  });
+
+  // /agent-cancel ─────────────────────────────────────────────────────────────
+  bot.command("agent-cancel", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const handoffId = ctx.match?.trim();
+    if (!handoffId) { await ctx.reply("Usage: /agent-cancel <handoff-id>"); return; }
+    const records = await listHandoffRecords(ctx.from!.id);
+    const record = records.find((r) => r.id === handoffId);
+    if (!record) { await ctx.reply(`Handoff <code>${escapeTelegramHtml(handoffId)}</code> not found.`, { parse_mode: "HTML" }); return; }
+    if (record.taskId) { await cancelTask(ctx.from!.id, record.taskId); }
+    const updated = { ...record, status: "cancelled" as const };
+    await saveHandoffRecord(ctx.from!.id, updated);
+    await replyHtml(ctx, `✅ Worker <b>${escapeTelegramHtml(String(record.to))}</b> (<code>${escapeTelegramHtml(record.id)}</code>) has been cancelled.\n\n<i>Note: If the worker was mid-execution, it will finish its current turn but will not be retried.</i>`);
   });
 
   // /connect ─────────────────────────────────────────────────────────────────

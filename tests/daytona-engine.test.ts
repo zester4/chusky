@@ -14,6 +14,7 @@ function fakeSandbox(id: string, state = "started") {
   const sandbox: any = {
     id, name: `chusky-${id}`, state, recoverable: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     refreshData: async () => undefined,
+    getUserHomeDir: async () => "/home/user",
     refreshActivity: async () => undefined,
     start: async () => { sandbox.state = "started"; },
     recover: async () => { sandbox.state = "started"; sandbox.recoverable = false; },
@@ -307,6 +308,7 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(generatorScript, /LongTable/);
   assert.match(generatorScript, /ImageReader/);
   assert.match(generatorScript, /PdfReader/);
+  assert.doesNotMatch(generatorScript, /write_pure_pdf/);
   assert.match(commands[0], /^python3 artifacts\/\.chusky\/pdf-generator-/);
   const visualScript = Buffer.from(commands[2].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   assert.match(visualScript, /kind="pdf"/);
@@ -343,9 +345,8 @@ test("creates a presentation with the built-in generator before Daytona delivery
   const structureScript = Buffer.from(commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   const visualScript = Buffer.from(commands[1].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   assert.match(structureScript, /target\.startswith\('\/'\)/);
-  // Dual-path probe now checks both /home/user and /home/user/workspace before failing.
-  assert.match(visualScript, /os\.path\.join\('\/home\/user', path\)/);
-  assert.match(visualScript, /os\.path\.join\('\/home\/user\/workspace', path\)/);
+  // QA uses the exact resolved path from registration, relative to SDK home.
+  assert.match(visualScript, /path=os\.path\.abspath\(path\)/);
   // require_renderer is emitted as a real Python boolean False for non-required types.
   assert.match(visualScript, /require_renderer=False/);
 });
@@ -440,6 +441,43 @@ test("rejects an overlapping table and chart in a generated presentation", async
   );
 });
 
+test("QA failure leaves no record and retries the same file from SDK home", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820030) as any;
+  sandbox.getUserHomeDir = async () => "/custom/home";
+  let failVisual = true;
+  sandbox.process.executeCommand = async (command: string, cwd: string) => {
+    assert.equal(cwd, "/custom/home");
+    const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
+    return { exitCode: script.includes("require_renderer") && failVisual ? 2 : 0, result: "Renderer setup failed" };
+  };
+  const args = { action: "register", type: "pdf", path: "artifacts/form.pdf" };
+  await assert.rejects(() => e.artifact(820030, args), /visual QA failed for 'artifacts\/form.pdf'/);
+  assert.equal((await getSession(820030)).artifacts?.length ?? 0, 0);
+  failVisual = false;
+  await e.artifact(820030, args);
+  assert.equal((await getSession(820030)).artifacts?.length, 1);
+});
+
+test("recovers an omitted workspace prefix before validation and delivery", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820031) as any;
+  sandbox.fs.getFileDetails = async (path: string) => {
+    if (path !== "workspace/form.pdf") throw new Error("no such file or directory");
+    return { size: 200 };
+  };
+  const result = await e.artifact(820031, { action: "register", type: "pdf", path: "form.pdf" }) as any;
+  assert.equal(result.path, "workspace/form.pdf");
+});
+
+test("does not collapse distinct case-sensitive files during path recovery", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820032) as any;
+  sandbox.fs.getFileDetails = async () => { throw new Error("no such file or directory"); };
+  sandbox.fs.listFiles = async () => [{ path: "a/Form.pdf" }, { path: "a/form.pdf" }];
+  await assert.rejects(() => e.artifact(820032, { action: "register", type: "pdf", path: "form.pdf" }), /matched multiple/);
+});
+
 test("turns a missing artifact path into an actionable input error", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820019) as any;
@@ -476,4 +514,3 @@ test("supports long commands up to 64000 characters and rejects commands exceedi
     /command must be 1-64000 characters/,
   );
 });
-
