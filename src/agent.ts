@@ -40,6 +40,7 @@ import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
+import { readR2Object } from "./lib/storage/r2.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -786,16 +787,17 @@ export async function runAgent(
         content: result,
       });
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
-        const asset = execResult as { downloadUrl?: unknown; name?: unknown; contentType?: unknown };
-        if (typeof asset.downloadUrl === "string" && /^https:\/\//i.test(asset.downloadUrl)) {
-          const download = await fetch(asset.downloadUrl);
-          if (!download.ok) throw new Error(`Saved image download failed (${download.status})`);
-          const mediaType = typeof asset.contentType === "string" ? asset.contentType.toLowerCase().split(";", 1)[0] : (download.headers.get("content-type") ?? "").toLowerCase().split(";", 1)[0];
+        const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
+        if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
+          // Read the private object server-side. A presigned URL is useful for
+          // clients, but relying on an external model/provider to fetch R2
+          // often fails because private buckets and egress policies vary.
+          const bytes = await readR2Object(asset.r2Key);
+          const mediaType = typeof asset.contentType === "string" ? asset.contentType.toLowerCase().split(";", 1)[0] : "";
           if (!["image/jpeg", "image/png", "image/webp"].includes(mediaType)) throw new Error("Saved image has an unsupported format");
-          const bytes = Buffer.from(await download.arrayBuffer());
           if (!bytes.length || bytes.length > 12 * 1024 * 1024) throw new Error("Saved image is empty or too large to deliver");
           retrievedImages.push({ data: bytes, mediaType, name: typeof asset.name === "string" ? asset.name : undefined });
-          messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: asset.downloadUrl } }] });
+          messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: `data:${mediaType};base64,${bytes.toString("base64")}` } }] });
         }
       }
     }
