@@ -39,6 +39,7 @@ import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
+import { posthog } from "./posthog.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -639,6 +640,7 @@ export async function runAgent(
         continue;
       }
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
+      posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       return { text: appendPreviewLinks(rawText, previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
     }
 
@@ -807,6 +809,7 @@ export async function runAgent(
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
+  posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
   return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
 }
 

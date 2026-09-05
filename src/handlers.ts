@@ -25,6 +25,7 @@ import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { posthog } from "./posthog.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 
 const activeRequests = new Map<number, AbortController>();
@@ -867,6 +868,7 @@ export function registerHandlers(bot: Bot): void {
 
     const s = await getSession(userId);
     const model = s.model;
+    posthog?.capture({ distinctId: String(userId), event: "telegram_message_received", properties: { model, message_length: text.length } });
     if (!(await canSpend(userId))) {
       await ctx.reply("💳 Your usage cap has been reached. Ask an administrator to increase it.");
       return;
@@ -946,6 +948,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       logger.error({ err: e, userId, model }, "Chusky error");
+      posthog?.captureException(e instanceof Error ? e : new Error(String(e)), String(userId));
       const msg = e instanceof Error ? e.message : String(e);
       try {
         await ctx.api.editMessageText(

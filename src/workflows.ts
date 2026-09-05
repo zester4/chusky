@@ -1,5 +1,6 @@
 import type { JobRecord, ReminderRecord } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
+import { posthog } from "./posthog.js";
 
 export interface ReminderWorkflowPayload { reminderId: string; userId: number; }
 export interface JobWorkflowPayload { jobId: string; userId: number; occurrenceId?: string; }
@@ -46,6 +47,7 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
   try {
     await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(reminder.text)}`, { parse_mode: "HTML" });
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent" });
+    posthog?.capture({ distinctId: String(payload.userId), event: "reminder_delivered", properties: { reminder_id: payload.reminderId } });
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });

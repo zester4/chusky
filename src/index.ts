@@ -58,6 +58,7 @@ import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
 import { processSendblueWorkflow } from "./sendblueWorkflow.js";
+import { posthog } from "./posthog.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -116,6 +117,7 @@ async function main(): Promise<void> {
       if (inFlightTelegramUpdates.size) logger.warn({ pending: inFlightTelegramUpdates.size }, "Stopping with Telegram updates still in flight");
       await bot.stop();
     } finally {
+      await posthog?.shutdown();
       process.exit(0);
     }
   };
@@ -359,6 +361,7 @@ async function main(): Promise<void> {
         const pairing = await consumeCliPairing(String(body.code ?? ""));
         if (!pairing) return c.json({ ok: false, error: "invalid or expired pairing code" }, 401);
         const result = await createCliDevice(pairing.userId, String(body.deviceName ?? "terminal"));
+        posthog?.capture({ distinctId: String(pairing.userId), event: "cli_device_paired", properties: { device_name: result.device.name } });
         return c.json({ ok: true, token: result.token, userId: pairing.userId, device: { name: result.device.name, createdAt: result.device.createdAt } });
       } catch { return c.json({ ok: false, error: "invalid pairing request" }, 400); }
     });
@@ -376,6 +379,7 @@ async function main(): Promise<void> {
       const name = decodeURIComponent(c.req.param("name")).trim();
       if (!name || name.length > 80) return c.json({ ok: false, error: "invalid device name" }, 400);
       if (!(await revokeCliDeviceByName(device.userId, name))) return c.json({ ok: false, error: "device not found" }, 404);
+      posthog?.capture({ distinctId: String(device.userId), event: "cli_device_revoked", properties: { device_name: name } });
       return c.json({ ok: true, revoked: name });
     });
 
@@ -564,7 +568,11 @@ async function main(): Promise<void> {
       const value = String(body.value ?? "").trim();
       if (!value || value.length > 300 || !["create", "enable", "disable", "delete"].includes(action)) return c.json({ ok: false, error: "invalid trigger operation" }, 400);
       try {
-        if (action === "create") return c.json({ ok: true, result: await createTrigger(device.userId, value, body.triggerConfig ?? {}) });
+        if (action === "create") {
+          const triggerResult = await createTrigger(device.userId, value, body.triggerConfig ?? {});
+          posthog?.capture({ distinctId: String(device.userId), event: "trigger_created", properties: { trigger_slug: value } });
+          return c.json({ ok: true, result: triggerResult });
+        }
         if (action === "enable" || action === "disable") return c.json({ ok: true, result: await setTriggerState(device.userId, value, action === "enable") });
         return c.json({ ok: true, result: await deleteTrigger(device.userId, value) });
       } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "trigger operation failed" }, 409); }
@@ -657,10 +665,12 @@ async function main(): Promise<void> {
           const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, undefined, body.approvalId);
           await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
+          posthog?.capture({ distinctId: String(device.userId), event: "cli_chat_completed", properties: { model: s.model, tools_used: result.toolsUsed ?? [], cost: result.cost ?? 0, message_length: message.length } });
           return { ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })), speech: await cliSpeech(device.userId, result.text) };
         }));
       } catch (e) {
         if (e instanceof ApprovalRequiredError) return c.json({ ok: false, error: "approval_required", approval: { id: e.approvalId, toolSlug: e.toolSlug, args: e.args } }, 409);
+        posthog?.captureException(e instanceof Error ? e : new Error(String(e)), String(device.userId));
         return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
       }
     });
@@ -712,6 +722,7 @@ async function main(): Promise<void> {
       if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) return c.json({ ok: false, error: "approval expired or not found" }, 404);
       if (body.decision !== "approve") {
         if (!(await setApprovalStatus(device.userId, id, "denied"))) return c.json({ ok: false, error: "approval could not be claimed" }, 409);
+        posthog?.capture({ distinctId: String(device.userId), event: "tool_approval_resolved", properties: { decision: "deny", tool_slug: approval.toolSlug } });
         return c.json({ ok: true, denied: true });
       }
       if (!(await claimApproval(device.userId, id))) return c.json({ ok: false, error: "approval could not be claimed" }, 409);
@@ -729,6 +740,7 @@ async function main(): Promise<void> {
           const result = await runAgent(device.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, id);
           await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
+          posthog?.capture({ distinctId: String(device.userId), event: "tool_approval_resolved", properties: { decision: "approve", tool_slug: approval.toolSlug, cost: result.cost ?? 0 } });
           return { ok: true, text: result.text, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })) };
         }));
       } catch (e) { return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500); }
@@ -795,6 +807,7 @@ async function main(): Promise<void> {
             await bot.api.sendMessage(chatId, `📁 Video saved in Daytona at <code>${xmlEscape(saved.path)}</code>.`, { parse_mode: "HTML" });
           }
           if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "completed", resultPath: saved?.path, completedAt: Date.now() });
+          posthog?.capture({ distinctId: String(payload.userId), event: "video_generated", properties: { destination, model: config.videoModel, size_bytes: bytes.length, delivered_to_telegram: Boolean(chatId && (destination === "telegram" || destination === "both")), saved_to_daytona: Boolean(saved) } });
           return { delivered: Boolean(chatId && (destination === "telegram" || destination === "both")), saved: saved ? { path: saved.path, bytes: saved.bytes } : undefined };
         }
         if (state === "failed" || state === "error" || state === "cancelled") {
