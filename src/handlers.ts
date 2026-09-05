@@ -918,6 +918,12 @@ export function registerHandlers(bot: Bot): void {
 
       let html = "";
 
+      if (result.toolsUsed.length > 0) {
+        const footer = result.toolsUsed.map(toolFooterLabel).filter(Boolean).join("  ");
+        const cost = result.cost ? `  ·  <i>$${result.cost.toFixed(5)}</i>` : "";
+        if (footer || cost) html += `\n\n<i>${footer}${cost}</i>`;
+      }
+
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
       await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
@@ -955,6 +961,22 @@ export function registerHandlers(bot: Bot): void {
       activeRequests.delete(userId);
     }
   });
+
+function toolFooterLabel(slug: string): string {
+  // Native CHUCK_* calls are internal implementation details. Keep the
+  // useful provider indicators while hiding the generic "🔧 chuck" label.
+  if (slug.startsWith("CHUCK_")) return "";
+  const map: Record<string, string> = {
+    COMPOSIO_MANAGE_CONNECTIONS: "🔗",
+    COMPOSIO_REMOTE_BASH_TOOL: "🖥️",
+    COMPOSIO_REMOTE_WORKBENCH: "🛠️",
+    COMPOSIO_SEARCH_TOOL: "🔎",
+    COMPOSIO_MULTI_EXECUTE_TOOL: "⚡",
+  };
+  if (map[slug]) return map[slug];
+  const toolkit = slug.split("_")[0]?.toLowerCase() ?? "tool";
+  return `🔧 ${toolkit}`;
+}
 
   // ── Photo ──────────────────────────────────────────────────────────────────
   bot.on("message:photo", async (ctx) => {
