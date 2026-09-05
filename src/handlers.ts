@@ -306,7 +306,7 @@ export function registerHandlers(bot: Bot): void {
       `/channel link slack|whatsapp|sendblue — link another channel securely\n` +
       `/channel link sendblue-group — create an iMessage group link code\n` +
       `/channel list — show linked channel identities\n` +
-      `/link-group <code> — activate the group (send inside iMessage)\n` +
+      `/linkgroup <code> — activate the group (send inside iMessage)\n` +
       `/group-access owner|all — control group access (send inside iMessage)\n` +
       `/unlink-group — unlink the iMessage group (send inside iMessage)\n` +
       `/image <description> — generate an image\n` +

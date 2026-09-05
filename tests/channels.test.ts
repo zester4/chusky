@@ -298,6 +298,18 @@ test("all linked channels receive a provider-specific confirmation", async () =>
   }
 });
 
+test("/linkgroup without a code explains how to link an iMessage group", async () => {
+  const sent: OutboundMessage[] = [];
+  const adapter: ChannelAdapter = { provider: "sendblue", capabilities: CHANNEL_CAPABILITIES.sendblue, async send(message) { sent.push(message); return { providerMessageId: "help", deliveredAt: Date.now() }; } };
+  const gateway = new ChannelGateway(async () => { throw new Error("agent loop should not run for /linkgroup"); });
+  gateway.register(adapter);
+  const message: InboundMessage = { provider: "sendblue", providerEventId: "sb-group-help", providerUserId: "+15550001", providerConversationId: "group-1", providerWorkspaceId: "+15550002", text: "/linkgroup", attachments: [], receivedAt: Date.now(), scope: "shared" };
+  const result = await gateway.processInbound(message);
+  assert.equal(result.linked, false);
+  assert.match(sent[0].text ?? "", /\/channel link sendblue-group/);
+  assert.match(sent[0].text ?? "", /\/linkgroup <code>/);
+});
+
 test("a linked owner can authorize a Sendblue group for all participants and unlink it", async () => {
   await linkChannelIdentity(42, { provider: "sendblue", externalUserId: "+15550001" });
   const code = await createSendblueGroupLinkCode(42);

@@ -365,7 +365,7 @@ First link the owner's private Sendblue identity. Then create a group authorizat
 Send the generated six-digit code inside the iMessage group from that same linked Sendblue number:
 
 ```text
-/link-group <code>
+/linkgroup <code>
 ```
 
 The group receives a confirmation and uses its own shared conversation history. By default, everyone in the group can use Chusky; private Telegram, web, direct-iMessage history, and account-only memory remain unavailable to the group. The linked owner can manage access from inside the group:

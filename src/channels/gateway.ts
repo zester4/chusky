@@ -83,7 +83,7 @@ export class ChannelGateway {
       return { duplicate: false, linked: true, delivered: [] };
     }
     if (isSendblueGroup && !groupAuthorization && message.text) {
-      const groupLink = message.text.trim().match(/^\/link-group\s+(\d{6})$/i);
+      const groupLink = message.text.trim().match(/^\/link[-_]?group\s+(\d{6})$/i);
       if (groupLink) {
         const linkedOwner = await resolveIdentity(message);
         try {
@@ -98,6 +98,18 @@ export class ChannelGateway {
           return { duplicate: false, linked: false, delivered: [] };
         }
       }
+    }
+    if (message.provider === "sendblue" && message.text?.trim().match(/^\/link[-_]?group$/i)) {
+      await this.outbox.send({
+        accountId: identity?.accountId ?? "unlinked",
+        userId: identity?.userId ?? 0,
+        target: buildReplyTarget(message),
+        text: "To link this iMessage group, first create a one-time code in Telegram with /channel link sendblue-group, then send /linkgroup <code> here from the linked owner account. WhatsApp group linking is not available through the WhatsApp Business API.",
+        idempotencyKey: `${message.provider}:${message.providerEventId}:group-link-help`,
+        kind: "notification",
+      }, adapter);
+      await completeChannelEvent(message.provider, message.providerEventId);
+      return { duplicate: false, linked: Boolean(identity), delivered: [] };
     }
     if (!identity && message.text) {
       const match = message.text.trim().match(/^\/link\s+(\d{6})$/i);
