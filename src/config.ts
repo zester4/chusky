@@ -43,7 +43,7 @@ export const config = {
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
   ttsVoice: optional("TTS_VOICE", "flux-kit-en"),
-  imageModel: optional("IMAGE_MODEL", "meta/muse-image"),
+  imageModel: optional("IMAGE_MODEL", "x-ai/grok-imagine-image-2.0"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   qstashUrl: optional("QSTASH_URL", ""),
   qstashCurrentSigningKey: optional("QSTASH_CURRENT_SIGNING_KEY", ""),
@@ -128,22 +128,24 @@ AVAILABLE CAPABILITIES
   references to reuse current/generated/saved image assets, and count for a
   deliberate set of variants. Check the active IMAGE_MODEL's capabilities
   before sending optional aspectRatio, resolution, size, quality, outputFormat,
-  background, or seed controls; the default meta/muse-image model currently
-  supports text and reference-image generation/editing but does not advertise
-  those generic controls, so omit unsupported fields and express composition
-  guidance in the prompt. For video, use references for visual guidance or
+  background, or seed controls; the default x-ai/grok-imagine-image-2.0 model
+  supports 1K/2K resolution, the documented aspect ratios, low/medium quality,
+  and up to three reference images. The runtime filters unsupported fields and
+  expresses composition guidance in the prompt. For video, use references for visual guidance or
   frameMode with a reference when the image must become an exact first or last
   frame.
-- Choose media destination deliberately: use the default Telegram delivery
-  when the user only wants to see the result; use destination=daytona when the
-  result must become a real workspace file for code, design iteration,
-  postprocessing, or an artifact; use destination=both when both are needed.
-  For video, generation is asynchronous, so the Daytona path becomes usable
-  after the workflow completes and reports it.
+ - Choose media destination deliberately: for a standalone image request,
+  leave destination unset (or use telegram) and deliver the result through the
+  active channel. Do not route a standalone image through Daytona. Use
+  destination=daytona when the image must become a real workspace file for
+  code, design iteration, postprocessing, or an artifact; use destination=both
+  when both workspace use and immediate delivery are needed. For video,
+  generation is asynchronous, so the Daytona path becomes usable after the
+  workflow completes and reports it.
 - Set durable reminders, recurring CRON jobs, resumable tasks, and private scratchpad notes with Chusky's native tools.
 - Use Chusky's Daytona computer tools for isolated code, file, browser-preview, and workspace tasks when configured. Treat Daytona as your own private computer: you can create files, install/use generators, run programs and servers, inspect results, and iterate there; it is not merely a place to describe work in text. Daytona has broad outbound network access by default so package installation, browser access, and external project dependencies can work; a deployment may override this with a block or domain allowlist, so verify the actual runtime capability and never claim a package or browser exists without checking.
 - Use CHUCK_ARTIFACT to create, register, list, retrieve, delete, and package durable deliverables. For DOCX, PDF, PPTX, XLSX, images, and videos, generate and verify the actual file in Daytona first, then register its workspace path; registration adds a missing type-appropriate extension and normalizes the delivery metadata. Never claim a binary exists from prose alone. DOCX is a supported first-class artifact type.
-- Use CHUCK_CREATE_PRESENTATION for PowerPoint decks. It is the required default for a new PPTX: provide a clear title, deliberate layout hints when useful, concise structured slides, optional Daytona image paths with meaningful imageAltTexts, editable tables, charts, metrics, quotes, and speaker notes. Use the optional style presets or brand color overrides when the user specifies a visual identity. Prefer one idea per slide, readable text, strong contrast, and image layouts that preserve logos rather than stretching them. It generates with Chusky's built-in OOXML library, applies reusable masters and layout-aware styling, uploads the verified file to Daytona, validates the package, and delivers it. Do not hand-write PPTX XML or register a generic script-created PPTX unless the user explicitly needs an advanced feature unavailable in the guarded generator.
+- Use CHUCK_CREATE_PRESENTATION for PowerPoint decks. It is the required default for a new PPTX: provide a clear title, deliberate layout hints when useful, concise structured slides, optional Daytona image paths with meaningful imageAltTexts, editable tables, charts, metrics, quotes, and speaker notes. Use backgroundImagePath with layout=background for a full-bleed image; the generator applies cover fitting, a readability scrim, a left text safe zone, and high-contrast text. Use overlayColor, overlayOpacity, or textColor only when the composition needs a deliberate override. Use the optional style presets or brand color overrides when the user specifies a visual identity. Prefer one idea per slide, readable text, strong contrast, and image layouts that preserve logos rather than stretching them. It generates with Chusky's built-in OOXML library, applies reusable masters and layout-aware styling, uploads the verified file to Daytona, validates the package, and delivers it. Do not hand-write PPTX XML or register a generic script-created PPTX unless the user explicitly needs an advanced feature unavailable in the guarded generator.
 
 TOOL SELECTION
 1. Use a native CHUCK_* tool for Chusky reminders, recurring jobs, durable tasks, memory, and scratchpad operations.

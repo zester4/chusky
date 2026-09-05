@@ -245,6 +245,12 @@ type PresentationSlideInput = {
   bullets?: string[];
   imagePaths?: string[];
   imageAltTexts?: string[];
+  imageFit?: "contain" | "cover";
+  backgroundImagePath?: string;
+  backgroundImageAltText?: string;
+  overlayColor?: string;
+  overlayOpacity?: number;
+  textColor?: string;
   table?: string[][];
   chart?: { categories: string[]; series: Array<{ name: string; values: number[] }> };
   layout?: PresentationLayout;
@@ -255,7 +261,7 @@ type PresentationSlideInput = {
   notes?: string;
 };
 
-type PresentationLayout = "auto" | "title" | "section" | "two_column" | "hero" | "metrics" | "comparison" | "timeline" | "image_focus" | "chart" | "table" | "quote" | "closing";
+type PresentationLayout = "auto" | "title" | "section" | "two_column" | "hero" | "metrics" | "comparison" | "timeline" | "image_focus" | "background" | "chart" | "table" | "quote" | "closing";
 
 type PresentationStyle = {
   preset: "executive" | "modern" | "bold" | "minimal" | "brand";
@@ -274,7 +280,7 @@ type PresentationStyle = {
 };
 
 const PRESENTATION_LAYOUTS = new Set<PresentationLayout>([
-  "auto", "title", "section", "two_column", "hero", "metrics", "comparison", "timeline", "image_focus", "chart", "table", "quote", "closing",
+  "auto", "title", "section", "two_column", "hero", "metrics", "comparison", "timeline", "image_focus", "background", "chart", "table", "quote", "closing",
 ]);
 
 const PRESENTATION_STYLE_PRESETS: Record<PresentationStyle["preset"], Omit<PresentationStyle, "preset" | "footer" | "includeSlideNumbers" | "logoPath">> = {
@@ -291,6 +297,25 @@ function presentationColor(value: unknown, label: string, fallback: string): str
   const color = value.trim().replace(/^#/, "").toUpperCase();
   if (!/^[0-9A-F]{6}$/.test(color)) throw new DaytonaInputError(`${label} must be a six-digit hex color`);
   return color;
+}
+
+function presentationOpacity(value: unknown, label: string, fallback: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const opacity = Number(value);
+  if (!Number.isFinite(opacity) || opacity < 0 || opacity > 100) throw new DaytonaInputError(`${label} must be a number from 0 to 100`);
+  return opacity;
+}
+
+function presentationImageFit(value: unknown, index: number): "contain" | "cover" | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const fit = String(value).toLowerCase();
+  if (fit !== "contain" && fit !== "cover") throw new DaytonaInputError(`slides[${index}].imageFit must be contain or cover`);
+  return fit;
+}
+
+function presentationColorLuminance(color: string): number {
+  const channels = [0, 2, 4].map((offset) => Number.parseInt(color.slice(offset, offset + 2), 16) / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4));
+  return channels[0]! * 0.2126 + channels[1]! * 0.7152 + channels[2]! * 0.0722;
 }
 
 function presentationStyle(value: unknown): PresentationStyle {
@@ -405,6 +430,8 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
     const imageAltTexts = slide.imageAltTexts === undefined ? undefined : Array.isArray(slide.imageAltTexts)
       ? slide.imageAltTexts.slice(0, 4).map((item, imageIndex) => presentationText(item, `slides[${index}].imageAltTexts[${imageIndex}]`, 300, true)!)
       : (() => { throw new DaytonaInputError(`slides[${index}].imageAltTexts must be an array`); })();
+    const backgroundImagePath = slide.backgroundImagePath === undefined ? undefined : safeDaytonaPath(presentationText(slide.backgroundImagePath, `slides[${index}].backgroundImagePath`, 500, true)!);
+    const backgroundImageAltText = slide.backgroundImageAltText === undefined ? undefined : presentationText(slide.backgroundImageAltText, `slides[${index}].backgroundImageAltText`, 300, true);
     const table = presentationTable(slide.table, index);
     const rawChart = slide.chart;
     let chart: PresentationSlideInput["chart"];
@@ -429,15 +456,24 @@ function presentationSlides(value: unknown): PresentationSlideInput[] {
     if (table && chart) {
       throw new DaytonaInputError(`slides[${index}] cannot include both table and chart; use separate slides`);
     }
+    const layout = presentationLayout(slide.layout, index);
+    if (layout === "background" && !backgroundImagePath) throw new DaytonaInputError(`slides[${index}].backgroundImagePath is required when layout is background`);
+    if (backgroundImagePath && imagePaths?.length) throw new DaytonaInputError(`slides[${index}] must use backgroundImagePath or imagePaths, not both`);
     return {
       title: presentationText(slide.title, `slides[${index}].title`, 200, true)!,
       body: presentationText(slide.body, `slides[${index}].body`, 2000),
       bullets,
       imagePaths,
       imageAltTexts,
+      imageFit: presentationImageFit(slide.imageFit, index),
+      backgroundImagePath,
+      backgroundImageAltText,
+      overlayColor: slide.overlayColor === undefined ? undefined : presentationColor(slide.overlayColor, `slides[${index}].overlayColor`, "0F172A"),
+      overlayOpacity: presentationOpacity(slide.overlayOpacity, `slides[${index}].overlayOpacity`, 52),
+      textColor: slide.textColor === undefined ? undefined : presentationColor(slide.textColor, `slides[${index}].textColor`, "FFFFFF"),
       table,
       chart,
-      layout: presentationLayout(slide.layout, index),
+      layout,
       eyebrow: presentationText(slide.eyebrow, `slides[${index}].eyebrow`, 80),
       accent: slide.accent === undefined ? undefined : presentationColor(slide.accent, `slides[${index}].accent`, "0F766E"),
       quote: presentationText(slide.quote, `slides[${index}].quote`, 1000),
@@ -542,6 +578,7 @@ function presentationChosenLayout(spec: PresentationSlideInput): PresentationLay
   if (spec.layout && spec.layout !== "auto") return spec.layout;
   if (spec.metrics?.length) return "metrics";
   if (spec.quote) return "quote";
+  if (spec.backgroundImagePath) return "background";
   if (spec.table) return "table";
   if (spec.chart) return "chart";
   if (spec.imagePaths?.length && spec.bullets?.length) return "hero";
@@ -607,15 +644,30 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
   for (const spec of slides) {
     const slide = pptx.addSlide({ masterName: "CHUSKY_CONTENT" });
     const layout = presentationChosenLayout(spec);
-    const images = spec.imagePaths ?? [];
+    const backgroundSlide = layout === "background" || Boolean(spec.backgroundImagePath);
+    const images = backgroundSlide ? [] : spec.imagePaths ?? [];
+    const foregroundColor = backgroundSlide ? (spec.textColor ?? "FFFFFF") : (spec.textColor ?? style.text);
+    const mutedForegroundColor = backgroundSlide ? foregroundColor : style.muted;
+    if (backgroundSlide && spec.backgroundImagePath) {
+      const x = 0;
+      const y = 0;
+      const w = 13.333;
+      const h = 7.5;
+      slide.addImage({ data: await loadImage(spec.backgroundImagePath), x, y, w, h, sizing: { type: "cover", x, y, w, h }, altText: spec.backgroundImageAltText ?? `Background image for ${spec.title}` });
+      const overlay = spec.overlayColor ?? (presentationColorLuminance(foregroundColor) > 0.5 ? "0F172A" : "FFFFFF");
+      presentationShape(slide, overlay, 0, 0, w, h, spec.overlayOpacity ?? 52);
+      // A denser left safe zone keeps long titles and bullets legible over busy photography.
+      presentationShape(slide, overlay, 0.52, 1.52, 7.15, 4.95, Math.max(0, (spec.overlayOpacity ?? 52) - 18));
+    }
     const titleY = spec.eyebrow ? 0.73 : 0.48;
     if (spec.eyebrow) slide.addText(spec.eyebrow.toUpperCase(), { x: 0.78, y: 0.38, w: 7.5, h: 0.2, fontFace: style.fontFace, fontSize: 9, bold: true, charSpacing: 1.4, color: style.accent, margin: 0 });
-    slide.addText(spec.title, { x: 0.78, y: titleY, w: 11.75, h: 0.58, fontFace: style.headingFontFace, fontSize: 26, bold: true, color: style.text, fit: "shrink", margin: 0 });
+    slide.addText(spec.title, { x: 0.78, y: titleY, w: 11.75, h: 0.58, fontFace: style.headingFontFace, fontSize: 26, bold: true, color: foregroundColor, fit: "shrink", margin: 0 });
     presentationShape(slide, spec.accent ?? style.accent, 0.8, 1.28, layout === "section" || layout === "closing" ? 1.4 : 0.65, 0.07);
 
     if (layout === "section" || layout === "closing") {
-      slide.addText(spec.body ?? spec.title, { x: 1.25, y: 2.55, w: 10.8, h: 1.15, fontFace: style.headingFontFace, fontSize: 30, bold: true, color: style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.08 });
-      if (spec.bullets?.length) slide.addText(spec.bullets.join("  •  "), { x: 1.5, y: 4.05, w: 10.3, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: style.muted, align: "center", fit: "shrink", margin: 0.05 });
+      slide.addText(spec.body ?? spec.title, { x: 1.25, y: 2.55, w: 10.8, h: 1.15, fontFace: style.headingFontFace, fontSize: 30, bold: true, color: backgroundSlide ? foregroundColor : style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.08 });
+      if (spec.bullets?.length) slide.addText(spec.bullets.join("  •  "), { x: 1.5, y: 4.05, w: 10.3, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: backgroundSlide ? mutedForegroundColor : style.muted, align: "center", fit: "shrink", margin: 0.05 });
+      if (spec.notes) slide.addNotes(spec.notes);
       continue;
     }
 
@@ -629,12 +681,14 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
         slide.addText(metric.label, { x: x + 0.2, y: 3.08, w: cardW - 0.4, h: 0.3, fontFace: style.fontFace, fontSize: 13, bold: true, color: style.text, fit: "shrink", margin: 0 });
         if (metric.detail) slide.addText(metric.detail, { x: x + 0.2, y: 3.48, w: cardW - 0.4, h: 0.45, fontFace: style.fontFace, fontSize: 10, color: style.muted, fit: "shrink", margin: 0 });
       });
+      if (spec.notes) slide.addNotes(spec.notes);
       continue;
     }
 
     if (layout === "quote" && spec.quote) {
-      slide.addText(`“${spec.quote}”`, { x: 1.15, y: 2.05, w: 10.95, h: 2.3, fontFace: style.headingFontFace, fontSize: 28, italic: true, color: style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.12 });
-      if (spec.body) slide.addText(spec.body, { x: 2, y: 4.8, w: 9.3, h: 0.45, fontFace: style.fontFace, fontSize: 13, color: style.muted, align: "center", fit: "shrink", margin: 0 });
+      slide.addText(`“${spec.quote}”`, { x: 1.15, y: 2.05, w: 10.95, h: 2.3, fontFace: style.headingFontFace, fontSize: 28, italic: true, color: backgroundSlide ? foregroundColor : style.primary, align: "center", valign: "middle", fit: "shrink", margin: 0.12 });
+      if (spec.body) slide.addText(spec.body, { x: 2, y: 4.8, w: 9.3, h: 0.45, fontFace: style.fontFace, fontSize: 13, color: backgroundSlide ? mutedForegroundColor : style.muted, align: "center", fit: "shrink", margin: 0 });
+      if (spec.notes) slide.addNotes(spec.notes);
       continue;
     }
 
@@ -643,21 +697,21 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
     const textWidth = hasSideImage ? 6.15 : 11.65;
     let cursor = 1.68;
     if (spec.body) {
-      slide.addText(spec.body, { x: 0.86, y: cursor, w: textWidth, h: layout === "two_column" || layout === "comparison" ? 3.85 : 1.15, fontFace: style.fontFace, fontSize: 18, color: style.text, fit: "shrink", valign: "top", margin: 0.03 });
+      slide.addText(spec.body, { x: 0.86, y: cursor, w: textWidth, h: layout === "two_column" || layout === "comparison" ? 3.85 : 1.15, fontFace: style.fontFace, fontSize: 18, color: foregroundColor, fit: "shrink", valign: "top", margin: 0.03 });
       cursor += layout === "two_column" || layout === "comparison" ? 0 : 1.22;
     }
     if (spec.bullets?.length && layout !== "timeline") {
       const bulletText = spec.bullets.map((bullet) => `• ${bullet}`).join("\n");
       const bulletX = layout === "two_column" || layout === "comparison" ? 6.95 : 0.92;
       const bulletW = layout === "two_column" || layout === "comparison" ? 5.25 : textWidth;
-      slide.addText(bulletText, { x: bulletX, y: layout === "two_column" || layout === "comparison" ? 1.78 : cursor, w: bulletW, h: 4.75, fontFace: style.fontFace, fontSize: 17, color: style.text, fit: "shrink", valign: "top", breakLine: false, margin: 0.04, paraSpaceAfter: 9 });
+      slide.addText(bulletText, { x: bulletX, y: layout === "two_column" || layout === "comparison" ? 1.78 : cursor, w: bulletW, h: 4.75, fontFace: style.fontFace, fontSize: 17, color: foregroundColor, fit: "shrink", valign: "top", breakLine: false, margin: 0.04, paraSpaceAfter: 9 });
     }
     if (layout === "timeline" && spec.bullets?.length) {
       presentationShape(slide, style.accent, 1.05, 1.85, 0.06, 4.35);
       spec.bullets.forEach((item, index) => {
         const y = 1.82 + index * Math.min(1.05, 4.35 / spec.bullets!.length);
         presentationShape(slide, style.accent, 0.94, y + 0.08, 0.28, 0.28);
-        slide.addText(item, { x: 1.55, y, w: 10.5, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: style.text, fit: "shrink", margin: 0 });
+        slide.addText(item, { x: 1.55, y, w: 10.5, h: 0.65, fontFace: style.fontFace, fontSize: 16, color: foregroundColor, fit: "shrink", margin: 0 });
       });
     }
     if (spec.table) {
@@ -673,7 +727,8 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
       const y = imageFocus ? 1.78 + index * (4.9 / Math.max(1, images.length)) : 1.55 + index * (5.15 / Math.max(1, images.length));
       const w = imageFocus ? 5.15 : 4.3;
       const h = imageFocus ? Math.max(1.25, 4.6 / Math.max(1, images.length)) : Math.max(1.1, 4.8 / Math.max(1, images.length));
-      slide.addImage({ data: await loadImage(imagePath), x, y, w, h, sizing: { type: imageFocus ? "cover" : "contain", x, y, w, h }, altText: spec.imageAltTexts?.[index] ?? `Image ${index + 1} for ${spec.title}` });
+      const fit = spec.imageFit ?? (imageFocus ? "cover" : "contain");
+      slide.addImage({ data: await loadImage(imagePath), x, y, w, h, sizing: { type: fit, x, y, w, h }, altText: spec.imageAltTexts?.[index] ?? `Image ${index + 1} for ${spec.title}` });
     }
     if (spec.notes) slide.addNotes(spec.notes);
   }

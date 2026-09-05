@@ -321,6 +321,30 @@ test("applies presentation themes and layout-aware slide primitives", async () =
   assert.equal(result.slideCount, 3);
 });
 
+test("fits a full-bleed background image behind readable slide text", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820024) as any;
+  const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  sandbox.fs.downloadFile = async (path: string) => {
+    assert.equal(path, "workspace/hero.png");
+    return onePixelPng;
+  };
+  const result = await e.createPresentation(820024, {
+    title: "Background treatment",
+    slides: [{
+      title: "A readable message over imagery",
+      layout: "background",
+      backgroundImagePath: "workspace/hero.png",
+      backgroundImageAltText: "A product team collaborating in an office",
+      overlayOpacity: 58,
+      textColor: "FFFFFF",
+      body: "The scrim and left safe zone keep this message readable over a busy image.",
+    }],
+  }) as any;
+  assert.equal(result.generated, true);
+  assert.equal(result.slideCount, 2);
+});
+
 test("rejects an overlapping table and chart in a generated presentation", async () => {
   const e = engine();
   await assert.rejects(

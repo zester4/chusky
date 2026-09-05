@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 
 export const ENV_PATH = resolve(process.cwd(), ".env");
 const REQUIRED = ["TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY", "COMPOSIO_API_KEY"] as const;
-const DEFAULTS: Record<string, string> = { DEFAULT_MODEL: "~deepseek/deepseek-v4-flash-latest", VISION_MODEL: "openai/gpt-5.6-luna", TRANSCRIPTION_MODEL: "openai/gpt-transcribe", IMAGE_MODEL: "meta/muse-image", VIDEO_MODEL: "bytedance/seedance-2.0-mini", PORT: "8080" };
+const DEFAULTS: Record<string, string> = { DEFAULT_MODEL: "~deepseek/deepseek-v4-flash-latest", VISION_MODEL: "openai/gpt-5.6-luna", TRANSCRIPTION_MODEL: "openai/gpt-transcribe", IMAGE_MODEL: "x-ai/grok-imagine-image-2.0", VIDEO_MODEL: "bytedance/seedance-2.0-mini", PORT: "8080" };
 export type SetupHealth = { key: string; status: "configured" | "missing" | "optional"; detail: string };
 
 export function parseEnv(text: string): Map<string, string> {

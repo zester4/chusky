@@ -2,11 +2,27 @@ import { randomUUID } from "node:crypto";
 import { safeDaytonaPath } from "./lib/daytona/index.js";
 
 export const MAX_GENERATED_IMAGES = 10;
+export const MUSE_IMAGE_MODEL = "meta/muse-image";
+export const GROK_IMAGINE_IMAGE_MODEL = "x-ai/grok-imagine-image-2.0";
 export const IMAGE_ASPECT_RATIOS = ["auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9", "9:21"] as const;
 export type ImageAspectRatio = typeof IMAGE_ASPECT_RATIOS[number];
 export type ImageResolution = "512" | "1K" | "2K" | "4K";
 export type ImageQuality = "auto" | "low" | "medium" | "high";
 export type ImageOutputFormat = "png" | "jpeg" | "webp";
+
+/**
+ * Muse Image is an OpenRouter image endpoint whose advertised parameter set
+ * is intentionally small. It accepts a prompt and reference images, but it
+ * does not accept the generic `quality`, `resolution`, `aspect_ratio`, etc.
+ * controls used by some other image providers.
+ */
+export function isMuseImageModel(model: string): boolean {
+  return model.trim().toLowerCase() === MUSE_IMAGE_MODEL;
+}
+
+export function isGrokImagineImageModel(model: string): boolean {
+  return model.trim().toLowerCase() === GROK_IMAGINE_IMAGE_MODEL;
+}
 
 export function normalizeImageCount(value: unknown): number {
   if (value === undefined || value === null || String(value).trim() === "") return 1;

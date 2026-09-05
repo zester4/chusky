@@ -38,7 +38,7 @@ import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
-import { normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
+import { isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -875,18 +875,75 @@ export interface ImageGenerationOptions {
   seed?: number;
 }
 
+function providerPrompt(prompt: string, options: ImageGenerationOptions): string {
+  const guidance: string[] = [];
+  if (options.aspectRatio) guidance.push(`Compose for a ${options.aspectRatio} canvas and keep important subjects inside safe margins.`);
+  if (options.size) guidance.push(`Use a composition intended for a ${options.size} canvas.`);
+  else if (options.resolution) guidance.push(`Use a composition intended for ${options.resolution} output.`);
+  if (options.background === "transparent") guidance.push("Use a transparent background if supported; otherwise keep the background clean and easily removable.");
+  if (options.quality === "high") guidance.push("Prioritize crisp, high-detail rendering.");
+  return guidance.length ? `${prompt}\n\nComposition guidance: ${guidance.join(" ")}` : prompt;
+}
+
+const GROK_ASPECT_RATIOS = new Set(["auto", "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1"]);
+
+function supportedGrokReferenceCount(references: ImageGenerationOptions["inputReferences"]): number {
+  const count = references?.length ?? 0;
+  if (count > 3) throw new Error("x-ai/grok-imagine-image-2.0 supports at most 3 input reference images");
+  return count;
+}
+
 export async function generateImages(prompt: string, count = 1, options: ImageGenerationOptions = {}): Promise<GeneratedImage[]> {
   const normalizedCount = normalizeImageCount(count);
-  const res = await fetch("https://openrouter.ai/api/v1/images", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: config.imageModel, prompt, ...(normalizedCount > 1 ? { n: normalizedCount } : {}), ...(options.inputReferences?.length ? { input_references: options.inputReferences } : {}), ...(options.aspectRatio ? { aspect_ratio: options.aspectRatio } : {}), ...(options.resolution ? { resolution: options.resolution } : {}), ...(options.size ? { size: options.size } : {}), ...(options.quality ? { quality: options.quality } : {}), ...(options.outputFormat ? { output_format: options.outputFormat } : {}), ...(options.background ? { background: options.background } : {}), ...(options.seed !== undefined ? { seed: options.seed } : {}) }),
+  const model = config.imageModel.trim();
+  const museModel = isMuseImageModel(model);
+  const grokModel = isGrokImagineImageModel(model);
+  const constrainedModel = museModel || grokModel;
+
+  // OpenRouter exposes image controls per model/provider. Muse currently
+  // advertises no generic controls, so sending `quality` (or even `n`) makes
+  // Meta reject the request. For Muse, emulate count with independent single
+  // image requests and only send the prompt plus reference images.
+  const requestCount = constrainedModel ? normalizedCount : 1;
+  const requestBodies = Array.from({ length: requestCount }, () => {
+    const body: Record<string, unknown> = { model, prompt: constrainedModel ? providerPrompt(prompt, options) : prompt };
+    if (options.inputReferences?.length) {
+      if (grokModel) supportedGrokReferenceCount(options.inputReferences);
+      body.input_references = options.inputReferences;
+    }
+    if (grokModel) {
+      if (options.aspectRatio && GROK_ASPECT_RATIOS.has(options.aspectRatio)) body.aspect_ratio = options.aspectRatio;
+      if (options.resolution === "1K" || options.resolution === "2K") body.resolution = options.resolution;
+      if (options.quality === "low" || options.quality === "medium") body.quality = options.quality;
+      else if (options.quality === "high") body.quality = "medium";
+    } else if (!museModel) {
+      if (normalizedCount > 1) body.n = normalizedCount;
+      if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
+      if (options.resolution) body.resolution = options.resolution;
+      if (options.size) body.size = options.size;
+      if (options.quality) body.quality = options.quality;
+      if (options.outputFormat) body.output_format = options.outputFormat;
+      if (options.background) body.background = options.background;
+      if (options.seed !== undefined) body.seed = options.seed;
+    }
+    return body;
   });
-  if (!res.ok) throw new Error(`OpenRouter image generation ${res.status}: ${await res.text()}`);
-  const result = await res.json() as { data?: { b64_json?: string; media_type?: string }[]; usage?: { cost?: number } };
-  const images = (result.data ?? []).filter((image) => typeof image.b64_json === "string" && image.b64_json.length > 0).map((image, index) => ({ data: Buffer.from(image.b64_json!, "base64"), mediaType: image.media_type || "image/png", ...(index === 0 && result.usage?.cost !== undefined ? { cost: result.usage.cost } : {}) }));
+
+  const responses = await Promise.all(requestBodies.map(async (body) => {
+    const res = await fetch("https://openrouter.ai/api/v1/images", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`OpenRouter image generation ${res.status}: ${await res.text()}`);
+    return await res.json() as { data?: { b64_json?: string; media_type?: string }[]; usage?: { cost?: number } };
+  }));
+
+  const images = responses.flatMap((result) => (result.data ?? [])
+    .filter((image) => typeof image.b64_json === "string" && image.b64_json.length > 0)
+    .map((image, index) => ({ data: Buffer.from(image.b64_json!, "base64"), mediaType: image.media_type || "image/png", ...(index === 0 && result.usage?.cost !== undefined ? { cost: result.usage.cost } : {}) })));
   if (!images.length) throw new Error("Image generation returned no images");
-  return images;
+  return images.slice(0, normalizedCount);
 }
 
 export async function generateImage(prompt: string): Promise<GeneratedImage> {
