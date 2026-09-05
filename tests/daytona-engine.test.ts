@@ -258,8 +258,11 @@ test("runs the visual renderability gate after structural artifact validation", 
     commands.push(command);
     return originalExecute.call(sandbox.process, command, ...rest);
   };
-  await e.artifact(820018, { action: "register", type: "pdf", path: "workspace/artifacts/visual.pdf" });
+  await e.artifact(820018, { action: "register", type: "presentation", path: "workspace/artifacts/visual.pptx" });
   assert.equal(commands.length, 2);
+  const validationScript = commands[0].match(/base64\.b64decode\('([^']+)'\)/)?.[1];
+  assert.ok(validationScript);
+  assert.match(Buffer.from(validationScript, "base64").toString("utf8"), /target\.lstrip\('\/'\)/);
   assert.match(commands[1], /base64\.b64decode/);
 });
 
