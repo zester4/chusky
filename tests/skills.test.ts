@@ -9,7 +9,7 @@ async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "chusky-skills-"));
   await mkdir(path.join(root, "spreadsheets", "references"), { recursive: true });
   await mkdir(path.join(root, "spreadsheets", "assets"), { recursive: true });
-  await writeFile(path.join(root, "spreadsheets", "SKILL.md"), "---\nname: spreadsheets\ndescription: Create professional Excel workbooks with formulas and charts.\n---\n\nUse wrapped cells and verify every sheet.\nSee `references/formatting.md` for column sizing.\n", "utf8");
+  await writeFile(path.join(root, "spreadsheets", "SKILL.md"), "---\nname: spreadsheets\ndescription: >\n  Create professional Excel workbooks with formulas and charts.\n  Keep tables readable and avoid overlapping content.\n---\n\nUse wrapped cells and verify every sheet.\nSee `references/formatting.md` for column sizing.\n", "utf8");
   await writeFile(path.join(root, "spreadsheets", "references", "formatting.md"), "Set explicit widths and wrap long labels.", "utf8");
   await writeFile(path.join(root, "spreadsheets", "assets", "template.png"), Buffer.from([137, 80, 78, 71]));
   return root;
@@ -20,6 +20,7 @@ test("searches skill metadata and loads matching guidance", async () => {
   try {
     const matches = await searchSkills("professional Excel workbook", 5, root);
     assert.equal(matches[0]?.name, "spreadsheets");
+    assert.match(matches[0]?.description ?? "", /Keep tables readable/);
     const context = await relevantSkillContext("create a workbook", root);
     assert.match(context, /wrapped cells/);
   } finally {

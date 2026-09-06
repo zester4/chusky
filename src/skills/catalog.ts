@@ -59,11 +59,28 @@ function parseFrontmatter(content: string, file: string): { name: string; descri
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   if (!match) throw new Error(`Skill '${file}' is missing YAML frontmatter`);
   const values = new Map<string, string>();
-  for (const line of match[1].split(/\r?\n/)) {
+  const lines = match[1].split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    // Only top-level YAML keys are relevant to the skill manifest. Indented
+    // lines belong to a block scalar or nested metadata and must not become
+    // accidental manifest fields.
+    if (!line || /^\s/.test(line)) continue;
     const separator = line.indexOf(":");
     if (separator < 0) continue;
     const key = line.slice(0, separator).trim();
     let value = line.slice(separator + 1).trim();
+    const block = value.match(/^([>|])[-+]?$/);
+    if (block) {
+      const continuation: string[] = [];
+      while (index + 1 < lines.length) {
+        const next = lines[index + 1];
+        if (next.trim() !== "" && !/^\s/.test(next)) break;
+        index += 1;
+        continuation.push(next.trim());
+      }
+      value = block[1] === ">" ? continuation.join(" ").replace(/\s+/g, " ").trim() : continuation.join("\n").trim();
+    }
     if ((value.startsWith("\"") && value.endsWith("\"")) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
     if (key) values.set(key, value);
   }
