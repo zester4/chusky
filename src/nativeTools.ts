@@ -21,6 +21,7 @@ import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { executeDelegation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
+import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -277,6 +278,9 @@ export async function cancelJob(userId: number, id: string): Promise<string> {
 
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   switch (slug) {
+    case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
+    case "CHUCK_READ_SKILL_FILE": return readSkillFile(text(args.name), args.path === undefined ? "SKILL.md" : text(args.path), args.maxChars === undefined ? 12_000 : Number(args.maxChars));
     case "CHUCK_SET_REMINDER": return setReminder(userId, args);
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
     case "CHUCK_CANCEL_REMINDER": return cancelReminder(userId, text(args.id));

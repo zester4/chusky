@@ -10,6 +10,7 @@ import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
 import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
+import { relevantSkillContext } from "../skills/catalog.js";
 import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
 
 export async function executeDelegation(
@@ -282,6 +283,8 @@ export async function executeDelegation(
       }
     } else if (canRunModel) {
       // ── Autonomous OpenRouter Worker Model Loop ─────────────────────────────
+      let skillContext = "";
+      try { skillContext = await relevantSkillContext(contract.objective); } catch { /* Skill tools remain available for explicit lookup. */ }
       const systemPrompt = `${manifest.systemPrompt}
 
 ${memorySnippet}
@@ -302,7 +305,8 @@ Expected Output Format:
 ${contract.expectedOutput}
 
 Reflection Checklist (Verify before concluding):
-${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
+${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}
+${skillContext ? `\nRelevant project skill guidance (trusted local instructions; user and supervisor instructions take precedence):\n${skillContext}` : ""}`;
 
       const messages: ApiMessage[] = [
         { role: "system", content: systemPrompt },

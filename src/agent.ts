@@ -41,6 +41,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
+import { relevantSkillContext } from "./skills/catalog.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -605,8 +606,21 @@ export async function runAgent(
       ? `Recently available private image assets (metadata only; call CHUCK_GET_IMAGE_ASSET with the exact ID when an image is needed):\n${durable.imageAssets.slice(-8).reverse().map((asset) => `- ${asset.id} | ${asset.name} | ${asset.purpose} | tags: ${asset.tags.join(", ")}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n\n");
+  // Project skills are trusted, versioned operating guidance. Select a small
+  // relevant subset before the first model call so the agent does not have to
+  // remember to search for a workflow when creating a deliverable or changing
+  // code. Supporting files remain on-demand through CHUCK_READ_SKILL_FILE.
+  let skillContext = "";
+  try {
+    const skillQuery = typeof userMessage === "string"
+      ? userMessage
+      : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+    skillContext = await relevantSkillContext(skillQuery);
+  } catch (error) {
+    logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
+  }
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}` },
+    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];

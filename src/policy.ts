@@ -3,6 +3,7 @@ export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|SEND|POST|PUBLISH
 export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
+  "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
@@ -52,6 +53,9 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 }
 
 const STATUSES: Record<string, string> = {
+  CHUCK_SEARCH_SKILLS: "🧭 I’m checking the relevant project skills…",
+  CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the skill’s supporting files…",
+  CHUCK_READ_SKILL_FILE: "📖 I’m reading the relevant skill guidance…",
   CHUCK_START_FACETIME_CALL: "📞 I’m preparing that FaceTime call…",
   CHUCK_LIST_FACETIME_CALLS: "📞 I’m checking your FaceTime call history…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",

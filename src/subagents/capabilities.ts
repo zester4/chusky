@@ -14,12 +14,15 @@ export interface CapabilityManifest {
   reflectionChecklist: string[];
 }
 
+const SKILL_TOOLS = ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"];
+
 export const WORKER_CAPABILITIES: Record<CapabilityWorkerName, CapabilityManifest> = {
   lucas: {
     name: "lucas",
     displayName: "Lucas (Software Engineering & Systems Specialist)",
     domain: "Engineering, Daytona code execution, builds, unit testing, PDF & PPTX document compilation",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_DAYTONA_WORKSPACE",
       "CHUCK_DAYTONA_EXECUTE",
       "CHUCK_DAYTONA_LIST_FILES",
@@ -67,6 +70,7 @@ Operating Rules:
     displayName: "Maya (Social Media & Integrations Specialist)",
     domain: "Social media publishing via Composio, webhooks, post formatting, trigger configuration",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_CREATE_TRIGGER",
       "CHUCK_SCHEDULE_JOB",
       "CHUCK_SET_REMINDER",
@@ -101,6 +105,7 @@ Operating Rules:
     displayName: "Leo (Marketing & Visual Studio Specialist)",
     domain: "Direct-response copywriting, visual prompt engineering, AI image & video generation, brand asset management",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_GENERATE_IMAGE",
       "CHUCK_GENERATE_VIDEO",
       "CHUCK_VIDEO_STATUS",
@@ -134,6 +139,7 @@ Operating Rules:
     displayName: "Sofia (Voice Operations & Real-World Negotiator)",
     domain: "Interactive phone calls (Twilio & FaceTime), vendor negotiations, appointment booking, voice call triage",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_START_PHONE_CALL",
       "CHUCK_LIST_PHONE_CALLS",
       "CHUCK_START_FACETIME_CALL",
@@ -164,6 +170,7 @@ Operating Rules:
     displayName: "Dexter (Desktop & Computer Use Specialist)",
     domain: "GUI desktop automation (mouse, keyboard, accessibility tree), web application navigation, visual UI form filling",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_DAYTONA_COMPUTER",
       "CHUCK_DAYTONA_PREVIEW",
       "CHUCK_HANDOFF_SUBAGENT",
@@ -190,6 +197,7 @@ Operating Rules:
     displayName: "Elena (Task Operations & Workflow Governor)",
     domain: "Durable task governance, checkpoint tracking, recurring cron job scheduling, attention state loop tracking",
     allowedTools: [
+      ...SKILL_TOOLS,
       "CHUCK_TASK_CREATE",
       "CHUCK_TASK_LIST",
       "CHUCK_TASK_GET",
