@@ -40,8 +40,15 @@ export function verifySendblueSignature(rawBody: string | Buffer, headers: Heade
 function attachment(payload: any): ChannelAttachment[] {
   const mediaUrl = typeof payload?.media_url === "string" ? payload.media_url.trim() : "";
   if (!mediaUrl || !/^https:\/\//i.test(mediaUrl)) return [];
-  const kind = String(payload.message_type ?? "").toLowerCase().includes("audio") || /\.(caf|m4a|mp3|aac|ogg|oga|wav|webm|flac)(?:\?|$)/i.test(mediaUrl) ? "audio"
-    : /\.(mp4|mov|webm)(?:\?|$)/i.test(mediaUrl) ? "video" : "image";
+  // Sendblue may include a normal shared URL in `media_url` and label the
+  // event as audio. Treat it as an attachment only when the URL or an
+  // explicit MIME field proves it is actual media; links remain plain text.
+  const explicitMime = String(payload.mime_type ?? payload.media_type ?? payload.content_type ?? "").toLowerCase();
+  const audio = explicitMime.startsWith("audio/") || /\.(caf|m4a|mp3|aac|ogg|oga|wav|webm|flac)(?:\?|$)/i.test(mediaUrl);
+  const video = explicitMime.startsWith("video/") || /\.(mp4|mov|webm)(?:\?|$)/i.test(mediaUrl);
+  const image = explicitMime.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|heic)(?:\?|$)/i.test(mediaUrl);
+  if (!audio && !video && !image) return [];
+  const kind = audio ? "audio" : video ? "video" : "image";
   return [{ id: String(payload.message_handle ?? mediaUrl), kind, url: mediaUrl }];
 }
 

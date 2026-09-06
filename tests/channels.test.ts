@@ -263,6 +263,20 @@ test("a Sendblue identity linked in a direct chat can use Chusky in a group", as
   });
 });
 
+test("keeps shared iMessage links as text even when Sendblue labels the event audio", () => {
+  const message = normalizeSendblueMessage({
+    message_handle: "sb-shared-link",
+    from_number: "+15550001",
+    sendblue_number: "+15550002",
+    group_id: "group-1",
+    content: "https://example.com/article",
+    media_url: "https://example.com/article",
+    message_type: "audio",
+  });
+  assert.equal(message?.text, "https://example.com/article");
+  assert.deepEqual(message?.attachments, []);
+});
+
 test("a Sendblue link command sends confirmation without entering the agent loop", async () => {
   const code = await createChannelLinkCode(42, "sendblue");
   const sent: OutboundMessage[] = [];
