@@ -3,8 +3,9 @@ import type { CapabilityWorkerName } from "../memory/types.js";
 export type ApprovalPolicy = "auto" | "require_chusky_approval";
 
 /** Overall wall-clock budget for a durable worker goal. */
-export type WorkerDuration = "30m" | "1h" | "3h" | "6h" | "3d" | "1w";
+export type WorkerDuration = "5m" | "30m" | "1h" | "3h" | "6h" | "3d" | "1w";
 export const WORKER_DURATION_SECONDS: Record<WorkerDuration, number> = {
+  "5m": 5 * 60,
   "30m": 30 * 60,
   "1h": 60 * 60,
   "3h": 3 * 60 * 60,

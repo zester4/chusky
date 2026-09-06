@@ -53,7 +53,7 @@ export async function executeDelegation(
   validateDelegationTarget(workerName, contractInput.objective, contractInput.allowedTools ?? []);
 
   const duration = (contractInput.duration && contractInput.duration in WORKER_DURATION_SECONDS ? contractInput.duration : "30m") as WorkerDuration;
-  const budgetSeconds = Math.max(30 * 60, Math.min(WORKER_DURATION_SECONDS["1w"], contractInput.budgetSeconds ?? WORKER_DURATION_SECONDS[duration]));
+  const budgetSeconds = Math.max(WORKER_DURATION_SECONDS["5m"], Math.min(WORKER_DURATION_SECONDS["1w"], contractInput.budgetSeconds ?? WORKER_DURATION_SECONDS[duration]));
   const existingHandoff = options?.resume ? await getHandoffRecord(userId, options.resume.handoffId) : undefined;
   if (options?.resume && !existingHandoff) throw new Error("The durable handoff record for this worker continuation no longer exists or is not owned by the user.");
   const startedAt = existingHandoff?.delegation?.startedAt ?? Date.now();

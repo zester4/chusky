@@ -224,6 +224,18 @@ test("accepts the expanded 100-call per-slice worker ceiling", async () => {
   assert.equal(result.handoffRecord?.delegation?.maxToolCalls, 100);
 });
 
+test("supports five-minute worker budgets for simple tasks", async () => {
+  const result = await executeDelegation(991014, {
+    worker: "lucas",
+    objective: "Read a short scratchpad note",
+    duration: "5m",
+    budgetSeconds: 1,
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "short" } } },
+  });
+  assert.equal(result.handoffRecord?.delegation?.duration, "5m");
+  assert.equal(result.handoffRecord?.delegation?.budgetSeconds, 5 * 60);
+});
+
 test("creates pre-execution approval record and pauses delegation when worker attempts a risky tool call", async () => {
   const userId = 991004;
   // Sofia attempts risky tool CHUCK_START_PHONE_CALL
