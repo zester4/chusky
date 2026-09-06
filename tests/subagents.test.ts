@@ -29,6 +29,13 @@ test("gives Lucas a complete private engineering loop while keeping provider too
   assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_SEARCH_TOOL"), false);
   assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_REMOTE_BASH_TOOL"), false);
   assert.equal(isComposioToolAllowedForWorker("leo", "GITHUB_CREATE_PULL_REQUEST"), false);
+  assert.deepEqual(WORKER_CAPABILITIES.maya.starterComposioTools, [
+    "GMAIL_SEND_EMAIL",
+    "INSTAGRAM_POST_IG_USER_MEDIA",
+    "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+    "LINKEDIN_CREATE_LINKED_IN_POST",
+  ]);
+  for (const slug of WORKER_CAPABILITIES.maya.starterComposioTools) assert.equal(isComposioToolAllowedForWorker("maya", slug), true);
 });
 
 test("rejects high-confidence engineering work routed to Leo", () => {
@@ -205,6 +212,16 @@ test("enforces maxToolCalls budget limit on worker delegation contract", async (
 
   assert.equal(result.status, "max_tool_calls_exceeded");
   assert.match(result.output, /exceeded max tool call limit/);
+});
+
+test("accepts the expanded 100-call per-slice worker ceiling", async () => {
+  const result = await executeDelegation(991013, {
+    worker: "lucas",
+    objective: "Inspect the repository and prepare an engineering report",
+    maxToolCalls: 100,
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "report" } } },
+  });
+  assert.equal(result.handoffRecord?.delegation?.maxToolCalls, 100);
 });
 
 test("creates pre-execution approval record and pauses delegation when worker attempts a risky tool call", async () => {

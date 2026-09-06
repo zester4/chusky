@@ -42,6 +42,7 @@ export async function executeDelegation(
       throw new Error(`Invalid delegation contract: Tool(s) [${invalidTools.join(", ")}] are not permitted for worker capability '${workerName}' manifest allowlist.`);
     }
   }
+  const starterComposioTools = manifest.starterComposioTools ?? [];
   if (contractInput.allowedComposioTools && contractInput.allowedComposioTools.length > 0) {
     const invalidTools = contractInput.allowedComposioTools.filter((tool) => !isComposioToolAllowedForWorker(workerName, tool));
     if (invalidTools.length > 0) {
@@ -67,7 +68,10 @@ export async function executeDelegation(
     worker: workerName,
     objective: contractInput.objective,
     model,
-    allowedComposioTools: [...new Set((contractInput.allowedComposioTools ?? []).map((tool) => tool.trim()).filter(Boolean))],
+    // Starter actions are exact, role-scoped slugs from Context7/Composio
+    // documentation. They are optional at runtime when the corresponding app
+    // is not connected; explicitly delegated actions remain required.
+    allowedComposioTools: [...new Set([...starterComposioTools, ...(contractInput.allowedComposioTools ?? [])].map((tool) => tool.trim()).filter(Boolean))],
     allowedTools: (contractInput.allowedTools ?? manifest.allowedTools).filter((tool) =>
       manifest.allowedTools.includes(tool)
     ),
@@ -75,7 +79,7 @@ export async function executeDelegation(
     expectedOutput: contractInput.expectedOutput ?? "Summary of executed task and outcomes.",
     approvalPolicy: contractInput.approvalPolicy ?? "auto",
     timeoutSeconds: Math.max(5, Math.min(300, contractInput.timeoutSeconds ?? 60)),
-    maxToolCalls: Math.max(0, Math.min(20, contractInput.maxToolCalls ?? 10)),
+    maxToolCalls: Math.max(0, Math.min(100, contractInput.maxToolCalls ?? 40)),
     duration,
     budgetSeconds,
   };
@@ -158,7 +162,13 @@ export async function executeDelegation(
   const canRunModel = Boolean(config.openRouterApiKey && config.openRouterApiKey !== "mock-key");
 
   try {
-    const scopedComposio = await getScopedComposioTools(userId, contract.allowedComposioTools);
+    // Native-only contract tests and fallback summaries do not need a live
+    // Composio session. Avoid contacting the provider unless the worker model
+    // or an explicit Composio action actually requires it.
+    const needsComposio = canRunModel || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
+    const scopedComposio = needsComposio
+      ? await getScopedComposioTools(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools })
+      : { tools: [], missing: starterComposioTools, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
     if (actionPayload) {
       // ── Explicit Tool Call Execution (Direct Action Payload) ────────────────
@@ -277,7 +287,8 @@ export async function executeDelegation(
 ${memorySnippet}
 
 ${options?.historySummary ? `Parent Conversation History Summary:\n${options.historySummary}\n` : ""}Delegated Native Tools: ${contract.allowedTools.join(", ") || "none"}
-Delegated Composio Actions: ${contract.allowedComposioTools.join(", ") || "none"}
+Delegated Composio Actions: ${scopedComposio.tools.map((tool: any) => String(tool?.function?.name ?? tool?.name ?? "")).filter(Boolean).join(", ") || "none"}
+Unavailable starter actions (connection required): ${scopedComposio.missing.filter((slug) => starterComposioTools.includes(slug)).join(", ") || "none"}
 Do not attempt a tool outside those lists. External actions remain approval-gated.
 If an integration action is unavailable or its slug appears wrong, do not guess,
 search broadly, or retry variants. Stop and ask Chusky to use the supervisor-only

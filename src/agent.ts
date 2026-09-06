@@ -356,27 +356,48 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
  * caller must still enforce its worker capability policy and approval gate;
  * this helper deliberately never exposes the entire ToolRouter catalogue.
  */
-export async function getScopedComposioTools(userId: number, allowedSlugs: string[]): Promise<{
+export async function getScopedComposioTools(userId: number, allowedSlugs: string[], options?: { optionalSlugs?: string[] }): Promise<{
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools: any[];
+  missing: string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   execute: (slug: string, args: Record<string, unknown>) => Promise<any>;
 }> {
   const unique = [...new Set(allowedSlugs.map((slug) => slug.trim()).filter(Boolean))];
-  if (!unique.length) return { tools: [], execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
-  const { sessionObj } = await getOrCreateComposioSession(userId);
+  if (!unique.length) return { tools: [], missing: [], execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
+  const optional = new Set((options?.optionalSlugs ?? []).map((slug) => slug.trim()).filter(Boolean));
+  let sessionObj: any;
+  try {
+    sessionObj = (await getOrCreateComposioSession(userId)).sessionObj;
+  } catch (error) {
+    // A disconnected optional starter app must not prevent a worker from
+    // completing native work. Explicitly delegated actions remain fail-closed.
+    if (unique.every((slug) => optional.has(slug))) {
+      return { tools: [], missing: unique, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
+    }
+    throw error;
+  }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const available: any[] = await sessionObj.tools();
+  let available: any[];
+  try {
+    available = await sessionObj.tools();
+  } catch (error) {
+    if (unique.every((slug) => optional.has(slug))) {
+      return { tools: [], missing: unique, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
+    }
+    throw error;
+  }
   const nameOf = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
   const byName = new Map(available.map((tool) => [nameOf(tool), tool]));
   const missing = unique.filter((slug) => !byName.has(slug));
-  if (missing.length) {
+  const requiredMissing = missing.filter((slug) => !optional.has(slug));
+  if (requiredMissing.length) {
     // A typo or stale slug must never silently broaden worker access. This is
     // a read-only discovery hint; Chusky must still deliberately search and
     // delegate an exact replacement in a later worker contract.
     let suggestions: string[] = [];
     try {
-      const matches = await sessionObj.search({ query: missing.join(" ") });
+      const matches = await sessionObj.search({ query: requiredMissing.join(" ") });
       const items = Array.isArray(matches) ? matches : (matches?.items ?? []);
       suggestions = items
         .map((tool: any) => String(tool?.slug ?? tool?.tool_slug ?? tool?.name ?? "").trim())
@@ -387,10 +408,11 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
       // still actionable when the search endpoint is temporarily unavailable.
     }
     const hint = suggestions.length ? ` Candidate slugs: ${suggestions.join(", ")}.` : "";
-    throw new Error(`Delegated Composio tool(s) are unavailable in this user's connected session: ${missing.join(", ")}.${hint} Ask Chusky to use COMPOSIO_SEARCH_TOOL with the intended action, verify the user's connection, then delegate the exact resulting slug.`);
+    throw new Error(`Delegated Composio tool(s) are unavailable in this user's connected session: ${requiredMissing.join(", ")}.${hint} Ask Chusky to use COMPOSIO_SEARCH_TOOL with the intended action, verify the user's connection, then delegate the exact resulting slug.`);
   }
   return {
-    tools: unique.map((slug) => byName.get(slug)!),
+    tools: unique.filter((slug) => byName.has(slug)).map((slug) => byName.get(slug)!),
+    missing,
     execute: (slug, args) => {
       if (!byName.has(slug)) throw new Error(`Composio tool ${slug} was not delegated to this worker.`);
       return sessionObj.execute(slug, args);

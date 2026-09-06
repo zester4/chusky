@@ -162,7 +162,7 @@ TOOL SELECTION
 WORKER ORCHESTRATION
 - You are the supervisor and remain responsible for the final answer, memory policy, approvals, and user communication. Delegate only when a specialist materially improves execution; do not delegate simple questions or use workers as a way to evade an approval.
 - Use CHUCK_DELEGATE_SUBAGENT with a concrete objective and expected output: Lucas for software engineering in Daytona, Maya for social/integration operations, Leo for marketing and media, Sofia for voice operations, Dexter for visual browser verification, and Elena for durable task operations.
-- A worker receives only its typed native tool set and the exact Composio action slugs named in allowedComposioTools. Before delegating a Composio action, discover it with COMPOSIO_SEARCH_TOOL and ensure the user's app is connected. Never grant a worker COMPOSIO remote bash, remote workbench, connection management, or the whole provider catalogue.
+- A worker receives its typed native tool set plus exact role-scoped starter Composio actions when the user's connection exposes them. Before delegating an action outside that starter set, discover it with COMPOSIO_SEARCH_TOOL and ensure the user's app is connected. Never grant a worker COMPOSIO remote bash, remote workbench, connection management, or the whole provider catalogue.
 - Workers may call CHUCK_REQUEST_ADDITIONAL_TOOLS when their current scope is insufficient. Treat that as a paused, structured request—not permission. Read its intent and reason, use COMPOSIO_SEARCH_TOOL only if appropriate, verify the connection and exact slug, then call CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST with that worker's handoff ID and only the exact permitted slug(s). This resumes the same durable worker task; never start a broad replacement delegation unless the original task was cancelled or expired.
 - For code or website work, prefer Lucas. Require his handoff to include what changed, checks actually run, failures if any, and the Daytona preview URL when a service is running. Lucas uses an isolated branch and may prepare a GitHub pull request or push only through the normal approval gate.
 - Use CHUCK_LIST_SUBAGENTS and CHUCK_GET_SUBAGENT_STATUS to recover a worker's durable handoff; use CHUCK_CANCEL_SUBAGENT only when the user asks to stop it. Summarize the useful result for the user instead of dumping raw worker logs or memories.
@@ -248,7 +248,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
 
   // ── Conversation ───────────────────────────────────────────────────
   maxHistory: positiveInt("MAX_HISTORY", 20),
-  maxToolRounds: positiveInt("MAX_TOOL_ROUNDS", 10),
+  // Give the supervisor enough room for multi-step plans while durable worker
+  // budgets and per-run cost controls remain the outer safety boundaries.
+  maxToolRounds: positiveInt("MAX_TOOL_ROUNDS", 20),
   userCostCap: Number(process.env.USER_COST_CAP ?? 0),
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.

@@ -2,7 +2,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "../config.js";
 import { resolveWorkflowEndpoint } from "../workflowUrls.js";
 import { getHandoffRecord, saveHandoffRecord } from "../store.js";
-import { isComposioToolAllowedForWorker } from "./capabilities.js";
+import { isComposioToolAllowedForWorker, WORKER_CAPABILITIES } from "./capabilities.js";
 
 export const SUBAGENT_TOOL_WAIT_TIMEOUT = "24h";
 
@@ -69,7 +69,9 @@ export async function resolveSubagentToolRequest(userId: number, handoffId: stri
   if (!record || record.status !== "requires_tool_request" || !record.workflowRunId || !record.toolRequestEventId) {
     throw new Error("This worker run is not waiting for a durable tool decision.");
   }
-  const allowedComposioTools = [...new Set(requestedTools.map((tool) => tool.trim()).filter(Boolean))];
+  const starter = WORKER_CAPABILITIES[record.to].starterComposioTools ?? [];
+  const existing = record.delegation?.allowedComposioTools ?? [];
+  const allowedComposioTools = [...new Set([...starter, ...existing, ...requestedTools].map((tool) => tool.trim()).filter(Boolean))];
   if (!allowedComposioTools.length) throw new Error("Select at least one exact Composio tool slug discovered by Chusky.");
   const invalid = allowedComposioTools.filter((tool) => !isComposioToolAllowedForWorker(record.to, tool));
   if (invalid.length) throw new Error(`Requested Composio tool(s) are outside ${record.to}'s permitted integration family: ${invalid.join(", ")}`);

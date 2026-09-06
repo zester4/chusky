@@ -7,6 +7,8 @@ export interface CapabilityManifest {
   allowedTools: string[];
   /** Permitted prefixes for explicitly delegated Composio actions. Never grants meta-tools. */
   allowedComposioPrefixes: string[];
+  /** Exact, low-friction Composio actions exposed when the user's connection has them. */
+  starterComposioTools: string[];
   allowedMemoryCategories: MemoryCategory[];
   systemPrompt: string;
   reflectionChecklist: string[];
@@ -42,6 +44,7 @@ export const WORKER_CAPABILITIES: Record<CapabilityWorkerName, CapabilityManifes
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: ["GITHUB_", "GITLAB_", "VERCEL_", "CLOUDFLARE_", "LINEAR_", "JIRA_", "SENTRY_"],
+    starterComposioTools: [],
     allowedMemoryCategories: ["project", "procedural", "asset"],
     systemPrompt: `You are Lucas, Chusky's Software Engineering & Systems Specialist.
 Your focus is technical execution in Daytona sandboxes: writing clean code, running builds, executing test suites, debugging, and compiling PDFs/presentations.
@@ -72,7 +75,13 @@ Operating Rules:
       "CHUCK_HANDOFF_SUBAGENT",
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
-    allowedComposioPrefixes: ["X_", "TWITTER_", "LINKEDIN_", "INSTAGRAM_", "FACEBOOK_", "SLACK_", "DISCORD_", "HUBSPOT_", "MAILCHIMP_"],
+    allowedComposioPrefixes: ["X_", "TWITTER_", "LINKEDIN_", "INSTAGRAM_", "FACEBOOK_", "SLACK_", "DISCORD_", "HUBSPOT_", "MAILCHIMP_", "GMAIL_"],
+    starterComposioTools: [
+      "GMAIL_SEND_EMAIL",
+      "INSTAGRAM_POST_IG_USER_MEDIA",
+      "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+      "LINKEDIN_CREATE_LINKED_IN_POST",
+    ],
     allowedMemoryCategories: ["business", "relationship", "procedural"],
     systemPrompt: `You are Maya, Chusky's Social Media & Integrations Specialist.
 Your focus is platform-specific social media publishing, API payload formatting, and automated trigger configuration.
@@ -105,6 +114,7 @@ Operating Rules:
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: ["CANVA_", "FIGMA_", "GOOGLEDRIVE_", "DROPBOX_"],
+    starterComposioTools: [],
     allowedMemoryCategories: ["business", "asset", "profile"],
     systemPrompt: `You are Leo, Chusky's Marketing & Visual Studio Specialist.
 Your focus is creative copywriting (AIDA, PAS frameworks), brand positioning, AI image/video prompt engineering, and visual asset management.
@@ -134,6 +144,7 @@ Operating Rules:
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "CALENDLY_", "HUBSPOT_", "SALESFORCE_"],
+    starterComposioTools: [],
     allowedMemoryCategories: ["relationship", "business"],
     systemPrompt: `You are Sofia, Chusky's Voice Operations & Real-World Negotiator.
 Your focus is executing outbound phone calls (Twilio and FaceTime audio), formulating call scripts, conducting voice interactions, and logging call outcomes.
@@ -159,6 +170,7 @@ Operating Rules:
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: [],
+    starterComposioTools: [],
     allowedMemoryCategories: ["project"],
     systemPrompt: `You are Dexter, Chusky's Desktop & Computer Use Specialist.
 Your focus is operating virtual desktop GUIs: inspecting window accessibility trees, performing coordinate mouse clicks/drags, typing text, and automating web UI workflows when direct APIs do not exist.
@@ -198,6 +210,7 @@ Operating Rules:
       "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "LINEAR_", "JIRA_", "SLACK_"],
+    starterComposioTools: [],
     allowedMemoryCategories: ["project", "procedural", "episodic"],
     systemPrompt: `You are Elena, Chusky's Task Operations & Workflow Governor.
 Your focus is governing durable background tasks, recording task checkpoints, managing recurring cron jobs, and tracking active attention loops.
@@ -218,6 +231,7 @@ Operating Rules:
     domain: "Supervisor, goal decomposition, sub-agent delegation, final approval authority, memory platform authority",
     allowedTools: [], // Chusky has access to all native tools + delegation tool
     allowedComposioPrefixes: [], // Chusky is not constrained by a worker manifest.
+    starterComposioTools: [],
     allowedMemoryCategories: ["profile", "relationship", "business", "project", "episodic", "procedural", "negative", "asset"],
     systemPrompt: "Chusky Orchestrator",
     reflectionChecklist: [],
