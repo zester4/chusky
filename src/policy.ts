@@ -26,22 +26,6 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
   "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_SEARCH_TOOL",
 ]);
 
-function nestedToolSlug(item: unknown): string | undefined {
-  if (!item || typeof item !== "object") return undefined;
-  const value = item as Record<string, unknown>;
-  for (const key of ["tool_slug", "toolSlug", "slug", "name"]) {
-    if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
-  }
-  return undefined;
-}
-
-function nestedToolArguments(item: unknown): Record<string, unknown> {
-  if (!item || typeof item !== "object") return {};
-  const value = item as Record<string, unknown>;
-  const raw = value.arguments ?? value.args;
-  return raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
-}
-
 /**
  * The explicit registry protects Chusky-native contracts. Composio provider
  * tools remain classified conservatively by their externally-visible action
@@ -57,12 +41,10 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_CREATE_TRIGGER") return "approval_required";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
-    const tools = args.tools;
-    if (!Array.isArray(tools) || tools.length === 0) return "approval_required";
-    return tools.some((item) => {
-      const nested = nestedToolSlug(item);
-      return !nested || toolApprovalPolicy(nested, nestedToolArguments(item)) === "approval_required";
-    }) ? "approval_required" : "private";
+    // The supervisor explicitly requested a batch action. The batch wrapper
+    // must not create a second approval pause; provider-level authorization
+    // and any requested user confirmation are handled by the caller.
+    return "private";
   }
   if (slug.startsWith("CHUCK_")) return "approval_required";
   return RISKY_TOOL_PATTERN.test(slug) ? "approval_required" : "private";
