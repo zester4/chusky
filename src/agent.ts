@@ -721,6 +721,7 @@ export async function runAgent(
           // following tool call (for example an Instagram upload) a real
           // reusable source instead of only a chat-rendered preview.
           for (const [index, image] of images.entries()) {
+            if (channelContext?.scope === "shared") break;
             try {
               const contentType = image.mediaType.toLowerCase().split(";", 1)[0];
               if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) continue;
@@ -748,7 +749,7 @@ export async function runAgent(
           }
           generatedReferenceImages.push(...images);
           if (destination === "telegram" || destination === "both") generatedImages.push(...images);
-          execResult = { imageGenerated: true, imageCount: images.length, destination, ...(assets.length ? { assets } : {}), ...(daytona.length ? { daytona } : {}), note: destination === "daytona" ? "Images saved in Daytona and as reusable image assets; they were not sent as separate Telegram images." : "Images generated, saved as reusable image assets, and delivered through the normal channel." };
+          execResult = { imageGenerated: true, imageCount: images.length, destination, ...(assets.length ? { assets } : {}), ...(daytona.length ? { daytona } : {}), note: channelContext?.scope === "shared" ? "Images generated and delivered in this group; private image-asset persistence is disabled for shared conversations." : destination === "daytona" ? "Images saved in Daytona and as reusable image assets; they were not sent as separate Telegram images." : "Images generated, saved as reusable image assets, and delivered through the normal channel." };
         } else if (slug === "CHUCK_CREATE_TRIGGER") {
           execResult = await createTrigger(userId, String(args.slug ?? ""), { triggerConfig: args.triggerConfig ?? {} });
         } else if (slug === "CHUCK_GENERATE_VIDEO") {
