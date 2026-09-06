@@ -391,8 +391,8 @@ test("creates a presentation with the built-in generator before Daytona delivery
   assert.match(structureScript, /target\.startswith\('\/'\)/);
   // QA uses the exact resolved path from registration, relative to SDK home.
   assert.match(visualScript, /path=os\.path\.abspath\(path\)/);
-  // require_renderer is emitted as a real Python boolean False for non-required types.
-  assert.match(visualScript, /require_renderer=False/);
+  // Every structured Office artifact is required to pass complete-page rendering.
+  assert.match(visualScript, /require_renderer=True/);
 });
 
 test("creates chart-heavy decks with complete root-relative OOXML chart relationships", async () => {

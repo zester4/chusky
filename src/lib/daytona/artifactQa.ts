@@ -5,7 +5,7 @@ import type { ArtifactType } from "../../store.js";
 // that a file can be opened. Never install packages during registration.
 // Exit 3 requests an isolated renderer; exit 2 means the document failed QA.
 export function artifactVisualQaScript(type: ArtifactType, path: string): string {
-  return `path=${JSON.stringify(path)}\nkind=${JSON.stringify(type)}\nrequire_renderer=${["pdf", "docx"].includes(type) ? "True" : "False"}\n` + String.raw`
+  return `path=${JSON.stringify(path)}\nkind=${JSON.stringify(type)}\n# Every structured artifact must be rendered before delivery. A package can be\n# structurally valid while still clipping text or producing a blank Office page.\nrequire_renderer=True\n` + String.raw`
 import os, shutil, subprocess, sys, tempfile
 
 def fail(message):
@@ -20,7 +20,7 @@ def missing_packages():
     if not shutil.which('pdfinfo') or not shutil.which('pdftoppm'):
         packages.append('poppler-utils')
     if kind != 'pdf' and not office_binary():
-        packages.extend(['libreoffice-writer', 'fonts-dejavu-core'])
+        packages.extend(['libreoffice-writer', 'libreoffice-calc', 'libreoffice-impress', 'fonts-dejavu-core'])
     return packages
 
 path=os.path.abspath(path)

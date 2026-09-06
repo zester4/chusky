@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { artifactVisualQaScript } from "../src/lib/daytona/artifactQa.js";
 
 // Execute the emitted Python; fake only OS tool discovery/processes.
-function runQa(scenario: string, type: "pdf" | "docx" = "pdf") {
+function runQa(scenario: string, type: "pdf" | "docx" | "presentation" | "spreadsheet" = "pdf") {
   const script = artifactVisualQaScript(type, "source.pdf");
   const harness = [
     "import os, tempfile, subprocess",
@@ -55,12 +55,15 @@ for (const scenario of ["bad-pdf", "empty", "partial"]) {
   });
 }
 
-test("missing DOCX dependencies request isolated rendering without attempting installation", () => {
-  const result = runQa("setup", "docx");
-  assert.equal(result.status, 3, result.stderr);
-  assert.match(result.stderr, /CHUSKY_RENDERER_UNAVAILABLE/);
-  assert.match(result.stdout, /RENDER_CALLS=0/);
-});
+for (const type of ["docx", "presentation", "spreadsheet"] as const) {
+  test(`missing ${type.toUpperCase()} dependencies request isolated rendering without attempting installation`, () => {
+    const result = runQa("setup", type);
+    assert.equal(result.status, 3, result.stderr);
+    assert.match(result.stderr, /CHUSKY_RENDERER_UNAVAILABLE/);
+    assert.match(result.stderr, /libreoffice-(writer|calc|impress)/);
+    assert.match(result.stdout, /RENDER_CALLS=0/);
+  });
+}
 
 test("successful Office exit without a converted PDF fails validation", () => {
   const result = runQa("conversion-failed", "docx");
