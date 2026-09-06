@@ -8,7 +8,7 @@ import { config } from "./config.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
-import type { ApprovalPolicy, HandoffRecord } from "./subagents/contracts.js";
+import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
@@ -209,6 +209,8 @@ export interface ScheduledWorkerBinding {
   approvalPolicy: ApprovalPolicy;
   timeoutSeconds: number;
   maxToolCalls: number;
+  duration?: WorkerDuration;
+  budgetSeconds?: number;
 }
 
 export interface JobRecord {
@@ -339,6 +341,8 @@ export interface ApprovalRecord {
   status: "pending" | "approved" | "consumed" | "denied" | "expired";
   createdAt: number;
   expiresAt: number;
+  /** Present for a specialist proposal; the Chusky supervisor resolves it. */
+  handoffId?: string;
 }
 
 export interface TriggerEventRecord {

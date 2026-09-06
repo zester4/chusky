@@ -10,6 +10,23 @@ export interface SubagentToolDecision {
   allowedComposioTools: string[];
 }
 
+/** Queue the next bounded execution slice for a durable worker goal. */
+export async function enqueueSubagentContinuation(userId: number, handoffId: string): Promise<{ workflowRunId: string }> {
+  const record = await getHandoffRecord(userId, handoffId);
+  if (!record || record.status !== "queued" || !record.taskId || !record.delegation?.budgetSeconds) {
+    throw new Error("Only a queued durable worker run can be continued.");
+  }
+  const count = (record.delegation.continuationCount ?? 0) + 1;
+  const workflowRunId = `subagent-run-${handoffId}-${count}`;
+  await saveHandoffRecord(userId, {
+    ...record,
+    workflowRunId,
+    delegation: { ...record.delegation, continuationCount: count },
+  });
+  const queued = await client().trigger({ url: subagentWorkflowUrl(), body: { userId, handoffId, mode: "continue" }, workflowRunId, retries: 3 });
+  return { workflowRunId: String(queued.workflowRunId ?? workflowRunId) };
+}
+
 export function subagentWorkflowUrl(): string {
   return resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/subagent", "Subagent workflows");
 }

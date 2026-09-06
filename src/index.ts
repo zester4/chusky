@@ -901,6 +901,8 @@ async function main(): Promise<void> {
               approvalPolicy: binding.approvalPolicy,
               timeoutSeconds: binding.timeoutSeconds,
               maxToolCalls: binding.maxToolCalls,
+              duration: binding.duration,
+              budgetSeconds: binding.budgetSeconds,
             }, { model: binding.model, historySummary: session.summaries.slice(-2).join("\n") });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
               const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
@@ -961,11 +963,49 @@ async function main(): Promise<void> {
     // continuation: it waits for Chusky's verified, role-scoped decision, then
     // resumes the original task and handoff record rather than starting over.
     app.post("/workflows/subagent", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId?: unknown; handoffId?: unknown };
+      const payload = workflow.requestPayload as { userId?: unknown; handoffId?: unknown; mode?: unknown };
       const userId = Number(payload.userId);
       const handoffId = typeof payload.handoffId === "string" ? payload.handoffId.trim() : "";
       if (!Number.isSafeInteger(userId) || userId <= 0 || !handoffId) {
         throw new WorkflowNonRetryableError("Invalid subagent workflow payload");
+      }
+
+      if (payload.mode === "continue") {
+        const resumed = await workflow.run("resume-worker-slice", async () => {
+          const record = await getHandoffRecord(userId, handoffId);
+          if (!record || record.status !== "queued" || !record.taskId || !record.delegation) {
+            throw new WorkflowNonRetryableError("Queued worker continuation is missing or no longer eligible");
+          }
+          await updateTask(userId, record.taskId, { status: "running", error: undefined, nextAction: "Resuming from the latest durable checkpoint." });
+          return executeDelegation(userId, {
+            worker: record.to as CapabilityWorkerName,
+            objective: record.objective,
+            context: { ...record.context, continuation: true },
+            expectedOutput: record.expectedOutput,
+            model: record.delegation!.model,
+            allowedTools: record.delegation!.allowedTools,
+            allowedComposioTools: record.delegation!.allowedComposioTools,
+            approvalPolicy: record.delegation!.approvalPolicy,
+            timeoutSeconds: record.delegation!.timeoutSeconds,
+            maxToolCalls: record.delegation!.maxToolCalls,
+            duration: record.delegation!.duration,
+            budgetSeconds: record.delegation!.budgetSeconds,
+          }, {
+            resume: { handoffId: record.id, taskId: record.taskId, workflowRunId: workflow.workflowRunId, resumeCount: (record.delegation!.continuationCount ?? 0) },
+          });
+        });
+        if (resumed.status === "queued") return;
+        if (resumed.status === "requires_tool_request" && resumed.handoffRecord) {
+          await workflow.run("queue-next-tool-request", async () => enqueueSubagentToolContinuation(userId, resumed.handoffRecord!.id));
+          return;
+        }
+        await workflow.run("deliver-worker-slice-result", async () => {
+          const chatId = await getTelegramChatId(userId);
+          if (!chatId || !resumed.output.trim()) return;
+          const title = resumed.status === "success" ? "✅ Worker task completed" : "⚠️ Worker task update";
+          await channelGateway.send({ accountId: `account_${userId}`, userId, target: { provider: "telegram", conversationId: String(chatId) }, text: `${title}\n\n${resumed.output}`, idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:telegram`, correlationId: handoffId, kind: "notification" });
+        });
+        return;
       }
 
       const waiting = await workflow.run("load-tool-request", async () => {

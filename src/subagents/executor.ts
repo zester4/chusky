@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "./capabilities.js";
+import { enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask } from "../store.js";
+import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
 import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
-import type { DelegationContract, DelegationResult, DelegationStatus, HandoffRecord } from "./contracts.js";
+import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
 
 export async function executeDelegation(
   userId: number,
@@ -50,6 +51,12 @@ export async function executeDelegation(
 
   validateDelegationTarget(workerName, contractInput.objective, contractInput.allowedTools ?? []);
 
+  const duration = (contractInput.duration && contractInput.duration in WORKER_DURATION_SECONDS ? contractInput.duration : "30m") as WorkerDuration;
+  const budgetSeconds = Math.max(30 * 60, Math.min(WORKER_DURATION_SECONDS["1w"], contractInput.budgetSeconds ?? WORKER_DURATION_SECONDS[duration]));
+  const existingHandoff = options?.resume ? await getHandoffRecord(userId, options.resume.handoffId) : undefined;
+  if (options?.resume && !existingHandoff) throw new Error("The durable handoff record for this worker continuation no longer exists or is not owned by the user.");
+  const startedAt = existingHandoff?.delegation?.startedAt ?? Date.now();
+
   // Inherit model from options/contract or fallback to default
   const model = options?.model || contractInput.model || config.defaultModel;
 
@@ -69,6 +76,8 @@ export async function executeDelegation(
     approvalPolicy: contractInput.approvalPolicy ?? "auto",
     timeoutSeconds: Math.max(5, Math.min(300, contractInput.timeoutSeconds ?? 60)),
     maxToolCalls: Math.max(0, Math.min(20, contractInput.maxToolCalls ?? 10)),
+    duration,
+    budgetSeconds,
   };
 
   // 1. Durable Task Linkage. A workflow continuation reuses the original task
@@ -82,8 +91,6 @@ export async function executeDelegation(
   if (!durableTask) throw new Error("The durable task for this worker continuation no longer exists or is not owned by the user.");
 
   // 2. Persistent Handoff Record
-  const existingHandoff = options?.resume ? await getHandoffRecord(userId, options.resume.handoffId) : undefined;
-  if (options?.resume && !existingHandoff) throw new Error("The durable handoff record for this worker continuation no longer exists or is not owned by the user.");
   const handoffRecord: HandoffRecord = existingHandoff ?? {
     id: `handoff_${randomUUID()}`,
     from: "chusky",
@@ -102,6 +109,10 @@ export async function executeDelegation(
     approvalPolicy: contract.approvalPolicy,
     timeoutSeconds: contract.timeoutSeconds,
     maxToolCalls: contract.maxToolCalls,
+    duration: contract.duration,
+    budgetSeconds: contract.budgetSeconds,
+    startedAt,
+    continuationCount: existingHandoff?.delegation?.continuationCount ?? 0,
   };
   if (options?.resume?.workflowRunId) handoffRecord.workflowRunId = options.resume.workflowRunId;
   if (options?.resume?.resumeCount !== undefined) handoffRecord.resumeCount = options.resume.resumeCount;
@@ -206,6 +217,7 @@ export async function executeDelegation(
               request: `Worker capability ${manifest.displayName} requested execution of ${actionPayload.name}`,
               history: [],
               model,
+              handoffId: handoffRecord.id,
             });
 
             approvalId = approvalRecord.id;
@@ -215,12 +227,12 @@ export async function executeDelegation(
               requiresApproval: true,
             };
             status = "requires_approval";
-            outputSummary = `Worker capability [${manifest.displayName}] requested approval for ${actionPayload.name}.`;
+            outputSummary = `Worker capability [${manifest.displayName}] proposed ${actionPayload.name}. Awaiting Chusky supervisor review.`;
 
             if (options?.onStatus) {
               await options.onStatus(`🛡️ ${manifest.displayName} requested approval for ${actionPayload.name}. Approval ID: ${approvalRecord.id}`);
             }
-            await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky/User approval");
+            await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky supervisor review");
           } else {
             if (options?.onStatus) {
               await options.onStatus(humanToolStatus(actionPayload.name));
@@ -432,14 +444,14 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
               requiresApproval: true,
             };
             status = "requires_approval";
-            outputSummary = `Worker capability [${manifest.displayName}] requested approval for risky tool ${slug}. Halting until user approves.`;
+            outputSummary = `Worker capability [${manifest.displayName}] proposed risky tool ${slug}. Awaiting Chusky supervisor review.`;
 
             if (options?.onStatus) {
               await options.onStatus(`🛡️ ${manifest.displayName} requested approval for ${slug}. Approval ID: ${approvalRecord.id}`);
             }
 
             approvalNeeded = true;
-            await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky/User approval");
+            await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky supervisor review");
             break;
           }
 
@@ -462,6 +474,8 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
                       approvalPolicy: contract.approvalPolicy,
                       timeoutSeconds: contract.timeoutSeconds,
                       maxToolCalls: contract.maxToolCalls,
+                      duration: contract.duration,
+                      budgetSeconds: contract.budgetSeconds,
                     },
                     approvedApprovalId: options?.approvedApprovalId,
                     onStatus: options?.onStatus,
@@ -474,6 +488,7 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
             logs.push({ tool: slug, args: executionArgs, result });
             messages.push({ role: "tool", tool_call_id: call.id, content: resultStr.slice(0, 20000) });
             await checkpointTask(userId, durableTask.id, `Executed ${slug}`, "Proceed to next step");
+            if (approvedForTool && isRisky) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
           } catch (err) {
             const errMsg = String((err as Error)?.message ?? err);
             logs.push({ tool: slug, args: executionArgs, error: errMsg });
@@ -501,6 +516,7 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
   }
 
   const durationMs = Date.now() - startTime;
+  const totalElapsedMs = Date.now() - startedAt;
   // A /agent-cancel can arrive while a provider turn is completing. Preserve
   // the user's cancellation rather than allowing a late worker response to
   // overwrite it with success.
@@ -512,8 +528,18 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
     status = "timed_out";
   }
 
+  // A slice limit is a continuation point, not a terminal failure. The
+  // durable supervisor will enqueue the same handoff again while its overall
+  // goal budget remains available.
+  if ((status === "timed_out" || status === "max_tool_calls_exceeded") && contract.maxToolCalls > 0 && totalElapsedMs < contract.budgetSeconds! * 1000) {
+    status = "queued";
+    outputSummary = `${manifest.displayName} completed an execution slice. Continuing the same task automatically within the ${contract.duration} budget.`;
+  }
+
   if (status === "success") {
     await completeTask(userId, durableTask.id, outputSummary);
+  } else if (status === "queued") {
+    await updateTask(userId, durableTask.id, { status: "queued", checkpoint: outputSummary, nextAction: "Continue from the latest checkpoint in the next execution slice." });
   } else if (status === "failed" || status === "max_tool_calls_exceeded" || status === "timed_out") {
     // `failTask` does not exist in store.ts. Use `blockTask` to record the
     // failure durably, then patch the status to "failed" via `updateTask`.
@@ -524,6 +550,19 @@ ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}`;
   handoffRecord.status = status;
   if (toolRequest) handoffRecord.toolRequest = toolRequest;
   await saveHandoffRecord(userId, handoffRecord);
+
+  if (status === "queued" && config.qstashToken && config.webhookUrl) {
+    try {
+      const continuation = await enqueueSubagentContinuation(userId, handoffRecord.id);
+      outputSummary += ` Continuation queued (${continuation.workflowRunId}).`;
+    } catch (error) {
+      status = "failed";
+      outputSummary = `The next worker slice could not be queued: ${String((error as Error)?.message ?? error)}`;
+      await updateTask(userId, durableTask.id, { status: "failed", error: outputSummary, nextAction: "Check QStash configuration and retry the task." });
+      handoffRecord.status = status;
+      await saveHandoffRecord(userId, handoffRecord);
+    }
+  }
 
   return {
     contractId: contract.id,

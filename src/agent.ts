@@ -797,10 +797,6 @@ export async function runAgent(
             generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
             execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The screenshot was sent to the user. Use accessibility or display tools for structured follow-up." };
           }
-          if (slug === "CHUCK_DELEGATE_SUBAGENT" && execResult && typeof execResult === "object" && (execResult as any).status === "requires_approval" && (execResult as any).approvalId) {
-            const subResult = execResult as { approvalId: string; proposal?: { actionName: string; payload: Record<string, unknown> } };
-            throw new ApprovalRequiredError(subResult.approvalId, subResult.proposal?.actionName ?? "subagent_risky_action", subResult.proposal?.payload ?? {});
-          }
         } else {
           execResult = await sessionObj.execute(slug, executionArgs);
         }

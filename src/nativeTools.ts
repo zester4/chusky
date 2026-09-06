@@ -8,7 +8,7 @@ import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, listJobs, listReminders,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
-  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind,
   type TaskStatus,
@@ -84,6 +84,38 @@ async function runDelegationWithDurableContinuation(
   if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
   const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
   return { ...result, durableContinuation: { queued: true, ...continuation } };
+}
+
+async function reviewSubagentAction(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+  const approvalId = text(args.approvalId);
+  const decision = String(args.decision ?? "").toLowerCase();
+  if (decision !== "approve" && decision !== "deny") throw new Error("decision must be approve or deny");
+  const approval = await getApproval(userId, approvalId);
+  if (!approval?.handoffId || approval.status !== "pending" || approval.expiresAt <= Date.now()) throw new Error("Subagent proposal is missing, expired, or already reviewed");
+  const handoff = await getHandoffRecord(userId, approval.handoffId);
+  if (!handoff?.taskId || !handoff.delegation) throw new Error("Subagent proposal is no longer attached to a durable handoff");
+  if (decision === "deny") {
+    await setApprovalStatus(userId, approvalId, "denied");
+    await updateTask(userId, handoff.taskId, { status: "blocked", error: "Chusky supervisor denied the proposed action.", nextAction: "Revise the plan or request a different action." });
+    await saveHandoffRecord(userId, { ...handoff, status: "failed" });
+    return { reviewed: true, decision, approvalId, taskId: handoff.taskId };
+  }
+  if (!(await claimApproval(userId, approvalId))) throw new Error("Subagent proposal could not be claimed for review");
+  const result = await executeDelegation(userId, {
+    worker: handoff.to as any,
+    objective: handoff.objective,
+    context: { ...handoff.context, supervisorReview: true },
+    expectedOutput: handoff.expectedOutput,
+    model: handoff.delegation.model,
+    allowedTools: handoff.delegation.allowedTools,
+    allowedComposioTools: handoff.delegation.allowedComposioTools,
+    approvalPolicy: handoff.delegation.approvalPolicy,
+    timeoutSeconds: handoff.delegation.timeoutSeconds,
+    maxToolCalls: handoff.delegation.maxToolCalls,
+    duration: handoff.delegation.duration,
+    budgetSeconds: handoff.delegation.budgetSeconds,
+  }, { approvedApprovalId: approvalId, resume: { handoffId: handoff.id, taskId: handoff.taskId, resumeCount: (handoff.resumeCount ?? 0) + 1 }, model: runtime.model });
+  return { reviewed: true, decision, approvalId, result };
 }
 
 function attentionKind(value: unknown): AttentionEntityKind {
@@ -382,6 +414,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       };
     case "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST":
       return resolveSubagentToolRequest(userId, text(args.handoffId), stringList(args.allowedComposioTools, "allowedComposioTools"));
+    case "CHUCK_REVIEW_SUBAGENT_ACTION":
+      return reviewSubagentAction(userId, args, runtime);
     case "CHUCK_LIST_SUBAGENTS": {
       const limit = args.limit === undefined ? 20 : Math.max(1, Math.min(50, Math.floor(Number(args.limit))));
       const records = await listHandoffRecords(userId);
