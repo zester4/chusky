@@ -4,7 +4,7 @@
 
 The complete Mintlify-style documentation is in [`docs/`](docs/index.mdx), including the quickstart, concepts, streaming, model selection, files, approvals, durable tasks, tools, skills, artifacts, video jobs, workers, channels, webhooks, security, errors, release operations, and production guidance. The Mintlify navigation configuration is [`docs.json`](docs.json).
 
-This package is the public developer boundary for Chusky. It is intentionally separate from the Telegram bot, Redis store, Composio credentials, and internal `CHUCK_*` tool names. Developers place their scoped `chsk_` project key in `CHUSKY_API_KEY`. On the self-hosted Oracle server only, `CHUSKY_PROJECT_KEY` is the private root/bootstrap credential used to provision those project keys.
+This package is the public developer boundary for Chusky. It is intentionally separate from the Telegram bot, Redis store, Composio credentials, and internal `CHUCK_*` tool names. SDK applications use `CHUSKY_API_KEY`, containing their scoped `chsk_` API key. `CHUSKY_PROJECT_KEY` is used only by the self-hosted Chusky operator to provision those API keys; it is never an SDK application credential.
 
 ```ts
 import { Chusky } from "@chusky/sdk";
@@ -23,7 +23,7 @@ for await (const event of chusky.threads.runs(thread.id).stream(
 }
 ```
 
-## Provisioning a project key
+## Operator-only API key provisioning
 
 Run this only on a trusted backend or operator machine. Never expose the root
 `CHUSKY_PROJECT_KEY` to a browser, developer, or end user.
@@ -52,7 +52,7 @@ remains solely for trusted operator `/v1/admin/*` provisioning.
 ## Contract and security
 
 - The SDK targets the versioned `/v1` Developer API described in [`docs/api-contract.md`](docs/api-contract.md). Do not point it at private `/cli/*` endpoints or use CLI device tokens as developer API keys.
-- `CHUSKY_PROJECT_KEY` is root-only: use it with `chusky.projects.create()` to provision a scoped `chsk_` project key. A developer stores that scoped key as `CHUSKY_API_KEY` in their own server environment. Project secrets are returned once, persisted only as hashes, may be rotated or revoked, and must never be exposed in browser code.
+- SDK applications authenticate with `CHUSKY_API_KEY` and send it only from a trusted server. `CHUSKY_PROJECT_KEY` is root-only operator infrastructure for provisioning or rotating scoped `chsk_` API keys; it must never be shipped in an SDK application or browser bundle. Project secrets are returned once, persisted only as hashes, may be rotated or revoked, and must never be exposed in browser code.
 - Durable POST operations should receive an `idempotencyKey`; retries only reuse a key for the exact same operation. Streaming run connections are intentionally not replayed: recover their persisted state through `get()` or `events()`.
 - Approval decisions always require an authenticated end-user context in the server. The SDK must never auto-approve a tool call.
 - `stream()` yields NDJSON events and supports `AbortSignal`, so consumers can stop a particular run without cancelling unrelated durable work.
