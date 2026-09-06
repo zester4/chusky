@@ -91,6 +91,22 @@ test("creates one workspace and persists its provider ID", async () => {
   assert.equal(lastCreateParams?.autoPauseInterval, undefined);
 });
 
+test("recovers a retained named sandbox after the local workspace record is lost", async () => {
+  const orphan = fakeSandbox("sandbox-retained");
+  orphan.name = "chusky-820050";
+  orphan.labels = { agent: "chusky", user_id: "820050" };
+  const e = new DaytonaEngine(() => ({
+    get: async (idOrName: string) => {
+      if (idOrName === orphan.id || idOrName === orphan.name) return orphan;
+      throw new Error("404 sandbox not found");
+    },
+    create: async () => { throw Object.assign(new Error("Sandbox with name chusky-820050 already exists"), { statusCode: 409 }); },
+  } as any));
+  const recovered = await e.getOrCreateWorkspace(820050);
+  assert.equal(recovered.id, orphan.id);
+  assert.equal((await getDaytonaWorkspace(820050))?.sandboxId, orphan.id);
+});
+
 test("reports an absent workspace without turning a normal status check into a tool failure", async () => {
   const result = await engine().workspace(820000, "status");
   assert.deepEqual(result, { exists: false, message: "No Daytona workspace exists yet. Use action=create, or use a file/computer tool and Chusky will create it automatically." });

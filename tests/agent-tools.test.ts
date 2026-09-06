@@ -54,3 +54,13 @@ test("Daytona accessibility search exposes a valid matching mode", () => {
   assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "OpenRouter" }), /unsupported value/);
   validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
 });
+
+test("normalizes recoverable PDF section argument shapes before validation", () => {
+  const single = { title: "Brief", sections: { heading: "Summary", body: "Ready." } } as Record<string, unknown>;
+  validateNativeToolArguments("CHUCK_CREATE_PDF", single);
+  assert.deepEqual(single.sections, [{ heading: "Summary", body: "Ready." }]);
+
+  const encoded = { title: "Brief", sections: JSON.stringify([{ heading: "Summary", body: "Ready." }]) } as Record<string, unknown>;
+  validateNativeToolArguments("CHUCK_CREATE_PDF", encoded);
+  assert.deepEqual(encoded.sections, [{ heading: "Summary", body: "Ready." }]);
+});

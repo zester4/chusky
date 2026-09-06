@@ -76,6 +76,24 @@ export function validateNativeToolArguments(name: string, args: Record<string, u
   const tool = chuckTools.find((item) => item.function.name === name);
   if (!tool) throw new Error(`Unknown native tool: ${name}`);
   const schema = tool.function.parameters as { required?: readonly string[]; properties?: Record<string, { type?: string; enum?: readonly string[]; items?: { type?: string } }> };
+  // Models occasionally serialize structured arguments as JSON text, or emit
+  // one PDF section instead of a one-item array. Normalize only these safe
+  // structural forms before enforcing the schema so a recoverable formatting
+  // mistake does not abort an otherwise valid document request.
+  for (const [key, rule] of Object.entries(schema.properties ?? {})) {
+    if (rule.type !== "array") continue;
+    const value = args[key];
+    if (typeof value === "string") {
+      try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed)) args[key] = parsed;
+      } catch {
+        // The normal type error below remains actionable for non-JSON text.
+      }
+    } else if (name === "CHUCK_CREATE_PDF" && key === "sections" && value && typeof value === "object" && !Array.isArray(value)) {
+      args[key] = [value];
+    }
+  }
   for (const key of schema.required ?? []) {
     if (!(key in args) || args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !args[key].trim())) throw new Error(`${name} requires argument: ${key}`);
   }
@@ -87,7 +105,7 @@ export function validateNativeToolArguments(name: string, args: Record<string, u
       : rule.type === "boolean" ? typeof value === "boolean"
       : rule.type === "array" ? Array.isArray(value) && (!rule.items?.type || value.every((item) => typeof item === rule.items?.type))
       : rule.type === "object" ? typeof value === "object" && !Array.isArray(value) : true;
-    if (!valid) throw new Error(`${name}.${key} must be a ${rule.type}`);
+    if (!valid) throw new Error(`${name}.${key} must be ${rule.type === "array" ? "an" : "a"} ${rule.type}`);
     if (rule.enum && !rule.enum.includes(value as string)) throw new Error(`${name}.${key} has an unsupported value`);
   }
 }

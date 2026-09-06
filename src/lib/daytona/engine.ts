@@ -70,6 +70,12 @@ function workspaceRecord(sandbox: Sandbox) {
   };
 }
 
+function isDaytonaConflict(error: unknown): boolean {
+  const candidate = error as { statusCode?: unknown; code?: unknown; message?: unknown };
+  const message = String(candidate?.message ?? error ?? "");
+  return candidate?.statusCode === 409 || candidate?.code === "CONFLICT" || /already exists|conflict/i.test(message);
+}
+
 function coordinate(value: unknown, label: string): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0 || n > 10000) throw new DaytonaInputError(`${label} must be a coordinate between 0 and 10000`);
@@ -1002,9 +1008,37 @@ export class DaytonaEngine {
         labels: { agent: "chusky", user_id: String(userId) },
         ...(DAYTONA_AUTO_PAUSE_MINUTES > 0 ? { autoPauseInterval: DAYTONA_AUTO_PAUSE_MINUTES } : {}),
       };
-      const sandbox = await client.create(createParams, { timeout: 120 });
-      await saveDaytonaWorkspace(userId, workspaceRecord(sandbox));
-      return sandbox;
+      try {
+        const sandbox = await client.create(createParams, { timeout: 120 });
+        await saveDaytonaWorkspace(userId, workspaceRecord(sandbox));
+        return sandbox;
+      } catch (error) {
+        if (!isDaytonaConflict(error)) throw error;
+        // Redis may have been flushed while Daytona retained the named
+        // sandbox. Recover it by its deterministic name instead of creating a
+        // replacement. A short bounded retry handles provider read-after-write
+        // lag when another process won the create race.
+        let lastError: unknown = error;
+        for (const delayMs of [0, 250, 750]) {
+          if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+          try {
+            const sandbox = await client.get(createParams.name);
+            const labels = sandbox.labels ?? {};
+            if (labels.user_id && labels.user_id !== String(userId)) {
+              throw new Error("Daytona returned a sandbox owned by another user");
+            }
+            await sandbox.refreshData();
+            if (sandbox.recoverable && sandbox.state !== "started") await sandbox.recover(60);
+            else if (sandbox.state !== "started") await sandbox.start(60);
+            await sandbox.refreshActivity();
+            await saveDaytonaWorkspace(userId, { ...workspaceRecord(sandbox), lastKnownState: sandbox.state });
+            return sandbox;
+          } catch (recoveryError) {
+            lastError = recoveryError;
+          }
+        }
+        throw lastError;
+      }
     })();
     createPromises.set(userId, creation);
     try {
