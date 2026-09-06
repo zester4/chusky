@@ -1,4 +1,5 @@
 import { runAgent, ApprovalRequiredError, transcribeAudio } from "../agent.js";
+import { config } from "../config.js";
 import {
   addUsage,
   appendChannelConversationMessages,
@@ -43,7 +44,7 @@ async function privateOrSharedHistory(conversation: ChuskyConversation) {
   }
   const stored = await getChannelConversation(conversation.conversationId);
   const session = await getSession(conversation.userId);
-  return { history: stored?.history ?? [], model: session.model };
+  return { history: stored?.history ?? [], model: stored?.model ?? config.groupDefaultModel };
 }
 
 async function saveConversation(conversation: ChuskyConversation, message: InboundMessage, text: string, response: string): Promise<void> {

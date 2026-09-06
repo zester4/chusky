@@ -15,7 +15,7 @@ import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, createChannelLinkCode, createSendblueGroupLinkCode, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock } from "../src/store.js";
+import { acquireUserLock, appendChannelConversationMessages, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock, setChannelConversationModel } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -349,6 +349,27 @@ test("a linked owner can authorize a Sendblue group for all participants and unl
   const unlink = normalizeSendblueMessage({ message_handle: "sb-group-unlink", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "/unlink-group" });
   assert.equal((await gateway.processInbound(unlink!)).linked, true);
   assert.equal(await getSendblueGroupAuthorization("group-1", "+15550002"), undefined);
+});
+
+test("group model overrides persist independently and default can clear them", async () => {
+  const id = "telegram:-:-100123:-";
+  await appendChannelConversationMessages({ id, accountId: "account_42", userId: 42, provider: "telegram", scope: "shared", messages: [] });
+  await setChannelConversationModel(id, "openai/gpt-5.6");
+  assert.equal((await getChannelConversation(id))?.model, "openai/gpt-5.6");
+  await setChannelConversationModel(id, undefined);
+  assert.equal((await getChannelConversation(id))?.model, undefined);
+});
+
+test("shared channel model command changes only that conversation", async () => {
+  await linkChannelIdentity(42, { provider: "slack", externalUserId: "U1", workspaceId: "T1" });
+  const adapter = new FakeAdapter();
+  const gateway = new ChannelGateway(async () => { throw new Error("agent loop should not run for /group-model"); });
+  gateway.register(adapter);
+  const message: InboundMessage = { provider: "slack", providerEventId: "slack-group-model", providerUserId: "U1", providerWorkspaceId: "T1", providerConversationId: "C1", text: "/group-model openai/gpt-5.6", attachments: [], receivedAt: Date.now(), scope: "shared" };
+  const result = await gateway.processInbound(message);
+  assert.equal(result.linked, true);
+  assert.equal((await getChannelConversation("slack:T1:C1:-"))?.model, "openai/gpt-5.6");
+  assert.match(adapter.sent[0].text ?? "", /openai\/gpt-5\.6/);
 });
 
 test("outbox idempotency prevents duplicate provider sends and records receipts", async () => {

@@ -1,10 +1,11 @@
 import { acquireUserLock, claimChannelEvent, completeChannelEvent, releaseChannelEvent, releaseUserLock, renewUserLock } from "../store.js";
 import { buildConversation, buildReplyTarget } from "./conversations.js";
 import { activateSendblueGroup, redeemLinkCode, resolveIdentity, resolveSendblueGroupAuthorization } from "./identity.js";
-import { revokeSendblueGroupAuthorization, saveSendblueGroupAuthorization } from "../store.js";
+import { appendChannelConversationMessages, getChannelConversation, revokeSendblueGroupAuthorization, saveSendblueGroupAuthorization, setChannelConversationModel } from "../store.js";
 import { ChannelOutbox } from "./outbox.js";
 import type { ChannelAdapter, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import { randomUUID } from "node:crypto";
+import { config } from "../config.js";
 
 export type ChannelMessageHandler = (message: InboundMessage, conversation: ChuskyConversation) => Promise<OutboundMessage[] | OutboundMessage | void>;
 
@@ -193,6 +194,30 @@ export class ChannelGateway {
 
     const conversation = buildConversation(identity.userId, message);
     if (!conversation.permissions.canUseAgent) throw new Error("Channel identity is not permitted to use Chusky");
+    if (message.scope === "shared" && message.text?.trim().match(/^\/group-model(?:\s+(.+))?$/i)) {
+      const match = message.text.trim().match(/^\/group-model(?:\s+(.+))?$/i)!;
+      const requested = match[1]?.trim() ?? "";
+      const current = (await getChannelConversation(conversation.conversationId))?.model ?? config.groupDefaultModel;
+      if (!requested) {
+        await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: `This group uses ${current}. Send /group-model default to use the configured group default (${config.groupDefaultModel}), or /group-model <model-id> to choose a model for this group.`, idempotencyKey: `${message.provider}:${message.providerEventId}:group-model-status`, kind: "notification" }, adapter);
+      } else {
+        const isDefault = /^default$/i.test(requested);
+        const model = isDefault ? undefined : (requested.length <= 200 && !/\s/.test(requested) ? requested : undefined);
+        if (!model && !isDefault) {
+          await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: "That model ID is invalid. Use a provider/model ID without spaces, or send /group-model default.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-model-invalid`, kind: "notification" }, adapter);
+        } else {
+          // A newly linked group has no conversation record yet. Create its
+          // empty record before applying the override so the setting is durable.
+          if (!(await getChannelConversation(conversation.conversationId))) {
+            await appendChannelConversationMessages({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: "shared", messages: [] });
+          }
+          await setChannelConversationModel(conversation.conversationId, model);
+          await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: `✅ This group will now use ${model ?? config.groupDefaultModel}.`, idempotencyKey: `${message.provider}:${message.providerEventId}:group-model-updated`, kind: "notification" }, adapter);
+        }
+      }
+      await completeChannelEvent(message.provider, message.providerEventId);
+      return { duplicate: false, linked: true, conversation, delivered: [] };
+    }
     if (adapter.markRead && message.scope === "private") void adapter.markRead(conversation.replyTarget).catch(() => undefined);
     const lockToken = randomUUID();
     const deadline = Date.now() + 120_000;

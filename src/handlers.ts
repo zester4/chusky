@@ -9,6 +9,7 @@ import {
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
+  getChannelConversation, appendChannelConversationMessages, setChannelConversationModel,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask,
 } from "./store.js";
@@ -27,6 +28,7 @@ import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { conversationIdFor } from "./channels/contracts.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
@@ -125,6 +127,30 @@ async function sendVoiceReply(ctx: Context, text: string, enabled: boolean): Pro
   }
 }
 
+function telegramConversationId(ctx: Context): string {
+  return conversationIdFor({
+    provider: "telegram",
+    providerConversationId: String(ctx.chat!.id),
+    providerThreadId: (ctx.message as { message_thread_id?: string | number } | undefined)?.message_thread_id ? String((ctx.message as { message_thread_id: string | number }).message_thread_id) : undefined,
+  });
+}
+
+async function telegramGroupModel(ctx: Context, fallback: string): Promise<string> {
+  if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") return fallback;
+  return (await getChannelConversation(telegramConversationId(ctx)))?.model ?? config.groupDefaultModel;
+}
+
+async function isTelegramGroupAdmin(ctx: Context): Promise<boolean> {
+  if (!ctx.from || !ctx.chat || (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup")) return false;
+  try {
+    const member = await ctx.api.getChatMember(ctx.chat.id, ctx.from.id);
+    return member.status === "creator" || member.status === "administrator";
+  } catch (error) {
+    logger.warn({ err: error, chatId: ctx.chat.id, userId: ctx.from.id }, "Could not verify Telegram group administrator");
+    return false;
+  }
+}
+
 async function sendGeneratedArtifacts(ctx: Context, files: Array<{ data: Buffer; name: string; contentType: string; artifactId: string; type: string }> | undefined): Promise<void> {
   for (const file of files ?? []) {
     try {
@@ -195,7 +221,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);
-    const result = await runAgent(userId, parts, s.history, s.model, undefined, controller.signal, undefined, undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } });
+    const result = await runAgent(userId, parts, s.history, await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } });
     await appendMessages(userId, [
       { role: "user", content: historyLabel, createdAt: telegramMessageReceivedAt(ctx) },
       { role: "assistant", content: result.text },
@@ -276,6 +302,7 @@ export function registerHandlers(bot: Bot): void {
       `  /channel link slack|whatsapp|sendblue — link another channel\n` +
       `  /channel link sendblue-group — create an iMessage group link code\n` +
       `  /group-access owner|all — set iMessage group access (inside the group)\n` +
+      `  /group-model <model-id|default> — choose the model for this Telegram group\n` +
       `  /unlink-group — unlink an iMessage group (inside the group)\n` +
       `  /help — show this\n\n` +
       `What do you want to do?`
@@ -308,6 +335,7 @@ export function registerHandlers(bot: Bot): void {
       `/channel list — show linked channel identities\n` +
       `/linkgroup <code> — activate the group (send inside iMessage)\n` +
       `/group-access owner|all — control group access (send inside iMessage)\n` +
+      `/group-model <model-id|default> — choose the model for this Telegram group\n` +
       `/unlink-group — unlink the iMessage group (send inside iMessage)\n` +
       `/image <description> — generate an image\n` +
       `/info — full session details\n` +
@@ -438,6 +466,36 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await ctx.reply("Usage: /channel link slack|whatsapp|sendblue|sendblue-group | /channel list | /channel notify slack|whatsapp|sendblue on|off");
+  });
+
+  bot.command("group-model", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (ctx.chat?.type !== "group" && ctx.chat?.type !== "supergroup") {
+      await ctx.reply("/group-model can only be used inside a Telegram group.");
+      return;
+    }
+    if (!(await isTelegramGroupAdmin(ctx))) {
+      await ctx.reply("Only a Telegram group administrator can change the group model.");
+      return;
+    }
+    const conversationId = telegramConversationId(ctx);
+    const requested = ctx.match?.trim() ?? "";
+    const current = (await getChannelConversation(conversationId))?.model ?? config.groupDefaultModel;
+    if (!requested) {
+      await ctx.reply(`This group uses ${current}. Send /group-model default to use ${config.groupDefaultModel}, or /group-model <model-id> to choose a model for this group.`);
+      return;
+    }
+    const isDefault = /^default$/i.test(requested);
+    const model = isDefault ? undefined : (requested.length <= 200 && !/\s/.test(requested) ? requested : undefined);
+    if (!model && !isDefault) {
+      await ctx.reply("That model ID is invalid. Use a provider/model ID without spaces, or send /group-model default.");
+      return;
+    }
+    if (!(await getChannelConversation(conversationId))) {
+      await appendChannelConversationMessages({ id: conversationId, accountId: `account_${ctx.from!.id}`, userId: ctx.from!.id, provider: "telegram", scope: "shared", messages: [] });
+    }
+    await setChannelConversationModel(conversationId, model);
+    await ctx.reply(`✅ This Telegram group will now use ${model ?? config.groupDefaultModel}.`);
   });
 
   // A web account proves possession of its Better Auth session by generating a
@@ -867,7 +925,7 @@ export function registerHandlers(bot: Bot): void {
     }
 
     const s = await getSession(userId);
-    const model = s.model;
+    const model = await telegramGroupModel(ctx, s.model);
     posthog?.capture({ distinctId: String(userId), event: "telegram_message_received", properties: { model, message_length: text.length } });
     if (!(await canSpend(userId))) {
       await ctx.reply("💳 Your usage cap has been reached. Ask an administrator to increase it.");

@@ -492,6 +492,8 @@ export interface ChannelConversationRecord {
   userId: number;
   provider: ChannelProvider;
   scope: "private" | "shared";
+  /** Per-group model override. Undefined means use config.groupDefaultModel. */
+  model?: string;
   history: Message[];
   summaries: string[];
   createdAt: number;
@@ -576,6 +578,7 @@ interface Backend {
   listOutbox(statuses?: OutboxRecord["status"][], limit?: number): Promise<OutboxRecord[]>;
   getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined>;
   saveChannelConversation(record: ChannelConversationRecord): Promise<void>;
+  setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined>;
   enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void>;
   takeChannelDebounce(key: string): Promise<InboundMessage[]>;
 }
@@ -1073,6 +1076,13 @@ class RedisBackend implements Backend {
   async saveChannelConversation(record: ChannelConversationRecord): Promise<void> {
     await this.r.set(this.channelConversationKey(record.id), JSON.stringify(record), "EX", 365 * 24 * 60 * 60);
   }
+  async setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined> {
+    const current = await this.getChannelConversation(id);
+    if (!current) return undefined;
+    const next = { ...current, ...(model ? { model } : { model: undefined }), updatedAt: Date.now() };
+    await this.saveChannelConversation(next);
+    return next;
+  }
   async enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void> {
     const redisKey = this.channelDebounceKey(key);
     await this.r.rpush(redisKey, JSON.stringify(message));
@@ -1406,6 +1416,13 @@ class MemoryBackend implements Backend {
   }
   async getChannelConversation(id: string) { return this.channelConversations.get(id); }
   async saveChannelConversation(record: ChannelConversationRecord) { this.channelConversations.set(record.id, record); }
+  async setChannelConversationModel(id: string, model: string | undefined) {
+    const current = this.channelConversations.get(id);
+    if (!current) return undefined;
+    const next = { ...current, ...(model ? { model } : { model: undefined }), updatedAt: Date.now() };
+    this.channelConversations.set(id, next);
+    return next;
+  }
   async enqueueChannelDebounce(key: string, message: InboundMessage, _ttlSeconds: number) { this.channelDebounce.set(key, [...(this.channelDebounce.get(key) ?? []), message].slice(-20)); }
   async takeChannelDebounce(key: string) { const messages = this.channelDebounce.get(key) ?? []; this.channelDebounce.delete(key); return messages; }
 }
@@ -2527,6 +2544,7 @@ export async function appendChannelConversationMessages(input: Omit<ChannelConve
     userId: input.userId,
     provider: input.provider,
     scope: input.scope,
+    ...(current?.model ? { model: current.model } : {}),
     history: history.slice(-cap),
     summaries,
     createdAt: current?.createdAt ?? now,
@@ -2534,6 +2552,10 @@ export async function appendChannelConversationMessages(input: Omit<ChannelConve
   };
   await backend.saveChannelConversation(record);
   return record;
+}
+
+export async function setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined> {
+  return backend.setChannelConversationModel(id, model);
 }
 
 export async function enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds = 30): Promise<void> {

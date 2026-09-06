@@ -459,6 +459,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `DASHBOARD_URL` | dashboard | — | Public Next.js dashboard URL; `/dashboard` opens its `/app` route |
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `minimax/minimax-m3:free` | Any OpenRouter model ID |
+| `GROUP_DEFAULT_MODEL` | — | same as `DEFAULT_MODEL` | Model for shared group conversations; `/group-model default` restores this value |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
 | `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |

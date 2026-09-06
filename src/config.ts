@@ -28,6 +28,8 @@ function nonNegativeInt(key: string, fallback: number): number {
   return n;
 }
 
+const defaultModel = optional("DEFAULT_MODEL", "minimax/minimax-m3:free");
+
 export const config = {
   // ── Telegram ───────────────────────────────────────────────────────
   telegramToken: required("TELEGRAM_BOT_TOKEN"),
@@ -38,7 +40,8 @@ export const config = {
 
   // ── OpenRouter (for LLM inference) ────────────────────────────────
   openRouterApiKey: required("OPENROUTER_API_KEY"),
-  defaultModel: optional("DEFAULT_MODEL", "minimax/minimax-m3:free"),
+  defaultModel,
+  groupDefaultModel: optional("GROUP_DEFAULT_MODEL", defaultModel),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
