@@ -517,6 +517,7 @@ interface Backend {
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
+  hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimDelivery(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery(key: string, ttlSeconds: number): Promise<void>;
@@ -666,6 +667,9 @@ class RedisBackend implements Backend {
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
+  }
+  async hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+    return (await this.r.exists(this.agentUpgradeKey(userId, upgradeId))) === 1;
   }
   async claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
     return (await this.r.set(this.agentUpgradeKey(userId, upgradeId), "1", "EX", 365 * 24 * 60 * 60, "NX")) === "OK";
@@ -1174,6 +1178,9 @@ class MemoryBackend implements Backend {
     if (expiresAt && expiresAt > Date.now()) return false;
     this.telegramUpdates.set(updateId, Date.now() + ttlSeconds * 1000);
     return true;
+  }
+  async hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+    return this.agentUpgrades.has(`${userId}:${upgradeId}`);
   }
   async claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
     const key = `${userId}:${upgradeId}`;
@@ -1822,6 +1829,10 @@ export async function claimTelegramUpdate(updateId: number, ttlSeconds = 24 * 60
 /** Atomically claims a release notice for one user. Redis uses SET NX so concurrent channel requests cannot duplicate it. */
 export async function claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
   return backend.claimAgentUpgrade(userId, upgradeId);
+}
+
+export async function hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+  return backend.hasAgentUpgrade(userId, upgradeId);
 }
 
 export function hashCliSecret(value: string): string {

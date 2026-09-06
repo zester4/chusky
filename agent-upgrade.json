@@ -1,11 +1,11 @@
 {
-  "id": "skill-tools-2026-09-06",
-  "version": "3.1.0",
+  "id": "upgrade-notices-2026-09-06",
+  "version": "3.1.1",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added project skill discovery with nested reference support.",
-    "Enabled skill guidance for the supervisor and all specialist agents.",
-    "Added safer, bounded skill file reads without script execution."
+    "Upgrade notices are now packaged into production deployments.",
+    "Chusky can see the release update before composing its reply.",
+    "Delivery is recorded once per user with an atomic Redis claim."
   ],
   "createdAt": "2026-09-06T00:00:00.000Z"
 }

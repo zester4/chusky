@@ -42,7 +42,7 @@ import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, 
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { relevantSkillContext } from "./skills/catalog.js";
-import { claimUpgradeNotice, formatAgentUpgradeNotice, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
+import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -590,6 +590,17 @@ export async function runAgent(
   } catch (error) {
     logger.warn({ err: error }, "Agent upgrade manifest unavailable; continuing without release notice");
   }
+  let announceUpgrade = false;
+  if (pendingUpgrade) {
+    try {
+      announceUpgrade = !(await isUpgradeNoticeClaimed(userId, pendingUpgrade));
+    } catch (error) {
+      // A transient status-read failure must not block the user's request. The
+      // final response still attempts the atomic claim and remains best effort.
+      logger.warn({ err: error, userId }, "Agent upgrade status unavailable; continuing with release context");
+      announceUpgrade = true;
+    }
+  }
   let relevantMemories: Awaited<ReturnType<typeof searchMemories>> = [];
   if (channelContext?.scope !== "shared" && typeof userMessage === "string" && userMessage.trim()) {
     relevantMemories = await searchMemories(userId, userMessage, { limit: 8 });
@@ -627,8 +638,11 @@ export async function runAgent(
   } catch (error) {
     logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
   }
+  const upgradeContext = announceUpgrade && pendingUpgrade
+    ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
+    : "";
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}` },
+    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
@@ -645,7 +659,13 @@ export async function runAgent(
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
   const addUpgradeNotice = async (text: string): Promise<string> => {
-    if (!pendingUpgrade || !(await claimUpgradeNotice(userId, pendingUpgrade))) return text;
+    if (!pendingUpgrade || !announceUpgrade) return text;
+    try {
+      if (!(await claimUpgradeNotice(userId, pendingUpgrade))) return text;
+    } catch (error) {
+      logger.warn({ err: error, userId }, "Could not record agent upgrade notice delivery");
+      return text;
+    }
     return `${formatAgentUpgradeNotice(pendingUpgrade)}\n\n${text}`.trim();
   };
 

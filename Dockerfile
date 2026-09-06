@@ -5,6 +5,7 @@ COPY package*.json ./
 RUN npm ci --legacy-peer-deps
 COPY tsconfig.json ./
 COPY src ./src
+COPY agent-upgrade.json ./agent-upgrade.json
 RUN npm run build
 
 # ── Stage 2: production ───────────────────────────────────────────────────────
@@ -17,6 +18,7 @@ RUN apk add --no-cache ffmpeg
 COPY package*.json ./
 RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/agent-upgrade.json ./agent-upgrade.json
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:8080/health || exit 1

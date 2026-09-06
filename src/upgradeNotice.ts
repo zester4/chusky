@@ -53,6 +53,11 @@ export async function claimUpgradeNotice(userId: number, notice: AgentUpgradeNot
   return claimAgentUpgrade(userId, notice.id);
 }
 
+export async function isUpgradeNoticeClaimed(userId: number, notice: AgentUpgradeNotice): Promise<boolean> {
+  const { hasAgentUpgrade } = await import("./store.js");
+  return hasAgentUpgrade(userId, notice.id);
+}
+
 export async function writeAgentUpgrade(manifestPath: string, value: unknown): Promise<AgentUpgradeNotice> {
   const notice = validateAgentUpgrade(value);
   await writeFile(manifestPath, `${JSON.stringify(notice, null, 2)}\n`, "utf8");
