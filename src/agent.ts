@@ -885,7 +885,7 @@ export async function runAgent(
         }
         result = typeof execResult === "string"
           ? execResult
-          : JSON.stringify(execResult);
+          : JSON.stringify(execResult) ?? "undefined";
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");

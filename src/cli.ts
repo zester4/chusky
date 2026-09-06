@@ -51,7 +51,7 @@ function attachmentParts(line: string): { path: string; message: string } | unde
 
 function mediaTypeFor(path: string): string {
   const ext = path.toLowerCase().split(".").pop() ?? "";
-  const types: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", ogg: "audio/ogg", oga: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", webm: "video/webm", mp4: "video/mp4", pdf: "application/pdf", txt: "text/plain", md: "text/markdown" };
+  const types: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", ogg: "audio/ogg", oga: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", webm: "video/webm", mp4: "video/mp4", pdf: "application/pdf", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", zip: "application/zip", txt: "text/plain", md: "text/markdown" };
   return types[ext] ?? "application/octet-stream";
 }
 
@@ -84,6 +84,16 @@ async function saveArtifacts(images: { data: string; mediaType: string }[], file
   }
 }
 
+async function saveDownloadedArtifact(client: ChuskyClient, id: string, color: boolean): Promise<void> {
+  const artifact = await client.downloadArtifact(id);
+  const directory = join(dirname(getCliConfigPath()), "artifacts");
+  await mkdir(directory, { recursive: true });
+  const safeName = artifact.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || `${id}.bin`;
+  const path = join(directory, `${Date.now()}-${safeName}`);
+  await writeFile(path, artifact.data);
+  console.log(formatSuccess(`Downloaded artifact to ${path}`, color));
+}
+
 async function chat(): Promise<void> {
   const config = await loadCliConfig();
   const color = config.color ?? process.stdout.isTTY === true;
@@ -102,6 +112,7 @@ async function chat(): Promise<void> {
     try {
       for await (const events of client.eventStream(Date.now(), eventsAbort.signal)) {
         for (const task of events.tasks ?? []) notificationQueue.push(`${paint("Event", "magenta", color)} ${taskLine(task, color)}`);
+        for (const run of events.runs ?? []) notificationQueue.push(`${paint("Run", "magenta", color)} ${run.id} [${run.status}] ${run.input.slice(0, 120)}`);
         for (const approval of events.approvals ?? []) notificationQueue.push(formatWarning(`Approval required: ${approval.toolSlug} — /approve ${approval.id}`, color));
         for (const reminder of events.reminders ?? []) notificationQueue.push(`${paint("Reminder", "yellow", color)} ${reminder.text}`);
         for (const job of events.jobs ?? []) notificationQueue.push(`${paint("Job", "yellow", color)} ${job.text} (${job.cron})`);
@@ -116,7 +127,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -198,6 +209,75 @@ async function chat(): Promise<void> {
         await writeFile(path, text, "utf8"); console.log(formatSuccess(`Conversation exported to ${path}`, color)); continue;
       }
       if (line === "/history") { const items = await loadCollection(client, "history"); await showPaged(items.map((m) => `${m.role}: ${m.content}`).join("\n") || "No history.", true); continue; }
+      if (line === "/workers" || line.startsWith("/workers ")) {
+        const result = await client.workers(line.slice("/workers".length).trim());
+        if (!result.ok) console.log(formatError(result.error || "Could not load workers.", color));
+        else await showPaged(result.workers?.length ? result.workers.map((worker) => `${worker.id}  [${worker.status}]  ${worker.worker}\n${worker.objective}`).join("\n\n") : "No delegated workers.", true);
+        continue;
+      }
+      if (line.startsWith("/worker ")) {
+        const parts = line.slice("/worker ".length).trim().split(/\s+/); const action = parts[0] === "cancel" ? "cancel" : "get"; const id = action === "cancel" ? parts[1] : parts[0];
+        if (!id) { console.log(formatError("Usage: /worker <id> | /worker cancel <id>", color)); continue; }
+        const result = action === "cancel" ? await client.cancelWorker(id) : await client.worker(id);
+        const worker: any = result.worker;
+        console.log(result.ok && worker ? `${formatSuccess(`${worker.id} [${worker.status}]`, color)}\nWorker: ${worker.worker}\nObjective: ${worker.objective}\nExpected: ${worker.expectedOutput || "not specified"}` : formatError(result.error || "Worker not found.", color));
+        continue;
+      }
+      if (line === "/skills" || line.startsWith("/skills ")) {
+        const result = await client.skills(line.slice("/skills".length).trim());
+        if (!result.ok) console.log(formatError(result.error || "Could not load skills.", color));
+        else await showPaged(result.skills?.length ? result.skills.map((skill) => `${skill.name}\n${skill.description}`).join("\n\n") : "No matching skills.", true);
+        continue;
+      }
+      if (line.startsWith("/skill ")) {
+        const parts = line.slice("/skill ".length).trim().split(/\s+/); const name = parts.shift() || "";
+        if (!name) { console.log(formatError("Usage: /skill <name> [file] | /skill files <name>", color)); continue; }
+        if (name === "files") { const skillName = parts.shift(); if (!skillName) { console.log(formatError("Usage: /skill files <name>", color)); continue; } const result = await client.skillFiles(skillName); console.log(result.ok ? result.files.map((file) => `${file.path}  (${file.bytes} bytes${file.binary ? ", binary" : ""})`).join("\n") || "No skill files found." : formatError(result.error || "Skill not found.", color)); }
+        else { const result = await client.skillRead(name, parts.join(" ") || "SKILL.md"); if (!result.ok) console.log(formatError(result.error || "Skill file not found.", color)); else await showPaged(`${paint(`${name}/${result.path}`, "cyan", color)}\n\n${result.content || "(binary or empty file)"}`, true); }
+        continue;
+      }
+      if (line === "/artifacts" || line.startsWith("/artifacts ")) {
+        const result = await client.artifacts(line.slice("/artifacts".length).trim());
+        if (!result.ok) console.log(formatError(result.error || "Could not load artifacts.", color));
+        else await showPaged(result.artifacts?.length ? result.artifacts.map((artifact) => `${artifact.id}  [${artifact.type}]  ${artifact.name}  (${artifact.size} bytes)`).join("\n") : "No artifacts.", true);
+        continue;
+      }
+      if (line.startsWith("/artifact ")) {
+        const parts = line.slice("/artifact ".length).trim().split(/\s+/); const action = parts.shift() || "";
+        try {
+          if (action === "download" && parts[0]) await saveDownloadedArtifact(client, parts[0], color);
+          else if (action === "delete" && parts[0]) { const result = await client.deleteArtifact(parts[0]); console.log(result.ok ? formatSuccess(`Deleted artifact ${parts[0]}.`, color) : formatError(result.error || "Artifact could not be deleted.", color)); }
+          else if (action === "package" && parts.length) { const result = await client.packageArtifacts(parts); console.log(result.ok ? formatSuccess(`Package created: ${result.artifact?.id || "queued"}.`, color) : formatError(result.error || "Package could not be created.", color)); }
+          else console.log(formatError("Usage: /artifact download|delete <id> | /artifact package <workspace-file> [more files]", color));
+        } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); }
+        continue;
+      }
+      if (line === "/videos") {
+        const result = await client.videos(); console.log(result.ok ? (result.videos?.map((video) => `${video.id}  [${video.status}]  ${video.destination}  ${video.prompt}`).join("\n") || "No video jobs.") : formatError(result.error || "Could not load video jobs.", color)); continue;
+      }
+      if (line.startsWith("/video ")) {
+        const parts = line.slice("/video ".length).trim().split(/\s+/); const action = parts.shift() || "";
+        if (action === "create") { const result = await client.createVideo({ prompt: parts.join(" ") }); console.log(result.ok ? formatSuccess(`Video queued: ${result.video?.id || "created"}.`, color) : formatError(result.error || "Video could not be queued.", color)); }
+        else if ((action === "status" || action === "cancel") && parts[0]) { const result = action === "status" ? await client.video(parts[0]) : await client.cancelVideo(parts[0]); const video: any = result.video; console.log(result.ok && video ? `${video.id}  [${video.status}]  ${video.prompt}${video.error ? `\nError: ${video.error}` : ""}` : formatError(result.error || "Video job not found.", color)); }
+        else console.log(formatError("Usage: /videos | /video create <prompt> | /video status|cancel <id>", color));
+        continue;
+      }
+      if (line === "/runs" || line.startsWith("/runs ")) {
+        const result = await client.runs(line.slice("/runs".length).trim());
+        if (!result.ok) console.log(formatError(result.error || "Could not load runs.", color));
+        else await showPaged(result.runs?.length ? result.runs.map((run) => `${run.id}  [${run.status}]  ${run.model || "default"}\n${run.input}`).join("\n\n") : "No durable runs.", true);
+        continue;
+      }
+      if (line.startsWith("/run ")) {
+        const raw = line.slice("/run ".length).trim(); const parts = raw.split(/\s+/); const action = ["status", "events", "cancel", "resume"].includes(parts[0]) ? parts.shift()! : "create";
+        if (action === "create") { const durationIndex = parts.findIndex((item) => ["5m", "30m", "1h", "3h", "6h", "3d", "1w"].includes(item)); const duration = durationIndex >= 0 ? parts.splice(durationIndex, 1)[0] : "30m"; const modelFlag = parts.find((item) => item.startsWith("--model=")); const toolsFlag = parts.find((item) => item.startsWith("--max-tools=")); const costFlag = parts.find((item) => item.startsWith("--max-cost=")); const input = parts.filter((item) => !item.startsWith("--model=") && !item.startsWith("--max-tools=") && !item.startsWith("--max-cost=")).join(" "); const result = await client.createRun({ input, duration, ...(modelFlag ? { model: modelFlag.slice(8) } : {}), ...(toolsFlag ? { maxToolCalls: Number(toolsFlag.slice(12)) } : {}), ...(costFlag ? { maxCost: Number(costFlag.slice(11)) } : {}) }); console.log(result.ok ? formatSuccess(`Run queued: ${result.run?.id || "created"} (${duration}).`, color) : formatError(result.error || "Run could not be queued.", color)); }
+        else if (parts[0]) { const id = parts[0]; const result = action === "status" ? await client.run(id) : action === "events" ? await client.runEvents(id) : action === "cancel" ? await client.cancelRun(id) : await client.resumeRun(id); if (action === "events") console.log(result.ok ? ((result.events as any[] | undefined)?.map((event: any) => `${new Date(event.at).toISOString()}  ${event.type}${event.text ? ` — ${event.text}` : ""}`).join("\n") || "No new events.") : formatError(result.error || "Run not found.", color)); else { const run: any = result.run; console.log(result.ok && run ? `${run.id}  [${run.status}]  ${run.model || "default"}\n${run.input}${run.output ? `\n\n${run.output}` : ""}${run.error ? `\nError: ${run.error.message}` : ""}` : formatError(result.error || "Run not found.", color)); } }
+        else console.log(formatError("Usage: /run <prompt> [5m|30m|1h|3h|6h|3d|1w] | /run status|events|cancel|resume <id>", color));
+        continue;
+      }
+      if (line === "/webhooks") { const result = await client.webhooks(); console.log(result.ok ? (result.webhooks?.map((hook) => `${hook.id}  [${hook.disabledAt ? "disabled" : "enabled"}]  ${hook.url}`).join("\n") || "No webhooks.") : formatError(result.error || "Could not load webhooks.", color)); continue; }
+      if (line.startsWith("/webhook ")) { const parts = line.slice("/webhook ".length).trim().split(/\s+/); const action = parts.shift() || ""; const id = parts.shift(); let result: any; if (action === "add" && id) result = await client.createWebhook(id); else if (["enable", "disable"].includes(action) && id) result = await client.setWebhook(id, action === "enable"); else if (action === "delete" && id) result = await client.deleteWebhook(id); else { console.log(formatError("Usage: /webhook add <https-url> | enable|disable|delete <id>", color)); continue; } console.log(result.ok ? formatSuccess(action === "add" ? `Webhook created${result.secret ? `; secret: ${result.secret}` : ""}.` : `Webhook ${action} completed.`, color) : formatError(result.error || "Webhook operation failed.", color)); continue; }
+      if (line === "/deliveries") { const result = await client.deliveries(); console.log(result.ok ? (result.deliveries?.map((delivery) => `${delivery.id}  [${delivery.status}]  ${delivery.provider}  ${delivery.kind}${delivery.lastError ? ` — ${delivery.lastError}` : ""}`).join("\n") || "No deliveries.") : formatError(result.error || "Could not load deliveries.", color)); continue; }
       if (line === "/tasks") {
         const result = await client.tasks();
         if (!result.ok) console.log(formatError(result.error || "Could not load tasks.", color));

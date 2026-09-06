@@ -6,11 +6,11 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getHandoffRecord, saveHandoffRecord, updateTask } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask } from "./store.js";
+import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
@@ -22,7 +22,7 @@ import { WhatsAppAdapter } from "./channels/whatsapp.js";
 import { SendblueAdapter } from "./channels/sendblue.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
@@ -36,7 +36,8 @@ import { executeDelegation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { readSkillFile } from "./skills/catalog.js";
+import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
+import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -212,6 +213,9 @@ async function main(): Promise<void> {
       }
       try { return await work(); } finally { await releaseUserLock(userId, token); }
     };
+    const cliArtifactView = (item: any) => ({ id: item.id, name: item.name, type: item.type, path: item.path, contentType: item.contentType, size: item.size, status: item.status, sandboxId: item.sandboxId, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString() });
+    const cliWorkerView = (item: any) => item ? ({ id: item.id, worker: item.to, from: item.from, objective: item.objective, expectedOutput: item.expectedOutput, status: item.status, taskId: item.taskId, workflowRunId: item.workflowRunId, timestamp: new Date(item.timestamp).toISOString(), context: item.context, delegation: item.delegation }) : undefined;
+    const cliRunView = (item: any, threadId?: string, taskId?: string) => item ? ({ id: item.id, threadId, taskId: taskId ?? item.taskId, status: item.status, input: item.input, model: item.model, output: item.output, budget: item.budget, error: item.error, events: item.events, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString() }) : undefined;
 
     const twilioCallbackUrl = (path: string, callId: string, userId: number) => `${config.twilioWebhookBaseUrl.replace(/\/+$/, "")}${path}?callId=${encodeURIComponent(callId)}&userId=${encodeURIComponent(String(userId))}`;
     const twilioForm = (body: Record<string, unknown>): Record<string, string> => Object.fromEntries(
@@ -418,7 +422,7 @@ async function main(): Promise<void> {
       const maxBytes = 12 * 1024 * 1024;
       if (uploaded.size < 1 || uploaded.size > maxBytes) return c.json({ ok: false, error: "file must be between 1 byte and 12 MB" }, 413);
       const mime = uploaded.type.toLowerCase();
-      const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "video/mp4", "video/webm", "application/pdf", "text/plain", "text/markdown"]);
+      const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "video/mp4", "video/webm", "application/pdf", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "text/plain", "text/markdown"]);
       if (!allowed.has(mime)) return c.json({ ok: false, error: `unsupported file type: ${mime || "unknown"}` }, 415);
       if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
       if (!(await canSpend(device.userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
@@ -474,17 +478,173 @@ async function main(): Promise<void> {
       return c.json({ ok: true, kind, page: safePage, pageSize, total, totalPages, items: items.slice((safePage - 1) * pageSize, safePage * pageSize) });
     });
 
+    app.get("/cli/workers", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const status = String(c.req.query("status") ?? "").trim();
+      const workers = (await listHandoffRecords(device.userId)).filter((item) => !status || item.status === status).slice(0, 100).map(cliWorkerView);
+      return c.json({ ok: true, workers });
+    });
+    app.get("/cli/workers/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const worker = cliWorkerView(await getHandoffRecord(device.userId, c.req.param("id")));
+      return worker ? c.json({ ok: true, worker }) : c.json({ ok: false, error: "worker not found" }, 404);
+    });
+    app.post("/cli/workers", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const worker = String(body.worker ?? "").trim(); const objective = String(body.objective ?? "").trim();
+      if (!worker || !objective || objective.length > 12_000) return c.json({ ok: false, error: "worker and objective are required" }, 400);
+      try {
+        const result: any = await withCliLock(device.userId, c.req.raw.signal, () => nativeTool(device.userId, "CHUCK_DELEGATE_SUBAGENT", { ...body, worker, objective }));
+        const record = result?.handoffRecord ?? result;
+        return c.json({ ok: true, worker: cliWorkerView(record), result }, 202);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 400); }
+    });
+    app.post("/cli/workers/:id/cancel", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const record = await getHandoffRecord(device.userId, c.req.param("id"));
+      if (!record) return c.json({ ok: false, error: "worker not found" }, 404);
+      if (record.taskId) await cancelTask(device.userId, record.taskId);
+      const updated = await saveHandoffRecord(device.userId, { ...record, status: "cancelled" });
+      return c.json({ ok: true, worker: cliWorkerView(updated) });
+    });
+
+    app.get("/cli/skills", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { return c.json({ ok: true, skills: await searchSkills(c.req.query("query") ?? "", Number(c.req.query("limit") ?? 20)) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "skill catalogue unavailable" }, 500); }
+    });
+    app.get("/cli/skills/:name/files", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { return c.json({ ok: true, files: await listSkillFiles(c.req.param("name"), Number(c.req.query("maxFiles") ?? 100)) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "skill not found" }, 404); }
+    });
+    app.get("/cli/skills/:name/read", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { return c.json({ ok: true, ...(await readSkillFile(c.req.param("name"), c.req.query("path") ?? "SKILL.md", Number(c.req.query("maxChars") ?? 12_000))) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "skill file not found" }, 404); }
+    });
+
+    app.get("/cli/artifacts", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const type = String(c.req.query("type") ?? ""); const artifacts = ((await getSession(device.userId)).artifacts ?? []).filter((item) => !type || item.type === type).slice(-100).reverse().map(cliArtifactView);
+      return c.json({ ok: true, artifacts });
+    });
+    app.get("/cli/artifacts/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const artifact = (await getSession(device.userId)).artifacts?.find((item) => item.id === c.req.param("id"));
+      return artifact ? c.json({ ok: true, artifact: cliArtifactView(artifact) }) : c.json({ ok: false, error: "artifact not found" }, 404);
+    });
+    app.get("/cli/artifacts/:id/download", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { const artifact = await daytonaEngine.downloadArtifact(device.userId, c.req.param("id")); return new Response(artifact.data, { headers: { "Content-Type": artifact.contentType, "Content-Length": String(artifact.size), "Content-Disposition": `attachment; filename="${artifact.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "artifact unavailable" }, 404); }
+    });
+    app.delete("/cli/artifacts/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { const result = await withCliLock(device.userId, c.req.raw.signal, () => nativeTool(device.userId, "CHUCK_ARTIFACT", { action: "delete", id: c.req.param("id") })); return c.json({ ok: true, result }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "artifact could not be deleted" }, 404); }
+    });
+    app.post("/cli/artifacts/package", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { files?: unknown; name?: unknown };
+      if (!Array.isArray(body.files) || !body.files.length || body.files.length > 100 || !body.files.every((item) => typeof item === "string")) return c.json({ ok: false, error: "files must be a non-empty array of workspace-relative paths" }, 400);
+      try { const result: any = await withCliLock(device.userId, c.req.raw.signal, () => daytonaEngine.artifact(device.userId, { action: "package", files: body.files, name: body.name })); return c.json({ ok: true, artifact: cliArtifactView(result) }, 201); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "artifact package could not be created" }, 400); }
+    });
+
+    app.get("/cli/videos", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const videos = (await listVideoJobs(device.userId)).map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), ...(item.completedAt ? { completedAt: new Date(item.completedAt).toISOString() } : {}) }));
+      return c.json({ ok: true, videos });
+    });
+    app.post("/cli/videos", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const prompt = String(body.prompt ?? "").trim(); const destination = ["telegram", "daytona", "both"].includes(String(body.destination)) ? String(body.destination) : "telegram";
+      if (!prompt || prompt.length > 4000) return c.json({ ok: false, error: "prompt is required and must be 4000 characters or fewer" }, 400);
+      try { const queued = await queueVideoWorkflow(device.userId, prompt, destination as "telegram" | "daytona" | "both", typeof body.workspacePath === "string" ? body.workspacePath : undefined, { duration: typeof body.duration === "number" ? body.duration : undefined, aspectRatio: typeof body.aspectRatio === "string" ? body.aspectRatio : undefined, resolution: typeof body.resolution === "string" ? body.resolution : undefined, generateAudio: typeof body.generateAudio === "boolean" ? body.generateAudio : undefined }); const video = await getVideoJob(device.userId, queued.jobId); return c.json({ ok: true, video: video && { ...video, createdAt: new Date(video.createdAt).toISOString(), updatedAt: new Date(video.updatedAt).toISOString() } }, 202); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "video generation unavailable" }, 503); }
+    });
+    app.get("/cli/videos/:id", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const video = await getVideoJob(device.userId, c.req.param("id")); return video ? c.json({ ok: true, video: { ...video, createdAt: new Date(video.createdAt).toISOString(), updatedAt: new Date(video.updatedAt).toISOString() } }) : c.json({ ok: false, error: "video job not found" }, 404); });
+    app.post("/cli/videos/:id/cancel", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const video = await getVideoJob(device.userId, c.req.param("id")); if (!video) return c.json({ ok: false, error: "video job not found" }, 404); const updated = await updateVideoJob(device.userId, video.id, { status: "cancelled" }); return c.json({ ok: true, video: updated && { ...updated, createdAt: new Date(updated.createdAt).toISOString(), updatedAt: new Date(updated.updatedAt).toISOString() } }); });
+
+    app.get("/cli/deliveries", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const deliveries = (await listOutbox(undefined, 500)).filter((item) => item.userId === device.userId && !item.webhook).slice(0, 100).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ ok: true, deliveries }); });
+    app.get("/cli/webhooks", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const webhooks = (await getSession(device.userId)).sdkWebhooks?.map((item) => ({ id: item.id, url: item.url, createdAt: new Date(item.createdAt).toISOString(), disabledAt: item.disabledAt ? new Date(item.disabledAt).toISOString() : undefined })) ?? []; return c.json({ ok: true, webhooks }); });
+    app.post("/cli/webhooks", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const body = await c.req.json().catch(() => ({})) as { url?: unknown }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return c.json({ ok: false, error: "a valid HTTPS webhook URL is required" }, 400); } if (!isSafeWebhookUrl(url)) return c.json({ ok: false, error: "webhook URLs must use public HTTPS endpoints" }, 400); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const session = await getSession(device.userId); session.sdkWebhooks = [...(session.sdkWebhooks ?? []), hook].slice(-20); await saveSession(device.userId, session); return c.json({ ok: true, webhook: { id: hook.id, url: hook.url, createdAt: new Date(hook.createdAt).toISOString() }, secret }, 201); });
+    app.patch("/cli/webhooks/:id", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const enabled = (await c.req.json().catch(() => ({})) as { enabled?: unknown }).enabled; if (typeof enabled !== "boolean") return c.json({ ok: false, error: "enabled must be boolean" }, 400); const session = await getSession(device.userId); const hook = session.sdkWebhooks?.find((item) => item.id === c.req.param("id")); if (!hook) return c.json({ ok: false, error: "webhook not found" }, 404); hook.disabledAt = enabled ? undefined : Date.now(); await saveSession(device.userId, session); return c.json({ ok: true, enabled }); });
+    app.delete("/cli/webhooks/:id", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "webhook not found" }, 404); const session = await getSession(device.userId); const hook = session.sdkWebhooks?.find((item) => item.id === c.req.param("id")); if (!hook) return c.json({ ok: false, error: "webhook not found" }, 404); hook.disabledAt = Date.now(); await saveSession(device.userId, session); return c.json({ ok: true }); });
+
+    // Durable CLI runs use the same task runner and budget enforcement as the
+    // public SDK. This keeps terminal-launched work resumable across process
+    // restarts instead of tying it to an HTTP request lifetime.
+    app.get("/cli/runs", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const status = String(c.req.query("status") ?? "").trim();
+      const session = await getSession(device.userId);
+      const runs = session.sdkThreads!.flatMap((thread) => thread.runs.map((run) => cliRunView(run, thread.id))).filter((run: any) => Boolean(run) && (!status || run.status === status)).sort((a: any, b: any) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 100);
+      return c.json({ ok: true, runs });
+    });
+    app.post("/cli/runs", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const input = String(body.input ?? "").trim();
+      const duration = body.duration === undefined ? "30m" : String(body.duration);
+      if (!input || input.length > 30_000) return c.json({ ok: false, error: "input is required and must be 30000 characters or fewer" }, 400);
+      if (!sdkDurationSeconds(duration)) return c.json({ ok: false, error: "duration must be one of 5m, 30m, 1h, 3h, 6h, 3d, or 1w" }, 400);
+      if (body.model !== undefined && (typeof body.model !== "string" || body.model.length > 200 || !/^[~a-zA-Z0-9._:/-]+$/.test(body.model))) return c.json({ ok: false, error: "model is invalid" }, 400);
+      const maxToolCalls = body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls);
+      const maxCost = body.maxCost === undefined ? undefined : Number(body.maxCost);
+      if (maxToolCalls !== undefined && (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 1000)) return c.json({ ok: false, error: "maxToolCalls must be an integer from 1 to 1000" }, 400);
+      if (maxCost !== undefined && (!Number.isFinite(maxCost) || maxCost <= 0 || maxCost > 1000)) return c.json({ ok: false, error: "maxCost must be a number greater than 0 and no more than 1000" }, 400);
+      const session = await getSession(device.userId); const now = Date.now();
+      const threadId = `cli_thread_${randomUUID()}`; const runId = `run_cli_${randomUUID()}`;
+      const thread = { id: threadId, externalId: `cli-${device.name}-${now}`, metadata: { source: "cli", title: input.slice(0, 120) }, history: [], runs: [] as any[], createdAt: now, updatedAt: now };
+      const run: any = { id: runId, status: "queued", input, model: typeof body.model === "string" && body.model.trim() ? body.model.trim() : session.model, budget: { duration, ...(maxToolCalls !== undefined ? { maxToolCalls } : {}), ...(maxCost !== undefined ? { maxCost } : {}) }, events: [{ id: `evt_${randomUUID()}`, type: "run.queued", at: now }], createdAt: now, updatedAt: now };
+      thread.runs.push(run); session.sdkThreads = [thread, ...(session.sdkThreads ?? [])].slice(0, 100); await saveSession(device.userId, session);
+      try {
+        const task = await createTask(device.userId, { title: input.slice(0, 120), objective: input, runAt: now, maxAttempts: 10, sdkRunId: runId, sdkThreadId: threadId, sdkInput: input, sdkModel: run.model, sdkBudget: run.budget, sdkStartedAt: now });
+        run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        const workflowRunId = await enqueueTaskWorkflow(device.userId, task.id, now); await updateTask(device.userId, task.id, { workflowRunId });
+        run.events.push({ id: `evt_${randomUUID()}`, type: "run.scheduled", at: Date.now(), text: workflowRunId }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        return c.json({ ok: true, run: cliRunView(run, threadId, task.id) }, 202);
+      } catch (error) {
+        run.status = "failed"; run.error = { code: "enqueue_failed", message: error instanceof Error ? error.message : String(error) }; run.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: run.error.message }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
+        return c.json({ ok: false, error: run.error.message, run: cliRunView(run, threadId) }, 503);
+      }
+    });
+    app.get("/cli/runs/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSession(device.userId);
+      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (run) return c.json({ ok: true, run: cliRunView(run, thread.id) }); }
+      return c.json({ ok: false, error: "run not found" }, 404);
+    });
+    app.get("/cli/runs/:id/events", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const after = Number(c.req.query("after") ?? 0) || 0; const session = await getSession(device.userId);
+      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (run) return c.json({ ok: true, events: run.events.filter((item) => item.at > after), now: Date.now() }); }
+      return c.json({ ok: false, error: "run not found" }, 404);
+    });
+    app.post("/cli/runs/:id/cancel", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSession(device.userId);
+      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (["completed", "cancelled"].includes(run.status)) return c.json({ ok: false, error: "run is already finished" }, 409); if (run.taskId) await cancelTask(device.userId, run.taskId); run.status = "cancelled"; run.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); return c.json({ ok: true, run: cliRunView(run, thread.id) }); }
+      return c.json({ ok: false, error: "run not found" }, 404);
+    });
+    app.post("/cli/runs/:id/resume", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSession(device.userId);
+      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (!["failed", "cancelled", "requires_approval"].includes(run.status)) return c.json({ ok: false, error: "only failed, cancelled, or approval-paused runs can be resumed" }, 409); if (!run.taskId) return c.json({ ok: false, error: "run has no durable task" }, 409); const task = await retryTask(device.userId, run.taskId); if (!task) return c.json({ ok: false, error: "run task is not retryable" }, 409); run.status = "queued"; run.error = undefined; run.events.push({ id: `evt_${randomUUID()}`, type: "run.resumed", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); try { const workflowRunId = await enqueueTaskWorkflow(device.userId, task.id, Date.now()); await updateTask(device.userId, task.id, { workflowRunId }); return c.json({ ok: true, run: cliRunView(run, thread.id, task.id) }, 202); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "run could not be resumed" }, 503); } }
+      return c.json({ ok: false, error: "run not found" }, 404);
+    });
+
     app.get("/cli/events", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const since = Math.max(0, Number(c.req.query("since") ?? "0") || 0);
       const session = await getSession(device.userId);
       const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > since).slice(0, 20);
+      const runs = session.sdkThreads!.flatMap((thread) => thread.runs.filter((run) => run.updatedAt > since).map((run) => cliRunView(run, thread.id))).filter(Boolean).slice(0, 20);
       const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > since).slice(-20);
       const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
       const reminders = storedReminders.filter((reminder) => reminder.createdAt > since).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
       const jobs = storedJobs.filter((job) => job.createdAt > since).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
-      return c.json({ ok: true, since, now: Date.now(), tasks, approvals, reminders, jobs });
+      return c.json({ ok: true, since, now: Date.now(), tasks, runs, approvals, reminders, jobs });
     });
 
     app.get("/cli/events/stream", async (c) => {
@@ -495,13 +655,14 @@ async function main(): Promise<void> {
         for (let attempt = 0; attempt < 900 && !c.req.raw.signal.aborted; attempt++) {
           const session = await getSession(device.userId);
           const tasks = (await listTasks(device.userId)).filter((task) => task.updatedAt > cursor).slice(0, 20);
+          const runs = session.sdkThreads!.flatMap((thread) => thread.runs.filter((run) => run.updatedAt > cursor).map((run) => cliRunView(run, thread.id))).filter(Boolean).slice(0, 20);
           const approvals = session.approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now() && approval.createdAt > cursor).slice(-20);
           const [storedReminders, storedJobs] = await Promise.all([listReminders(device.userId), listJobs(device.userId)]);
           const reminders = storedReminders.filter((reminder) => reminder.createdAt > cursor).slice(-20).map((reminder) => ({ id: reminder.id, text: reminder.text, runAt: reminder.runAt, status: reminder.status }));
           const jobs = storedJobs.filter((job) => job.createdAt > cursor).slice(-20).map((job) => ({ id: job.id, text: job.text, cron: job.cron, status: job.status }));
           const now = Date.now();
-          if (tasks.length || approvals.length || reminders.length || jobs.length) {
-            await stream.writeSSE({ event: "notification", data: JSON.stringify({ tasks, approvals, reminders, jobs, now }) });
+          if (tasks.length || runs.length || approvals.length || reminders.length || jobs.length) {
+            await stream.writeSSE({ event: "notification", data: JSON.stringify({ tasks, runs, approvals, reminders, jobs, now }) });
           } else await stream.writeSSE({ event: "keepalive", data: String(now) });
           cursor = now;
           await stream.sleep(2000);
@@ -963,6 +1124,10 @@ async function main(): Promise<void> {
               const session = await getSession(task.userId);
               const durationSeconds = sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
+              if (task.sdkRunId && task.sdkThreadId) {
+                const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
+                if (sdkRun && sdkRun.status === "queued") { sdkRun.status = "running"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.started", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); }
+              }
               const budgetAbort = new AbortController(); const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
               let result;
               try { result = await runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions: await sdkTaskSkillInstructions(task.sdkSkills) }); }

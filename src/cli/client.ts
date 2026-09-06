@@ -23,7 +23,7 @@ export interface CliTask {
   attempt: number; maxAttempts: number; runAt?: number; updatedAt: number; events: CliTaskEvent[];
 }
 export interface CliDevice { name: string; createdAt: number; lastSeenAt: number; }
-export interface CliEventsResponse extends CliResponse { now: number; tasks: CliTask[]; approvals: CliSession["approvals"]; reminders: { id: string; text: string; runAt: number; status: string }[]; jobs: { id: string; text: string; cron: string; status: string }[]; }
+export interface CliEventsResponse extends CliResponse { now: number; tasks: CliTask[]; runs?: CliRun[]; approvals: CliSession["approvals"]; reminders: { id: string; text: string; runAt: number; status: string }[]; jobs: { id: string; text: string; cron: string; status: string }[]; }
 export interface CliCollectionResponse extends CliResponse { kind: string; page: number; pageSize: number; total: number; totalPages: number; items: unknown[]; }
 export interface CliResponse { ok: boolean; text?: string; error?: string; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; [key: string]: unknown; }
 export interface CliModel { id: string; name: string; }
@@ -32,6 +32,14 @@ export interface CliAppsResponse extends CliResponse { apps: { slug: string; nam
 export interface CliTriggersResponse extends CliResponse { triggers: unknown[]; }
 export interface CliChannelsResponse extends CliResponse { channels: { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; proactiveOptIn?: boolean }[]; }
 export interface CliGeneratedFile { data: string; name: string; contentType: string; artifactId?: string; type?: string; }
+export interface CliWorker { id: string; worker: string; from: string; objective: string; expectedOutput: string; status: string; taskId?: string; workflowRunId?: string; timestamp: string; delegation?: Record<string, unknown>; context?: Record<string, unknown>; }
+export interface CliSkill { name: string; description: string; path: string; score?: number; files?: number; }
+export interface CliSkillFile { name?: string; path: string; bytes: number; binary: boolean; content?: string; truncated?: boolean; }
+export interface CliArtifact { id: string; name: string; type: string; path: string; contentType: string; size: number; status: string; sandboxId: string; createdAt: string; updatedAt: string; }
+export interface CliVideoJob { id: string; prompt: string; destination: "telegram" | "daytona" | "both"; status: string; pollCount: number; workspacePath?: string; workflowRunId?: string; resultPath?: string; error?: string; createdAt: string; updatedAt: string; completedAt?: string; }
+export interface CliRun { id: string; threadId?: string; taskId?: string; status: string; input: string; model?: string; output?: string; budget?: Record<string, unknown>; error?: { code: string; message: string }; events?: { id: string; type: string; at: number; text?: string }[]; createdAt: string; updatedAt: string; }
+export interface CliWebhook { id: string; url: string; createdAt: string; disabledAt?: string; }
+export interface CliDelivery { id: string; provider: string; status: string; kind: string; attempts: number; providerStatus?: string; lastError?: string; createdAt: string; updatedAt: string; deliveredAt?: string; }
 export type CliStreamEvent = { type: "start" | "delta" | "done" | "approval_required" | "error"; text?: string; error?: string; model?: string; toolsUsed?: string[]; cost?: number; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; images?: { data: string; mediaType: string }[]; files?: CliGeneratedFile[]; speech?: { data: string; mediaType: string } };
 
 const configPath = process.platform === "win32"
@@ -148,4 +156,37 @@ export class ChuskyClient {
     if (!response.ok && !data.error) data.error = `HTTP ${response.status}`;
     return data;
   }
+  workers(status = "") { return this.request(`/cli/workers${status ? `?status=${encodeURIComponent(status)}` : ""}`) as Promise<CliResponse & { workers: CliWorker[] }>; }
+  worker(id: string) { return this.request(`/cli/workers/${encodeURIComponent(id)}`) as Promise<CliResponse & { worker?: CliWorker }>; }
+  createWorker(input: { worker: string; objective: string; expectedOutput?: string; model?: string; duration?: string; maxToolCalls?: number }) { return this.request("/cli/workers", { method: "POST", body: JSON.stringify(input) }) as Promise<CliResponse & { worker?: CliWorker }>; }
+  cancelWorker(id: string) { return this.request(`/cli/workers/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" }) as Promise<CliResponse & { worker?: CliWorker }>; }
+  skills(query = "", limit = 20) { return this.request(`/cli/skills?limit=${Math.max(1, Math.min(20, limit))}${query ? `&query=${encodeURIComponent(query)}` : ""}`) as Promise<CliResponse & { skills: CliSkill[] }>; }
+  skillFiles(name: string) { return this.request(`/cli/skills/${encodeURIComponent(name)}/files`) as Promise<CliResponse & { files: CliSkillFile[] }>; }
+  skillRead(name: string, path = "SKILL.md", maxChars = 12000) { return this.request(`/cli/skills/${encodeURIComponent(name)}/read?path=${encodeURIComponent(path)}&maxChars=${maxChars}`) as Promise<CliResponse & CliSkillFile>; }
+  artifacts(type = "") { return this.request(`/cli/artifacts${type ? `?type=${encodeURIComponent(type)}` : ""}`) as Promise<CliResponse & { artifacts: CliArtifact[] }>; }
+  artifact(id: string) { return this.request(`/cli/artifacts/${encodeURIComponent(id)}`) as Promise<CliResponse & { artifact?: CliArtifact }>; }
+  deleteArtifact(id: string) { return this.request(`/cli/artifacts/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  packageArtifacts(files: string[], name = "chusky-project.zip") { return this.request("/cli/artifacts/package", { method: "POST", body: JSON.stringify({ files, name }) }) as Promise<CliResponse & { artifact?: CliArtifact }>; }
+  async downloadArtifact(id: string): Promise<{ name: string; contentType: string; data: Uint8Array }> {
+    if (!this.config.serverUrl) throw new Error("Set CHUSKY_SERVER_URL or run: chusky auth link --server https://your-chusky-host");
+    const headers = new Headers({ Accept: "application/octet-stream" }); if (this.config.token) headers.set("Authorization", `Bearer ${this.config.token}`);
+    const response = await fetch(`${this.config.serverUrl.replace(/\/$/, "")}/cli/artifacts/${encodeURIComponent(id)}/download`, { headers, signal: AbortSignal.timeout(120000) });
+    if (!response.ok) { const data = await response.json().catch(() => ({})) as CliResponse; throw new Error(data.error || `HTTP ${response.status}`); }
+    return { name: response.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/i)?.[1] || `${id}.bin`, contentType: response.headers.get("content-type") || "application/octet-stream", data: new Uint8Array(await response.arrayBuffer()) };
+  }
+  videos() { return this.request("/cli/videos") as Promise<CliResponse & { videos: CliVideoJob[] }>; }
+  createVideo(input: { prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; duration?: number; aspectRatio?: string; resolution?: string; generateAudio?: boolean }) { return this.request("/cli/videos", { method: "POST", body: JSON.stringify(input) }) as Promise<CliResponse & { video?: CliVideoJob }>; }
+  video(id: string) { return this.request(`/cli/videos/${encodeURIComponent(id)}`) as Promise<CliResponse & { video?: CliVideoJob }>; }
+  cancelVideo(id: string) { return this.request(`/cli/videos/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" }) as Promise<CliResponse & { video?: CliVideoJob }>; }
+  runs(status = "") { return this.request(`/cli/runs${status ? `?status=${encodeURIComponent(status)}` : ""}`) as Promise<CliResponse & { runs: CliRun[] }>; }
+  run(id: string) { return this.request(`/cli/runs/${encodeURIComponent(id)}`) as Promise<CliResponse & { run?: CliRun }>; }
+  createRun(input: { input: string; model?: string; duration?: string; maxToolCalls?: number; maxCost?: number }) { return this.request("/cli/runs", { method: "POST", body: JSON.stringify(input) }) as Promise<CliResponse & { run?: CliRun }>; }
+  runEvents(id: string, after = 0) { return this.request(`/cli/runs/${encodeURIComponent(id)}/events?after=${after}`) as Promise<CliResponse & { events: CliRun["events"] }>; }
+  cancelRun(id: string) { return this.request(`/cli/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", body: "{}" }) as Promise<CliResponse & { run?: CliRun }>; }
+  resumeRun(id: string) { return this.request(`/cli/runs/${encodeURIComponent(id)}/resume`, { method: "POST", body: "{}" }) as Promise<CliResponse & { run?: CliRun }>; }
+  webhooks() { return this.request("/cli/webhooks") as Promise<CliResponse & { webhooks: CliWebhook[] }>; }
+  createWebhook(url: string) { return this.request("/cli/webhooks", { method: "POST", body: JSON.stringify({ url }) }) as Promise<CliResponse & { webhook?: CliWebhook; secret?: string }>; }
+  setWebhook(id: string, enabled: boolean) { return this.request(`/cli/webhooks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }); }
+  deleteWebhook(id: string) { return this.request(`/cli/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" }); }
+  deliveries() { return this.request("/cli/deliveries") as Promise<CliResponse & { deliveries: CliDelivery[] }>; }
 }
