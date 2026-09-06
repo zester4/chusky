@@ -692,7 +692,9 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "    styles.add(ParagraphStyle(name='ChuskyBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.4, textColor=text, spaceAfter=8, widowControl=True))",
     "    styles.add(ParagraphStyle(name='ChuskyBullet', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.35, leftIndent=14, firstLineIndent=-8, textColor=text, spaceAfter=4, widowControl=True))",
     "    styles.add(ParagraphStyle(name='ChuskyCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=8.5, leading=10.5, textColor=text, spaceAfter=0, widowControl=True))",
-    "    styles.add(ParagraphStyle(name='ChuskyCaption', parent=styles['Caption'], fontName='Helvetica-Oblique', fontSize=8.5, leading=11, textColor=muted, alignment=TA_CENTER, spaceBefore=4, spaceAfter=10, keepWithNext=False))",
+    // ReportLab's sample stylesheet does not guarantee a Caption style. Use
+    // BodyText as the stable base for captions across renderer versions.
+    "    styles.add(ParagraphStyle(name='ChuskyCaption', parent=styles['BodyText'], fontName='Helvetica-Oblique', fontSize=8.5, leading=11, textColor=muted, alignment=TA_CENTER, spaceBefore=4, spaceAfter=10, keepWithNext=False))",
     "    def rich(value):",
     "        value=escape(str(value)).replace('\\n', '<br/>')",
     "        value=re.sub(r'\\*\\*(.+?)\\*\\*', r'<b>\\1</b>', value)",
