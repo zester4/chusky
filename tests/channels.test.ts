@@ -259,8 +259,32 @@ test("a Sendblue identity linked in a direct chat can use Chusky in a group", as
     from_number: "+15550002",
     content: "Group reply",
     group_id: "group-1",
+    numbers: ["+15550001", "+15550002"],
     reply_to: { message_handle: "sb-group-in-1" },
   });
+});
+
+test("Sendblue carries newly added group participants into outbound delivery", async () => {
+  const requests: any[] = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: "sb-group-out-2" }), { status: 200 });
+  }) as typeof fetch);
+  const message = normalizeSendblueMessage({
+    message_handle: "sb-group-in-2",
+    from_number: "+15550001",
+    sendblue_number: "+15550002",
+    group_id: "group-1",
+    content: "A new participant was added",
+    participants: ["+15550001", "+15550002", "+15550003", "not-a-number", "+15550003"],
+  });
+  assert.deepEqual(message?.providerParticipantIds, ["+15550001", "+15550002", "+15550003"]);
+  await adapter.send({
+    accountId: "account_42", userId: 42,
+    target: { provider: "sendblue", conversationId: "group-1", metadata: { groupId: "group-1", groupParticipants: JSON.stringify(message?.providerParticipantIds) } },
+    text: "Welcome to the group", idempotencyKey: "sendblue-group-participants-1",
+  });
+  assert.deepEqual(requests[0].body.numbers, ["+15550001", "+15550002", "+15550003"]);
 });
 
 test("keeps shared iMessage links as text even when Sendblue labels the event audio", () => {

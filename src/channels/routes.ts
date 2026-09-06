@@ -161,7 +161,25 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
         const payload = JSON.parse(raw) as any;
         if (await processStatus(payload)) return c.json({ ok: true, status: true });
         const message = normalizeSendblueMessage(payload);
-        if (!message) return c.json({ ok: true, ignored: true });
+        if (!message) {
+          // Keep provider diagnostics useful without logging message content or
+          // phone numbers. This is especially important when a group member
+          // change causes Sendblue to deliver a shape we cannot normalize.
+          logger.warn({
+            event: "sendblue_receive_ignored",
+            isOutbound: payload?.is_outbound === true,
+            hasMessageHandle: Boolean(payload?.message_handle),
+            hasSender: Boolean(payload?.from_number),
+            hasRecipient: Boolean(payload?.sendblue_number ?? payload?.to_number),
+            hasGroupId: Boolean(String(payload?.group_id ?? "").trim()),
+            participantCount: Array.isArray(payload?.participants) ? payload.participants.length : 0,
+            messageType: typeof payload?.message_type === "string" ? payload.message_type.slice(0, 40) : undefined,
+          }, "Ignored Sendblue receive webhook payload");
+          return c.json({ ok: true, ignored: true });
+        }
+        if (message.scope === "shared") {
+          logger.info({ event: "sendblue_group_received", participantCount: message.providerParticipantIds?.length ?? 0 }, "Received Sendblue group message");
+        }
         const record = await createChannelInboundEvent(message);
         if (sendblue.enqueue && await claimChannelInboundEvent(record.eventId)) {
           const eventId = record.eventId;

@@ -81,11 +81,17 @@ export function normalizeSendblueMessage(payload: any, receivedAt = Date.now()):
   const sender = String(payload.from_number).trim();
   const recipient = String(payload.sendblue_number ?? payload.to_number ?? "").trim();
   if (!sender || !recipient) return undefined;
+  const participants = Array.isArray(payload.participants)
+    ? [...new Set<string>(payload.participants
+      .map((value: unknown) => typeof value === "string" ? value.trim() : "")
+      .filter((value: string) => /^\+[1-9]\d{7,14}$/.test(value)))].slice(0, 50)
+    : [];
   return {
     provider: "sendblue",
     providerEventId: String(payload.message_handle),
     providerUserId: sender,
     providerConversationId: groupId || sender,
+    ...(groupId && participants.length ? { providerParticipantIds: participants } : {}),
     ...(groupId ? { providerWorkspaceId: recipient } : {}),
     ...(payload.reply_to?.message_handle ? { providerReplyToId: String(payload.reply_to.message_handle) } : {}),
     text: typeof payload.content === "string" && payload.content.trim() ? payload.content.trim() : undefined,
@@ -228,12 +234,22 @@ export class SendblueAdapter implements ChannelAdapter {
     if (!this.apiKey || !this.apiSecret || !this.fromNumber) throw new Error("Sendblue API credentials and sending number are required");
     const groupId = message.target.metadata?.groupId;
     const isGroup = Boolean(groupId);
+    const groupParticipants = isGroup
+      ? (() => {
+        try {
+          const parsed = JSON.parse(message.target.metadata?.groupParticipants ?? "[]");
+          return Array.isArray(parsed)
+            ? [...new Set(parsed.filter((value): value is string => typeof value === "string" && /^\+[1-9]\d{7,14}$/.test(value)))].slice(0, 50)
+            : [];
+        } catch { return []; }
+      })()
+      : [];
     const attachments = message.attachments?.filter((item) => item.url).slice(0, 10) ?? [];
     const body: Record<string, unknown> = {
       from_number: this.fromNumber,
       content: formatSendblueText(message.text ?? "").slice(0, this.capabilities.maxTextLength),
       ...(this.statusCallback ? { status_callback: this.statusCallback } : {}),
-      ...(groupId ? { group_id: groupId } : { number: message.target.conversationId }),
+      ...(groupId ? { group_id: groupId, ...(groupParticipants.length ? { numbers: groupParticipants } : {}) } : { number: message.target.conversationId }),
       ...(message.target.metadata?.messageHandle ? { reply_to: { message_handle: message.target.metadata.messageHandle } } : {}),
     };
     if (message.template || message.interactive) throw new Error("Sendblue interactive or template messages cannot include media");

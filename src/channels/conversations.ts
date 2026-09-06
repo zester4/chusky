@@ -18,7 +18,12 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
     workspaceId: message.providerWorkspaceId,
     ...(message.provider === "sendblue" ? {
       metadata: {
-        ...(message.scope === "shared" ? { groupId: message.providerConversationId } : {}),
+        ...(message.scope === "shared" ? {
+          groupId: message.providerConversationId,
+          ...(message.provider === "sendblue" && message.providerParticipantIds?.length
+            ? { groupParticipants: JSON.stringify(message.providerParticipantIds) }
+            : {}),
+        } : {}),
         messageHandle: message.providerEventId,
         ...(message.providerReplyToId ? { replyToHandle: message.providerReplyToId } : {}),
       },

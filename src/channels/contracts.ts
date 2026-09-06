@@ -49,6 +49,8 @@ export interface InboundMessage {
   providerUserId: string;
   providerWorkspaceId?: string;
   providerConversationId: string;
+  /** Provider-verified participants for shared conversations, when supplied. */
+  providerParticipantIds?: string[];
   providerThreadId?: string;
   providerReplyToId?: string;
   text?: string;
