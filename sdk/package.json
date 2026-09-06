@@ -1,6 +1,6 @@
 {
   "name": "@chusky/sdk",
-  "version": "0.2.0",
+  "version": "0.1.2",
   "description": "TypeScript SDK for Chusky's developer API.",
   "license": "MIT",
   "type": "module",
