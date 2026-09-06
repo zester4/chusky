@@ -197,6 +197,11 @@ export class ChannelGateway {
     if (message.scope === "shared" && message.text?.trim().match(/^\/group-model(?:\s+(.+))?$/i)) {
       const match = message.text.trim().match(/^\/group-model(?:\s+(.+))?$/i)!;
       const requested = match[1]?.trim() ?? "";
+      if (groupAuthorization && message.providerUserId !== groupAuthorization.ownerExternalUserId) {
+        await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: "Only the linked iMessage account owner can change this group's model.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-model-denied`, kind: "notification" }, adapter);
+        await completeChannelEvent(message.provider, message.providerEventId);
+        return { duplicate: false, linked: true, conversation, delivered: [] };
+      }
       const current = (await getChannelConversation(conversation.conversationId))?.model ?? config.groupDefaultModel;
       if (!requested) {
         await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: `This group uses ${current}. Send /group-model default to use the configured group default (${config.groupDefaultModel}), or /group-model <model-id> to choose a model for this group.`, idempotencyKey: `${message.provider}:${message.providerEventId}:group-model-status`, kind: "notification" }, adapter);
