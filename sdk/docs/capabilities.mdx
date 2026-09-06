@@ -1,0 +1,39 @@
+---
+title: Capabilities, skills, and artifacts
+description: Give runs the right tools and move generated work safely through the platform.
+---
+
+## Tool and skill discovery
+
+Use `tools.list()` to discover the Composio and native capabilities available to a project. Use `skills.list()` to inspect the trusted `.chusky/skills` catalog and `skills.files()` or `skills.readFile()` when a skill references supporting scripts, templates, or assets.
+
+```ts
+const tools = await chusky.tools.list({ query: "Gmail" });
+const skills = await chusky.skills.list();
+
+const run = await chusky.threads.runs(thread.id).create({
+  input: "Research the customer and prepare a report.",
+  tools: { allow: tools.data.slice(0, 5).map((tool) => tool.slug) },
+  skills: skills.data.filter((skill) => skill.name === "research").map((skill) => skill.name),
+  wait: false,
+  budget: { duration: "3h", maxToolCalls: 60, maxCost: 2 },
+});
+```
+
+Allow and deny rules are checked before the model sees the catalog and again immediately before execution. A missing connected account is surfaced as a connection requirement; it does not silently grant a credential.
+
+## Generated artifacts and video jobs
+
+Artifacts are verified outputs produced in the Daytona workspace. List them, inspect metadata, and download the bytes through the SDK:
+
+```ts
+const artifacts = await chusky.artifacts.list({ type: "report" });
+const file = await chusky.artifacts.download(artifacts.data[0].id);
+await writeFile("report.pdf", Buffer.from(file.bytes));
+```
+
+Video generation is durable and independently cancellable. Submit a job with `videos.create()`, observe it with `videos.get()`, and deliver the completed artifact through the channel or your own storage policy.
+
+## Workers and channels
+
+Workers are durable scheduled routines. `workers.create()` accepts a schedule, task input, budget, and optional channel target. Channels and activity provide the control-plane view needed for dashboards and operational history.

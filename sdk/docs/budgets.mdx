@@ -3,19 +3,16 @@ title: Usage and budget limits
 description: Keep model, tool, file, and workflow costs predictable.
 ---
 
-Budget policies should be configured server-side at project, user, and run levels.
+Budget policies can be set on each run and should also be constrained by the project and user policy in your application.
 
 ```ts
-// Planned SDK shape
 const budget = {
-  maxCostPerRun: 0.25,
-  maxDailyCost: 5,
-  maxToolCallsPerRun: 20,
-  maxInputBytes: 25_000_000,
+  maxToolCalls: 20,
+  maxCost: 0.25,
 };
 ```
 
-The server should reserve budget before execution, account for actual provider usage after each model response, and release unused reservations. Concurrent runs must use an atomic Redis-backed check so two requests cannot overspend the same limit.
+The server enforces `maxToolCalls` and `maxCost` during the run. A tool-call ceiling produces a resumable boundary with an actionable message; a cost ceiling stops additional tool work. Durable runs also accept `budget.duration` values of `5m`, `30m`, `1h`, `3h`, `6h`, `3d`, or `1w`.
 
 Recommended responses:
 
@@ -25,4 +22,4 @@ Recommended responses:
 
 Expose usage through the usage endpoint and include bounded cost metadata in run and webhook records. Never trust a client-provided cost value.
 
-> **Status:** The platform already enforces the configured global user spend cap. Per-project, per-run, token, and tool-call budgets are planned additions.
+For asynchronous work, combine the budget with `wait: false`; the QStash-backed task resumes from persisted state after a process restart. Treat the returned task as the source of truth for progress and retry state.

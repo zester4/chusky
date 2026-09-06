@@ -11,6 +11,8 @@
     "dashboard": "npm --prefix chusky-web run dev",
     "build": "tsc",
     "build:sdk": "tsc -p sdk/tsconfig.json",
+    "sdk:check": "npm run typecheck && npm run build:sdk && npm run test:sdk",
+    "sdk:version": "node scripts/bump-sdk-version.mjs",
     "agent:upgrade": "tsx scripts/record-agent-upgrade.ts",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",

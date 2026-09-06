@@ -1,0 +1,23 @@
+---
+title: SDK releases
+description: Validate, version, publish, and track Chusky SDK releases.
+---
+
+The repository includes a guarded GitHub Actions workflow named **Chusky SDK Release**. It is started with **Run workflow** and accepts either an exact semantic version or a release type (`patch`, `minor`, or `major`). The workflow:
+
+1. Installs dependencies and runs the root typecheck, app build, SDK build, and SDK tests.
+2. Updates `sdk/package.json` with the requested version.
+3. Commits the version change and creates the `sdk-vX.Y.Z` tag.
+4. Publishes `@chusky/sdk` with npm provenance.
+5. Creates a GitHub release with generated notes for that tag.
+
+Configure the repository `NPM_TOKEN` secret before running it. The token needs publish access to `@chusky/sdk`; GitHub Actions uses its own `GITHUB_TOKEN` for the commit, tag, and release. A failed validation stops before the version, tag, or publish steps.
+
+For a local preflight, run:
+
+```bash
+npm run sdk:check
+npm run sdk:version -- patch
+```
+
+The version script accepts `patch`, `minor`, `major`, or an exact `x.y.z` version. Commit the resulting package change only when you intend to release it.

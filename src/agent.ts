@@ -440,12 +440,17 @@ export interface AgentChannelContext {
   conversationId: string;
   scope?: "private" | "shared";
   triggerEventId?: string;
+  deliveryTarget?: import("./channels/contracts.js").ReplyTarget;
 }
 
 export interface AgentRunOptions {
   instructions?: string;
   toolAllow?: string[];
   toolDeny?: string[];
+  /** Tools in this list always create an approval request, even if normally low-risk. */
+  toolRequireApproval?: string[];
+  maxToolCalls?: number;
+  maxCost?: number;
   temporalContext?: TemporalContext;
 }
 
@@ -648,6 +653,7 @@ export async function runAgent(
   ];
 
   const toolsUsed: string[] = [];
+  let toolCallsExecuted = 0;
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
   // Keep generated media available as an in-turn reference even when the
@@ -740,6 +746,15 @@ export async function runAgent(
           messages.push({ role: "tool", tool_call_id: call.id, content: previousResult });
           continue;
         }
+        if ((options?.maxToolCalls !== undefined && toolCallsExecuted >= options.maxToolCalls) || (options?.maxCost !== undefined && totalCost >= options.maxCost)) {
+          result = options?.maxCost !== undefined && totalCost >= options.maxCost
+            ? "This run reached its configured cost budget. Resume it with a larger budget to continue."
+            : "This run reached its configured tool-call budget. Resume it with a larger budget to continue.";
+          toolResultsByCallId.set(call.id, result);
+          messages.push({ role: "tool", tool_call_id: call.id, content: result });
+          continue;
+        }
+        toolCallsExecuted += 1;
         const args = parseToolArguments(call.function.arguments);
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
         let executionArgs = args;
@@ -751,7 +766,7 @@ export async function runAgent(
           // Always execute the exact arguments the user reviewed instead of
           // requiring the model to reproduce the original serialization.
           executionArgs = approved.args;
-        } else if (isRiskyToolSlug(slug, args)) {
+        } else if (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args)) {
           const approval = await createApproval({
             userId,
             ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
@@ -849,7 +864,7 @@ export async function runAgent(
           });
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget });
           if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);

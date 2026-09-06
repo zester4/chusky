@@ -1,0 +1,32 @@
+---
+title: How the platform works
+description: Understand request boundaries, durable execution, storage, and delivery.
+---
+
+## Request boundaries
+
+Every SDK request is scoped by two values: the project key in `Authorization` and your application user ID in `X-Chusky-User-Id`. The user ID is the ownership boundary for threads, runs, files, approvals, tasks, artifacts, channel connections, and activity. Private credentials and internal tool implementations stay on the server.
+
+The API is versioned under `/v1`. POST operations that create or change durable state accept `Idempotency-Key`; reuse the same key only when retrying the exact same operation. A mismatch returns a conflict instead of creating a duplicate.
+
+## Synchronous and durable runs
+
+`runs.create()` waits for a terminal result by default. `wait: false` persists the run and creates a task before returning `202`. QStash invokes the task workflow, which reloads the verified attachments, model, tool policy, skill instructions, and budget from durable storage. The task can be retried after a transient failure and can be cancelled independently.
+
+The run’s duration budget is a wall-clock limit across continuations. Tool-call and cost ceilings are checked inside the agent loop. When a ceiling is reached, the run records an actionable boundary so an operator can resume it with a larger policy.
+
+## Capability and approval flow
+
+The server resolves the requested native and Composio tools, then applies allow and deny rules before sending the catalog to the model. `requireApproval` adds an explicit approval gate for selected tools, including tools that are not classified as risky by default. Risky tools still require approval automatically. Approval decisions are scoped to the user, expire, and bind to the arguments that the reviewer saw.
+
+Skills are read from the trusted project `.chusky/skills` catalog. A skill’s `SKILL.md` is loaded as bounded instructions, and supporting files can be discovered through the skills API. Unknown or removed skills are ignored safely so a run can still complete with the remaining instructions.
+
+## Files and artifacts
+
+Uploads go directly to Cloudflare R2 using a five-minute presigned URL. Chusky verifies the object’s size and content type before marking it available. Runs refer to file IDs; the server resolves those IDs to bytes or signed URLs and never accepts arbitrary object keys from the client.
+
+Artifacts are outputs registered by the Daytona workspace. The artifact record is scoped to the owning user; the download endpoint checks ownership and returns verified bytes with a safe filename. This makes generated PDFs, documents, presentations, spreadsheets, images, videos, and ZIP files addressable after the original run has ended.
+
+## Webhooks and operational views
+
+Terminal run events are written to the durable webhook outbox before delivery. The outbox leases work, retries interrupted deliveries, and exposes delivery records for inspection and retry. `activity`, `deliveries`, `usage`, and `channels` are read-only control-plane views suitable for an operator dashboard.

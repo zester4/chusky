@@ -6,6 +6,7 @@ import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
   const sent: { chatId: number; text: string }[] = [];
+  const sentChannels: { provider: string; conversationId: string; text: string }[] = [];
   const updates: Partial<ReminderRecord>[] = [];
   const jobUpdates: Record<string, unknown>[] = [];
   const claims = new Set<string>();
@@ -18,10 +19,11 @@ function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
     updateJob: async (_userId: number, _id: string, patch: Record<string, unknown>) => { jobUpdates.push(patch); return true; },
     getTelegramChatId: async () => 99,
     sendMessage: async (chatId: number, text: string) => { sent.push({ chatId, text }); },
+    sendChannelMessage: async (target: { provider: string; conversationId: string }, text: string) => { sentChannels.push({ provider: target.provider, conversationId: target.conversationId, text }); },
     claimDelivery: async (key: string) => { if (claims.has(key)) return false; claims.add(key); return true; },
     completeDelivery: async () => undefined,
   };
-  return { ...base, ...overrides, sent, updates, jobUpdates, reminder, job };
+  return { ...base, ...overrides, sent, sentChannels, updates, jobUpdates, reminder, job };
 }
 
 test("workflow endpoints always use the configured public HTTPS URL", () => {
@@ -50,6 +52,21 @@ test("reminder delivery renders Markdown as Telegram HTML", async () => {
   await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
   assert.match(state.sent[0].text, /<b>Bring this up<\/b>/);
   assert.match(state.sent[0].text, /<code>check it<\/code>/);
+});
+
+test("channel-targeted reminders deliver to the originating iMessage conversation", async () => {
+  const state = deps({
+    getReminder: async () => ({
+      ...deps().reminder,
+      text: "Meet in the group",
+      deliveryTarget: { provider: "sendblue", conversationId: "group-123", metadata: { groupId: "group-123", groupParticipants: "+15550001,+15550002" } },
+    }),
+  });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(state.sent.length, 0);
+  assert.deepEqual(state.sentChannels, [{ provider: "sendblue", conversationId: "group-123", text: "⏰ Chusky reminder\n\nMeet in the group" }]);
+  assert.deepEqual(state.updates, [{ status: "sent" }]);
 });
 
 test("reminders without a Telegram mapping fail without attempting delivery", async () => {

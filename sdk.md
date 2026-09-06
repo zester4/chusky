@@ -10,8 +10,12 @@ Chusky now has a versioned developer API under `/v1` and a standalone ESM TypeSc
 
 - Threads: create, list, and fetch.
 - Runs: synchronous execution, NDJSON streaming, fetch/list events, and cancellation.
+- Durable runs: `wait: false` creates a QStash-backed task that can resume after the request or process ends.
 - Approvals: inspect, decide, and resume an approval-gated run.
-- Tasks: list and inspect durable agent tasks.
+- Tasks: list, inspect, retry, and cancel durable agent tasks.
+- Tools and skills: discover Composio/native tools and read the trusted `.chusky/skills` catalog, including supporting files.
+- Artifacts and videos: inspect/download verified Daytona outputs and manage durable video jobs.
+- Workers, channels, and activity: schedule durable routines and inspect delivery and control-plane history.
 - Audit/usage: fetch scoped audit events.
 - Typed SDK errors for authentication, validation, rate-limit, HTTP, and abort failures.
 - Streaming is exposed as an async iterator and supports cancellation through `AbortSignal`.
@@ -21,7 +25,7 @@ The SDK uses the requested `CHUSKY_API_KEY` naming convention. There is no `CHUS
 
 ### Project credentials and tenant isolation
 
-`CHUSKY_API_KEY` is the server-side root/bootstrap credential. It can create developer projects and their runtime keys through root-only admin endpoints.
+`CHUSKY_PROJECT_KEY` is the server-side root/bootstrap credential. It can create developer projects and their runtime keys through root-only admin endpoints. `CHUSKY_API_KEY` is reserved for a scoped `chsk_...` project key in an application server.
 
 - Project API keys are returned only at creation or rotation time.
 - Only a SHA-256 hash and a non-sensitive key prefix are persisted.
@@ -95,6 +99,10 @@ Developers can register, list, and delete webhook subscriptions, and inspect del
 - `sdk/README.md`
 - `sdk/docs/api-contract.md`
 - `sdk/openapi.yaml`
+- `sdk/docs/capabilities.mdx`
+- `sdk/docs/architecture.mdx`
+- `sdk/CHANGELOG.md`
+- `sdk/docs/releases.mdx`
 - `sdk/tests/client.test.ts`
 
 ### Tests and automation
@@ -103,6 +111,8 @@ Developers can register, list, and delete webhook subscriptions, and inspect del
 - `tests/webhooks.test.ts` — secret encryption, signatures, delivery headers, and URL safety.
 - `tests/webhook-outbox.test.ts` — durable/idempotent webhook queue behavior.
 - `.github/workflows/ci.yml` — CI verification for app and SDK.
+- `.github/workflows/sdk-release.yml` — guarded semantic version bump, npm provenance publish, tag, and GitHub release.
+- `scripts/bump-sdk-version.mjs` — branded local versioning command used by the release workflow.
 - `README.md` — developer API and credential guidance.
 - `package.json` and `package-lock.json` — R2/AWS SDK dependencies and SDK scripts.
 
@@ -112,7 +122,8 @@ The normal Chusky provider configuration is still required. For the developer AP
 
 | Variable | Purpose |
 | --- | --- |
-| `CHUSKY_API_KEY` | Root/bootstrap credential used by server operators only. Do not put this in client applications. |
+| `CHUSKY_PROJECT_KEY` | Root/bootstrap credential used by server operators only. Do not put this in client applications. |
+| `CHUSKY_API_KEY` | Optional provider/API credential used by the running Chusky application; SDK clients use a scoped `chsk_...` project key in their own environment. |
 | `REDIS_URL` | Required production durability for sessions, runs, projects, idempotency, files, audit, and the outbox. |
 | `WEBHOOK_URL` | Enables the current hosted API-server/webhook mode in `src/index.ts`. |
 | `R2_ACCOUNT_ID` | Enables R2-backed file uploads. |
@@ -130,15 +141,15 @@ For browser-direct R2 uploads, configure bucket CORS separately for the applicat
 The implementation has been checked locally with:
 
 ```powershell
-npm test
 npm run typecheck
 npm run build
 npm run build:sdk
 npm run test:sdk
+npm run sdk:check
 git diff --check
 ```
 
-The root test suite passed, including the new SDK/API, webhook, and outbox coverage. Two pre-existing PTY-oriented tests are intentionally skipped where a PTY is unavailable. The SDK client suite has five passing tests.
+The SDK typecheck, build, client suite, and diff checks pass locally. The full root suite is also part of CI; on Windows, the local run can be blocked by EPERM reads from locked `node_modules` worker files, so CI is the authoritative clean-environment run.
 
 ## What remains before a broad public launch
 
@@ -154,7 +165,7 @@ The foundation is production-oriented, but the following are the meaningful rema
 
 5. Project-wide limits and billing hooks. Current rate behavior is request/run oriented. Add project-wide concurrency, token/spend, file, webhook, and monthly quota controls, usage aggregation, and metering/billing integration if the API will be commercial.
 
-6. Public API release process. The SDK is published as `@chusky/sdk` with MIT metadata and a prepublish verification hook. Continue maintaining semantic versioning, changelog, provenance, support, and deprecation policy.
+6. Public API release process. The guarded **Chusky SDK Release** workflow now maintains semantic versioning, npm provenance, immutable `sdk-vX.Y.Z` tags, and GitHub releases. Add a changelog entry and run the workflow only after staging validation passes.
 
 7. Contract validation and compatibility. Validate all API request/response payloads against a shared schema, add OpenAPI contract tests/generated client checks, document pagination and error-code stability, and establish a version-deprecation policy.
 
@@ -164,7 +175,7 @@ The foundation is production-oriented, but the following are the meaningful rema
 
 ## Recommended rollout order
 
-1. Set `CHUSKY_API_KEY`, Redis, `WEBHOOK_URL`, and—if files are needed—R2 credentials in a staging environment.
+1. Set `CHUSKY_PROJECT_KEY`, Redis, `WEBHOOK_URL`, and—if files are needed—R2 credentials in a staging environment.
 2. Use the root key only to create a low-privilege test project; use its `chsk_...` key in the SDK.
 3. Execute the real end-to-end checks above, including a webhook receiver and R2 CORS upload.
 4. Complete the rotation, webhook/DLQ, atomicity, and observability items before onboarding untrusted external developers at scale.

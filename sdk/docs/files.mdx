@@ -19,6 +19,13 @@ await fetch(intent.uploadUrl, {
 });
 
 const verified = await chusky.files.complete(intent.id);
+
+// For Node.js Buffers, Uint8Arrays, or browser Blobs:
+const uploaded = await chusky.files.upload({
+  name: "logo.png",
+  contentType: "image/png",
+  bytes,
+});
 ```
 
 Only verified files can be attached or downloaded. Upload URLs expire quickly; do not persist them. The backend enforces type, size, ownership, and content-type verification.

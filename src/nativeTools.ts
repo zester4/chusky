@@ -12,7 +12,7 @@ import {
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind,
   type TaskStatus,
-  type JobRecord, type ReminderRecord, type ScheduledWorkerBinding,
+  type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord,
 } from "./store.js";
@@ -34,6 +34,7 @@ export interface NativeToolRuntime {
   onStatus?: (statusText: string) => Promise<void> | void;
   approvedApprovalId?: string;
   signal?: AbortSignal;
+  deliveryTarget?: import("./channels/contracts.js").ReplyTarget;
   /** Present only when a specialist is executing its own native tool call. */
   worker?: Exclude<import("./memory/types.js").CapabilityWorkerName, "chusky">;
   workerBinding?: Omit<ScheduledWorkerBinding, "worker" | "objective">;
@@ -197,13 +198,29 @@ function futureTimestamp(args: Record<string, unknown>): number {
   return runAt;
 }
 
-export async function setReminder(userId: number, args: Record<string, unknown>): Promise<ReminderRecord> {
+function durableReminderTarget(target: NativeToolRuntime["deliveryTarget"]): ReminderDeliveryTarget | undefined {
+  if (!target?.provider || !target.conversationId) return undefined;
+  const metadata = target.metadata
+    ? Object.fromEntries(Object.entries(target.metadata).filter(([key]) => key === "groupId" || key === "groupParticipants"))
+    : undefined;
+  return {
+    provider: target.provider,
+    conversationId: target.conversationId,
+    ...(target.threadId ? { threadId: target.threadId } : {}),
+    ...(target.workspaceId ? { workspaceId: target.workspaceId } : {}),
+    ...(metadata && Object.keys(metadata).length ? { metadata } : {}),
+  };
+}
+
+export async function setReminder(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<ReminderRecord> {
+  const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
   const reminder: ReminderRecord = {
     id: `rem_${randomUUID()}`,
     userId,
     text: text(args.text),
     runAt: futureTimestamp(args),
     status: "scheduled",
+    ...(deliveryTarget ? { deliveryTarget } : {}),
     createdAt: Date.now(),
   };
   const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
@@ -281,7 +298,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
     case "CHUCK_READ_SKILL_FILE": return readSkillFile(text(args.name), args.path === undefined ? "SKILL.md" : text(args.path), args.maxChars === undefined ? 12_000 : Number(args.maxChars));
-    case "CHUCK_SET_REMINDER": return setReminder(userId, args);
+    case "CHUCK_SET_REMINDER": return setReminder(userId, args, runtime);
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
     case "CHUCK_CANCEL_REMINDER": return cancelReminder(userId, text(args.id));
     case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args, runtime);

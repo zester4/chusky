@@ -40,9 +40,14 @@ export interface Run {
   threadId: string;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
+  model?: string;
   output?: string;
   taskId?: string;
   approvalId?: string;
+  metadata?: JsonObject;
+  budget?: RunBudget;
+  tools?: RunToolPolicy;
+  skills?: string[];
   error?: { code: string; message: string };
   createdAt: string;
   updatedAt: string;
@@ -53,9 +58,17 @@ export interface CreateRunParams {
   /** Optional model override. The server validates it against available models. */
   model?: string;
   metadata?: JsonObject;
+  attachments?: string[];
+  budget?: RunBudget;
+  tools?: RunToolPolicy;
+  skills?: string[];
   /** Wait for a terminal result. Use stream() for token-level progress. */
   wait?: boolean;
 }
+
+export type DurationBudget = "5m" | "30m" | "1h" | "3h" | "6h" | "3d" | "1w";
+export interface RunBudget { duration?: DurationBudget; maxToolCalls?: number; maxCost?: number; }
+export interface RunToolPolicy { allow?: string[]; deny?: string[]; requireApproval?: string[]; }
 
 export interface Task {
   id: string;
@@ -68,6 +81,9 @@ export interface Task {
   error?: string;
   createdAt: string;
   updatedAt: string;
+  attempt?: number;
+  maxAttempts?: number;
+  events?: Array<{ id: string; type: string; message: string; at: number; attempt: number }>;
 }
 
 export interface Approval {
@@ -76,9 +92,23 @@ export interface Approval {
   toolSlug: string;
   args: JsonObject;
   expiresAt: string;
+  request?: string;
+  channelProvider?: string;
+  handoffId?: string;
 }
 
+export interface Skill { name: string; description: string; path: string; bytes?: number; updatedAt?: string; files?: number; }
+export interface SkillFile { name?: string; path: string; bytes: number; binary: boolean; content?: string; truncated?: boolean; }
+export interface Tool { slug: string; description: string; source: "native" | "composio"; approval?: "auto" | "approval_required"; toolkit?: string; connected?: boolean; }
+export interface Artifact { id: string; name: string; type: "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project"; path: string; contentType: string; size: number; status: "available"; sandboxId: string; createdAt: string; updatedAt: string; downloadUrl?: string; }
+export interface VideoJob { id: string; prompt: string; destination: "telegram" | "daytona" | "both"; workspacePath?: string; workflowRunId?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; pollCount: number; error?: string; resultPath?: string; createdAt: string; updatedAt: string; completedAt?: string; }
+export interface Worker { id: string; worker: string; from: string; objective: string; expectedOutput: string; status: string; taskId?: string; workflowRunId?: string; timestamp: string; delegation?: JsonObject; context?: JsonObject; }
+export interface ChannelConnection { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; verifiedAt: string; proactiveOptIn: boolean; }
+export interface Activity { now: number; approvals: Approval[]; tasks: Task[]; reminders: JsonObject[]; jobs: JsonObject[]; }
+export interface Delivery { id: string; provider: string; status: string; kind: string; attempts: number; providerStatus?: string; lastError?: string; createdAt: string; updatedAt: string; deliveredAt?: string; }
+
 export type RunStreamEvent =
+  | { type: "run.queued"; run: Run }
   | { type: "run.started"; run: Run }
   | { type: "run.delta"; runId: string; text: string }
   | { type: "run.tool_started"; runId: string; toolSlug: string }

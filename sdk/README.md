@@ -2,7 +2,7 @@
 
 ## Documentation
 
-The complete Mintlify-style documentation is in [`docs/`](docs/index.mdx), including the quickstart, concepts, streaming, model selection, files, approvals, durable tasks, webhooks, security, errors, and production guidance. The Mintlify navigation configuration is [`docs.json`](docs.json).
+The complete Mintlify-style documentation is in [`docs/`](docs/index.mdx), including the quickstart, concepts, streaming, model selection, files, approvals, durable tasks, tools, skills, artifacts, video jobs, workers, channels, webhooks, security, errors, release operations, and production guidance. The Mintlify navigation configuration is [`docs.json`](docs.json).
 
 This package is the public developer boundary for Chusky. It is intentionally separate from the Telegram bot, Redis store, Composio credentials, and internal `CHUCK_*` tool names. Developers place their scoped `chsk_` project key in `CHUSKY_API_KEY`. On the self-hosted Oracle server only, `CHUSKY_PROJECT_KEY` is the private root/bootstrap credential used to provision those project keys.
 
@@ -60,4 +60,10 @@ remains solely for trusted operator `/v1/admin/*` provisioning.
 
 ## Available resources
 
-`projects`, `threads`, `runs`, `tasks`, `approvals`, `files`, `webhooks`, `audit`, and `usage` are available today. Files use short-lived, direct Cloudflare R2 URLs: create an upload intent, upload with the returned URL, call `files.complete()`, then request a download URL. Webhook subscriptions are stored encrypted and return their signing secret exactly once; delivery retries and dead-letter administration remain a server-operations concern.
+The current resources are `projects`, `threads`, `runs`, `tasks`, `approvals`, `files`, `tools`, `skills`, `artifacts`, `videos`, `workers`, `channels`, `activity`, `webhooks`, `audit`, and `usage`. Files use short-lived, direct Cloudflare R2 URLs: create an upload intent, upload with the returned URL, call `files.complete()`, then request a download URL. `files.upload()` is a convenience helper for this sequence. Artifact downloads return verified bytes from the Daytona workspace through the API.
+
+See [`docs/architecture.mdx`](docs/architecture.mdx) for the request, durability, capability, storage, and delivery boundaries that implement these resources.
+
+Runs can be short and synchronous or durable and asynchronous. Pass `wait: false` to `runs.create()` to receive a task-backed run immediately; inspect it with `tasks.get()`, retry or cancel it, and resume a failed or approval-paused run with `runs.resume()`. Use `budget.duration` (`5m`, `30m`, `1h`, `3h`, `6h`, `3d`, or `1w`) together with `budget.maxToolCalls` and `budget.maxCost` to bound work. Tool and skill allowlists are enforced server-side before the agent receives its catalog.
+
+Webhook deliveries are queryable and can be retried through the SDK. Keep the endpoint idempotent and treat delivery IDs as deduplication keys.

@@ -62,3 +62,43 @@ test("SDK file deletion accepts the no-content response", async () => {
   await sdk.files.delete("file_1");
   assert.deepEqual(captured, { url: "https://example.test/v1/files/file_1", method: "DELETE" });
 });
+
+test("SDK exposes tools, skills, workers, artifacts, and channel resources", async () => {
+  const urls: string[] = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    urls.push(`${init?.method ?? "GET"}:${url}`);
+    if (url.endsWith("/download")) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+  await sdk.tools.list({ query: "search" });
+  await sdk.skills.list({ query: "pdf" });
+  await sdk.workers.list();
+  await sdk.artifacts.list();
+  const bytes = await sdk.artifacts.download("artifact_1");
+  await sdk.channels.list();
+  await sdk.activity.deliveries();
+  assert.deepEqual(Array.from(bytes), [1, 2, 3]);
+  assert.deepEqual(urls, [
+    "GET:https://example.test/v1/tools?query=search",
+    "GET:https://example.test/v1/skills?query=pdf",
+    "GET:https://example.test/v1/workers",
+    "GET:https://example.test/v1/artifacts",
+    "GET:https://example.test/v1/artifacts/artifact_1/download",
+    "GET:https://example.test/v1/channels",
+    "GET:https://example.test/v1/deliveries",
+  ]);
+});
+
+test("SDK upload helper completes a presigned upload with a distinct idempotency key", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string }> = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ url, method: init?.method, body: String(init?.body ?? "") });
+    if (url.endsWith("/files")) return new Response(JSON.stringify({ id: "file_1", name: "x.txt", contentType: "text/plain", size: 3, status: "pending", uploadUrl: "https://upload.example.test/file_1", expiresAt: "2026-01-01T00:00:00.000Z" }), { status: 201 });
+    if (url.startsWith("https://upload.example.test")) return new Response(null, { status: 200 });
+    return new Response(JSON.stringify({ id: "file_1", name: "x.txt", contentType: "text/plain", size: 3, status: "available" }), { status: 200 });
+  }) });
+  await sdk.files.upload({ name: "x.txt", contentType: "text/plain", data: new TextEncoder().encode("abc") }, { idempotencyKey: "upload_1" });
+  assert.equal(calls[0]?.method, "POST");
+  assert.equal(calls[1]?.url, "https://upload.example.test/file_1");
+  assert.equal(calls[2]?.url, "https://example.test/v1/files/file_1/complete");
+});

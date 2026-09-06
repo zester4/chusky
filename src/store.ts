@@ -100,10 +100,16 @@ export interface SdkRunRecord {
   id: string;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
+  model?: string;
   /** Verified R2 uploads used for this run. Keys are intentionally never exposed. */
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   output?: string;
   approvalId?: string;
+  taskId?: string;
+  metadata?: Record<string, unknown>;
+  budget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
+  tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
+  skills?: string[];
   error?: { code: string; message: string };
   events: Array<{ id: string; type: string; at: number; text?: string }>;
   createdAt: number;
@@ -182,6 +188,16 @@ export interface TaskRecord {
   events: TaskEvent[];
   createdAt: number;
   updatedAt: number;
+  /** Optional SDK run linkage for asynchronous API executions. */
+  sdkRunId?: string;
+  sdkThreadId?: string;
+  sdkInput?: string;
+  sdkAttachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
+  sdkModel?: string;
+  sdkTools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
+  sdkBudget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
+  sdkStartedAt?: number;
+  sdkSkills?: string[];
 }
 
 export interface ReminderRecord {
@@ -191,8 +207,19 @@ export interface ReminderRecord {
   runAt: number;
   workflowRunId?: string;
   status: "scheduled" | "sent" | "cancelled" | "failed";
+  /** Durable channel destination captured when the reminder is created. */
+  deliveryTarget?: ReminderDeliveryTarget;
   deliveryError?: string;
   createdAt: number;
+}
+
+export interface ReminderDeliveryTarget {
+  provider: ChannelProvider;
+  conversationId: string;
+  threadId?: string;
+  workspaceId?: string;
+  /** Only durable routing metadata belongs here; message handles are excluded. */
+  metadata?: Record<string, string>;
 }
 
 /**
@@ -1694,7 +1721,7 @@ function taskEvent(type: TaskEvent["type"], message: string, attempt: number, at
   return { id: `taskevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, attempt };
 }
 
-export async function createTask(userId: number, input: Pick<TaskRecord, "title" | "objective"> & Partial<Pick<TaskRecord, "steps" | "workspaceId" | "runAt" | "maxAttempts">>): Promise<TaskRecord> {
+export async function createTask(userId: number, input: Pick<TaskRecord, "title" | "objective"> & Partial<Omit<TaskRecord, "id" | "userId" | "title" | "objective" | "createdAt" | "updatedAt" | "status" | "attempt" | "events" | "lease">>): Promise<TaskRecord> {
   const now = Date.now();
   const task: TaskRecord = normalizeTask({
     id: `task_${randomUUID()}`,
@@ -1707,6 +1734,15 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     attempt: 0,
     maxAttempts: input.maxAttempts ?? 3,
     runAt: input.runAt,
+    sdkRunId: input.sdkRunId,
+    sdkThreadId: input.sdkThreadId,
+    sdkInput: input.sdkInput,
+    sdkAttachments: input.sdkAttachments,
+    sdkModel: input.sdkModel,
+    sdkTools: input.sdkTools,
+    sdkBudget: input.sdkBudget,
+    sdkStartedAt: input.sdkStartedAt,
+    sdkSkills: input.sdkSkills,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,

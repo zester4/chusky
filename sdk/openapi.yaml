@@ -26,6 +26,26 @@ paths:
     delete: { summary: Revoke the authenticated owner's project key, responses: { '204': { description: Revoked }, '404': { description: Not found } } }
   /account/projects/{projectId}/rotate-key:
     post: { summary: Rotate the authenticated owner's project key and return it exactly once, responses: { '201': { description: Rotated }, '404': { description: Not found } } }
+  /account/overview:
+    get: { summary: Get the authenticated account overview, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /account/models:
+    get: { summary: List models available to the authenticated account, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /account/preferences:
+    patch: { summary: Update account model and voice preferences, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+  /account/telegram-link:
+    post: { summary: Create a Telegram linking code for the account, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Linking code } } }
+  /account/calls:
+    get: { summary: List account voice calls, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /apps:
+    get: { summary: List connected app toolkits, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /apps/{toolkit}/connect:
+    post: { summary: Start connecting an app toolkit, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: OAuth connection URL } } }
+  /triggers:
+    get: { summary: List account triggers, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
+  /triggers/{triggerId}:
+    patch: { summary: Enable or disable an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+    delete: { summary: Delete an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /threads:
     get:
       summary: List a user's threads
@@ -37,13 +57,15 @@ paths:
       responses: { '201': { description: Created } }
   /threads/{threadId}:
     get: { summary: Get one thread, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    patch: { summary: Update thread metadata, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+    delete: { summary: Delete an idle thread, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /threads/{threadId}/runs:
     get:
       summary: List runs for a thread
       parameters: [{ $ref: '#/components/parameters/UserId' }]
       responses: { '200': { description: Cursor page } }
     post:
-      summary: Run Chusky synchronously
+      summary: Run Chusky synchronously or queue a durable task with wait=false
       parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
       responses: { '201': { description: Created } }
   /threads/{threadId}/runs/stream:
@@ -55,6 +77,8 @@ paths:
     get: { summary: Get a run, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /threads/{threadId}/runs/{runId}/cancel:
     post: { summary: Cancel a running run, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Cancelled } } }
+  /threads/{threadId}/runs/{runId}/resume:
+    post: { summary: Resume a failed, cancelled, or approval-paused run as a new durable run, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Resumed } } }
   /threads/{threadId}/runs/{runId}/events:
     get: { summary: Recover persisted run events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /approvals/{approvalId}:
@@ -64,6 +88,10 @@ paths:
     get: { summary: List tasks for an SDK user, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /tasks/{taskId}:
     get: { summary: Get one task, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /tasks/{taskId}/retry:
+    post: { summary: Retry a failed, blocked, or cancelled task, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Requeued } } }
+  /tasks/{taskId}/cancel:
+    post: { summary: Cancel a queued or running task, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Cancelled } } }
   /files:
     post: { summary: Create a direct R2 upload URL, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Presigned URL } } }
   /files/{fileId}:
@@ -79,9 +107,51 @@ paths:
     get: { summary: List webhook subscriptions, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Create an HTTPS webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
   /webhooks/{webhookId}:
+    patch: { summary: Enable or disable a webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
     delete: { summary: Disable a webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Disabled } } }
   /webhooks/{webhookId}/deliveries:
     get: { summary: List bounded delivery attempts for a subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /webhooks/{webhookId}/deliveries/{deliveryId}/retry:
+    post: { summary: Requeue a failed webhook delivery, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Requeued } } }
+  /approvals:
+    get: { summary: List pending approvals for the SDK user, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /tools:
+    get: { summary: List native and connected Composio tools, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /tools/{slug}:
+    get: { summary: Get one tool by exact slug, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /skills:
+    get: { summary: Search the trusted project skill catalogue, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /skills/{name}/files:
+    get: { summary: List all files bundled in a skill, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /skills/{name}/files/read:
+    get: { summary: Read a bounded text file from a skill, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /artifacts:
+    get: { summary: List durable Daytona artifacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /artifacts/{id}:
+    get: { summary: Get an artifact record, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    delete: { summary: Delete an owned artifact record, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
+  /artifacts/{id}/download:
+    get: { summary: Download an artifact from the persistent Daytona workspace, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Binary artifact bytes } } }
+  /videos:
+    get: { summary: List video generation jobs, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Queue a durable video generation job, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Queued } } }
+  /videos/{id}:
+    get: { summary: Get video job status, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /videos/{id}/cancel:
+    post: { summary: Cancel a queued video job, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Cancelled } } }
+  /workers:
+    get: { summary: List durable sub-agent delegations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create a typed durable sub-agent delegation under Chusky supervision, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Queued } } }
+  /workers/{id}:
+    get: { summary: Get a sub-agent delegation and its contract, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /workers/{id}/cancel:
+    post: { summary: Cancel a sub-agent delegation, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Cancelled } } }
+  /channels:
+    get: { summary: List verified channel connections, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /deliveries:
+    get: { summary: List outbound channel delivery receipts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /activity:
+    get: { summary: Get a bounded activity feed for polling dashboards, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }

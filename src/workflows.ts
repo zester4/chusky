@@ -1,4 +1,4 @@
-import type { JobRecord, ReminderRecord } from "./store.js";
+import type { JobRecord, ReminderRecord, ReminderDeliveryTarget } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { posthog } from "./posthog.js";
 
@@ -12,6 +12,7 @@ export interface WorkflowDependencies {
   updateJob(userId: number, id: string, patch: Partial<JobRecord>): Promise<boolean>;
   getTelegramChatId(userId: number): Promise<number | undefined>;
   sendMessage(chatId: number, text: string, options: { parse_mode: "HTML" }): Promise<unknown>;
+  sendChannelMessage?(target: ReminderDeliveryTarget, text: string, idempotencyKey: string): Promise<unknown>;
   runAgent?(job: JobRecord): Promise<{ text: string; cost?: number }>;
   runWorker?(job: JobRecord): Promise<{ text: string; cost?: number }>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
@@ -39,13 +40,19 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
   if (!reminder || reminder.status !== "scheduled") return { skipped: true, delivered: false };
   const deliveryKey = `reminder:${payload.reminderId}`;
   if (deps.claimDelivery && !(await deps.claimDelivery(deliveryKey, 15 * 60 * 1000))) return { skipped: true, delivered: false };
-  const chatId = await deps.getTelegramChatId(payload.userId);
-  if (!chatId) {
+  const target = reminder.deliveryTarget;
+  const chatId = target?.provider === "telegram" ? Number(target.conversationId) : await deps.getTelegramChatId(payload.userId);
+  if ((!target && !chatId) || (target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: "No Telegram mapping" });
     return { delivered: false };
   }
   try {
-    await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(reminder.text)}`, { parse_mode: "HTML" });
+    if (target && target.provider !== "telegram") {
+      await deps.sendChannelMessage!(target, `⏰ Chusky reminder\n\n${reminder.text}`, `reminder:${payload.reminderId}`);
+    } else {
+      if (!chatId) throw new Error("No Telegram mapping");
+      await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(reminder.text)}`, { parse_mode: "HTML" });
+    }
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent" });
     posthog?.capture({ distinctId: String(payload.userId), event: "reminder_delivered", properties: { reminder_id: payload.reminderId } });
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);

@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getHandoffRecord, saveHandoffRecord, updateTask } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getHandoffRecord, saveHandoffRecord, updateTask } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -35,6 +35,8 @@ import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
+import { readR2Object, signR2Download } from "./lib/storage/r2.js";
+import { readSkillFile } from "./skills/catalog.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -47,6 +49,29 @@ function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string
   }).slice(0, 20).map(([key, value]) => `${key}: ${String(value).slice(0, 180)}`);
   return [`Trigger: ${event.triggerSlug || "event"}`, ...redacted].join("\n").slice(0, 3500);
 }
+
+async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>): Promise<string | ContentPart[]> {
+  if (!task?.sdkAttachments?.length) return task?.sdkInput ?? task?.objective ?? "Continue the durable task.";
+  const parts: ContentPart[] = [{ type: "text", text: task.sdkInput || "Please analyze the attached file(s)." }];
+  const session = await getSession(task.userId);
+  for (const reference of task.sdkAttachments) {
+    const file = session.sdkFiles?.find((candidate) => candidate.id === reference.id && candidate.status === "available");
+    if (!file) continue;
+    if (file.contentType.startsWith("video/")) { parts.push({ type: "video_url", video_url: { url: await signR2Download(file.key) } }); continue; }
+    const bytes = await readR2Object(file.key);
+    if (file.contentType.startsWith("audio/")) { parts.push({ type: "text", text: `Transcript of ${file.name}:\n${await transcribeAudio(bytes, file.contentType.split("/")[1] || "wav")}` }); }
+    else if (file.contentType.startsWith("image/")) parts.push({ type: "image_url", image_url: { url: `data:${file.contentType};base64,${bytes.toString("base64")}` } });
+    else parts.push({ type: "file", file: { filename: file.name, file_data: `data:${file.contentType};base64,${bytes.toString("base64")}` } });
+  }
+  return parts;
+}
+async function sdkTaskSkillInstructions(skills: string[] | undefined): Promise<string | undefined> {
+  if (!skills?.length) return undefined;
+  const blocks: string[] = [];
+  for (const name of skills.slice(0, 10)) { try { const file = await readSkillFile(name, "SKILL.md", 8000); if (file.content) blocks.push(`Trusted skill guidance (${name}):\n${file.content}`); } catch { /* invalid or removed skills do not abort the durable run */ } }
+  return blocks.length ? blocks.join("\n\n").slice(0, 24000) : undefined;
+}
+function sdkDurationSeconds(value: string | undefined): number | undefined { return ({ "5m": 300, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600, "3d": 259200, "1w": 604800 } as Record<string, number>)[value ?? ""]; }
 import { registerSdkApi } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import { registerAuthRoutes } from "./authRoutes.js";
@@ -827,7 +852,7 @@ async function main(): Promise<void> {
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {
       let payload;
       try { payload = parseReminderWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid reminder workflow payload"); }
-      await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options) }));
+      await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options), sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }) }));
     }, { url: resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows") }));
 
     // QStash failure callbacks are authenticated separately from Workflow
@@ -934,16 +959,30 @@ async function main(): Promise<void> {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
           execute: async (task) => {
             try {
-              const prompt = `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. Do not perform risky external actions without the normal approval flow.`;
+              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. Do not perform risky external actions without the normal approval flow.`;
               const session = await getSession(task.userId);
-              const result = await runAgent(task.userId, prompt, session.history, session.model);
+              const durationSeconds = sdkDurationSeconds(task.sdkBudget?.duration);
+              if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
+              const budgetAbort = new AbortController(); const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
+              let result;
+              try { result = await runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions: await sdkTaskSkillInstructions(task.sdkSkills) }); }
+              finally { if (budgetTimer) clearTimeout(budgetTimer); }
+              if (task.sdkRunId && task.sdkThreadId) {
+                const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
+                if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); }
+                await completeTask(task.userId, task.id, result.text);
+              }
               const latest = await getTask(task.userId, task.id);
               const chatId = await getTelegramChatId(task.userId);
               if (chatId && result.text.trim()) await bot.api.sendMessage(chatId, `📌 <b>Task update</b>\n\n${result.text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`, { parse_mode: "HTML" });
               if (latest?.status === "completed") return { status: "completed" as const, message: "Task completed by the agent", result: latest.result, checkpoint: latest.checkpoint };
               return { status: "blocked" as const, message: "Task ran and is awaiting review or a next instruction", checkpoint: latest?.checkpoint, nextAction: latest?.nextAction ?? "Review the task update and continue when ready." };
             } catch (error) {
-              if (error instanceof ApprovalRequiredError) return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
+              if (error instanceof ApprovalRequiredError) {
+                if (task.sdkRunId && task.sdkThreadId) { const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "requires_approval"; sdkRun.approvalId = error.approvalId; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.approval_required", at: Date.now() }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); } }
+                return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
+              }
+              if (task.sdkRunId && task.sdkThreadId) { const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "failed"; sdkRun.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: sdkRun.error.message }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); } }
               throw error;
             }
           },
