@@ -517,6 +517,7 @@ interface Backend {
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
+  claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimDelivery(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery(key: string, ttlSeconds: number): Promise<void>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
@@ -592,6 +593,7 @@ class RedisBackend implements Backend {
   private tk = (hash: string) => `chuck:cli:device:${hash}`;
   private uk = (id: number) => `chuck:user:${id}:devices`;
   private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
+  private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private channelIdentityKey = (provider: ChannelProvider, externalUserId: string, workspaceId?: string) => `chuck:channel:identity:${provider}:${createHash("sha256").update(`${workspaceId ?? "-"}:${externalUserId}`).digest("hex")}`;
   private channelIdentityUserKey = (userId: number) => `chuck:user:${userId}:channel-identities`;
@@ -664,6 +666,9 @@ class RedisBackend implements Backend {
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
+  }
+  async claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+    return (await this.r.set(this.agentUpgradeKey(userId, upgradeId), "1", "EX", 365 * 24 * 60 * 60, "NX")) === "OK";
   }
   async claimDelivery(key: string, leaseMs: number): Promise<boolean> {
     const digest = createHash("sha256").update(key).digest("hex");
@@ -1084,6 +1089,7 @@ class MemoryBackend implements Backend {
   private pairings = new Map<string, CliPairingRecord>();
   private devices = new Map<string, CliDeviceRecord>();
   private telegramUpdates = new Map<number, number>();
+  private agentUpgrades = new Set<string>();
   private channelIdentities = new Map<string, ChannelIdentityRecord>();
   private channelIdentityUsers = new Map<number, Set<string>>();
   private channelInstallations = new Map<string, ChannelInstallationRecord>();
@@ -1167,6 +1173,12 @@ class MemoryBackend implements Backend {
     const expiresAt = this.telegramUpdates.get(updateId);
     if (expiresAt && expiresAt > Date.now()) return false;
     this.telegramUpdates.set(updateId, Date.now() + ttlSeconds * 1000);
+    return true;
+  }
+  async claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+    const key = `${userId}:${upgradeId}`;
+    if (this.agentUpgrades.has(key)) return false;
+    this.agentUpgrades.add(key);
     return true;
   }
   async claimDelivery(key: string, leaseMs: number): Promise<boolean> {
@@ -1805,6 +1817,11 @@ export async function releaseUserLock(uid: number, token: string): Promise<void>
 export async function claimTelegramUpdate(updateId: number, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
   if (!Number.isSafeInteger(updateId) || updateId < 0) return true;
   return backend.claimTelegramUpdate(updateId, ttlSeconds);
+}
+
+/** Atomically claims a release notice for one user. Redis uses SET NX so concurrent channel requests cannot duplicate it. */
+export async function claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean> {
+  return backend.claimAgentUpgrade(userId, upgradeId);
 }
 
 export function hashCliSecret(value: string): string {

@@ -42,6 +42,7 @@ import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, 
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { relevantSkillContext } from "./skills/catalog.js";
+import { claimUpgradeNotice, formatAgentUpgradeNotice, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -582,6 +583,13 @@ export async function runAgent(
 
   // Build message array for OpenRouter
   const durable = await getSession(userId);
+  let pendingUpgrade: AgentUpgradeNotice | undefined;
+  try {
+    const upgrade = await loadAgentUpgrade();
+    if (upgrade) pendingUpgrade = upgrade;
+  } catch (error) {
+    logger.warn({ err: error }, "Agent upgrade manifest unavailable; continuing without release notice");
+  }
   let relevantMemories: Awaited<ReturnType<typeof searchMemories>> = [];
   if (channelContext?.scope !== "shared" && typeof userMessage === "string" && userMessage.trim()) {
     relevantMemories = await searchMemories(userId, userMessage, { limit: 8 });
@@ -636,6 +644,10 @@ export async function runAgent(
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
+  const addUpgradeNotice = async (text: string): Promise<string> => {
+    if (!pendingUpgrade || !(await claimUpgradeNotice(userId, pendingUpgrade))) return text;
+    return `${formatAgentUpgradeNotice(pendingUpgrade)}\n\n${text}`.trim();
+  };
 
   for (let round = 0; round < config.maxToolRounds; round++) {
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
@@ -681,7 +693,7 @@ export async function runAgent(
       }
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-      return { text: appendPreviewLinks(rawText, previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+      return { text: await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks)), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -882,7 +894,7 @@ export async function runAgent(
   const text = final.choices[0]?.message?.content ?? "";
 
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-  return { text: typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+  return { text: await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks)), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

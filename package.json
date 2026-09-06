@@ -11,6 +11,7 @@
     "dashboard": "npm --prefix chusky-web run dev",
     "build": "tsc",
     "build:sdk": "tsc -p sdk/tsconfig.json",
+    "agent:upgrade": "tsx scripts/record-agent-upgrade.ts",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",
     "chat": "tsx src/cli.ts chat",
