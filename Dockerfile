@@ -19,6 +19,10 @@ COPY package*.json ./
 RUN npm ci --omit=dev --legacy-peer-deps && npm cache clean --force
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/agent-upgrade.json ./agent-upgrade.json
+# Skills are trusted runtime guidance loaded from process.cwd(). Keep the
+# project catalogue in the production image so automatic selection and the
+# CHUCK_* skill tools work after deployment.
+COPY .chusky ./.chusky
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD wget -qO- http://localhost:8080/health || exit 1

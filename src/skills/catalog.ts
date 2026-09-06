@@ -154,8 +154,12 @@ function terms(query: string): string[] {
 
 export async function searchSkills(query: string, limit = 5, root = DEFAULT_SKILLS_ROOT): Promise<SkillSearchResult[]> {
   const skills = await loadCatalog(root);
-  const requested = terms(query);
   const phrase = String(query ?? "").toLowerCase().trim();
+  // A broad skills question should list the catalogue instead of requiring
+  // every skill description to contain the literal word "skills".
+  const broadQuery = /^(?:(?:what|which|show|list|tell me about)\s+)?(?:available\s+)?skills?\s*(?:do you have|are available|list)?[?!.]*$/i.test(phrase)
+    || /^(?:what|which)\s+capabilities\s+do\s+you\s+have[?!.]*$/i.test(phrase);
+  const requested = broadQuery ? [] : terms(query);
   const scored = skills.map((skill) => {
     const name = skill.name.toLowerCase();
     const description = skill.description.toLowerCase();
@@ -169,7 +173,7 @@ export async function searchSkills(query: string, limit = 5, root = DEFAULT_SKIL
     return { skill, score };
   }).filter(({ score }) => !requested.length || score > 0).sort((a, b) => b.score - a.score || a.skill.name.localeCompare(b.skill.name));
   const boundedLimit = Math.max(1, Math.min(Math.floor(Number(limit) || 5), 20));
-  return scored.slice(0, boundedLimit).map(({ skill, score }) => ({ name: skill.name, description: skill.description, path: `.chusky/skills/${skill.name}/SKILL.md`, score, files: 0 }));
+  return scored.slice(0, boundedLimit).map(({ skill, score }) => ({ name: skill.name, description: skill.description, path: `.chusky/skills/${path.basename(skill.directory)}/SKILL.md`, score, files: 0 }));
 }
 
 async function getSkill(name: string, root: string): Promise<SkillManifest> {

@@ -45,3 +45,17 @@ test("lists nested resources and reads only files inside the skill", async () =>
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("lists broad skill questions and returns the real directory path", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "chusky-skills-broad-"));
+  try {
+    await mkdir(path.join(root, "video-editing"), { recursive: true });
+    await writeFile(path.join(root, "video-editing", "SKILL.md"), "---\nname: openrouter-video-editing\ndescription: Generate and edit videos.\n---\n\nUse the video workflow.", "utf8");
+    const matches = await searchSkills("What skills do you have?", 20, root);
+    assert.equal(matches[0]?.name, "openrouter-video-editing");
+    assert.equal(matches[0]?.path, ".chusky/skills/video-editing/SKILL.md");
+  } finally {
+    clearSkillCatalogCache();
+    await rm(root, { recursive: true, force: true });
+  }
+});
