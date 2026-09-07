@@ -19,6 +19,7 @@ import { notifyTriggerApproval } from "../triggerWorkflow.js";
 import { persistSendblueMedia, persistWhatsAppMedia } from "./sendblueMedia.js";
 import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 import { putR2Object, r2Configured } from "../lib/storage/r2.js";
+import { sharedGroupInstructions } from "./groupInstructions.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -34,7 +35,7 @@ function reply(conversation: ChuskyConversation, text: string, idempotencySeed: 
 
 function agentInstructions(conversation: ChuskyConversation): string | undefined {
   if (conversation.scope !== "shared") return undefined;
-  return `You are replying in a shared ${conversation.provider} group conversation. Your response is visible to every participant, so address the group naturally rather than assuming you are speaking privately to the linked account owner. Never reveal or rely on private Telegram, direct-channel, personal memory, or account-only conversation context. Use only this group's conversation history and the current message. If a request needs private context or private confirmation, ask the user to continue in a direct chat.`;
+  return sharedGroupInstructions(conversation.provider);
 }
 
 async function privateOrSharedHistory(conversation: ChuskyConversation) {

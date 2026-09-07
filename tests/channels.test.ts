@@ -9,6 +9,7 @@ import { ChannelDebouncer } from "../src/channels/debounce.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "../src/channels/slack.js";
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
+import { sendblueFileExtensionForMime } from "../src/channels/sendblueMedia.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
 import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
@@ -170,6 +171,26 @@ test("Sendblue sends every generated attachment as a separate iMessage", async (
   assert.equal(requests[0].body.media_url, "https://cdn.example/1.png");
   assert.equal(requests[1].body.content, "");
   assert.equal(requests[1].body.media_url, "https://cdn.example/2.png");
+});
+
+test("Sendblue group delivery preserves verified Office artifact extensions", async () => {
+  assert.equal(sendblueFileExtensionForMime("application/vnd.openxmlformats-officedocument.wordprocessingml.document"), "docx");
+  assert.equal(sendblueFileExtensionForMime("application/vnd.openxmlformats-officedocument.presentationml.presentation"), "pptx");
+  assert.equal(sendblueFileExtensionForMime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"), "xlsx");
+  const requests: Array<{ url: string; body: any }> = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+    return new Response(JSON.stringify({ message_handle: "sb-docx-out" }), { status: 200 });
+  }) as typeof fetch);
+  await adapter.send({
+    accountId: "account_42", userId: 42,
+    target: { provider: "sendblue", conversationId: "group-1", metadata: { groupId: "group-1", groupParticipants: JSON.stringify(["+15550001", "+15550002"]) } },
+    text: "Here is the group brief.", idempotencyKey: "sendblue-group-docx-1",
+    attachments: [{ id: "artifact-docx", kind: "document", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename: "group-brief.docx", url: "https://cdn.example/group-brief.docx" }],
+  });
+  assert.equal(requests[0]?.url.endsWith("/send-group-message"), true);
+  assert.equal(requests[0]?.body.media_url, "https://cdn.example/group-brief.docx");
+  assert.equal(requests[0]?.body.group_id, "group-1");
 });
 
 test("Sendblue converts Markdown into readable iMessage text", () => {

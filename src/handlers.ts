@@ -29,6 +29,7 @@ import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { conversationIdFor } from "./channels/contracts.js";
+import { sharedGroupInstructions } from "./channels/groupInstructions.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
@@ -140,6 +141,39 @@ async function telegramGroupModel(ctx: Context, fallback: string): Promise<strin
   return (await getChannelConversation(telegramConversationId(ctx)))?.model ?? config.groupDefaultModel;
 }
 
+function isTelegramShared(ctx: Context): boolean {
+  return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+}
+
+const SHARED_GROUP_TOOL_DENY = [
+  "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY",
+  "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
+] as const;
+
+async function telegramConversationHistory(ctx: Context, privateHistory: Awaited<ReturnType<typeof getSession>>["history"]) {
+  if (!isTelegramShared(ctx)) return privateHistory;
+  return (await getChannelConversation(telegramConversationId(ctx)))?.history ?? [];
+}
+
+async function saveTelegramConversation(ctx: Context, userId: number, text: string, response: string, createdAt: number): Promise<void> {
+  const messages = [{ role: "user" as const, content: text, createdAt }, { role: "assistant" as const, content: response }];
+  if (!isTelegramShared(ctx)) {
+    await appendMessages(userId, messages);
+    return;
+  }
+  await appendChannelConversationMessages({
+    id: telegramConversationId(ctx), accountId: `account_${userId}`, userId, provider: "telegram", scope: "shared", messages,
+  });
+}
+
+function telegramAgentOptions(ctx: Context, receivedAt: number) {
+  const shared = isTelegramShared(ctx);
+  return {
+    ...(shared ? { instructions: sharedGroupInstructions("Telegram"), toolDeny: [...SHARED_GROUP_TOOL_DENY] } : {}),
+    temporalContext: { messageReceivedAt: receivedAt, timezone: config.timezone },
+  };
+}
+
 async function isTelegramGroupAdmin(ctx: Context): Promise<boolean> {
   if (!ctx.from || !ctx.chat || (ctx.chat.type !== "group" && ctx.chat.type !== "supergroup")) return false;
   try {
@@ -221,14 +255,16 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const status = await ctx.reply(statusText, { parse_mode: "HTML" });
   try {
     const s = await getSession(userId);
-    const result = await runAgent(userId, parts, s.history, await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } });
-    await appendMessages(userId, [
-      { role: "user", content: historyLabel, createdAt: telegramMessageReceivedAt(ctx) },
-      { role: "assistant", content: result.text },
-    ]);
+    const receivedAt = telegramMessageReceivedAt(ctx);
+    const result = await runAgent(userId, parts, await telegramConversationHistory(ctx, s.history), await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, undefined, telegramAgentOptions(ctx, receivedAt));
+    await saveTelegramConversation(ctx, userId, historyLabel, result.text, receivedAt);
     if (result.cost) await addUsage(userId, result.cost);
     await editMarkdown(ctx, status.message_id, result.text);
     await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
+    // Media-originated requests can also create verified Daytona artifacts.
+    // ctx.replyWithDocument preserves the current Telegram group/thread, just
+    // like a text-originated request, rather than leaving the file undelivered.
+    await sendGeneratedArtifacts(ctx, result.generatedFiles);
     for (const image of result.generatedImages ?? []) {
       await ctx.replyWithPhoto(new InputFile(image.data, image.mediaType.includes("jpeg") ? "chusky.jpg" : "chusky.png"));
       if (image.cost) await addUsage(userId, image.cost);
@@ -957,8 +993,9 @@ export function registerHandlers(bot: Bot): void {
     }
 
     try {
+      const receivedAt = telegramMessageReceivedAt(ctx);
       const result = await runAgent(
-        userId, text, s.history, model, updateStatus, controller.signal,
+        userId, text, await telegramConversationHistory(ctx, s.history), model, updateStatus, controller.signal,
         async (delta) => {
           streamedText += delta;
           if (Date.now() - lastStreamEdit > 800 && streamedText.trim()) {
@@ -966,14 +1003,11 @@ export function registerHandlers(bot: Bot): void {
             await editHtml(ctx, statusMsg.message_id, mdToTelegramHtml(streamedText));
           }
         },
-        undefined, undefined, { temporalContext: { messageReceivedAt: telegramMessageReceivedAt(ctx), timezone: config.timezone } }
+        undefined, undefined, telegramAgentOptions(ctx, receivedAt)
       );
       clearInterval(typingInterval);
 
-      await appendMessages(userId, [
-        { role: "user", content: text, createdAt: telegramMessageReceivedAt(ctx) },
-        { role: "assistant", content: result.text },
-      ]);
+      await saveTelegramConversation(ctx, userId, text, result.text, receivedAt);
       if (result.cost) await addUsage(userId, result.cost);
 
       let html = "";

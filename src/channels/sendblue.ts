@@ -71,6 +71,9 @@ function attachmentKind(mimeType: string | undefined): ChannelAttachment["kind"]
 function attachment(payload: any): ChannelAttachment[] {
   const mediaUrl = typeof payload?.media_url === "string" ? payload.media_url.trim() : "";
   if (!mediaUrl || !/^https:\/\//i.test(mediaUrl)) return [];
+  // Some Sendblue events mirror a plain shared link into media_url. A link
+  // that is exactly the message text is not an uploaded attachment.
+  if (typeof payload?.content === "string" && payload.content.trim() === mediaUrl) return [];
   // Sendblue documents `media_url` as its CDN URL for *any attached media*.
   // Do not infer whether an attachment exists from its extension: their CDN
   // links may be extensionless, and that used to drop PDFs and Office files.

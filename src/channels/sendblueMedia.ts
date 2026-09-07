@@ -11,7 +11,14 @@ const extensionForMimeType: Record<string, string> = {
   "audio/flac": "flac", "audio/caf": "caf", "audio/x-caf": "caf",
   "video/mp4": "mp4", "video/webm": "webm",
   "application/pdf": "pdf",
+  "text/plain": "txt", "text/markdown": "md", "text/csv": "csv", "application/json": "json", "application/xml": "xml", "text/xml": "xml", "application/rtf": "rtf",
+  "application/msword": "doc", "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/vnd.ms-excel": "xls", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.ms-powerpoint": "ppt", "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/zip": "zip",
 };
+
+const deliverableMimeTypes = new Set(Object.keys(extensionForMimeType));
 
 export function sendblueFileExtensionForMime(mimeType: string): string {
   return extensionForMimeType[mimeType.toLowerCase().split(";", 1)[0]] ?? "bin";
@@ -27,7 +34,10 @@ export async function persistGeneratedMedia(userId: number, images: GeneratedMed
   const attachments: ChannelAttachment[] = [];
   for (const item of [...images, ...files].slice(0, 10)) {
     const mimeType = (item.mediaType ?? item.contentType ?? "").toLowerCase().split(";", 1)[0];
-    const allowed = mimeType.startsWith("image/") || mimeType.startsWith("audio/") || mimeType === "video/mp4" || mimeType === "video/webm" || mimeType === "application/pdf";
+    // Artifact tools return verified Office/PDF files. Keep the channel policy
+    // aligned with those artifact types so a successful Daytona result is not
+    // silently dropped on iMessage or WhatsApp delivery.
+    const allowed = mimeType.startsWith("image/") || mimeType.startsWith("audio/") || deliverableMimeTypes.has(mimeType);
     if (!allowed || !item.data?.length || item.data.length > 12 * 1024 * 1024) continue;
     // Sendblue determines attachment rendering from the URL extension. In
     // particular, .caf is the documented Apple inline voice-note format.
