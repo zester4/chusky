@@ -651,7 +651,11 @@ interface Backend {
   takeChannelDebounce(key: string): Promise<InboundMessage[]>;
 }
 
-const AGENT_RUN_TTL_SECONDS = 90 * 24 * 60 * 60;
+// A supervisor run is an audit/status record, not a conversation store.  Worker
+// runs may need to resume after a durable Workflow wait, so they keep a longer
+// (but still bounded) checkpoint window.
+const SUPERVISOR_RUN_TTL_SECONDS = 7 * 24 * 60 * 60;
+const WORKER_RUN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const AGENT_RUN_MAX_BYTES = 2 * 1024 * 1024;
 const RECOVERABLE_OUTBOX_STATUSES = ["queued", "failed", "delivering"] as const;
 
@@ -659,36 +663,96 @@ function isRecoverableOutboxStatus(status: OutboxRecord["status"]): status is ty
   return (RECOVERABLE_OUTBOX_STATUSES as readonly string[]).includes(status);
 }
 
+function isDataUrl(value: string): boolean {
+  return /^data:[^,]+,/i.test(value);
+}
+
+function omittedMediaMarker(value: string): string {
+  const mime = /^data:([^;,]+)/i.exec(value)?.[1] ?? "binary media";
+  // Base64 is approximately four thirds the original byte length. This is
+  // intentionally only a diagnostic estimate; raw media never belongs in Redis.
+  const payloadLength = value.indexOf(",") >= 0 ? value.length - value.indexOf(",") - 1 : 0;
+  const bytes = Math.floor((payloadLength * 3) / 4);
+  return `[${mime} (${bytes} bytes) omitted from durable checkpoint; use a saved asset or request re-upload.]`;
+}
+
+function compactCheckpointText(value: string, maxLength = 20_000): string {
+  // Model/tool payloads occasionally embed a data URL inside JSON or prose.
+  // Remove every occurrence, rather than only handling a content part whose
+  // whole value is a data URL.
+  return value
+    .replace(/data:[^,\s]+,[A-Za-z0-9+/_=-]+/gi, (dataUrl) => omittedMediaMarker(dataUrl))
+    .slice(0, maxLength);
+}
+
+function compactCheckpointValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    if (isDataUrl(value)) return omittedMediaMarker(value);
+    return compactCheckpointText(value);
+  }
+  if (!value || typeof value !== "object") return value;
+  if (depth >= 6) return "[nested checkpoint data elided]";
+  if (Array.isArray(value)) return value.slice(0, 24).map((entry) => compactCheckpointValue(entry, depth + 1));
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => [key, compactCheckpointValue(entry, depth + 1)]));
+}
+
+function compactCheckpointContentPart(part: unknown): unknown {
+  if (!part || typeof part !== "object") return compactCheckpointValue(part);
+  const entry = part as Record<string, unknown>;
+  const imageUrl = entry.image_url as Record<string, unknown> | undefined;
+  const videoUrl = entry.video_url as Record<string, unknown> | undefined;
+  const file = entry.file as Record<string, unknown> | undefined;
+  const rawMedia = [imageUrl?.url, videoUrl?.url, file?.file_data].find((value): value is string => typeof value === "string" && isDataUrl(value));
+  // OpenRouter expects a real URL for image/video/file parts. A diagnostic text
+  // part keeps a resumed worker's context valid instead of replaying a fake URL.
+  if (rawMedia) return { type: "text", text: omittedMediaMarker(rawMedia) };
+  return compactCheckpointValue(part);
+}
+
+function compactWorkerMessages(messages: unknown[]): unknown[] {
+  // Keep the system instruction even after trimming old turns; otherwise a
+  // resumed worker could lose its capability and safety contract.
+  const firstSystem = messages.find((message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "system");
+  const recent = messages.slice(-39);
+  const selected = firstSystem && !recent.includes(firstSystem) ? [firstSystem, ...recent] : recent;
+  return selected.map((message) => {
+    if (!message || typeof message !== "object") return compactCheckpointValue(message);
+    const item = message as Record<string, unknown>;
+    if (!Array.isArray(item.content)) return compactCheckpointValue(item);
+    return {
+      ...compactCheckpointValue({ ...item, content: undefined }) as Record<string, unknown>,
+      content: item.content.slice(0, 24).map((part) => compactCheckpointContentPart(part)),
+    };
+  });
+}
+
+function agentRunTtlSeconds(record: AgentRunRecord): number {
+  return record.kind === "worker" ? WORKER_RUN_TTL_SECONDS : SUPERVISOR_RUN_TTL_SECONDS;
+}
+
 function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
-  const boundedMessages = Array.isArray(record.state?.messages)
-    ? record.state.messages.slice(-120).map((message) => {
-        if (!message || typeof message !== "object") return message;
-        const item = message as Record<string, unknown>;
-        const content = item.content;
-        if (typeof content === "string") return { ...item, content: content.slice(0, 80_000) };
-        if (Array.isArray(content)) {
-          return { ...item, content: content.slice(0, 32).map((part) => {
-            if (!part || typeof part !== "object") return part;
-            const entry = part as Record<string, unknown>;
-            return JSON.stringify(entry).length <= 80_000 ? entry : { type: String(entry.type ?? "content"), text: "[large content elided from checkpoint]" };
-          }) };
-        }
-        return item;
-      })
+  // Only worker checkpoints are used to resume a durable subagent workflow.
+  // Supervisor runs always rebuild context from the bounded session/history, so
+  // retaining their full OpenRouter message list would duplicate user data.
+  const boundedMessages = record.kind === "worker" && Array.isArray(record.state?.messages)
+    ? compactWorkerMessages(record.state.messages)
     : undefined;
   const state = record.state
-    ? {
-        ...record.state,
-        messages: boundedMessages,
+    ? (() => {
+        const { messages: _messages, ...rest } = record.state;
+        return {
+        ...rest,
+        ...(boundedMessages ? { messages: boundedMessages } : {}),
         toolResults: record.state.toolResults
-          ? Object.fromEntries(Object.entries(record.state.toolResults).slice(-120).map(([key, value]) => [key, String(value).slice(0, 20_000)]))
+          ? Object.fromEntries(Object.entries(record.state.toolResults).slice(-120).map(([key, value]) => [key, compactCheckpointText(String(value))]))
           : undefined,
-        output: record.state.output?.slice(0, 20_000),
-        checkpoint: record.state.checkpoint?.slice(0, 4_000),
-        nextAction: record.state.nextAction?.slice(0, 2_000),
-      }
+        output: record.state.output ? compactCheckpointText(record.state.output) : undefined,
+        checkpoint: record.state.checkpoint ? compactCheckpointText(record.state.checkpoint, 4_000) : undefined,
+        nextAction: record.state.nextAction ? compactCheckpointText(record.state.nextAction, 2_000) : undefined,
+        };
+      })()
     : undefined;
-  const next: AgentRunRecord = { ...record, objective: record.objective.slice(0, 20_000), state, events: record.events.slice(-200), updatedAt: Date.now() };
+  const next: AgentRunRecord = { ...record, objective: compactCheckpointText(record.objective), state, events: record.events.slice(-200), updatedAt: Date.now() };
   const encoded = JSON.stringify(next);
   if (encoded.length > AGENT_RUN_MAX_BYTES) throw new Error("Agent run checkpoint exceeds the 2 MB durable state limit; compact the run before continuing.");
   return next;
@@ -785,6 +849,7 @@ class RedisBackend implements Backend {
   async saveAgentRun(input: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord> {
     const record = boundedAgentRun({ ...input, version: expectedVersion === undefined ? input.version : expectedVersion + 1 });
     const key = this.runKey(record.id);
+    const ttlSeconds = agentRunTtlSeconds(record);
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.r.watch(key);
       const currentRaw = await this.r.get(key);
@@ -795,9 +860,9 @@ class RedisBackend implements Backend {
       }
       const next = current && expectedVersion === undefined ? { ...record, version: current.version + 1 } : record;
       const result = await this.r.multi()
-        .set(key, JSON.stringify(next), "EX", AGENT_RUN_TTL_SECONDS)
+        .set(key, JSON.stringify(next), "EX", ttlSeconds)
         .zadd(this.runIndexKey(next.userId), next.updatedAt, next.id)
-        .expire(this.runIndexKey(next.userId), AGENT_RUN_TTL_SECONDS)
+        .expire(this.runIndexKey(next.userId), ttlSeconds)
         .exec();
       if (result) return next;
     }
@@ -819,9 +884,9 @@ class RedisBackend implements Backend {
   async saveHandoffRecord(input: HandoffRecord & { userId: number }): Promise<HandoffRecord> {
     const record = { ...input, context: input.context ?? {} };
     await this.r.multi()
-      .set(this.handoffKey(record.id), JSON.stringify(record), "EX", AGENT_RUN_TTL_SECONDS)
+      .set(this.handoffKey(record.id), JSON.stringify(record), "EX", WORKER_RUN_TTL_SECONDS)
       .zadd(this.handoffIndexKey(record.userId), record.timestamp, record.id)
-      .expire(this.handoffIndexKey(record.userId), AGENT_RUN_TTL_SECONDS)
+      .expire(this.handoffIndexKey(record.userId), WORKER_RUN_TTL_SECONDS)
       .exec();
     return record;
   }

@@ -11,10 +11,69 @@ import {
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
   createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
+  getAgentRun, saveAgentRun, type AgentRunRecord,
 } from "../src/store.js";
 import { nativeTool } from "../src/nativeTools.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+function agentRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
+  const now = Date.now();
+  return {
+    id: `run-store-${Math.random().toString(36).slice(2)}`,
+    userId: 810000,
+    kind: "supervisor",
+    objective: "test durable run compaction",
+    status: "running",
+    version: 0,
+    events: [],
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+test("supervisor run records keep audit state without duplicating model context", async () => {
+  const rawImage = "data:image/png;base64," + "a".repeat(12_000);
+  const input = agentRun({
+    state: {
+      messages: [
+        { role: "system", content: "system instruction" },
+        { role: "user", content: [{ type: "image_url", image_url: { url: rawImage } }] },
+      ],
+      output: "completed safely",
+      toolResults: { image: `created ${rawImage}` },
+    },
+  });
+  const saved = await saveAgentRun(input);
+  const restored = await getAgentRun(input.userId, input.id);
+  assert.equal(saved.state?.messages, undefined);
+  assert.equal(restored?.state?.messages, undefined);
+  assert.equal(restored?.state?.output, "completed safely");
+  assert.match(restored?.state?.toolResults?.image ?? "", /omitted from durable checkpoint/);
+  assert.doesNotMatch(JSON.stringify(restored), /data:image\/png;base64/i);
+});
+
+test("worker checkpoints retain resumable text but replace raw media", async () => {
+  const rawImage = "data:image/png;base64," + "b".repeat(12_000);
+  const input = agentRun({
+    kind: "worker",
+    state: {
+      messages: [
+        { role: "system", content: "worker contract" },
+        { role: "user", content: "build the report" },
+        { role: "user", content: [{ type: "image_url", image_url: { url: rawImage } }] },
+      ],
+    },
+  });
+  const saved = await saveAgentRun(input);
+  const messages = saved.state?.messages ?? [];
+  assert.match(JSON.stringify(messages), /worker contract/);
+  assert.match(JSON.stringify(messages), /omitted from durable checkpoint/);
+  assert.doesNotMatch(JSON.stringify(messages), /data:image\/png;base64/i);
+  const finalContent = (messages.at(-1) as { content?: Array<{ type?: string }> }).content;
+  assert.equal(finalContent?.[0]?.type, "text");
+});
 
 test("video jobs persist owner-scoped lifecycle and progress", async () => {
   const job = await createVideoJob({ userId: 810099, prompt: "A red kite", destination: "telegram" });
