@@ -103,6 +103,28 @@ test("Sendblue hydrates bounded media for the shared agent handler", async () =>
   assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
 });
 
+test("Sendblue recognizes and hydrates group PDFs and Office documents", async () => {
+  const pdf = normalizeSendblueMessage({
+    message_handle: "sb-group-pdf", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1",
+    participants: ["+15550001", "+15550002"], content: "Please summarize this", media_url: "https://cdn.sendblue.example/media/opaque-id", mime_type: "application/pdf",
+  });
+  assert.equal(pdf?.scope, "shared");
+  assert.equal(pdf?.attachments[0]?.kind, "document");
+  assert.equal(pdf?.attachments[0]?.mimeType, "application/pdf");
+
+  const pdfAdapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "application/pdf", "content-length": "3" } })) as typeof fetch);
+  const hydratedPdf = await pdfAdapter.hydrateInbound(pdf!);
+  assert.equal(hydratedPdf.attachments[0]?.kind, "document");
+  assert.match(hydratedPdf.attachments[0]?.url ?? "", /^data:application\/pdf;base64,/);
+
+  const officeAdapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "application/octet-stream", "content-length": "3" } })) as typeof fetch);
+  const hydratedOffice = await officeAdapter.hydrateInbound({
+    provider: "sendblue", providerEventId: "sb-docx", providerUserId: "+15550001", providerConversationId: "group-1", scope: "shared", receivedAt: Date.now(), attachments: [{ id: "sb-docx", kind: "document", filename: "proposal.docx", mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", url: "https://cdn.sendblue.example/proposal.docx" }],
+  });
+  assert.equal(hydratedOffice.attachments[0]?.mimeType, "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+  assert.match(hydratedOffice.attachments[0]?.url ?? "", /^data:application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document;base64,/);
+});
+
 test("Sendblue identifies a voice recording from its downloaded MIME type", async () => {
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "audio/mp4", "content-length": "3" } })) as typeof fetch);
   const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-voice", providerUserId: "+15550001", providerConversationId: "+15550001", attachments: [{ id: "voice-1", kind: "image", url: "https://cdn.example/media" }], receivedAt: Date.now(), scope: "private" });

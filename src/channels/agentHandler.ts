@@ -75,16 +75,19 @@ async function persistInboundImages(message: InboundMessage, userId: number): Pr
   }
 }
 
-function mediaFailureText(error: ChannelMediaError): string {
+function mediaFailureText(error: ChannelMediaError, kind: InboundMessage["attachments"][number]["kind"] = "audio"): string {
+  const label = kind === "document" ? "document" : kind === "image" ? "image" : kind === "video" ? "video" : "voice message";
   switch (error) {
     case "unsupported_media_type":
-      return "I received the voice message, but its audio format is not supported yet. Please try again as an iMessage voice note, M4A, AAC, MP3, WAV, OGG, WebM, or send it as text.";
+      return kind === "audio"
+        ? "I received the voice message, but its audio format is not supported yet. Please try again as an iMessage voice note, M4A, AAC, MP3, WAV, OGG, WebM, or send it as text."
+        : `I received the ${label}, but its format is not supported yet. Please send it as a PDF, Word document, text file, JPEG, PNG, WebP, MP4, or a supported audio format.`;
     case "too_large":
-      return "I received the voice message, but it is too large to process. Please send a shorter recording.";
+      return kind === "audio" ? "I received the voice message, but it is too large to process. Please send a shorter recording." : `I received the ${label}, but it is too large to process safely. Please send a file under 12 MB.`;
     case "empty_media":
-      return "I received the voice message, but it arrived empty. Please try sending it again.";
+      return `I received the ${label}, but it arrived empty. Please try sending it again.`;
     default:
-      return "I received your voice message, but I could not download it safely. Please try sending it again.";
+      return `I received the ${label}, but I could not download it safely. Please try sending it again.`;
   }
 }
 
@@ -162,7 +165,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     const text = message.text?.trim();
     if (!text && !message.attachments.length) return reply(conversation, "I received that, but there was no text or supported attachment to work with.", message.providerEventId);
     const mediaFailure = message.attachments.find((attachment) => attachment.mediaError);
-    if (mediaFailure?.mediaError) return reply(conversation, mediaFailureText(mediaFailure.mediaError), message.providerEventId);
+    if (mediaFailure?.mediaError) return reply(conversation, mediaFailureText(mediaFailure.mediaError, mediaFailure.kind), message.providerEventId);
     if (message.attachments.length && message.attachments.some((attachment) => !attachment.url)) return reply(conversation, "I received the attachment, but the channel could not provide its media bytes safely.", message.providerEventId);
     const { history, model } = await privateOrSharedHistory(conversation);
     try {

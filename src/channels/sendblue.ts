@@ -37,32 +37,64 @@ export function verifySendblueSignature(rawBody: string | Buffer, headers: Heade
   if (!sameSecret(legacy, secret)) throw new ChannelVerificationError("Invalid Sendblue webhook signature");
 }
 
+const EXTENSION_MIME_TYPES: Record<string, string> = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", heic: "image/heic", heif: "image/heif",
+  mp3: "audio/mpeg", m4a: "audio/mp4", aac: "audio/aac", ogg: "audio/ogg", oga: "audio/ogg", wav: "audio/wav", webm: "audio/webm", flac: "audio/flac", caf: "audio/x-caf",
+  mp4: "video/mp4", mov: "video/quicktime",
+  pdf: "application/pdf", txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json", xml: "application/xml", rtf: "application/rtf",
+  doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+};
+
+function filenameFromMediaUrl(mediaUrl: string, fallback: string): string {
+  try {
+    const name = decodeURIComponent(new URL(mediaUrl).pathname.split("/").pop() ?? "").replace(/[\0\r\n]/g, "").trim();
+    return name ? name.slice(0, 200) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function mimeFromFilename(filename: string): string | undefined {
+  const extension = filename.toLowerCase().match(/\.([a-z0-9]{1,10})$/)?.[1];
+  return extension ? EXTENSION_MIME_TYPES[extension] : undefined;
+}
+
+function attachmentKind(mimeType: string | undefined): ChannelAttachment["kind"] {
+  if (mimeType?.startsWith("image/")) return "image";
+  if (mimeType?.startsWith("audio/")) return "audio";
+  if (mimeType?.startsWith("video/")) return "video";
+  return "document";
+}
+
 function attachment(payload: any): ChannelAttachment[] {
   const mediaUrl = typeof payload?.media_url === "string" ? payload.media_url.trim() : "";
   if (!mediaUrl || !/^https:\/\//i.test(mediaUrl)) return [];
-  // Sendblue may include a normal shared URL in `media_url` and label the
-  // event as audio. Treat it as an attachment only when the URL or an
-  // explicit MIME field proves it is actual media; links remain plain text.
-  const explicitMime = String(payload.mime_type ?? payload.media_type ?? payload.content_type ?? "").toLowerCase();
-  const audio = explicitMime.startsWith("audio/") || /\.(caf|m4a|mp3|aac|ogg|oga|wav|webm|flac)(?:\?|$)/i.test(mediaUrl);
-  const video = explicitMime.startsWith("video/") || /\.(mp4|mov|webm)(?:\?|$)/i.test(mediaUrl);
-  const image = explicitMime.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|heic)(?:\?|$)/i.test(mediaUrl);
-  if (!audio && !video && !image) return [];
-  const kind = audio ? "audio" : video ? "video" : "image";
-  return [{ id: String(payload.message_handle ?? mediaUrl), kind, url: mediaUrl }];
+  // Sendblue documents `media_url` as its CDN URL for *any attached media*.
+  // Do not infer whether an attachment exists from its extension: their CDN
+  // links may be extensionless, and that used to drop PDFs and Office files.
+  const declaredName = typeof payload?.filename === "string" ? payload.filename : typeof payload?.file_name === "string" ? payload.file_name : "";
+  const fallbackName = `sendblue-${String(payload.message_handle ?? "attachment").slice(0, 80)}`;
+  const filename = (declaredName.replace(/[\0\r\n]/g, "").trim() || filenameFromMediaUrl(mediaUrl, fallbackName)).slice(0, 200);
+  const explicitMime = String(payload.mime_type ?? payload.media_type ?? payload.content_type ?? "").split(";", 1)[0].trim().toLowerCase();
+  const mimeType = explicitMime || mimeFromFilename(filename);
+  return [{ id: String(payload.message_handle ?? mediaUrl), kind: attachmentKind(mimeType), ...(mimeType ? { mimeType } : {}), filename, url: mediaUrl }];
 }
 
 const SEND_BLUE_MEDIA_TYPES = new Set([
-  "image/jpeg", "image/png", "image/webp", "image/gif",
+  "image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "image/heif",
   "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/wav", "audio/x-wav",
   "audio/webm", "audio/ogg", "audio/aac", "audio/flac", "audio/caf", "audio/x-caf",
-  "video/mp4", "video/webm",
+  "video/mp4", "video/webm", "video/quicktime",
+  "application/pdf", "text/plain", "text/markdown", "text/csv", "application/json", "application/xml", "text/xml", "application/rtf",
+  "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 ]);
 
 function kindForMimeType(mimeType: string): ChannelAttachment["kind"] {
-  if (mimeType.startsWith("audio/")) return "audio";
-  if (mimeType.startsWith("video/")) return "video";
-  return "image";
+  return attachmentKind(mimeType);
 }
 
 function mediaErrorFor(error: unknown): ChannelMediaError {
@@ -279,7 +311,15 @@ export class SendblueAdapter implements ChannelAdapter {
       try {
         const response = await this.fetchImpl(item.url, { signal: AbortSignal.timeout(20_000) });
         if (!response.ok) throw new Error(`Sendblue media download failed: ${response.status}`);
-        const mimeType = String(response.headers.get("content-type") ?? item.mimeType ?? "application/octet-stream").split(";", 1)[0].toLowerCase();
+        const responseMime = String(response.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase();
+        const declaredMime = item.mimeType?.toLowerCase();
+        // CDN responses occasionally use application/octet-stream for Office
+        // files. A webhook-declared MIME or filename is a bounded fallback.
+        const mimeType = responseMime && responseMime !== "application/octet-stream"
+          ? responseMime
+          : declaredMime && declaredMime !== "application/octet-stream"
+            ? declaredMime
+            : mimeFromFilename(item.filename ?? "") ?? (responseMime || "application/octet-stream");
         if (!SEND_BLUE_MEDIA_TYPES.has(mimeType)) throw new Error(`Unsupported Sendblue media type: ${mimeType}`);
         const declared = Number(response.headers.get("content-length") ?? 0);
         if (declared > 12 * 1024 * 1024) throw new Error("Sendblue media is larger than 12 MB");
