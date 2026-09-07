@@ -405,6 +405,9 @@ test("outbox idempotency prevents duplicate provider sends and records receipts"
   assert.equal(first.id, second.id);
   assert.equal(adapter.sent.length, 1);
   assert.equal((await getOutbox(first.id))?.status, "delivered");
+  // Delivered audit records must never be picked up by crash recovery.
+  assert.equal(await outbox.recover(new Map([["slack", adapter]])), 0);
+  assert.equal(adapter.sent.length, 1);
 });
 
 test("Sendblue group metadata survives durable outbox recovery", async () => {
