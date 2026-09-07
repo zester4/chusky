@@ -14,7 +14,7 @@ test("does not gate read-only tools", () => {
   }
 });
 
-test("uses explicit native policies and does not double-gate Composio batches", () => {
+test("uses explicit native policies and gates only side-effecting Composio batches", () => {
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_START_FACETIME_CALL"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_LIST_FACETIME_CALLS"), "private");
@@ -24,7 +24,7 @@ test("uses explicit native policies and does not double-gate Composio batches", 
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
-  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), false);
 });
 

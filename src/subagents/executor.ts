@@ -5,11 +5,12 @@ import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus } from "../store.js";
+import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
 import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
+import type { ReplyTarget } from "../channels/contracts.js";
 import { relevantSkillContext } from "../skills/catalog.js";
 import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
 
@@ -22,6 +23,7 @@ export async function executeDelegation(
     approvedApprovalId?: string;
     signal?: AbortSignal;
     historySummary?: string;
+    deliveryTarget?: ReplyTarget;
     resume?: { handoffId: string; taskId: string; workflowRunId?: string; resumeCount?: number };
   }
 ): Promise<DelegationResult> {
@@ -58,6 +60,7 @@ export async function executeDelegation(
   const existingHandoff = options?.resume ? await getHandoffRecord(userId, options.resume.handoffId) : undefined;
   if (options?.resume && !existingHandoff) throw new Error("The durable handoff record for this worker continuation no longer exists or is not owned by the user.");
   const startedAt = existingHandoff?.delegation?.startedAt ?? Date.now();
+  const existingRun = existingHandoff?.delegation?.runId ? await getAgentRun(userId, existingHandoff.delegation.runId) : undefined;
 
   // Inherit model from options/contract or fallback to default
   const model = options?.model || contractInput.model || config.defaultModel;
@@ -108,6 +111,7 @@ export async function executeDelegation(
     taskId: durableTask.id,
   };
   handoffRecord.delegation = {
+    runId: existingRun?.id ?? existingHandoff?.delegation?.runId ?? `run_${randomUUID()}`,
     model,
     allowedTools: contract.allowedTools,
     allowedComposioTools: contract.allowedComposioTools,
@@ -166,7 +170,8 @@ export async function executeDelegation(
     // Native-only contract tests and fallback summaries do not need a live
     // Composio session. Avoid contacting the provider unless the worker model
     // or an explicit Composio action actually requires it.
-    const needsComposio = canRunModel || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
+    const continuationAcknowledgement = Boolean(options?.resume && !actionPayload && (contract.context?.previousToolRequest || existingHandoff?.status === "requires_tool_request"));
+    const needsComposio = (canRunModel && !continuationAcknowledgement) || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
     const scopedComposio = needsComposio
       ? await getScopedComposioTools(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools })
       : { tools: [], missing: starterComposioTools, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
@@ -264,6 +269,7 @@ export async function executeDelegation(
                         maxToolCalls: contract.maxToolCalls,
                       },
                       approvedApprovalId: options?.approvedApprovalId,
+                      deliveryTarget: options?.deliveryTarget,
                       onStatus: options?.onStatus,
                       signal: activeSignal,
                     });
@@ -281,6 +287,13 @@ export async function executeDelegation(
           }
         }
       }
+    } else if (options?.resume && !actionPayload && (contract.context?.previousToolRequest || existingHandoff?.status === "requires_tool_request")) {
+      // A scoped capability continuation may arrive without a new model turn:
+      // the supervisor has already reviewed the request and only asked the
+      // worker to acknowledge the newly granted boundary. Preserve the same
+      // handoff and return a deterministic checkpoint instead of inventing a
+      // second objective or repeating the original work.
+      outputSummary = `Worker capability [${manifest.displayName}] resumed with the supervisor-approved capability scope. The original request was preserved and no unreviewed external action was executed.`;
     } else if (canRunModel) {
       // ── Autonomous OpenRouter Worker Model Loop ─────────────────────────────
       let skillContext = "";
@@ -308,10 +321,46 @@ Reflection Checklist (Verify before concluding):
 ${manifest.reflectionChecklist.map((c) => `- ${c}`).join("\n")}
 ${skillContext ? `\nRelevant project skill guidance (trusted local instructions; user and supervisor instructions take precedence):\n${skillContext}` : ""}`;
 
-      const messages: ApiMessage[] = [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: contract.objective },
-      ];
+      const restoredMessages = existingRun?.state?.messages;
+      const messages: ApiMessage[] = Array.isArray(restoredMessages) && restoredMessages.length
+        ? restoredMessages as ApiMessage[]
+        : [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: contract.objective },
+          ];
+      let runVersion = existingRun?.version ?? 0;
+      const runRecord: AgentRunRecord = existingRun ?? {
+        id: handoffRecord.delegation.runId!,
+        userId,
+        kind: "worker",
+        worker: workerName,
+        objective: contract.objective,
+        model,
+        status: "running",
+        budget: { duration: contract.duration, timeoutSeconds: contract.timeoutSeconds, maxToolCalls: contract.maxToolCalls, startedAt },
+        state: { messages, toolCallsExecuted: 0, round: 0 },
+        version: 0,
+        events: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      const checkpointRun = async (statusPatch: AgentRunRecord["status"], data: Record<string, unknown> = {}): Promise<void> => {
+        runRecord.status = statusPatch;
+        runRecord.state = {
+          ...(runRecord.state ?? {}),
+          messages,
+          toolCallsExecuted: toolCallsCount,
+          output: outputSummary || undefined,
+          checkpoint: typeof data.checkpoint === "string" ? data.checkpoint : runRecord.state?.checkpoint,
+          nextAction: typeof data.nextAction === "string" ? data.nextAction : runRecord.state?.nextAction,
+          round: typeof data.round === "number" ? data.round : runRecord.state?.round,
+        };
+        runRecord.events = [...runRecord.events, { id: `evt_${randomUUID()}`, type: String(data.eventType ?? statusPatch), at: Date.now(), data }].slice(-200);
+        const saved = await saveAgentRun(runRecord, existingRun ? runVersion : undefined);
+        runVersion = saved.version;
+        Object.assign(runRecord, saved);
+      };
+      await checkpointRun("running", { eventType: options?.resume ? "worker.resumed" : "worker.started", round: 0 });
 
       for (let round = 0; round < contract.maxToolCalls + 1; round++) {
         if (activeSignal.aborted) {
@@ -327,6 +376,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           break;
         }
 
+        await checkpointRun("running", { eventType: "worker.model_requested", round, model, messageCount: messages.length });
         const response = await orChat(
           model,
           messages,
@@ -340,6 +390,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           outputSummary = `No response choice received from worker model.`;
           break;
         }
+        await checkpointRun("running", { eventType: "worker.model_completed", round, model, finishReason: choice.finish_reason ?? "unknown", hasToolCalls: Boolean(choice.message?.tool_calls?.length) });
 
         const { message: assistantMsg } = choice;
         const toolCalls = assistantMsg.tool_calls ?? [];
@@ -419,6 +470,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
               logs.push({ tool: slug, args: rawArgs, result: { requested: true, ...toolRequest } });
               messages.push({ role: "tool", tool_call_id: call.id, content: "Capability request recorded. Stop here; Chusky will decide whether to discover and delegate a narrowly scoped tool." });
               await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky tool discovery and scoped re-delegation");
+              await checkpointRun("waiting_tools", { eventType: "worker.tool_request", checkpoint: outputSummary, nextAction: "Await Chusky tool discovery and scoped re-delegation" });
             }
             approvalNeeded = true;
             break;
@@ -450,6 +502,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
               request: `Worker capability ${manifest.displayName} requested execution of ${slug}`,
               history: [],
               model,
+              handoffId: handoffRecord.id,
             });
 
             approvalId = approvalRecord.id;
@@ -467,6 +520,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
 
             approvalNeeded = true;
             await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky supervisor review");
+            await checkpointRun("waiting_approval", { eventType: "worker.approval_requested", checkpoint: outputSummary, nextAction: "Await Chusky supervisor review", approvalId: approvalRecord.id });
             break;
           }
 
@@ -493,6 +547,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
                       budgetSeconds: contract.budgetSeconds,
                     },
                     approvedApprovalId: options?.approvedApprovalId,
+                    deliveryTarget: options?.deliveryTarget,
                     onStatus: options?.onStatus,
                     signal: activeSignal,
                   });
@@ -503,6 +558,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             logs.push({ tool: slug, args: executionArgs, result });
             messages.push({ role: "tool", tool_call_id: call.id, content: resultStr.slice(0, 20000) });
             await checkpointTask(userId, durableTask.id, `Executed ${slug}`, "Proceed to next step");
+            await checkpointRun("running", { eventType: "worker.tool_completed", tool: slug, round, checkpoint: `Executed ${slug}`, nextAction: "Proceed to next step" });
             if (approvedForTool && isRisky) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
           } catch (err) {
             const errMsg = String((err as Error)?.message ?? err);
@@ -521,6 +577,9 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           break;
         }
       }
+      if (status === "success") await checkpointRun("completed", { eventType: "worker.completed", checkpoint: outputSummary, nextAction: "" });
+      else if (status === "timed_out" || status === "max_tool_calls_exceeded") await checkpointRun("queued", { eventType: "worker.slice_exhausted", checkpoint: outputSummary, nextAction: "Continue from the latest durable checkpoint.", round: contract.maxToolCalls });
+      else if (status === "failed") await checkpointRun("failed", { eventType: "worker.failed", checkpoint: outputSummary, nextAction: "Inspect the failure and retry when safe." });
     } else {
       // Direct summary execution
       outputSummary = `Worker capability [${manifest.displayName}] received objective: "${contract.objective}". Output expected: "${contract.expectedOutput}". Scope verified clean. ${memorySnippet}`;
@@ -576,6 +635,30 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
       await updateTask(userId, durableTask.id, { status: "failed", error: outputSummary, nextAction: "Check QStash configuration and retry the task." });
       handoffRecord.status = status;
       await saveHandoffRecord(userId, handoffRecord);
+    }
+  } else if (status === "queued") {
+    // Never report a durable continuation that cannot actually be scheduled.
+    // This makes missing QStash/public-webhook configuration an explicit,
+    // retryable failure instead of a task stranded in `queued` forever.
+    status = "failed";
+    outputSummary = "Worker reached its slice limit, but durable continuation is unavailable. Configure QSTASH_TOKEN and WEBHOOK_URL, then retry the task.";
+    await updateTask(userId, durableTask.id, { status: "failed", error: outputSummary, nextAction: "Configure QSTASH_TOKEN and WEBHOOK_URL, then retry." });
+    handoffRecord.status = status;
+    await saveHandoffRecord(userId, handoffRecord);
+  }
+
+  // Reconcile the durable run after the outer continuation decision. A slice
+  // may first checkpoint as queued and then become failed if scheduling is not
+  // available; the run record must expose that final truth as well.
+  if (handoffRecord.delegation?.runId) {
+    const finalRun = await getAgentRun(userId, handoffRecord.delegation.runId);
+    if (finalRun) {
+      await saveAgentRun({
+        ...finalRun,
+        status: status === "success" ? "completed" : status === "cancelled" ? "cancelled" : status === "queued" ? "queued" : status === "requires_approval" ? "waiting_approval" : status === "requires_tool_request" ? "waiting_tools" : "failed",
+        state: { ...(finalRun.state ?? {}), output: outputSummary.slice(0, 20_000), checkpoint: outputSummary.slice(0, 4_000), nextAction: status === "queued" ? "Continue from the latest durable checkpoint." : "" },
+        events: [...finalRun.events, { id: `evt_${randomUUID()}`, type: `run.${status}`, at: Date.now(), data: { output: outputSummary.slice(0, 2_000) } }].slice(-200),
+      }, finalRun.version);
     }
   }
 

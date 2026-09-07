@@ -28,8 +28,8 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getImageAsset, getSession, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
-import type { Message } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
 import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
@@ -441,6 +441,8 @@ export interface AgentChannelContext {
   scope?: "private" | "shared";
   triggerEventId?: string;
   deliveryTarget?: import("./channels/contracts.js").ReplyTarget;
+  runId?: string;
+  parentRunId?: string;
 }
 
 export interface AgentRunOptions {
@@ -452,6 +454,9 @@ export interface AgentRunOptions {
   maxToolCalls?: number;
   maxCost?: number;
   temporalContext?: TemporalContext;
+  /** Reuse a durable run when a queued workflow resumes. */
+  runId?: string;
+  parentRunId?: string;
 }
 
 export function appendPreviewLinks(text: string, links: string[]): string {
@@ -536,6 +541,11 @@ export async function runAgent(
 
   if (onStatus) await onStatus("📜 I’m reading your message……");
 
+  const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
+  const existingRun = await getAgentRun(userId, durableRunId);
+  let durableRunRecord = existingRun;
+  let durableRunVersion = existingRun?.version;
+
   let requestModel = model;
 
   // Get Composio session for this user
@@ -543,15 +553,21 @@ export async function runAgent(
 
   if (onStatus) await onStatus("🧭 I’m getting the right tools for you…");
 
-  // Fetch the full tool list from Composio (1000+ tools + meta tools)
-  // These are OpenAI-compatible function descriptors
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const composioTools: any[] = await sessionObj.tools();
-  composioTools.push(...LOCAL_TOOLS);
   const allow = options?.toolAllow?.length ? new Set(options.toolAllow) : undefined;
   const deny = new Set(options?.toolDeny ?? []);
+  // Composio sessions expose discovery and execution meta-tools by default.
+  // Keep the model context bounded: direct actions explicitly allowlisted for
+  // this run remain available, while the model can discover any other action
+  // through COMPOSIO_SEARCH_TOOL and execute it through the session.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fullComposioTools: any[] = await sessionObj.tools();
+  const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
+  const composioTools = fullComposioTools.length > 80
+    ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
+    : fullComposioTools;
+  composioTools.push(...LOCAL_TOOLS);
   const availableTools = composioTools.filter((tool) => {
-    const name = String(tool?.function?.name ?? tool?.name ?? "");
+    const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);
   });
 
@@ -584,7 +600,7 @@ export async function runAgent(
     logger.debug({ err: e, model }, "Model capability lookup unavailable");
   }
 
-  logger.debug({ toolCount: composioTools.length }, "Composio tools loaded");
+  logger.debug({ toolCount: composioTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Composio tools loaded");
 
   // Build message array for OpenRouter
   const durable = await getSession(userId);
@@ -672,15 +688,51 @@ export async function runAgent(
       logger.warn({ err: error, userId }, "Could not record agent upgrade notice delivery");
       return text;
     }
+    // Internal/unit callers without a delivery channel still claim the notice
+    // so it is not replayed, but the release banner is user-facing only when
+    // a real channel or SDK run is present.
+    if (!channelContext && !options?.runId) return text;
     return `${formatAgentUpgradeNotice(pendingUpgrade)}\n\n${text}`.trim();
   };
 
+  const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
+    const record: AgentRunRecord = {
+      ...(durableRunRecord ?? {
+        id: durableRunId,
+        userId,
+        kind: "supervisor",
+        objective: typeof userMessage === "string" ? userMessage : "Multimodal agent request",
+        createdAt: Date.now(),
+        version: 0,
+        events: [],
+      }),
+      model: requestModel,
+      parentRunId: options?.parentRunId ?? channelContext?.parentRunId ?? durableRunRecord?.parentRunId,
+      status,
+      state: {
+        messages,
+        toolCallsExecuted,
+        round: messages.length,
+        output: output?.slice(0, 20_000),
+        toolResults: Object.fromEntries([...toolResultsByCallId.entries()].slice(-120)),
+      },
+       events: [...(durableRunRecord?.events ?? []), { id: `evt_${randomUUID()}`, type: eventType, at: Date.now(), data: { toolCallsExecuted, toolsUsed: toolsUsed.slice(-50), ...eventData } }].slice(-200),
+      updatedAt: Date.now(),
+    };
+    const saved = await saveAgentRun(record, durableRunVersion);
+    durableRunVersion = saved.version;
+    durableRunRecord = saved;
+  };
+  await persistRun("running", existingRun ? "run.resumed" : "run.started");
+
   for (let round = 0; round < config.maxToolRounds; round++) {
     logger.debug({ round, model: requestModel, messageCount: messages.length }, "Agent round");
+    await persistRun("running", "run.round_started");
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     let response: ChatResponse;
     try {
+      await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
       response = await orChat(requestModel, messages, availableTools, signal, onDelta);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -691,6 +743,7 @@ export async function runAgent(
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
         response = await orChat(requestModel, messages, availableTools, signal, onDelta);
       } else {
+        await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;
       }
     }
@@ -700,6 +753,7 @@ export async function runAgent(
     if (!choice) throw new Error("No choices in OpenRouter response");
 
     const { finish_reason, message: assistantMsg } = choice;
+    await persistRun("running", "run.model_completed", undefined, { model: requestModel, round, finishReason: finish_reason ?? "unknown", hasToolCalls: Boolean(assistantMsg.tool_calls?.length) });
     const legacyToolCalls = typeof assistantMsg.content === "string" ? parseLegacyDsmlToolCalls(assistantMsg.content) : [];
     const toolCalls = assistantMsg.tool_calls ?? legacyToolCalls;
 
@@ -719,7 +773,9 @@ export async function runAgent(
       }
       logger.info({ model: requestModel, round, toolsUsed, cost: totalCost }, "Chusky done");
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-      return { text: await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks)), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+      const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
+      await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
+      return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -735,11 +791,13 @@ export async function runAgent(
 
       if (onStatus) await onStatus(toolStatus(slug));
       logger.debug({ slug, args: call.function.arguments }, "Tool call");
+      await persistRun("running", "run.tool_started", undefined, { tool: slug, callId: call.id, round });
 
       let result: string;
       let execResult: unknown;
       try {
-        const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug);
+        const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
+          || ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"].includes(slug);
         if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
         const previousResult = toolResultsByCallId.get(call.id);
         if (previousResult !== undefined) {
@@ -776,6 +834,7 @@ export async function runAgent(
             history,
             model,
           });
+          await persistRun("waiting_approval", "run.approval_requested", undefined, { approvalId: approval.id, tool: slug, callId: call.id, round });
           throw new ApprovalRequiredError(approval.id, slug, args);
         }
         // session.execute() routes the call through Composio:
@@ -903,6 +962,7 @@ export async function runAgent(
         tool_call_id: call.id,
         content: result,
       });
+      await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !result.startsWith("Error executing ") });
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
         const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
@@ -929,7 +989,9 @@ export async function runAgent(
   const text = final.choices[0]?.message?.content ?? "";
 
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-  return { text: await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks)), toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+  const finalText = await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks));
+  await persistRun("completed", "run.completed_after_round_limit", finalText);
+  return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

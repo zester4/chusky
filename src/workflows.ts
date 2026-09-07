@@ -68,9 +68,10 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
   if (!job || job.status !== "active") return { skipped: true, delivered: false };
   const deliveryKey = `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}`;
   if (deps.claimDelivery && !(await deps.claimDelivery(deliveryKey, 15 * 60 * 1000))) return { skipped: true, delivered: false };
-  const chatId = await deps.getTelegramChatId(payload.userId);
-  if (!chatId) {
-    await deps.updateJob(payload.userId, payload.jobId, { deliveryError: "No Telegram mapping" });
+  const target = job.deliveryTarget;
+  const chatId = target?.provider === "telegram" ? Number(target.conversationId) : (!target ? await deps.getTelegramChatId(payload.userId) : undefined);
+  if ((!target && !chatId) || (target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
+    await deps.updateJob(payload.userId, payload.jobId, { deliveryError: target ? `No adapter for ${target.provider}` : "No Telegram mapping" });
     return { delivered: false };
   }
   try {
@@ -80,9 +81,13 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
         ? await deps.runAgent(job)
         : { text: job.text };
     const response = result.text.trim() || "Scheduled job completed.";
-    const header = "🔁 <b>Chusky scheduled job</b>\n\n";
-    for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {
-      await deps.sendMessage(chatId, `${header}${chunk}`, { parse_mode: "HTML" });
+    if (target && target.provider !== "telegram") {
+      await deps.sendChannelMessage!(target, `🔁 Chusky scheduled job\n\n${response}`, `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}`);
+    } else {
+      const header = "🔁 <b>Chusky scheduled job</b>\n\n";
+      for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {
+        await deps.sendMessage(chatId!, `${header}${chunk}`, { parse_mode: "HTML" });
+      }
     }
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {

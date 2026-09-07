@@ -16,3 +16,4 @@ data/
 Thumbs.db
 .pnpm-store/
 __pycache__/
+/artifacts/

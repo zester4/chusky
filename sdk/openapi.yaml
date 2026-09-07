@@ -81,6 +81,8 @@ paths:
     post: { summary: Resume a failed, cancelled, or approval-paused run as a new durable run, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Resumed } } }
   /threads/{threadId}/runs/{runId}/events:
     get: { summary: Recover persisted run events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /threads/{threadId}/runs/{runId}/trace:
+    get: { summary: Inspect the durable model/tool/handoff trace; include_state=true returns the bounded checkpoint, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Durable trace } } }
   /approvals/{approvalId}:
     get: { summary: Get a pending approval, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Approve or deny then resume safely, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Run result } } }

@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -191,7 +191,9 @@ async function main(): Promise<void> {
     if (config.apiKey || config.betterAuthEnabled) {
       registerSdkApi(app);
       void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed"));
-      sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 30_000);
+      // SDK webhooks use the same durable outbox as channels. They are sent
+      // immediately on enqueue; this is only crash recovery, not polling.
+      sdkWebhookRecovery = setInterval(() => { void recoverSdkWebhooks().catch((error) => logger.warn({ error }, "SDK webhook recovery failed")); }, 120_000);
       if (typeof sdkWebhookRecovery === "object" && "unref" in sdkWebhookRecovery) sdkWebhookRecovery.unref();
     }
 
@@ -1055,7 +1057,9 @@ async function main(): Promise<void> {
         runAgent: async (job) => withCliLock(payload.userId, undefined, async () => {
           const session = await getSession(payload.userId);
           try {
-            const result = await runAgent(payload.userId, job.text, session.history, session.model);
+             const result = await runAgent(payload.userId, job.text, session.history, session.model, undefined, undefined, undefined, undefined,
+               job.deliveryTarget ? { accountId: `account_${payload.userId}`, provider: job.deliveryTarget.provider, conversationId: job.deliveryTarget.conversationId, deliveryTarget: job.deliveryTarget } : undefined,
+               { runId: `job_run_${job.id}_${occurrenceId}` });
             await appendMessages(payload.userId, [
               { role: "user", content: `[Scheduled job ${job.id}] ${job.text}` },
               { role: "assistant", content: result.text },
@@ -1088,8 +1092,9 @@ async function main(): Promise<void> {
               timeoutSeconds: binding.timeoutSeconds,
               maxToolCalls: binding.maxToolCalls,
               duration: binding.duration,
-              budgetSeconds: binding.budgetSeconds,
-            }, { model: binding.model, historySummary: session.summaries.slice(-2).join("\n") });
+               budgetSeconds: binding.budgetSeconds,
+               context: job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : undefined,
+             }, { model: binding.model, historySummary: session.summaries.slice(-2).join("\n"), deliveryTarget: job.deliveryTarget });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
               const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
               return { text: `The scheduled ${binding.worker} task paused for a verified capability request. Handoff ${result.handoffRecord.id} is waiting; continuation ${continuation.workflowRunId} was queued.` };
@@ -1110,6 +1115,7 @@ async function main(): Promise<void> {
           }
         }),
         sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
+        sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }),
       }));
     }, { url: resolveWorkflowEndpoint(config.jobWorkflowUrl, config.webhookUrl, "/workflows/job", "Job workflows") }));
 
@@ -1130,7 +1136,7 @@ async function main(): Promise<void> {
               }
               const budgetAbort = new AbortController(); const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
               let result;
-              try { result = await runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions: await sdkTaskSkillInstructions(task.sdkSkills) }); }
+              try { result = await runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions: await sdkTaskSkillInstructions(task.sdkSkills), runId: task.sdkRunId, parentRunId: task.sdkThreadId }); }
               finally { if (budgetTimer) clearTimeout(budgetTimer); }
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
@@ -1196,6 +1202,7 @@ async function main(): Promise<void> {
             budgetSeconds: record.delegation!.budgetSeconds,
           }, {
             resume: { handoffId: record.id, taskId: record.taskId, workflowRunId: workflow.workflowRunId, resumeCount: (record.delegation!.continuationCount ?? 0) },
+            deliveryTarget: (record.context?.deliveryTarget as ReminderDeliveryTarget | undefined),
           });
         });
         if (resumed.status === "queued") return;
@@ -1204,9 +1211,16 @@ async function main(): Promise<void> {
           return;
         }
         await workflow.run("deliver-worker-slice-result", async () => {
-          const chatId = await getTelegramChatId(userId);
-          if (!chatId || !resumed.output.trim()) return;
+          if (!resumed.output.trim()) return;
+          const record = await getHandoffRecord(userId, handoffId);
+          const target = record?.context?.deliveryTarget as ReminderDeliveryTarget | undefined;
           const title = resumed.status === "success" ? "✅ Worker task completed" : "⚠️ Worker task update";
+          if (target) {
+            await channelGateway.send({ accountId: `account_${userId}`, userId, target, text: `${title}\n\n${resumed.output}`, idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:${target.provider}`, correlationId: handoffId, kind: "notification" });
+            return;
+          }
+          const chatId = await getTelegramChatId(userId);
+          if (!chatId) return;
           await channelGateway.send({ accountId: `account_${userId}`, userId, target: { provider: "telegram", conversationId: String(chatId) }, text: `${title}\n\n${resumed.output}`, idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:telegram`, correlationId: handoffId, kind: "notification" });
         });
         return;

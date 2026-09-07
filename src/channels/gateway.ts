@@ -46,7 +46,10 @@ export class ChannelGateway {
     return record.id;
   }
 
-  startRecovery(intervalMs = 30_000): void {
+  // Normal sends are delivered synchronously. Recovery is only the safety net
+  // after a crash, so a two-minute cadence avoids needless Redis traffic while
+  // still recovering a stranded delivery promptly.
+  startRecovery(intervalMs = 120_000): void {
     if (this.recoveryTimer) return;
     void this.outbox.recover(this.adapters).catch(() => undefined);
     this.recoveryTimer = setInterval(() => { void this.outbox.recover(this.adapters).catch(() => undefined); }, intervalMs);

@@ -23,3 +23,19 @@ Recommended responses:
 Expose usage through the usage endpoint and include bounded cost metadata in run and webhook records. Never trust a client-provided cost value.
 
 For asynchronous work, combine the budget with `wait: false`; the QStash-backed task resumes from persisted state after a process restart. Treat the returned task as the source of truth for progress and retry state.
+
+## Inspecting a durable trace
+
+Every synchronous SDK run is also checkpointed as a provider-neutral agent run.
+Use the trace endpoint to inspect model turns, tool starts/results, approvals,
+failures, and completion without loading the transcript into the normal run
+response:
+
+```http
+GET /v1/threads/{threadId}/runs/{runId}/trace
+```
+
+Pass `?include_state=true` only when the checkpointed messages and tool results
+are needed for debugging. The trace is owner-scoped, versioned for optimistic
+concurrency, and retained independently from chat history. Worker handoffs use
+the same trace model and expose their `runId` through the worker endpoints.

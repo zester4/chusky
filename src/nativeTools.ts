@@ -20,6 +20,7 @@ import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { executeDelegation } from "./subagents/executor.js";
+import { planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 
@@ -82,7 +83,11 @@ async function runDelegationWithDurableContinuation(
   contract: Parameters<typeof executeDelegation>[1],
   runtime: NativeToolRuntime,
 ): Promise<unknown> {
-  const result = await executeDelegation(userId, contract, runtime);
+  const durableTarget = durableReminderTarget(runtime.deliveryTarget);
+  const durableContext = durableTarget && !contract.context?.deliveryTarget
+    ? { ...(contract.context ?? {}), deliveryTarget: durableTarget }
+    : contract.context;
+  const result = await executeDelegation(userId, { ...contract, context: durableContext }, runtime);
   if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
   const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
   return { ...result, durableContinuation: { queued: true, ...continuation } };
@@ -258,7 +263,8 @@ export async function scheduleJob(userId: number, args: Record<string, unknown>,
   const workerBinding: ScheduledWorkerBinding | undefined = runtime.worker && runtime.workerBinding
     ? { worker: runtime.worker, objective: jobText, ...runtime.workerBinding }
     : undefined;
-  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: jobText, cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", ...(workerBinding ? { workerBinding } : {}), createdAt: Date.now() };
+  const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
+  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: jobText, cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", ...(workerBinding ? { workerBinding } : {}), ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now() };
   const client = new QStashClient({ token: requireQStash() });
   await addJob(userId, job);
   try { await client.schedules.create({
@@ -294,6 +300,12 @@ export async function cancelJob(userId: number, id: string): Promise<string> {
 }
 
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
+  if (slug === "CHUCK_REQUEST_ADDITIONAL_TOOLS" && !runtime.worker) {
+    throw new Error("CHUCK_REQUEST_ADDITIONAL_TOOLS is reserved for specialist workers; Chusky must search and verify the capability directly.");
+  }
+  if (slug === "CHUCK_REVIEW_SUBAGENT_ACTION" && runtime.worker) {
+    throw new Error("Only Chusky can review specialist actions.");
+  }
   switch (slug) {
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
@@ -425,6 +437,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         context: (args.context as any) ?? {},
         expectedOutput: args.expectedOutput ? String(args.expectedOutput) : undefined,
       }, runtime);
+    case "CHUCK_PLAN_DELEGATION":
+      if (runtime.worker) throw new Error("CHUCK_PLAN_DELEGATION is reserved for Chusky, the supervisor.");
+      return planDelegationObjective(text(args.objective), Array.isArray(args.allowedTools) ? args.allowedTools.map((item) => String(item)) : []);
     case "CHUCK_REQUEST_ADDITIONAL_TOOLS":
       return {
         requested: true,

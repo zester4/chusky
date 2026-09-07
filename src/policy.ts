@@ -19,6 +19,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
   "CHUCK_LIST_SUBAGENTS", "CHUCK_GET_SUBAGENT_STATUS", "CHUCK_CANCEL_SUBAGENT",
   "CHUCK_DELEGATE_SUBAGENT", "CHUCK_HANDOFF_SUBAGENT", "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+  "CHUCK_PLAN_DELEGATION",
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
 ]);
@@ -43,10 +44,14 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_CREATE_TRIGGER") return "approval_required";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
-    // The supervisor explicitly requested a batch action. The batch wrapper
-    // must not create a second approval pause; provider-level authorization
-    // and any requested user confirmation are handled by the caller.
-    return "private";
+    // Batch execution gets one approval boundary only when at least one nested
+    // action is side-effecting. Read-only verification batches stay automatic.
+    const nested = Array.isArray(args.tools) ? args.tools : [];
+    const hasSideEffect = nested.some((item) => {
+      const name = item && typeof item === "object" ? String((item as Record<string, unknown>).tool_slug ?? (item as Record<string, unknown>).name ?? "") : "";
+      return RISKY_TOOL_PATTERN.test(name);
+    });
+    return hasSideEffect ? "approval_required" : "private";
   }
   if (slug.startsWith("CHUCK_")) return "approval_required";
   return RISKY_TOOL_PATTERN.test(slug) ? "approval_required" : "private";
@@ -117,6 +122,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_GET_SUBAGENT_STATUS: "🔍 I’m fetching that delegation status…",
   CHUCK_CANCEL_SUBAGENT: "🛑 I’m cancelling that worker delegation…",
   CHUCK_HANDOFF_SUBAGENT: "🤝 I’m handing off to a specialist…",
+  CHUCK_PLAN_DELEGATION: "🧭 I’m mapping that work to the right specialists…",
   CHUCK_REQUEST_ADDITIONAL_TOOLS: "🧩 A specialist is requesting an additional capability…",
   CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST: "🧩 I’m resuming that specialist with the verified capability…",
 };

@@ -58,6 +58,8 @@ export interface HandoffRecord {
   toolRequestEventId?: string;
   resumeCount?: number;
   delegation?: {
+    /** Durable execution record containing the exact worker model state. */
+    runId?: string;
     model?: string;
     allowedTools: string[];
     allowedComposioTools: string[];

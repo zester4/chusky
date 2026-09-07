@@ -116,6 +116,36 @@ export interface SdkRunRecord {
   updatedAt: number;
 }
 
+/**
+ * Durable execution state for a supervisor or specialist run.  This record is
+ * deliberately separate from UserSession so a long-running run never rewrites
+ * chat history, memories, or SDK metadata on every checkpoint.
+ */
+export type AgentRunStatus = "queued" | "running" | "waiting_approval" | "waiting_tools" | "paused" | "completed" | "failed" | "cancelled";
+export interface AgentRunEvent {
+  id: string;
+  type: string;
+  at: number;
+  data?: Record<string, unknown>;
+}
+export interface AgentRunRecord {
+  id: string;
+  userId: number;
+  parentRunId?: string;
+  kind: "supervisor" | "worker";
+  worker?: string;
+  objective: string;
+  model?: string;
+  status: AgentRunStatus;
+  budget?: { duration?: string; timeoutSeconds?: number; maxToolCalls?: number; maxCost?: number; startedAt?: number };
+  /** JSON-serializable model state; bounded by saveAgentRun(). */
+  state?: { messages?: unknown[]; toolCallsExecuted?: number; round?: number; output?: string; toolResults?: Record<string, string>; checkpoint?: string; nextAction?: string };
+  version: number;
+  events: AgentRunEvent[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface SdkThreadRecord {
   id: string;
   externalId: string;
@@ -248,6 +278,8 @@ export interface JobRecord {
   scheduleId: string;
   status: "active" | "cancelled";
   workerBinding?: ScheduledWorkerBinding;
+  /** Durable provider-neutral destination captured when the job is created. */
+  deliveryTarget?: ReminderDeliveryTarget;
   deliveryError?: string;
   createdAt: number;
 }
@@ -541,6 +573,12 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined>;
+  saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord>;
+  listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
+  getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined>;
+  saveHandoffRecord(record: HandoffRecord & { userId: number }): Promise<HandoffRecord>;
+  listHandoffRecords(userId: number, limit?: number): Promise<HandoffRecord[]>;
   incrRate(userId: number): Promise<number>;
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
@@ -573,6 +611,9 @@ interface Backend {
   revokeCliDevice(userId: number, tokenHash: string): Promise<boolean>;
   listCliDevices(userId: number): Promise<CliDeviceRecord[]>;
   claimApproval(userId: number, id: string): Promise<ApprovalRecord | undefined>;
+  getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined>;
+  saveApproval(record: ApprovalRecord): Promise<ApprovalRecord>;
+  listApprovals(userId: number, limit?: number): Promise<ApprovalRecord[]>;
   getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined>;
   listChannelIdentities(userId: number): Promise<ChannelIdentityRecord[]>;
   saveChannelIdentity(record: ChannelIdentityRecord): Promise<boolean>;
@@ -610,10 +651,59 @@ interface Backend {
   takeChannelDebounce(key: string): Promise<InboundMessage[]>;
 }
 
+const AGENT_RUN_TTL_SECONDS = 90 * 24 * 60 * 60;
+const AGENT_RUN_MAX_BYTES = 2 * 1024 * 1024;
+const RECOVERABLE_OUTBOX_STATUSES = ["queued", "failed", "delivering"] as const;
+
+function isRecoverableOutboxStatus(status: OutboxRecord["status"]): status is typeof RECOVERABLE_OUTBOX_STATUSES[number] {
+  return (RECOVERABLE_OUTBOX_STATUSES as readonly string[]).includes(status);
+}
+
+function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
+  const boundedMessages = Array.isArray(record.state?.messages)
+    ? record.state.messages.slice(-120).map((message) => {
+        if (!message || typeof message !== "object") return message;
+        const item = message as Record<string, unknown>;
+        const content = item.content;
+        if (typeof content === "string") return { ...item, content: content.slice(0, 80_000) };
+        if (Array.isArray(content)) {
+          return { ...item, content: content.slice(0, 32).map((part) => {
+            if (!part || typeof part !== "object") return part;
+            const entry = part as Record<string, unknown>;
+            return JSON.stringify(entry).length <= 80_000 ? entry : { type: String(entry.type ?? "content"), text: "[large content elided from checkpoint]" };
+          }) };
+        }
+        return item;
+      })
+    : undefined;
+  const state = record.state
+    ? {
+        ...record.state,
+        messages: boundedMessages,
+        toolResults: record.state.toolResults
+          ? Object.fromEntries(Object.entries(record.state.toolResults).slice(-120).map(([key, value]) => [key, String(value).slice(0, 20_000)]))
+          : undefined,
+        output: record.state.output?.slice(0, 20_000),
+        checkpoint: record.state.checkpoint?.slice(0, 4_000),
+        nextAction: record.state.nextAction?.slice(0, 2_000),
+      }
+    : undefined;
+  const next: AgentRunRecord = { ...record, objective: record.objective.slice(0, 20_000), state, events: record.events.slice(-200), updatedAt: Date.now() };
+  const encoded = JSON.stringify(next);
+  if (encoded.length > AGENT_RUN_MAX_BYTES) throw new Error("Agent run checkpoint exceeds the 2 MB durable state limit; compact the run before continuing.");
+  return next;
+}
+
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   constructor(private r: Redis) {}
   private sk = (id: number) => `chuck:session:${id}`;
+  private runKey = (id: string) => `chuck:run:${id}`;
+  private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
+  private handoffKey = (id: string) => `chuck:handoff:${id}`;
+  private handoffIndexKey = (id: number) => `chuck:user:${id}:handoffs`;
+  private approvalKey = (id: string) => `chuck:approval:${id}`;
+  private approvalIndexKey = (id: number) => `chuck:user:${id}:approvals`;
   private rk = (id: number) => `chuck:rate:${id}`;
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
@@ -642,22 +732,101 @@ class RedisBackend implements Backend {
   private outboxKey = (id: string) => `chuck:outbox:${id}`;
   private outboxIdempotencyKey = (key: string) => `chuck:outbox:idempotency:${createHash("sha256").update(key).digest("hex")}`;
   private outboxProviderKey = (provider: ChannelProvider, providerMessageId: string) => `chuck:outbox:provider:${provider}:${createHash("sha256").update(providerMessageId).digest("hex")}`;
+  /** Status-specific indexes keep idle recovery from scanning delivered audit records. */
+  private outboxPendingIndexKey = (status: typeof RECOVERABLE_OUTBOX_STATUSES[number]) => `chuck:outbox:pending:${status}`;
+  private outboxPendingIndexReadyKey = "chuck:outbox:pending:index-v1";
+  private outboxPendingIndexMigrationLockKey = "chuck:outbox:pending:index-v1:lock";
   private channelConversationKey = (id: string) => `chuck:channel:conversation:${createHash("sha256").update(id).digest("hex")}`;
   private channelDebounceKey = (id: string) => `chuck:channel:debounce:${createHash("sha256").update(id).digest("hex")}`;
 
   async getSession(userId: number): Promise<UserSession> {
     const raw = await this.r.get(this.sk(userId));
     if (raw) {
-      try { return JSON.parse(raw) as UserSession; } catch { /* fallthrough */ }
+      try { const session = JSON.parse(raw) as UserSession; session.approvals = await this.listApprovals(userId, 20); return session; } catch { /* fallthrough */ }
     }
-    return fresh();
+    const session = fresh(); session.approvals = await this.listApprovals(userId, 20); return session;
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
     // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
     // It must survive the normal chat-session TTL just like durable tasks and CLI devices.
     if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(s)); return; }
-    await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify(s));
+    // Approval records live in their own short-lived keyspace. Keep an empty
+    // legacy field for old readers without copying approval payloads into the
+    // hot session blob on every unrelated write.
+    await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+  }
+  async getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
+    const raw = await this.r.get(this.approvalKey(id));
+    if (!raw) return undefined;
+    try { const approval = JSON.parse(raw) as ApprovalRecord; return approval.userId === userId ? approval : undefined; } catch { return undefined; }
+  }
+  async saveApproval(record: ApprovalRecord): Promise<ApprovalRecord> {
+    await this.r.setex(this.approvalKey(record.id), Math.max(60, Math.ceil((record.expiresAt - Date.now()) / 1000)), JSON.stringify(record));
+    await this.r.zadd(this.approvalIndexKey(record.userId), record.createdAt, record.id);
+    await this.r.expire(this.approvalIndexKey(record.userId), 24 * 60 * 60);
+    return record;
+  }
+  async listApprovals(userId: number, limit = 50): Promise<ApprovalRecord[]> {
+    const ids = await this.r.zrevrange(this.approvalIndexKey(userId), 0, Math.max(0, limit - 1));
+    const records = await Promise.all(ids.map((id) => this.getApproval(userId, id)));
+    return records.filter((record): record is ApprovalRecord => Boolean(record));
+  }
+  async getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined> {
+    const raw = await this.r.get(this.runKey(id));
+    if (!raw) return undefined;
+    try {
+      const record = JSON.parse(raw) as AgentRunRecord;
+      return record.userId === userId ? record : undefined;
+    } catch { return undefined; }
+  }
+  async saveAgentRun(input: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord> {
+    const record = boundedAgentRun({ ...input, version: expectedVersion === undefined ? input.version : expectedVersion + 1 });
+    const key = this.runKey(record.id);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const currentRaw = await this.r.get(key);
+      const current = currentRaw ? JSON.parse(currentRaw) as AgentRunRecord : undefined;
+      if (expectedVersion !== undefined && (!current || current.userId !== record.userId || current.version !== expectedVersion)) {
+        await this.r.unwatch();
+        throw new Error("Agent run changed concurrently; reload its checkpoint and retry.");
+      }
+      const next = current && expectedVersion === undefined ? { ...record, version: current.version + 1 } : record;
+      const result = await this.r.multi()
+        .set(key, JSON.stringify(next), "EX", AGENT_RUN_TTL_SECONDS)
+        .zadd(this.runIndexKey(next.userId), next.updatedAt, next.id)
+        .expire(this.runIndexKey(next.userId), AGENT_RUN_TTL_SECONDS)
+        .exec();
+      if (result) return next;
+    }
+    throw new Error("Could not persist agent run checkpoint after concurrent updates.");
+  }
+  async listAgentRuns(userId: number, limit = 50): Promise<AgentRunRecord[]> {
+    const ids = await this.r.zrevrange(this.runIndexKey(userId), 0, Math.max(0, limit - 1));
+    const records = await Promise.all(ids.map((id) => this.getAgentRun(userId, id)));
+    return records.filter((record): record is AgentRunRecord => Boolean(record));
+  }
+  async getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined> {
+    const raw = await this.r.get(this.handoffKey(id));
+    if (!raw) return undefined;
+    try {
+      const record = JSON.parse(raw) as HandoffRecord & { userId?: number };
+      return (record.userId === undefined || record.userId === userId) ? record : undefined;
+    } catch { return undefined; }
+  }
+  async saveHandoffRecord(input: HandoffRecord & { userId: number }): Promise<HandoffRecord> {
+    const record = { ...input, context: input.context ?? {} };
+    await this.r.multi()
+      .set(this.handoffKey(record.id), JSON.stringify(record), "EX", AGENT_RUN_TTL_SECONDS)
+      .zadd(this.handoffIndexKey(record.userId), record.timestamp, record.id)
+      .expire(this.handoffIndexKey(record.userId), AGENT_RUN_TTL_SECONDS)
+      .exec();
+    return record;
+  }
+  async listHandoffRecords(userId: number, limit = 100): Promise<HandoffRecord[]> {
+    const ids = await this.r.zrevrange(this.handoffIndexKey(userId), 0, Math.max(0, limit - 1));
+    const records = await Promise.all(ids.map((id) => this.getHandoffRecord(userId, id)));
+    return records.filter((record): record is HandoffRecord => Boolean(record));
   }
 
   async createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord> {
@@ -857,17 +1026,16 @@ class RedisBackend implements Backend {
     return records.filter((r): r is CliDeviceRecord => Boolean(r));
   }
   async claimApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
-    const key = this.sk(userId);
+    const key = this.approvalKey(id);
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.r.watch(key);
       const raw = await this.r.get(key);
       if (!raw) { await this.r.unwatch(); return undefined; }
-      const s = JSON.parse(raw) as UserSession;
-      const approval = s.approvals?.find((a) => a.id === id);
-      if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
-      approval.status = "approved";
-      const result = await this.r.multi().setex(key, config.sessionTtl, JSON.stringify(s)).exec();
-      if (result) return approval;
+      const approval = JSON.parse(raw) as ApprovalRecord;
+      if (approval.userId !== userId || approval.status !== "pending" || approval.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
+      const next = { ...approval, status: "approved" as const };
+      const result = await this.r.multi().setex(key, Math.max(60, Math.ceil((next.expiresAt - Date.now()) / 1000)), JSON.stringify(next)).exec();
+      if (result) return next;
     }
     return undefined;
   }
@@ -1041,6 +1209,7 @@ class RedisBackend implements Backend {
       const result = await this.r.multi()
         .set(this.outboxKey(record.id), JSON.stringify(record), "EX", 30 * 24 * 60 * 60)
         .set(idempotencyKey, record.id, "EX", 30 * 24 * 60 * 60)
+        .zadd(this.outboxPendingIndexKey("queued"), record.createdAt, record.id)
         .exec();
       if (result) return record;
     }
@@ -1061,7 +1230,11 @@ class RedisBackend implements Backend {
       const now = Date.now();
       if (record.status === "delivered" || (record.status === "delivering" && (record.leaseExpiresAt ?? 0) > now)) { await this.r.unwatch(); return undefined; }
       const next = { ...record, status: "delivering" as const, attempts: record.attempts + 1, leaseToken: randomUUID(), leaseExpiresAt: now + leaseMs, updatedAt: now };
-      const result = await this.r.multi().set(key, JSON.stringify(next), "EX", 30 * 24 * 60 * 60).exec();
+      const result = await this.r.multi()
+        .set(key, JSON.stringify(next), "EX", 30 * 24 * 60 * 60)
+        .zrem(this.outboxPendingIndexKey(record.status as typeof RECOVERABLE_OUTBOX_STATUSES[number]), id)
+        .zadd(this.outboxPendingIndexKey("delivering"), next.createdAt, id)
+        .exec();
       if (result) return next;
     }
     return undefined;
@@ -1070,15 +1243,83 @@ class RedisBackend implements Backend {
     const current = await this.getOutbox(id);
     if (!current) return undefined;
     const next = { ...current, ...patch, id: current.id, idempotencyKey: current.idempotencyKey, updatedAt: Date.now() };
-    await this.r.set(this.outboxKey(id), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
-    if (next.providerMessageId) await this.r.set(this.outboxProviderKey(next.provider, next.providerMessageId), id, "EX", 30 * 24 * 60 * 60);
+    const transaction = this.r.multi().set(this.outboxKey(id), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    for (const status of RECOVERABLE_OUTBOX_STATUSES) transaction.zrem(this.outboxPendingIndexKey(status), id);
+    if (isRecoverableOutboxStatus(next.status)) transaction.zadd(this.outboxPendingIndexKey(next.status), next.createdAt, id);
+    if (next.providerMessageId) transaction.set(this.outboxProviderKey(next.provider, next.providerMessageId), id, "EX", 30 * 24 * 60 * 60);
+    await transaction.exec();
     return next;
   }
   async getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string) {
     const id = await this.r.get(this.outboxProviderKey(provider, providerMessageId));
     return id ? this.getOutbox(id) : undefined;
   }
+  /**
+   * Add retryable legacy records to the new status indexes once. This is the
+   * only compatibility scan; every new or updated record maintains its index
+   * atomically, so idle recovery never reads delivered records again.
+   */
+  private async ensurePendingOutboxIndexes(): Promise<void> {
+    if (await this.r.exists(this.outboxPendingIndexReadyKey)) return;
+    const locked = await this.r.set(this.outboxPendingIndexMigrationLockKey, "1", "EX", 120, "NX");
+    if (locked !== "OK") return;
+    try {
+      let cursor = "0";
+      do {
+        const [next, keys] = await this.r.scan(cursor, "MATCH", "chuck:outbox:out_*", "COUNT", 200);
+        cursor = next;
+        if (!keys.length) continue;
+        const values = await this.r.mget(...keys);
+        const byStatus = new Map<typeof RECOVERABLE_OUTBOX_STATUSES[number], Array<[number, string]>>();
+        for (const [index, raw] of values.entries()) {
+          if (!raw) continue;
+          try {
+            const record = JSON.parse(raw) as OutboxRecord;
+            if (!isRecoverableOutboxStatus(record.status)) continue;
+            const entries = byStatus.get(record.status) ?? [];
+            entries.push([record.createdAt, record.id]);
+            byStatus.set(record.status, entries);
+          } catch { /* corrupt legacy records cannot be recovered safely */ }
+        }
+        for (const [status, entries] of byStatus) {
+          const members = entries.flatMap(([score, id]) => [score, id]);
+          if (members.length) await this.r.zadd(this.outboxPendingIndexKey(status), ...members);
+        }
+      } while (cursor !== "0");
+      await this.r.set(this.outboxPendingIndexReadyKey, "1");
+    } finally {
+      await this.r.del(this.outboxPendingIndexMigrationLockKey);
+    }
+  }
+
+  private async listRecoverableOutbox(statuses: typeof RECOVERABLE_OUTBOX_STATUSES[number][], limit: number): Promise<OutboxRecord[]> {
+    await this.ensurePendingOutboxIndexes();
+    const idGroups = await Promise.all(statuses.map((status) => this.r.zrange(this.outboxPendingIndexKey(status), 0, limit - 1)));
+    const ids = [...new Set(idGroups.flat())];
+    if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.outboxKey(id)));
+    const records: OutboxRecord[] = [];
+    const staleIds: string[] = [];
+    for (const [index, raw] of values.entries()) {
+      if (!raw) { staleIds.push(ids[index]); continue; }
+      try {
+        const record = JSON.parse(raw) as OutboxRecord;
+        if (statuses.includes(record.status as typeof RECOVERABLE_OUTBOX_STATUSES[number])) records.push(record);
+        else staleIds.push(record.id);
+      } catch { staleIds.push(ids[index]); }
+    }
+    if (staleIds.length) {
+      const cleanup = this.r.multi();
+      for (const status of RECOVERABLE_OUTBOX_STATUSES) cleanup.zrem(this.outboxPendingIndexKey(status), ...staleIds);
+      await cleanup.exec();
+    }
+    return records.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+  }
+
   async listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
+    if (statuses?.length && statuses.every(isRecoverableOutboxStatus)) {
+      return this.listRecoverableOutbox([...new Set(statuses)], limit);
+    }
     const records: OutboxRecord[] = [];
     let cursor = "0";
     do {
@@ -1125,6 +1366,8 @@ class RedisBackend implements Backend {
 // ── Memory ────────────────────────────────────────────────────────────────────
 class MemoryBackend implements Backend {
   private sessions = new Map<number, UserSession>();
+  private agentRuns = new Map<string, AgentRunRecord>();
+  private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
   private locks = new Map<number, { token: string; exp: number }>();
   private pairings = new Map<string, CliPairingRecord>();
@@ -1155,9 +1398,42 @@ class MemoryBackend implements Backend {
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
   private jobs = new Map<number, JobRecord[]>();
+  private approvals = new Map<string, ApprovalRecord>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async getApproval(userId: number, id: string) { const approval = this.approvals.get(id); return approval?.userId === userId ? approval : undefined; }
+  async saveApproval(record: ApprovalRecord) { this.approvals.set(record.id, record); const session = this.sessions.get(record.userId) ?? fresh(); session.approvals = [...session.approvals.filter((item) => item.id !== record.id), record].slice(-20); this.sessions.set(record.userId, session); return record; }
+  async listApprovals(userId: number, limit = 50) { return [...this.approvals.values()].filter((item) => item.userId === userId).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit); }
+  async getAgentRun(userId: number, id: string) {
+    const record = this.agentRuns.get(id);
+    return record?.userId === userId ? record : undefined;
+  }
+  async saveAgentRun(input: AgentRunRecord, expectedVersion?: number) {
+    const current = this.agentRuns.get(input.id);
+    if (current && current.userId !== input.userId) throw new Error("Agent run is owned by another user.");
+    if (expectedVersion !== undefined && (!current || current.version !== expectedVersion)) throw new Error("Agent run changed concurrently; reload its checkpoint and retry.");
+    const next = boundedAgentRun({ ...input, version: current ? current.version + 1 : input.version });
+    this.agentRuns.set(next.id, next);
+    return next;
+  }
+  async listAgentRuns(userId: number, limit = 50) {
+    return [...this.agentRuns.values()].filter((record) => record.userId === userId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+  }
+  async getHandoffRecord(userId: number, id: string) {
+    const record = this.handoffs.get(id);
+    return record?.userId === userId ? record : undefined;
+  }
+  async saveHandoffRecord(record: HandoffRecord & { userId: number }) {
+    const prior = this.handoffs.get(record.id);
+    const latest = [...this.handoffs.values()].filter((item) => item.userId === record.userId && item.id !== record.id).reduce((max, item) => Math.max(max, item.timestamp), 0);
+    const next = { ...record, context: record.context ?? {}, timestamp: prior ? record.timestamp : Math.max(record.timestamp, latest + 1) };
+    this.handoffs.set(record.id, next);
+    return next;
+  }
+  async listHandoffRecords(userId: number, limit = 100) {
+    return [...this.handoffs.values()].filter((record) => record.userId === userId).sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
+  }
   async getReminders(userId: number) {
     const existing = this.reminders.get(userId);
     if (existing) return existing;
@@ -1294,10 +1570,12 @@ class MemoryBackend implements Backend {
   }
   async listCliDevices(userId: number) { return [...this.devices.values()].filter((d) => d.userId === userId); }
   async claimApproval(userId: number, id: string) {
-    const s = this.sessions.get(userId);
-    const approval = s?.approvals?.find((a) => a.id === id);
+    const approval = await this.getApproval(userId, id);
     if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) return undefined;
     approval.status = "approved";
+    this.approvals.set(approval.id, approval);
+    const s = this.sessions.get(userId);
+    if (s) { const index = s.approvals.findIndex((item) => item.id === approval.id); if (index >= 0) s.approvals[index] = approval; }
     return approval;
   }
 
@@ -1528,6 +1806,20 @@ export async function saveSession(uid: number, s: UserSession): Promise<void> {
   return backend.saveSession(uid, s);
 }
 
+/** Read one durable execution record without loading the owner's chat session. */
+export async function getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined> {
+  return backend.getAgentRun(userId, id);
+}
+
+/** Persist a bounded execution checkpoint with optimistic version protection. */
+export async function saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord> {
+  return backend.saveAgentRun(record, expectedVersion);
+}
+
+export async function listAgentRuns(userId: number, limit = 50): Promise<AgentRunRecord[]> {
+  return backend.listAgentRuns(userId, Math.max(1, Math.min(100, limit)));
+}
+
 export async function addFaceTimeCall(uid: number, record: FaceTimeCallRecord): Promise<FaceTimeCallRecord> {
   const s = await getSession(uid);
   s.faceTimeCalls = [record, ...(s.faceTimeCalls ?? [])].slice(0, 50);
@@ -1549,23 +1841,18 @@ export async function listFaceTimeCalls(uid: number): Promise<FaceTimeCallRecord
 }
 
 export async function saveHandoffRecord(uid: number, record: HandoffRecord): Promise<HandoffRecord> {
-  const s = await getSession(uid);
-  const existingIndex = (s.handoffRecords ?? []).findIndex((h) => h.id === record.id);
-  if (existingIndex >= 0 && s.handoffRecords) {
-    s.handoffRecords[existingIndex] = record;
-  } else {
-    s.handoffRecords = [record, ...(s.handoffRecords ?? [])].slice(0, 100);
-  }
-  await saveSession(uid, s);
+  await backend.saveHandoffRecord({ ...record, userId: uid });
   return record;
 }
 
 export async function listHandoffRecords(uid: number): Promise<HandoffRecord[]> {
+  const records = await backend.listHandoffRecords(uid, 100);
+  if (records.length) return records;
   return (await getSession(uid)).handoffRecords ?? [];
 }
 
 export async function getHandoffRecord(uid: number, id: string): Promise<HandoffRecord | undefined> {
-  return (await getSession(uid)).handoffRecords?.find((record) => record.id === id);
+  return (await backend.getHandoffRecord(uid, id)) ?? (await getSession(uid)).handoffRecords?.find((record) => record.id === id);
 }
 
 export async function getFaceTimeCall(uid: number, id: string): Promise<FaceTimeCallRecord | undefined> {
@@ -2389,30 +2676,31 @@ export async function addHistorySummary(uid: number, summary: string): Promise<v
 }
 
 export async function createApproval(record: Omit<ApprovalRecord, "id" | "status" | "createdAt" | "expiresAt">, ttlMs = 15 * 60 * 1000): Promise<ApprovalRecord> {
-  const s = await getSession(record.userId);
   const approval: ApprovalRecord = { ...record, id: `appr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, status: "pending", createdAt: Date.now(), expiresAt: Date.now() + ttlMs };
-  s.approvals = [...s.approvals.filter((a) => a.status === "pending" ? a.expiresAt > Date.now() : true), approval].slice(-20);
-  await saveSession(record.userId, s);
+  await backend.saveApproval(approval);
   return approval;
 }
 
 export async function getApproval(uid: number, id: string): Promise<ApprovalRecord | undefined> {
-  return (await getSession(uid)).approvals.find((a) => a.id === id);
+  return backend.getApproval(uid, id);
 }
 
 export async function setApprovalStatus(uid: number, id: string, status: ApprovalRecord["status"]): Promise<boolean> {
-  const s = await getSession(uid);
-  const approval = s.approvals.find((a) => a.id === id);
+  const approval = await backend.getApproval(uid, id);
   if (!approval) return false;
   if ((status === "approved" || status === "denied") && (approval.status !== "pending" || approval.expiresAt <= Date.now())) return false;
   if (status === "consumed" && approval.status !== "approved") return false;
   approval.status = status;
-  await saveSession(uid, s);
+  await backend.saveApproval(approval);
   return true;
 }
 
 export async function claimApproval(uid: number, id: string): Promise<ApprovalRecord | undefined> {
   return backend.claimApproval(uid, id);
+}
+
+export async function listApprovals(uid: number, limit = 50): Promise<ApprovalRecord[]> {
+  return backend.listApprovals(uid, limit);
 }
 
 export async function getChannelIdentity(provider: ChannelProvider, externalUserId: string, workspaceId?: string): Promise<ChannelIdentityRecord | undefined> {

@@ -257,12 +257,11 @@ export function isComposioToolAllowedForWorker(worker: CapabilityWorkerName, slu
   return WORKER_CAPABILITIES[worker].allowedComposioPrefixes.some((prefix) => normalized.startsWith(prefix));
 }
 
-/** Reject high-confidence semantic worker mismatches before persisting a task. */
-export function validateDelegationTarget(worker: CapabilityWorkerName, objective: string, allowedTools: string[] = []): void {
+export function classifyDelegationObjective(objective: string, allowedTools: string[] = []): CapabilityWorkerName[] {
   const text = objective.trim().toLowerCase();
   // A supervisor may temporarily run an orchestration handoff through the
   // current worker; the target worker in that payload is validated separately.
-  if (/\b(hand off|handoff|delegate|delegation)\b/.test(text)) return;
+  if (/\b(hand off|handoff|delegate|delegation)\b/.test(text)) return [];
   const tools = allowedTools.map((tool) => tool.toUpperCase());
   const engineering = /\b(code|coding|software|backend|frontend|api|bug|debug|fix|refactor|implement|typescript|javascript|python|build|compile|test suite|unit test|deploy|daytona|server|database|redis|r2|cloudflare worker)\b/.test(text) ||
     tools.some((tool) => /CHUCK_(DAYTONA_(WORKSPACE|EXECUTE|LIST_FILES|READ_FILE|WRITE_FILE|FIND_FILES|SEARCH_FILES|FILE_DETAILS|CREATE_FOLDER|MOVE_FILES|GIT|PTY|PREVIEW)|CREATE_PDF|CREATE_PRESENTATION|ARTIFACT)/.test(tool));
@@ -273,9 +272,47 @@ export function validateDelegationTarget(worker: CapabilityWorkerName, objective
   const computer = /\b(browser|gui|desktop|computer use|click|fill a form|web app navigation|screenshot)\b/.test(text) || tools.some((tool) => /CHUCK_DAYTONA_(COMPUTER|BROWSER|PREVIEW)/.test(tool));
   const workflow = /\b(reminder|recurring|cron|schedule|durable task|checkpoint|attention loop|background task)\b/.test(text) || tools.some((tool) => /CHUCK_(TASK_|SET_REMINDER|LIST_REMINDERS|CANCEL_REMINDER|SCHEDULE_JOB|LIST_JOBS|CANCEL_JOB|ATTENTION_STATE)/.test(tool));
 
-  const expected: CapabilityWorkerName | undefined = engineering ? "lucas" : creative ? "leo" : voice ? "sofia" : computer ? "dexter" : workflow ? "elena" : social ? "maya" : undefined;
+  return [
+    engineering ? "lucas" : undefined,
+    creative ? "leo" : undefined,
+    voice ? "sofia" : undefined,
+    computer ? "dexter" : undefined,
+    workflow ? "elena" : undefined,
+    social ? "maya" : undefined,
+  ].filter((value): value is CapabilityWorkerName => Boolean(value));
+}
+
+export interface DelegationPlanStep {
+  worker: CapabilityWorkerName;
+  objective: string;
+  dependsOn: CapabilityWorkerName[];
+}
+
+/** Build a deterministic, reviewable plan for mixed objectives before any
+ * worker is created. The supervisor can execute these steps independently and
+ * pass each prior result forward, preserving the dependency boundary. */
+export function planDelegationObjective(objective: string, allowedTools: string[] = []): DelegationPlanStep[] {
+  const matches = classifyDelegationObjective(objective, allowedTools);
+  const order: CapabilityWorkerName[] = ["leo", "lucas", "sofia", "dexter", "maya", "elena"];
+  const workers = order.filter((worker) => matches.includes(worker));
+  return workers.map((worker, index) => ({
+    worker,
+    objective: `${objective.trim()}\n\nYou own only the ${WORKER_CAPABILITIES[worker].domain.toLowerCase()} portion. Return a concise handoff for the next step.`,
+    dependsOn: workers.slice(0, index),
+  }));
+}
+
+/** Reject high-confidence semantic worker mismatches before persisting a task. */
+export function validateDelegationTarget(worker: CapabilityWorkerName, objective: string, allowedTools: string[] = []): void {
+  const matches = classifyDelegationObjective(objective, allowedTools);
+  if (matches.length > 1) {
+    const workers = matches.map((candidate) => `${candidate} (${WORKER_CAPABILITIES[candidate].domain})`).join(", ");
+    const plan = planDelegationObjective(objective, allowedTools).map((step) => ({ worker: step.worker, dependsOn: step.dependsOn }));
+    throw new Error(`Delegation routing rejected: this objective spans multiple capabilities: ${workers}. Create one delegation per capability in dependency order; never assign the mixed objective to a single worker. Suggested plan: ${JSON.stringify(plan)}`);
+  }
+  const expected = matches[0];
   if (expected && worker !== expected) {
     const display = WORKER_CAPABILITIES[expected].displayName;
-    throw new Error(`Delegation routing rejected: this objective matches ${display}. Reissue the delegation with worker=${expected}, not worker=${worker}. Split mixed objectives into separate delegations.`);
+    throw new Error(`Delegation routing rejected: this objective matches ${display}. Reissue the delegation with worker=${expected}, not worker=${worker}.`);
   }
 }
