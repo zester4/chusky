@@ -697,6 +697,8 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   constructor(private r: Redis) {}
+  /** Avoid a Redis EXISTS call before every idle recovery pass after startup. */
+  private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
   private runKey = (id: string) => `chuck:run:${id}`;
   private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
@@ -1260,7 +1262,11 @@ class RedisBackend implements Backend {
    * atomically, so idle recovery never reads delivered records again.
    */
   private async ensurePendingOutboxIndexes(): Promise<void> {
-    if (await this.r.exists(this.outboxPendingIndexReadyKey)) return;
+    if (this.pendingOutboxIndexesReady) return;
+    if (await this.r.exists(this.outboxPendingIndexReadyKey)) {
+      this.pendingOutboxIndexesReady = true;
+      return;
+    }
     const locked = await this.r.set(this.outboxPendingIndexMigrationLockKey, "1", "EX", 120, "NX");
     if (locked !== "OK") return;
     try {
@@ -1287,6 +1293,7 @@ class RedisBackend implements Backend {
         }
       } while (cursor !== "0");
       await this.r.set(this.outboxPendingIndexReadyKey, "1");
+      this.pendingOutboxIndexesReady = true;
     } finally {
       await this.r.del(this.outboxPendingIndexMigrationLockKey);
     }
