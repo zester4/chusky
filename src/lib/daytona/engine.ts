@@ -1621,16 +1621,42 @@ export class DaytonaEngine {
   async computer(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 40);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await sandbox.computerUse.start();
     const computer = sandbox.computerUse;
+    if (action === "status") return computer.getStatus();
+    if (action === "stop") return computer.stop();
+    if (action === "process_status") return computer.getProcessStatus(boundedText(args.processName, "processName", 40));
+    if (action === "recording_list") return computer.recording.list();
+    if (action === "recording_get") return computer.recording.get(boundedText(args.recordingId, "recordingId", 200));
+    if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
+    if (action === "recording_delete") { await computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)); return { deleted: true }; }
+    await computer.start();
     switch (action) {
-      case "status": return computer.getStatus();
+      case "start": return { started: true, status: await computer.getStatus() };
       case "display": return computer.display.getInfo();
+      case "display_info": return computer.display.getInfo();
       case "windows": return computer.display.getWindows();
+      case "process_restart": return computer.restartProcess(boundedText(args.processName, "processName", 40));
+      case "process_logs": return computer.getProcessLogs(boundedText(args.processName, "processName", 40));
+      case "process_errors": return computer.getProcessErrors(boundedText(args.processName, "processName", 40));
+      case "mouse_position": return computer.mouse.getPosition();
+      case "recording_start": return computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined);
+      case "recording_download": {
+        const recordingId = boundedText(args.recordingId, "recordingId", 200);
+        const path = safeDaytonaPath(args.path ?? `recordings/${recordingId}.mp4`, "path");
+        await computer.recording.download(recordingId, path);
+        return { recordingId, path, downloaded: true };
+      }
       case "screenshot": {
         const result = await computer.screenshot.takeCompressed({ format: "jpeg", quality: 70, scale: 0.75, showCursor: args.showCursor === true });
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes } satisfies DaytonaScreenshotResult & { __daytonaScreenshot: true };
+      }
+      case "screenshot_region": {
+        const width = boundedInt(args.width, 1, 7680);
+        const height = boundedInt(args.height, 1, 4320);
+        const result = await computer.screenshot.takeCompressedRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, { format: "jpeg", quality: 70, scale: 0.75, showCursor: args.showCursor === true });
+        if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
+        return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes, region: { x: args.x, y: args.y, width, height } };
       }
       case "mouse_move": return computer.mouse.move(coordinate(args.x, "x"), coordinate(args.y, "y"));
       case "mouse_click": return computer.mouse.click(coordinate(args.x, "x"), coordinate(args.y, "y"), args.button ? boundedText(args.button, "button", 10) : "left", args.double === true);
@@ -1739,6 +1765,7 @@ export class DaytonaEngine {
   async browser(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args);
     if (action === "status") {
       const stored = await getDaytonaWorkspace(userId);
       return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, computer: await this.computer(userId, { action: "status" }), windows: await this.computer(userId, { action: "windows" }) };
