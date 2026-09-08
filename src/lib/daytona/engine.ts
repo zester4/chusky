@@ -6,12 +6,12 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
-import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType } from "../../store.js";
+import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
 import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
-import type { DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
+import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
@@ -26,6 +26,8 @@ const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;
 const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
 const DAYTONA_MAX_EXECUTION_SECONDS = 900;
+const DAYTONA_PREVIEW_MIN_SECONDS = 60;
+const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
 
 function boundedInt(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
@@ -1332,10 +1334,195 @@ export class DaytonaEngine {
   async preview(userId: number, port: number): Promise<DaytonaPreviewResult> {
     const normalizedPort = boundedInt(port, 3000, 65535);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const result = await sandbox.getPreviewLink(normalizedPort);
+    const expiresInSeconds = 3600;
+    const result = await sandbox.getSignedPreviewUrl(normalizedPort, expiresInSeconds);
     const url = String(result.url ?? "").trim();
     if (!/^https?:\/\//i.test(url)) throw new DaytonaInputError("Daytona returned an invalid preview URL");
-    return { sandboxId: sandbox.id, port: normalizedPort, url };
+    return { sandboxId: sandbox.id, port: normalizedPort, url, expiresAt: Date.now() + expiresInSeconds * 1000 };
+  }
+
+  /**
+   * App-project control plane. This deliberately keeps a project's source,
+   * verification evidence, local branch and preview process together rather
+   * than treating a preview URL as proof that an application works.
+   */
+  async app(userId: number, args: Record<string, unknown>): Promise<DaytonaAppResult | { apps: DaytonaAppRecord[] } | (DaytonaScreenshotResult & { app: DaytonaAppRecord; url: string; expiresAt: number })> {
+    const action = boundedText(args.action, "action", 20);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const stored = await getDaytonaWorkspace(userId);
+    const apps = [...(stored?.apps ?? [])];
+    const saveApps = async (next: DaytonaAppRecord[]) => {
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, { ...current, apps: next.slice(-20), updatedAt: Date.now() });
+    };
+    const result = (app: DaytonaAppRecord, output?: string): DaytonaAppResult => ({
+      sandboxId: sandbox.id, ...app, url: app.previewUrl, expiresAt: app.previewExpiresAt, ...(output ? { output } : {}),
+    });
+    const update = async (index: number, app: DaytonaAppRecord) => {
+      apps[index] = app;
+      await saveApps(apps);
+      return app;
+    };
+    const verify = async (index: number, app: DaytonaAppRecord): Promise<DaytonaAppRecord> => {
+      // --if-present makes optional project scripts explicit skips, while build
+      // is mandatory for both supported templates. This is executable evidence,
+      // not a model assertion that a project probably compiles.
+      const commands: Array<{ name: DaytonaAppCheck["name"]; command: string; required: boolean }> = [
+        { name: "typecheck", command: "npm run typecheck --if-present", required: false },
+        { name: "lint", command: "npm run lint --if-present", required: false },
+        { name: "test", command: "npm run test --if-present -- --run", required: false },
+        { name: "build", command: "npm run build", required: true },
+      ];
+      const checks: DaytonaAppCheck[] = [];
+      for (const check of commands) {
+        const execution = await this.execute(userId, check.command, app.path, 900);
+        const skipped = !check.required && /missing script|unknown script/i.test(execution.output);
+        checks.push({
+          name: check.name,
+          status: skipped ? "skipped" : execution.exitCode === 0 ? "passed" : "failed",
+          output: execution.output.slice(-2000),
+          completedAt: Date.now(),
+        });
+      }
+      const passed = checks.every((check) => check.status !== "failed");
+      const verification: DaytonaAppVerification = {
+        status: passed ? "passed" : "failed",
+        checks,
+        ...(passed ? { verifiedAt: Date.now() } : {}),
+      };
+      return update(index, {
+        ...app,
+        status: passed ? "verified" : "failed",
+        verification,
+        release: { status: "not_requested" },
+        updatedAt: Date.now(),
+      });
+    };
+
+    if (action === "list") return { apps };
+    const id = boundedText(args.id ?? args.name, "id", 64).toLowerCase();
+    if (!/^[a-z][a-z0-9-]{1,62}$/.test(id)) throw new DaytonaInputError("id must be 2-63 lowercase letters, numbers, or hyphens and start with a letter");
+    const index = apps.findIndex((app) => app.id === id);
+    const existing = index >= 0 ? apps[index] : undefined;
+    if (action === "scaffold") {
+      if (existing) throw new DaytonaInputError(`An app named '${id}' already exists; use its project actions instead.`);
+      const framework = boundedText(args.framework, "framework", 20) as DaytonaAppFramework;
+      if (framework !== "vite-react" && framework !== "nextjs") throw new DaytonaInputError("framework must be vite-react or nextjs");
+      const path = `workspace/apps/${id}`;
+      const branch = `chusky/${id}`;
+      const scaffold = framework === "vite-react"
+        ? `mkdir -p workspace/apps && cd workspace/apps && npm create vite@latest ${id} -- --template react-ts && cd ${id} && npm install`
+        : `mkdir -p workspace/apps && cd workspace/apps && npx create-next-app@latest ${id} --yes --use-npm && cd ${id} && npm install`;
+      const run = await this.execute(userId, scaffold, undefined, 900);
+      if (run.exitCode !== 0) throw new DaytonaInputError(`App scaffold failed: ${run.output.slice(-800)}`);
+      // Keep generated work isolated from the outset. It is local-only: remote
+      // repository creation, push and deployment retain their approval gates.
+      const gitSetup = await this.execute(userId, `git init -b main && git add -A && git -c user.name=Chusky -c user.email=chusky@localhost commit -m "chore: scaffold ${id}" && git checkout -b ${branch}`, path, 120);
+      if (gitSetup.exitCode !== 0) throw new DaytonaInputError(`App scaffold completed but local project branch setup failed: ${gitSetup.output.slice(-800)}`);
+      const app: DaytonaAppRecord = {
+        id, framework, path, branch, port: framework === "vite-react" ? 5173 : 3000,
+        status: "scaffolded", verification: { status: "pending", checks: [] }, release: { status: "not_requested" },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      await saveApps([...apps, app]);
+      return result(app, `${run.output}\n${gitSetup.output}`.slice(-DAYTONA_MAX_OUTPUT_CHARS));
+    }
+    if (!existing) throw new DaytonaInputError(`App '${id}' was not found in this workspace`);
+
+    if (action === "verify") return result(await verify(index, existing));
+    if (action === "branch") {
+      const branch = boundedText(args.branch, "branch", 120);
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,118}$/.test(branch) || branch.includes("..") || branch.endsWith("/")) throw new DaytonaInputError("branch must be a safe Git branch name");
+      await sandbox.git.createBranch(existing.path, branch);
+      await sandbox.git.checkoutBranch(existing.path, branch);
+      return result(await update(index, { ...existing, branch, verification: { status: "pending", checks: [] }, release: { status: "not_requested" }, updatedAt: Date.now() }));
+    }
+    if (action === "stop") {
+      if (existing.ptySessionId) {
+        try { await sandbox.process.killPtySession(existing.ptySessionId); } catch { /* The service may already have exited. */ }
+      }
+      return result(await update(index, { ...existing, status: "stopped", ptySessionId: undefined, previewUrl: undefined, previewExpiresAt: undefined, updatedAt: Date.now() }));
+    }
+    const expiry = Math.max(DAYTONA_PREVIEW_MIN_SECONDS, Math.min(DAYTONA_PREVIEW_MAX_SECONDS, boundedInt(args.expiresInSeconds, 3600, DAYTONA_PREVIEW_MAX_SECONDS)));
+    if (action === "status") {
+      const preview = existing.status === "running" || existing.status === "ready_for_review" || existing.status === "ready_to_publish"
+        ? await sandbox.getSignedPreviewUrl(existing.port, expiry) : undefined;
+      const app = preview ? await update(index, { ...existing, previewUrl: String(preview.url), previewExpiresAt: Date.now() + expiry * 1000, updatedAt: Date.now() }) : existing;
+      return result(app);
+    }
+    if (action === "logs") {
+      if (!existing.ptySessionId) throw new DaytonaInputError("This app has no running server. Start it before reading server logs.");
+      const logs = await this.pty(userId, { action: "read", id: existing.ptySessionId });
+      const latestOutput = (logs.output || existing.lastOutput || "").slice(-DAYTONA_MAX_PTY_OUTPUT);
+      const app = latestOutput && latestOutput !== existing.lastOutput
+        ? await update(index, { ...existing, lastOutput: latestOutput, updatedAt: Date.now() })
+        : existing;
+      return result(app, latestOutput);
+    }
+    if (action === "review") {
+      const visual = existing.verification?.visual;
+      if (!visual || visual.status !== "captured" || Date.now() - visual.capturedAt > 10 * 60 * 1000) throw new DaytonaInputError("Capture a fresh visual screenshot with action=visual before recording a review.");
+      const summary = boundedText(args.summary, "summary", 2000);
+      const passed = args.passed === true;
+      const verification: DaytonaAppVerification = {
+        ...(existing.verification ?? { status: "pending", checks: [] }),
+        visual: { status: passed ? "passed" : "failed", summary, capturedAt: visual.capturedAt, reviewedAt: Date.now() },
+      };
+      return result(await update(index, { ...existing, status: passed ? "ready_for_review" : "failed", verification, release: { status: "not_requested" }, updatedAt: Date.now() }));
+    }
+    if (action === "release") {
+      const verification = existing.verification;
+      if (verification?.status !== "passed" || verification.visual?.status !== "passed") {
+        throw new DaytonaInputError("Release handoff requires a passing current verification and an honest passing visual review.");
+      }
+      const target = args.target ? boundedText(args.target, "target", 200) : "external deployment";
+      return result(await update(index, { ...existing, status: "ready_to_publish", release: { status: "awaiting_approval", target, requestedAt: Date.now() }, updatedAt: Date.now() }));
+    }
+    if (action !== "visual" && action !== "start") throw new DaytonaInputError("Unsupported app action");
+    let app = existing;
+    if (action === "start") {
+      // Re-run on every start so a later edit cannot inherit an old green
+      // check. Preview is a verification outcome, never a substitute for it.
+      app = await verify(index, existing);
+      if (app.verification?.status !== "passed") throw new DaytonaInputError("App verification failed. Fix the recorded check output before starting a preview.");
+      // A reviewed or release-ready project can still have its already-checked
+      // preview server running. Do not create a duplicate server/port merely
+      // because its lifecycle status is more specific than "running".
+      const serverAlreadyRunning = app.status === "running" || app.status === "ready_for_review" || app.status === "ready_to_publish";
+      if (!serverAlreadyRunning || !app.ptySessionId) {
+        const port = args.port === undefined ? app.port : boundedInt(args.port, app.port, 65535);
+        const sessionId = `app-${id}-${randomUUID().slice(0, 8)}`;
+        const output = collectPtyOutput();
+        const handle = await sandbox.process.createPty({ id: sessionId, cwd: app.path, cols: 140, rows: 40, onData: output.onData });
+        try {
+          await handle.waitForConnection();
+          const command = app.framework === "vite-react"
+            ? `npm run dev -- --host 0.0.0.0 --port ${port}`
+            : `npm run dev -- --hostname 0.0.0.0 --port ${port}`;
+          await handle.sendInput(`${command}\n`);
+          await brieflyCollect(handle, 1500);
+        } finally { await handle.disconnect(); }
+        const health = await this.execute(userId, `node -e "fetch('http://127.0.0.1:${port}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"`, app.path, 20);
+        const checks = [...(app.verification?.checks ?? []), { name: "health" as const, status: health.exitCode === 0 ? "passed" as const : "failed" as const, output: health.output.slice(-2000), completedAt: Date.now() }];
+        if (health.exitCode !== 0) {
+          try { await sandbox.process.killPtySession(sessionId); } catch { /* best-effort cleanup */ }
+          await update(index, { ...app, status: "failed", ptySessionId: undefined, verification: { status: "failed", checks }, updatedAt: Date.now() });
+          throw new DaytonaInputError(`App server did not become reachable on port ${port}. Check app logs and fix the app before retrying.`);
+        }
+        const preview = await sandbox.getSignedPreviewUrl(port, expiry);
+        app = await update(index, { ...app, port, status: "running", ptySessionId: sessionId, lastOutput: output.chunks.join("").slice(-DAYTONA_MAX_PTY_OUTPUT), previewUrl: String(preview.url), previewExpiresAt: Date.now() + expiry * 1000, verification: { ...(app.verification as DaytonaAppVerification), checks }, updatedAt: Date.now() });
+        const current = await getDaytonaWorkspace(userId);
+        if (current) await saveDaytonaWorkspace(userId, { ...current, ptySessions: [...(current.ptySessions ?? []).filter((item) => item.id !== sessionId), { id: sessionId, createdAt: Date.now() }], apps, updatedAt: Date.now() });
+      }
+      return result(app);
+    }
+    if (!app.ptySessionId || !app.previewUrl) throw new DaytonaInputError("Start the app before visual verification.");
+    const preview = await sandbox.getSignedPreviewUrl(app.port, expiry);
+    const url = String(preview.url);
+    await this.browser(userId, { action: "open", url });
+    const screenshot = await this.computer(userId, { action: "screenshot" }) as DaytonaScreenshotResult & { __daytonaScreenshot: true };
+    app = await update(index, { ...app, status: "running", previewUrl: url, previewExpiresAt: Date.now() + expiry * 1000, verification: { ...(app.verification as DaytonaAppVerification), visual: { status: "captured", capturedAt: Date.now() } }, updatedAt: Date.now() });
+    return { ...screenshot, app, url, expiresAt: app.previewExpiresAt! };
   }
 
   async createSnapshot(userId: number, name: string): Promise<DaytonaSnapshotResult> {

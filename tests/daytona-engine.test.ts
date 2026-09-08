@@ -47,6 +47,7 @@ function fakeSandbox(id: string, state = "started") {
       deleteFile: async () => undefined,
     },
     getPreviewLink: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/${port}` }),
+    getSignedPreviewUrl: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/signed/${port}` }),
     createSnapshot: async () => undefined,
     computerUse: {
       start: async () => undefined,
@@ -212,12 +213,58 @@ test("browser navigation persists safe URL state and rejects embedded credential
   await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
 });
 
-test("returns a browser-accessible preview URL and rejects provider URL failures", async () => {
+test("returns a signed browser-accessible preview URL and rejects provider URL failures", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820014) as any;
-  assert.deepEqual(await e.preview(820014, 3003), { sandboxId: sandbox.id, port: 3003, url: "https://preview.test/3003" });
+  const preview = await e.preview(820014, 3003);
+  assert.equal(preview.sandboxId, sandbox.id);
+  assert.equal(preview.port, 3003);
+  assert.equal(preview.url, "https://preview.test/signed/3003");
+  assert.ok((preview.expiresAt ?? 0) > Date.now());
   sandbox.previewUrl = "localhost:3003";
   await assert.rejects(() => e.preview(820014, 3003), /invalid preview URL/);
+});
+
+test("app projects create an isolated branch, verify before preview, retain evidence, and stop cleanly", async () => {
+  const e = engine();
+  const scaffolded = await e.app(820015, { action: "scaffold", id: "client-portal", framework: "vite-react" }) as any;
+  assert.equal(scaffolded.status, "scaffolded");
+  assert.equal(scaffolded.path, "workspace/apps/client-portal");
+  assert.equal(scaffolded.branch, "chusky/client-portal");
+  const verified = await e.app(820015, { action: "verify", id: "client-portal" }) as any;
+  assert.equal(verified.status, "verified");
+  assert.equal(verified.verification.status, "passed");
+  assert.deepEqual(verified.verification.checks.map((check: any) => check.name), ["typecheck", "lint", "test", "build"]);
+  const running = await e.app(820015, { action: "start", id: "client-portal", expiresInSeconds: 120 }) as any;
+  assert.equal(running.status, "running");
+  assert.equal(running.verification.checks.at(-1).name, "health");
+  assert.match(running.url, /^https:\/\/preview\.test\/signed\/5173$/);
+  assert.ok(running.ptySessionId);
+  const logs = await e.app(820015, { action: "logs", id: "client-portal" }) as any;
+  assert.match(logs.output, /ran:/);
+  const refreshed = await e.app(820015, { action: "status", id: "client-portal" }) as any;
+  assert.equal(refreshed.status, "running");
+  const screenshot = await e.app(820015, { action: "visual", id: "client-portal" }) as any;
+  assert.equal(screenshot.__daytonaScreenshot, true);
+  const reviewed = await e.app(820015, { action: "review", id: "client-portal", passed: true, summary: "Readable desktop layout and expected content are visible." }) as any;
+  assert.equal(reviewed.verification.visual.status, "passed");
+  const release = await e.app(820015, { action: "release", id: "client-portal", target: "Vercel preview" }) as any;
+  assert.equal(release.status, "ready_to_publish");
+  assert.equal(release.release.status, "awaiting_approval");
+  const stopped = await e.app(820015, { action: "stop", id: "client-portal" }) as any;
+  assert.equal(stopped.status, "stopped");
+  assert.equal(stopped.ptySessionId, undefined);
+});
+
+test("app preview refuses a failed production verification and never starts its server", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820016) as any;
+  await e.app(820016, { action: "scaffold", id: "broken-app", framework: "nextjs" });
+  sandbox.commandExitCode = 1;
+  await assert.rejects(() => e.app(820016, { action: "start", id: "broken-app" }), /verification failed/);
+  const app = (await e.app(820016, { action: "status", id: "broken-app" })) as any;
+  assert.equal(app.status, "failed");
+  assert.equal(app.ptySessionId, undefined);
 });
 
 test("creates and persists a text artifact without placing bytes in session history", async () => {

@@ -924,7 +924,7 @@ export async function runAgent(
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
           execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget });
-          if (slug === "CHUCK_DAYTONA_PREVIEW" && execResult && typeof execResult === "object") {
+          if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
@@ -934,10 +934,21 @@ export async function runAgent(
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
             execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact was delivered to the user." };
           }
-          if (slug === "CHUCK_DAYTONA_COMPUTER" && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
-            const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number };
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
+            const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
             generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
-            execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The screenshot was sent to the user. Use accessibility or display tools for structured follow-up." };
+            // A screenshot used for visual QA must be visible to the model too,
+            // not only delivered to the user. The following model turn can
+            // therefore honestly review the rendered application and record a
+            // pass/fail result through CHUCK_DAYTONA_APP review.
+            messages.push({
+              role: "user",
+              content: [
+                { type: "text", text: `Live app visual-QA screenshot${screenshot.app?.id ? ` for ${screenshot.app.id}` : ""}. Inspect the actual rendered UI. If it meets the requested design and is readable, call CHUCK_DAYTONA_APP with action=review, passed=true and concise evidence. If it does not, call review with passed=false, then fix the app; never claim a visual pass without inspecting this image.` },
+                { type: "image_url", image_url: { url: `data:${screenshot.mediaType};base64,${screenshot.base64}` } },
+              ],
+            });
+            execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
           }
         } else {
           execResult = await sessionObj.execute(slug, executionArgs);

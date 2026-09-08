@@ -38,6 +38,28 @@ export interface DaytonaPreviewResult {
   sandboxId: string;
   port: number;
   url: string;
+  expiresAt?: number;
+}
+
+export interface DaytonaAppResult {
+  sandboxId: string;
+  id: string;
+  framework: "vite-react" | "nextjs";
+  path: string;
+  port: number;
+  status: "scaffolded" | "verified" | "running" | "ready_for_review" | "ready_to_publish" | "stopped" | "failed";
+  branch?: string;
+  verification?: {
+    status: "passed" | "failed" | "pending";
+    checks: Array<{ name: string; status: string; output: string; completedAt: number }>;
+    visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number };
+  };
+  release?: { status: "not_requested" | "awaiting_approval" | "published"; requestedAt?: number; target?: string };
+  ptySessionId?: string;
+  lastOutput?: string;
+  url?: string;
+  expiresAt?: number;
+  output?: string;
 }
 
 export interface DaytonaSnapshotResult {

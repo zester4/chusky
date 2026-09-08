@@ -166,7 +166,47 @@ export interface DaytonaWorkspaceRecord {
   updatedAt: number;
   lastKnownState?: string;
   ptySessions?: Array<{ id: string; createdAt: number }>;
+  /** Bounded control-plane records for web apps running in the owned workspace. */
+  apps?: DaytonaAppRecord[];
   browser?: { lastUrl?: string; updatedAt: number };
+}
+
+export type DaytonaAppFramework = "vite-react" | "nextjs";
+/**
+ * A web app is a durable project, not just a process ID. These states are
+ * intentionally conservative: a project cannot be marked release-ready until
+ * its current source has passed both executable and visual verification.
+ */
+export type DaytonaAppStatus = "scaffolded" | "verified" | "running" | "ready_for_review" | "ready_to_publish" | "stopped" | "failed";
+export interface DaytonaAppCheck {
+  name: "typecheck" | "lint" | "test" | "build" | "health";
+  status: "passed" | "failed" | "skipped";
+  output: string;
+  completedAt: number;
+}
+export interface DaytonaAppVerification {
+  status: "passed" | "failed" | "pending";
+  checks: DaytonaAppCheck[];
+  verifiedAt?: number;
+  visual?: { status: "captured" | "passed" | "failed"; summary?: string; capturedAt: number; reviewedAt?: number };
+}
+export interface DaytonaAppRecord {
+  id: string;
+  framework: DaytonaAppFramework;
+  path: string;
+  port: number;
+  status: DaytonaAppStatus;
+  /** Isolated local Git branch; remote push remains an approval-gated action. */
+  branch?: string;
+  verification?: DaytonaAppVerification;
+  release?: { status: "not_requested" | "awaiting_approval" | "published"; requestedAt?: number; target?: string };
+  ptySessionId?: string;
+  /** Last bounded server output, retained for diagnosis when a PTY reconnect has no historical buffer. */
+  lastOutput?: string;
+  previewUrl?: string;
+  previewExpiresAt?: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";

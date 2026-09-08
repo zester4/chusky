@@ -87,6 +87,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_DELETE_FILE: "🗑️ I’m removing that file…",
   CHUCK_DAYTONA_DELETE_WORKSPACE: "🗑️ I’m removing my computer workspace…",
   CHUCK_DAYTONA_PREVIEW: "🌐 I’m opening the preview…",
+  CHUCK_DAYTONA_APP: "🚀 I’m building and running your app…",
   CHUCK_DAYTONA_CREATE_SNAPSHOT: "📦 I’m saving a restore point…",
   CHUCK_DAYTONA_COMPUTER: "🖥️ I’m using my private computer…",
   CHUCK_DAYTONA_PAUSE: "⏸️ I’m putting my computer workspace on standby…",

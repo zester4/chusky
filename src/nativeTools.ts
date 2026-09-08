@@ -419,6 +419,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_DELETE_FILE": return daytonaEngine.deleteFile(userId, text(args.path), args.recursive === true);
     case "CHUCK_DAYTONA_DELETE_WORKSPACE": return daytonaEngine.deleteWorkspace(userId);
     case "CHUCK_DAYTONA_PREVIEW": return daytonaEngine.preview(userId, Number(args.port));
+    case "CHUCK_DAYTONA_APP": return daytonaEngine.app(userId, args);
     case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaEngine.createSnapshot(userId, text(args.name));
     case "CHUCK_DAYTONA_COMPUTER": return daytonaEngine.computer(userId, args);
     case "CHUCK_DAYTONA_PAUSE": return daytonaEngine.pause(userId);
