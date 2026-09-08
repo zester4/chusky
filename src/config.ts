@@ -42,6 +42,9 @@ export const config = {
   openRouterApiKey: required("OPENROUTER_API_KEY"),
   defaultModel,
   groupDefaultModel: optional("GROUP_DEFAULT_MODEL", defaultModel),
+  // Live calls use a latency-oriented model instead of inheriting a possibly
+  // slower general-purpose/reasoning model from the user's chat session.
+  voiceModel: optional("VOICE_MODEL", "openai/gpt-5.6-luna"),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),

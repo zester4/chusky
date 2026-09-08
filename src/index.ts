@@ -319,7 +319,7 @@ async function main(): Promise<void> {
       try {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
-          return runAgent(userId, transcript, session.history, session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, {
+          return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
             instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
             toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS", "CHUCK_LIST_PHONE_CALLS"],
           });
@@ -339,6 +339,45 @@ async function main(): Promise<void> {
         if (!speculative || !c.req.raw.signal.aborted) logger.warn({ err: error, callId, userId }, "Voice turn failed");
         return c.json({ ok: false, error: "voice turn failed" }, 502);
       }
+    });
+
+    // Streaming voice turn endpoint. It deliberately does not write history:
+    // the media bridge commits only after the definitive Flux turn and after
+    // its streamed response has completed. This prevents speculative or
+    // interrupted speech from being persisted.
+    app.post("/internal/facetime/turn-stream", async (c) => {
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.faceTimeMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean };
+      const callId = String(body.callId ?? "").trim();
+      const userId = Number(body.userId);
+      const transcript = String(body.transcript ?? "").trim();
+      const speculative = body.speculative === true;
+      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
+      if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      if (!(await canSpend(userId))) return c.json({ ok: false, error: "usage cap reached" }, 402);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          try {
+            const result = await withCliLock(userId, c.req.raw.signal, async () => {
+              send({ type: "start", model: config.voiceModel, speculative });
+              return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
+                instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform an external action during this call; ask the caller to continue in Telegram for approvals or actions.",
+                toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_FACETIME_CALLS", "CHUCK_LIST_PHONE_CALLS"],
+              });
+            });
+            send({ type: "done", text: result.text.slice(0, 5000), cost: result.cost ?? 0, speculative });
+          } catch (error) {
+            if (!c.req.raw.signal.aborted) send({ type: "error", error: "voice turn failed" });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
     });
 
     // The bridge commits a completed Flux turn once. This keeps eager drafts
