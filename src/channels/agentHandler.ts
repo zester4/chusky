@@ -49,7 +49,7 @@ async function privateOrSharedHistory(conversation: ChuskyConversation) {
 }
 
 async function saveConversation(conversation: ChuskyConversation, message: InboundMessage, text: string, response: string): Promise<void> {
-  const messages = [{ role: "user" as const, content: text, createdAt: message.receivedAt }, { role: "assistant" as const, content: response }];
+  const messages = [{ role: "user" as const, content: text, createdAt: message.receivedAt }, { role: "assistant" as const, content: response, createdAt: message.receivedAt }];
   if (conversation.scope === "private") await appendMessages(conversation.userId, messages);
   else await appendChannelConversationMessages({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: conversation.scope, messages });
 }

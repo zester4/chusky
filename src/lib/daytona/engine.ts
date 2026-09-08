@@ -1,6 +1,8 @@
 import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle } from "@daytona/sdk";
 import { randomUUID } from "node:crypto";
 import { posix as pathPosix } from "node:path";
+import { AlignmentType, BorderStyle, Document, Footer, Header, HeadingLevel, ImageRun, Packer, PageNumber, Paragraph, ShadingType, Table, TableCell, TableRow, TextRun, WidthType } from "docx";
+import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
@@ -269,6 +271,8 @@ type PdfSectionInput = {
   body?: string;
   bullets?: string[];
   table?: string[][];
+  /** Relative table column weights, for example [1, 3, 1]. */
+  columnWidths?: number[];
   imagePath?: string;
   imageAltText?: string;
   imageWidth?: number;
@@ -279,11 +283,95 @@ type PdfSectionInput = {
 type PdfStyleInput = {
   pageSize: "A4" | "LETTER" | "LEGAL";
   margin: number;
+  preset: "executive" | "modern" | "bold" | "minimal" | "brand";
+  fontFamily: "sans" | "serif" | "mono";
+  fontName: string;
+  fontBold: string;
+  fontItalic: string;
+  monoFont: string;
   primary: string;
   accent: string;
   text: string;
   muted: string;
   fontSize: number;
+  header?: string;
+  footer?: string;
+  includePageNumbers: boolean;
+  author?: string;
+  logoPath?: string;
+};
+
+/** Shared company identity. Format-specific style fields still take precedence. */
+type BrandInput = {
+  companyName?: string;
+  tagline?: string;
+  logoPath?: string;
+  header?: string;
+  footer?: string;
+  preset?: "executive" | "modern" | "bold" | "minimal" | "brand";
+  primary?: string;
+  accent?: string;
+  secondary?: string;
+  background?: string;
+  surface?: string;
+  text?: string;
+  muted?: string;
+  fontFamily?: "sans" | "serif" | "mono";
+};
+
+type DocumentSectionInput = PdfSectionInput;
+type SpreadsheetSheetInput = { name: string; rows: string[][]; tabColor?: string };
+
+function brandInput(value: unknown): BrandInput {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const preset = input.preset === undefined ? undefined : String(input.preset).toLowerCase();
+  if (preset !== undefined && !(preset in PDF_STYLE_PRESETS)) throw new DaytonaInputError("brand.preset must be executive, modern, bold, minimal, or brand");
+  const fontFamily = input.fontFamily === undefined ? undefined : String(input.fontFamily).toLowerCase();
+  if (fontFamily !== undefined && !(fontFamily in PDF_FONT_FAMILIES)) throw new DaytonaInputError("brand.fontFamily must be sans, serif, or mono");
+  const text = (key: keyof BrandInput, max = 180) => input[key] === undefined ? undefined : presentationText(input[key], `brand.${key}`, max, true);
+  return {
+    ...(text("companyName") ? { companyName: text("companyName") } : {}),
+    ...(text("tagline") ? { tagline: text("tagline") } : {}),
+    ...(input.logoPath === undefined ? {} : { logoPath: safeDaytonaPath(presentationText(input.logoPath, "brand.logoPath", 500, true)!) }),
+    ...(text("header") ? { header: text("header") } : {}),
+    ...(text("footer") ? { footer: text("footer") } : {}),
+    ...(preset === undefined ? {} : { preset: preset as BrandInput["preset"] }),
+    ...(fontFamily === undefined ? {} : { fontFamily: fontFamily as BrandInput["fontFamily"] }),
+    ...Object.fromEntries(["primary", "accent", "secondary", "background", "surface", "text", "muted"].filter((key) => input[key] !== undefined).map((key) => [key, presentationColor(input[key], `brand.${key}`, "000000")])) as Partial<BrandInput>,
+  };
+}
+
+function mergeBrandStyle(style: unknown, brand: BrandInput): Record<string, unknown> {
+  const explicit = style && typeof style === "object" && !Array.isArray(style) ? style as Record<string, unknown> : {};
+  const identity: Record<string, unknown> = {
+    ...(brand.preset ? { preset: brand.preset } : {}),
+    ...(brand.primary ? { primary: brand.primary } : {}),
+    ...(brand.accent ? { accent: brand.accent } : {}),
+    ...(brand.secondary ? { secondary: brand.secondary } : {}),
+    ...(brand.background ? { background: brand.background } : {}),
+    ...(brand.surface ? { surface: brand.surface } : {}),
+    ...(brand.text ? { text: brand.text } : {}),
+    ...(brand.muted ? { muted: brand.muted } : {}),
+    ...(brand.logoPath ? { logoPath: brand.logoPath } : {}),
+    ...(brand.header || brand.companyName ? { header: brand.header ?? brand.companyName } : {}),
+    ...(brand.footer || brand.tagline ? { footer: brand.footer ?? brand.tagline } : {}),
+    ...(brand.fontFamily ? { fontFamily: brand.fontFamily } : {}),
+  };
+  return { ...identity, ...explicit };
+}
+
+const PDF_STYLE_PRESETS: Record<PdfStyleInput["preset"], Pick<PdfStyleInput, "primary" | "accent" | "text" | "muted">> = {
+  executive: { primary: "123B5D", accent: "0F766E", text: "243B53", muted: "52606D" },
+  modern: { primary: "312E81", accent: "DB2777", text: "1F2937", muted: "64748B" },
+  bold: { primary: "111827", accent: "F97316", text: "1F2937", muted: "475569" },
+  minimal: { primary: "334155", accent: "2563EB", text: "0F172A", muted: "64748B" },
+  brand: { primary: "0F766E", accent: "0284C7", text: "142337", muted: "496580" },
+};
+
+const PDF_FONT_FAMILIES: Record<PdfStyleInput["fontFamily"], Pick<PdfStyleInput, "fontName" | "fontBold" | "fontItalic" | "monoFont">> = {
+  sans: { fontName: "Helvetica", fontBold: "Helvetica-Bold", fontItalic: "Helvetica-Oblique", monoFont: "Courier" },
+  serif: { fontName: "Times-Roman", fontBold: "Times-Bold", fontItalic: "Times-Italic", monoFont: "Courier" },
+  mono: { fontName: "Courier", fontBold: "Courier-Bold", fontItalic: "Courier-Oblique", monoFont: "Courier" },
 };
 
 const PRESENTATION_LAYOUTS = new Set<PresentationLayout>([
@@ -331,8 +419,11 @@ function presentationStyle(value: unknown): PresentationStyle {
   if (!(requestedPreset in PRESENTATION_STYLE_PRESETS)) throw new DaytonaInputError("style.preset must be executive, modern, bold, minimal, or brand");
   const preset = requestedPreset as PresentationStyle["preset"];
   const defaults = PRESENTATION_STYLE_PRESETS[preset];
-  const fontFace = input.fontFace === undefined ? defaults.fontFace : presentationText(input.fontFace, "style.fontFace", 80, true)!;
-  const headingFontFace = input.headingFontFace === undefined ? defaults.headingFontFace : presentationText(input.headingFontFace, "style.headingFontFace", 80, true)!;
+  const fontFamily = input.fontFamily === undefined ? undefined : String(input.fontFamily).toLowerCase();
+  if (fontFamily !== undefined && !(fontFamily in PDF_FONT_FAMILIES)) throw new DaytonaInputError("style.fontFamily must be sans, serif, or mono");
+  const familyFonts = fontFamily === "serif" ? { body: "Georgia", heading: "Georgia" } : fontFamily === "mono" ? { body: "Cascadia Mono", heading: "Cascadia Mono" } : undefined;
+  const fontFace = input.fontFace === undefined ? (familyFonts?.body ?? defaults.fontFace) : presentationText(input.fontFace, "style.fontFace", 80, true)!;
+  const headingFontFace = input.headingFontFace === undefined ? (familyFonts?.heading ?? defaults.headingFontFace) : presentationText(input.headingFontFace, "style.headingFontFace", 80, true)!;
   const footer = input.footer === undefined ? undefined : presentationText(input.footer, "style.footer", 160);
   const logoPath = input.logoPath === undefined ? undefined : safeDaytonaPath(presentationText(input.logoPath, "style.logoPath", 500, true)!);
   return {
@@ -480,12 +571,21 @@ function pdfSections(value: unknown): PdfSectionInput[] {
     const imagePath = section.imagePath === undefined ? undefined : safeDaytonaPath(presentationText(section.imagePath, `sections[${index}].imagePath`, 500, true)!);
     const imageWidth = section.imageWidth === undefined ? undefined : boundedNumber(section.imageWidth, 5.5, 7.0);
     const table = pdfTable(section.table, `sections[${index}].table`);
+    const columnWidths = section.columnWidths === undefined ? undefined : Array.isArray(section.columnWidths)
+      ? section.columnWidths.map((item, columnIndex) => {
+        const width = Number(item);
+        if (!Number.isFinite(width) || width <= 0 || width > 100) throw new DaytonaInputError(`sections[${index}].columnWidths[${columnIndex}] must be a number from 0 to 100`);
+        return width;
+      })
+      : (() => { throw new DaytonaInputError(`sections[${index}].columnWidths must be an array of relative widths`); })();
+    if (columnWidths && (!table || columnWidths.length !== Math.max(...table.map((row) => row.length)))) throw new DaytonaInputError(`sections[${index}].columnWidths must contain one width for each table column`);
     const chart = pdfChart(section.chart, `sections[${index}].chart`);
     return {
       heading: presentationText(section.heading, `sections[${index}].heading`, 200),
       body: presentationText(section.body, `sections[${index}].body`, 8000),
       bullets,
       table,
+      columnWidths,
       imagePath,
       imageAltText: presentationText(section.imageAltText, `sections[${index}].imageAltText`, 300),
       imageWidth,
@@ -497,20 +597,34 @@ function pdfSections(value: unknown): PdfSectionInput[] {
 
 function pdfStyle(value: unknown): PdfStyleInput {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const preset = input.preset === undefined ? "executive" : String(input.preset).toLowerCase();
+  if (!(preset in PDF_STYLE_PRESETS)) throw new DaytonaInputError("style.preset must be executive, modern, bold, minimal, or brand");
+  const fontFamily = input.fontFamily === undefined ? "sans" : String(input.fontFamily).toLowerCase();
+  if (!(fontFamily in PDF_FONT_FAMILIES)) throw new DaytonaInputError("style.fontFamily must be sans, serif, or mono");
   const pageSize = input.pageSize === undefined ? "A4" : String(input.pageSize).toUpperCase();
   if (pageSize !== "A4" && pageSize !== "LETTER" && pageSize !== "LEGAL") throw new DaytonaInputError("style.pageSize must be A4, LETTER, or LEGAL");
   const margin = input.margin === undefined ? 0.65 : Number(input.margin);
   if (!Number.isFinite(margin) || margin < 0.35 || margin > 1.25) throw new DaytonaInputError("style.margin must be between 0.35 and 1.25 inches");
   const fontSize = input.fontSize === undefined ? 10.5 : Number(input.fontSize);
   if (!Number.isFinite(fontSize) || fontSize < 8 || fontSize > 18) throw new DaytonaInputError("style.fontSize must be between 8 and 18 points");
+  const presetColors = PDF_STYLE_PRESETS[preset as PdfStyleInput["preset"]];
+  const fonts = PDF_FONT_FAMILIES[fontFamily as PdfStyleInput["fontFamily"]];
   return {
     pageSize: pageSize as PdfStyleInput["pageSize"],
     margin,
-    primary: presentationColor(input.primary, "style.primary", "123B5D"),
-    accent: presentationColor(input.accent, "style.accent", "0F766E"),
-    text: presentationColor(input.text, "style.text", "243B53"),
-    muted: presentationColor(input.muted, "style.muted", "52606D"),
+    preset: preset as PdfStyleInput["preset"],
+    fontFamily: fontFamily as PdfStyleInput["fontFamily"],
+    ...fonts,
+    primary: presentationColor(input.primary, "style.primary", presetColors.primary),
+    accent: presentationColor(input.accent, "style.accent", presetColors.accent),
+    text: presentationColor(input.text, "style.text", presetColors.text),
+    muted: presentationColor(input.muted, "style.muted", presetColors.muted),
     fontSize,
+    ...(input.header === undefined ? {} : { header: presentationText(input.header, "style.header", 180, true) }),
+    ...(input.footer === undefined ? { footer: "Created by Chusky" } : { footer: presentationText(input.footer, "style.footer", 180) }),
+    includePageNumbers: input.includePageNumbers !== false,
+    ...(input.author === undefined ? {} : { author: presentationText(input.author, "style.author", 180) }),
+    ...(input.logoPath === undefined ? {} : { logoPath: safeDaytonaPath(presentationText(input.logoPath, "style.logoPath", 500, true)!) }),
   };
 }
 
@@ -703,27 +817,33 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "    style=payload['style']; primary=colors.HexColor('#' + style['primary']); accent=colors.HexColor('#' + style['accent']); text=colors.HexColor('#' + style['text']); muted=colors.HexColor('#' + style['muted'])",
     "    margin=float(style['margin'])*inch",
     "    path=payload['path']; os.makedirs(os.path.dirname(path) or '.', exist_ok=True)",
-    "    doc=SimpleDocTemplate(path, pagesize=page_sizes[style['pageSize']], leftMargin=margin, rightMargin=margin, topMargin=margin+0.15*inch, bottomMargin=margin+0.2*inch, title=payload['title'], author='Chusky')",
+    "    doc=SimpleDocTemplate(path, pagesize=page_sizes[style['pageSize']], leftMargin=margin, rightMargin=margin, topMargin=margin+0.55*inch, bottomMargin=margin+0.28*inch, title=payload['title'], author=style.get('author') or 'Chusky')",
     "    styles=getSampleStyleSheet()",
-    "    styles.add(ParagraphStyle(name='ChuskyTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=24, leading=29, textColor=primary, alignment=TA_LEFT, spaceAfter=14, keepWithNext=True))",
-    "    styles.add(ParagraphStyle(name='ChuskyHeading', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=15, leading=19, textColor=primary, spaceBefore=12, spaceAfter=7, keepWithNext=True, keepTogether=True))",
-    "    styles.add(ParagraphStyle(name='ChuskyBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.4, textColor=text, spaceAfter=8, widowControl=True))",
-    "    styles.add(ParagraphStyle(name='ChuskyBullet', parent=styles['BodyText'], fontName='Helvetica', fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.35, leftIndent=14, firstLineIndent=-8, textColor=text, spaceAfter=4, widowControl=True))",
-    "    styles.add(ParagraphStyle(name='ChuskyCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=8.5, leading=10.5, textColor=text, spaceAfter=0, widowControl=True))",
+    "    styles.add(ParagraphStyle(name='ChuskyTitle', parent=styles['Title'], fontName=style['fontBold'], fontSize=24, leading=29, textColor=primary, alignment=TA_LEFT, spaceAfter=14, keepWithNext=True))",
+    "    styles.add(ParagraphStyle(name='ChuskyHeading', parent=styles['Heading1'], fontName=style['fontBold'], fontSize=15, leading=19, textColor=primary, spaceBefore=12, spaceAfter=7, keepWithNext=True, keepTogether=True))",
+    "    styles.add(ParagraphStyle(name='ChuskyBody', parent=styles['BodyText'], fontName=style['fontName'], fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.4, textColor=text, spaceAfter=8, widowControl=True))",
+    "    styles.add(ParagraphStyle(name='ChuskyBullet', parent=styles['BodyText'], fontName=style['fontName'], fontSize=float(style['fontSize']), leading=float(style['fontSize'])*1.35, leftIndent=14, firstLineIndent=-8, textColor=text, spaceAfter=4, widowControl=True))",
+    "    styles.add(ParagraphStyle(name='ChuskyCell', parent=styles['BodyText'], fontName=style['fontName'], fontSize=8.5, leading=10.5, textColor=text, spaceAfter=0, widowControl=True))",
     // ReportLab's sample stylesheet does not guarantee a Caption style. Use
     // BodyText as the stable base for captions across renderer versions.
-    "    styles.add(ParagraphStyle(name='ChuskyCaption', parent=styles['BodyText'], fontName='Helvetica-Oblique', fontSize=8.5, leading=11, textColor=muted, alignment=TA_CENTER, spaceBefore=4, spaceAfter=10, keepWithNext=False))",
+    "    styles.add(ParagraphStyle(name='ChuskyCaption', parent=styles['BodyText'], fontName=style['fontItalic'], fontSize=8.5, leading=11, textColor=muted, alignment=TA_CENTER, spaceBefore=4, spaceAfter=10, keepWithNext=False))",
     "    def rich(value):",
     "        value=escape(str(value)).replace('\\n', '<br/>')",
     "        value=re.sub(r'\\*\\*(.+?)\\*\\*', r'<b>\\1</b>', value)",
     "        value=re.sub(r'(?<!\\*)\\*([^*]+)\\*(?!\\*)', r'<i>\\1</i>', value)",
-    "        value=re.sub(r'`([^`]+)`', r'<font name=\"Courier\">\\1</font>', value)",
+    "        value=re.sub(r'`([^`]+)`', r'<font name=\"' + style['monoFont'] + '\">\\1</font>', value)",
     "        return value",
     "    def para(value, paragraph_style='ChuskyBody'): return Paragraph(rich(value), styles[paragraph_style])",
     "    def draw_page(canvas, document):",
     "        canvas.saveState(); width,height=page_sizes[style['pageSize']]",
     "        canvas.setStrokeColor(accent); canvas.setLineWidth(1.2); canvas.line(margin, height-margin-0.04*inch, width-margin, height-margin-0.04*inch)",
-    "        canvas.setFont('Helvetica', 8); canvas.setFillColor(muted); canvas.drawString(margin, 0.35*inch, 'Created by Chusky'); canvas.drawRightString(width-margin, 0.35*inch, 'Page ' + str(document.page)); canvas.restoreState()",
+    "        canvas.setFont(style['fontName'], 8); canvas.setFillColor(muted); header=style.get('header') or payload['title']; footer=style.get('footer') or ''; canvas.drawString(margin, height-margin+0.05*inch, str(header)[:120]); canvas.drawString(margin, 0.35*inch, str(footer)[:120]);",
+    "        logo=style.get('logoPath');",
+    "        if logo:",
+    "            if not os.path.isfile(logo): raise FileNotFoundError('PDF logo does not exist: ' + logo)",
+    "            canvas.drawImage(logo, width-margin-0.95*inch, height-margin+0.01*inch, width=0.9*inch, height=0.32*inch, preserveAspectRatio=True, anchor='ne', mask='auto')",
+    "        if style.get('includePageNumbers', True): canvas.drawRightString(width-margin, 0.35*inch, 'Page ' + str(document.page))",
+    "        canvas.restoreState()",
     "    def add_image(story, section):",
     "        image_path=section['imagePath']",
     "        if not os.path.isfile(image_path): raise FileNotFoundError('PDF image does not exist: ' + image_path)",
@@ -736,7 +856,7 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "        caption=section.get('imageAltText') or os.path.basename(image_path)",
     "        story.append(KeepTogether([image, Paragraph(escape(str(caption)), styles['ChuskyCaption'])]))",
     "    def add_chart(story, chart_data):",
-    "        drawing=Drawing(doc.width, 235); chart=VerticalBarChart(); chart.x=45; chart.y=35; chart.width=doc.width-65; chart.height=170; chart.data=[series['values'] for series in chart_data['series']]; chart.categoryAxis.categoryNames=chart_data['categories']; chart.categoryAxis.labels.fontName='Helvetica'; chart.categoryAxis.labels.fontSize=8; chart.valueAxis.labels.fontName='Helvetica'; chart.valueAxis.labels.fontSize=8; chart.valueAxis.valueMin=0; chart.valueAxis.valueMax=max(1, max(max(series['values']) for series in chart_data['series'])*1.15); chart.valueAxis.valueStep=max(1, chart.valueAxis.valueMax/5); chart.bars[0].fillColor=accent; chart.bars[0].strokeColor=accent; drawing.add(chart); drawing.add(String(0, 220, chart_data['series'][0]['name'], fontName='Helvetica-Bold', fontSize=9, fillColor=primary)); story.append(drawing); story.append(Spacer(1, 8))",
+    "        drawing=Drawing(doc.width, 235); chart=VerticalBarChart(); chart.x=45; chart.y=35; chart.width=doc.width-65; chart.height=170; chart.data=[series['values'] for series in chart_data['series']]; chart.categoryAxis.categoryNames=chart_data['categories']; chart.categoryAxis.labels.fontName=style['fontName']; chart.categoryAxis.labels.fontSize=8; chart.valueAxis.labels.fontName=style['fontName']; chart.valueAxis.labels.fontSize=8; chart.valueAxis.valueMin=0; chart.valueAxis.valueMax=max(1, max(max(series['values']) for series in chart_data['series'])*1.15); chart.valueAxis.valueStep=max(1, chart.valueAxis.valueMax/5); chart.bars[0].fillColor=accent; chart.bars[0].strokeColor=accent; drawing.add(chart); drawing.add(String(0, 220, chart_data['series'][0]['name'], fontName=style['fontBold'], fontSize=9, fillColor=primary)); story.append(drawing); story.append(Spacer(1, 8))",
     "    story=[Paragraph(escape(payload['title']), styles['ChuskyTitle'])]",
     "    story.append(Spacer(1, 3))",
     "    for section in payload['sections']:",
@@ -749,8 +869,12 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "        if section.get('table'):",
     "            data=[]",
     "            for row_index,row in enumerate(section['table']): data.append([para(cell, 'ChuskyCell') for cell in row])",
-    "            cols=max(len(row) for row in section['table']); widths=[doc.width/cols]*cols; table=LongTable(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign='LEFT')",
-    "            table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),primary),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,muted),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),6),('RIGHTPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)])); story.append(table); story.append(Spacer(1, 10))",
+    "            cols=max(len(row) for row in section['table']); weights=section.get('columnWidths') or [1]*cols; total=sum(float(weight) for weight in weights); widths=[doc.width*float(weight)/total for weight in weights]; table=LongTable(data, colWidths=widths, repeatRows=1, splitByRow=1, hAlign='LEFT')",
+    "            commands=[('BACKGROUND',(0,0),(-1,0),primary),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),style['fontBold']),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white, colors.HexColor('#F3F7FA')]),('GRID',(0,0),(-1,-1),0.4,muted),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]",
+    "            for row_index,row in enumerate(section['table'][1:], start=1):",
+    "                for col_index,cell in enumerate(row):",
+    "                    if re.match(r'^\\s*[+-]?(?:[$€£]\\s*)?\\d[\\d,]*(?:\\.\\d+)?%?\\s*$', str(cell)): commands.append(('ALIGN',(col_index,row_index),(col_index,row_index),'RIGHT'))",
+    "            table.setStyle(TableStyle(commands)); story.append(table); story.append(Spacer(1, 12))",
     "        if section.get('chart'): add_chart(story, section['chart'])",
     "        if section.get('imagePath'): add_image(story, section)",
     "    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)",
@@ -879,6 +1003,12 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
 
   for (const spec of slides) {
     const slide = pptx.addSlide({ masterName: "CHUSKY_CONTENT" });
+    // Add the identity mark on every slide, not only the cover. Keeping this
+    // in the generator avoids relying on a PowerPoint master relationship
+    // that can be stripped by different Office renderers.
+    if (style.logoPath) {
+      slide.addImage({ data: await loadImage(style.logoPath), x: 11.8, y: 0.27, w: 0.82, h: 0.42, sizing: { type: "contain", x: 11.8, y: 0.27, w: 0.82, h: 0.42 }, altText: "Presentation brand logo" });
+    }
     const layout = presentationChosenLayout(spec);
     const backgroundSlide = layout === "background" || Boolean(spec.backgroundImagePath);
     const images = backgroundSlide ? [] : spec.imagePaths ?? [];
@@ -897,7 +1027,7 @@ async function presentationBytes(sandbox: Sandbox, title: string, slides: Presen
     }
     const titleY = spec.eyebrow ? 0.73 : 0.48;
     if (spec.eyebrow) slide.addText(spec.eyebrow.toUpperCase(), { x: 0.78, y: 0.38, w: 7.5, h: 0.2, fontFace: style.fontFace, fontSize: 9, bold: true, charSpacing: 1.4, color: style.accent, margin: 0 });
-    slide.addText(spec.title, { x: 0.78, y: titleY, w: 11.75, h: 0.58, fontFace: style.headingFontFace, fontSize: 26, bold: true, color: foregroundColor, fit: "shrink", margin: 0 });
+    slide.addText(spec.title, { x: 0.78, y: titleY, w: style.logoPath ? 10.65 : 11.75, h: 0.58, fontFace: style.headingFontFace, fontSize: 26, bold: true, color: foregroundColor, fit: "shrink", margin: 0 });
     presentationShape(slide, spec.accent ?? style.accent, 0.8, 1.28, layout === "section" || layout === "closing" ? 1.4 : 0.65, 0.07);
 
     if (layout === "section" || layout === "closing") {
@@ -1445,10 +1575,100 @@ export class DaytonaEngine {
     }
   }
 
+  async createDocument(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true }> {
+    const title = presentationText(args.title, "title", 200, true)!;
+    const sections = pdfSections(args.sections);
+    const brand = brandInput(args.brand);
+    const style = pdfStyle(mergeBrandStyle(args.style, brand));
+    const requestedPath = args.path === undefined ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "document"}`, "docx")}` : safeDaytonaPath(args.path, "path");
+    const path = requestedPath.toLowerCase().endsWith(".docx") ? requestedPath : `${requestedPath}.docx`;
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const color = (value: string) => value.replace(/^#/, "");
+    const imageFor = async (imagePath: string): Promise<Buffer> => {
+      try { return Buffer.from(await sandbox.fs.downloadFile(imagePath)); }
+      catch (error) { throw new DaytonaInputError(`Unable to read document image ${imagePath}: ${error instanceof Error ? error.message : String(error)}`); }
+    };
+    const headerChildren: Paragraph[] = [];
+    if (style.logoPath) {
+      const bytes = await imageFor(style.logoPath);
+      if (!bytes.length) throw new DaytonaInputError(`Document logo is empty: ${style.logoPath}`);
+      headerChildren.push(new Paragraph({ alignment: AlignmentType.RIGHT, children: [new ImageRun({ data: bytes, transformation: { width: 105, height: 42 }, type: presentationImageMime(style.logoPath) === "image/jpeg" ? "jpg" : "png" })] }));
+    }
+    const headerText = style.header ?? brand.companyName;
+    if (headerText) headerChildren.push(new Paragraph({ alignment: style.logoPath ? AlignmentType.LEFT : AlignmentType.RIGHT, children: [new TextRun({ text: headerText, bold: true, color: color(style.primary), size: 20, font: style.fontName })] }));
+    if (brand.tagline) headerChildren.push(new Paragraph({ children: [new TextRun({ text: brand.tagline, color: color(style.muted), size: 16, italics: true, font: style.fontName })] }));
+    const body: Array<Paragraph | Table> = [new Paragraph({ heading: HeadingLevel.TITLE, children: [new TextRun({ text: title, bold: true, color: color(style.primary), font: style.fontBold, size: 34 })], spacing: { after: 260 } })];
+    for (const section of sections) {
+      if (section.pageBreakBefore) body.push(new Paragraph({ pageBreakBefore: true }));
+      if (section.heading) body.push(new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: section.heading, bold: true, color: color(style.primary), font: style.fontBold })], spacing: { before: 220, after: 100 } }));
+      if (section.body) body.push(new Paragraph({ children: [new TextRun({ text: section.body, font: style.fontName, color: color(style.text), size: Math.round(style.fontSize * 2) })], spacing: { after: 110 } }));
+      for (const bullet of section.bullets ?? []) body.push(new Paragraph({ text: bullet, bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun({ text: bullet, font: style.fontName, color: color(style.text), size: Math.round(style.fontSize * 2) })] }));
+      if (section.table) {
+        body.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: section.table.map((row, rowIndex) => new TableRow({ children: row.map((cell) => new TableCell({ shading: rowIndex === 0 ? { type: ShadingType.CLEAR, color: color(style.primary) } : rowIndex % 2 ? { type: ShadingType.CLEAR, color: "F3F7FA" } : undefined, borders: { top: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, bottom: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, left: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, right: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 } }, children: [new Paragraph({ children: [new TextRun({ text: cell, bold: rowIndex === 0, color: rowIndex === 0 ? "FFFFFF" : color(style.text), font: style.fontName, size: 18 })] })] })) })) }));
+      }
+      if (section.imagePath) {
+        const bytes = await imageFor(section.imagePath);
+        if (!bytes.length) throw new DaytonaInputError(`Document image is empty: ${section.imagePath}`);
+        body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 120, after: 60 }, children: [new ImageRun({ data: bytes, transformation: { width: Math.round((section.imageWidth ?? 5.7) * 96), height: Math.round((section.imageWidth ?? 5.7) * 54) }, type: presentationImageMime(section.imagePath) === "image/jpeg" ? "jpg" : "png" })] }));
+        if (section.imageAltText) body.push(new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: section.imageAltText, italics: true, color: color(style.muted), size: 16 })] }));
+      }
+    }
+    const doc = new Document({ creator: style.author ?? "Chusky", title, sections: [{ properties: {}, headers: headerChildren.length ? { default: new Header({ children: headerChildren }) } : undefined, footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: style.footer ?? "Created by Chusky", color: color(style.muted), size: 16 }), ...(style.includePageNumbers ? [new TextRun({ text: "  •  Page " }), new TextRun({ children: [PageNumber.CURRENT] })] : [])] })] }) }, children: body }] });
+    await sandbox.fs.uploadFile(Buffer.from(await Packer.toBuffer(doc)), path);
+    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx);
+    return { ...artifact, generated: true };
+  }
+
+  async createSpreadsheet(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true }> {
+    const title = presentationText(args.title, "title", 200, true)!;
+    if (!Array.isArray(args.sheets) || args.sheets.length < 1 || args.sheets.length > 12) throw new DaytonaInputError("sheets must contain 1-12 sheet definitions");
+    const brand = brandInput(args.brand);
+    const style = presentationStyle(mergeBrandStyle(args.style, brand));
+    const sheets: SpreadsheetSheetInput[] = args.sheets.map((raw, index) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`sheets[${index}] must be an object`);
+      const input = raw as Record<string, unknown>;
+      const name = presentationText(input.name, `sheets[${index}].name`, 31, true)!;
+      const rows = pdfTable(input.rows ?? input.table, `sheets[${index}].rows`);
+      if (!rows?.length) throw new DaytonaInputError(`sheets[${index}].rows must contain a header row and at least one row`);
+      return { name, rows, tabColor: input.tabColor === undefined ? undefined : presentationColor(input.tabColor, `sheets[${index}].tabColor`, style.accent) };
+    });
+    const requestedPath = args.path === undefined ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "workbook"}`, "spreadsheet")}` : safeDaytonaPath(args.path, "path");
+    const path = requestedPath.toLowerCase().endsWith(".xlsx") ? requestedPath : `${requestedPath}.xlsx`;
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const workbook = new ExcelJS.Workbook(); workbook.creator = "Chusky"; workbook.company = brand.companyName ?? "Chusky"; workbook.created = new Date();
+    let brandLogoId: number | undefined;
+    if (brand.logoPath) {
+      const extension = presentationImageMime(brand.logoPath) === "image/jpeg" ? "jpeg" : "png";
+      if (extension !== "jpeg" && !brand.logoPath.toLowerCase().endsWith(".png")) throw new DaytonaInputError("Spreadsheet logoPath must be a PNG or JPEG image");
+      let bytes: Buffer;
+      try { bytes = Buffer.from(await sandbox.fs.downloadFile(brand.logoPath)); }
+      catch (error) { throw new DaytonaInputError(`Unable to read spreadsheet logo ${brand.logoPath}: ${error instanceof Error ? error.message : String(error)}`); }
+      if (!bytes.length) throw new DaytonaInputError(`Spreadsheet logo is empty: ${brand.logoPath}`);
+      brandLogoId = workbook.addImage({ base64: `data:image/${extension};base64,${bytes.toString("base64")}`, extension });
+    }
+    for (const spec of sheets) {
+      const sheet = workbook.addWorksheet(spec.name, { properties: { tabColor: { argb: `FF${spec.tabColor ?? style.accent}` } }, views: [{ state: "frozen", ySplit: 3 }] });
+      sheet.mergeCells(1, 1, 1, Math.max(1, spec.rows[0]!.length));
+      const brandLine = brand.companyName ? `${brand.companyName}${brand.tagline ? ` — ${brand.tagline}` : ""}` : title;
+      const heading = sheet.getCell("A1"); heading.value = brandLine; heading.font = { name: style.headingFontFace, size: 16, bold: true, color: { argb: "FFFFFFFF" } }; heading.fill = { type: "pattern", pattern: "solid", fgColor: { argb: `FF${style.primary}` } }; heading.alignment = { vertical: "middle" }; sheet.getRow(1).height = 28;
+      if (brandLogoId !== undefined) sheet.addImage(brandLogoId, { tl: { col: Math.max(0, spec.rows[0]!.length - 1), row: 0 }, ext: { width: 74, height: 27 } });
+      sheet.mergeCells(2, 1, 2, Math.max(1, spec.rows[0]!.length)); sheet.getCell("A2").value = title; sheet.getCell("A2").font = { name: style.fontFace, italic: true, color: { argb: `FF${style.muted}` } };
+      sheet.addRows(spec.rows);
+      const headerRow = sheet.getRow(3); headerRow.height = 22;
+      headerRow.eachCell((cell) => { cell.font = { name: style.fontFace, bold: true, color: { argb: "FFFFFFFF" } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: `FF${style.accent}` } }; cell.alignment = { vertical: "middle", wrapText: true }; });
+      for (let row = 4; row <= spec.rows.length + 2; row++) sheet.getRow(row).eachCell((cell) => { cell.font = { name: style.fontFace, color: { argb: `FF${style.text}` } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: row % 2 ? "FFFFFFFF" : `FF${style.surface}` } }; cell.alignment = { vertical: "top", wrapText: true }; cell.border = { bottom: { style: "hair", color: { argb: "FFD8E1EA" } } }; });
+      spec.rows[0]!.forEach((_cell, index) => { sheet.getColumn(index + 1).width = Math.min(42, Math.max(13, ...spec.rows.map((row) => String(row[index] ?? "").length + 2))); });
+      sheet.addTable({ name: `ChuskyTable${workbook.worksheets.length}`, ref: `A3:${String.fromCharCode(64 + spec.rows[0]!.length)}${spec.rows.length + 2}`, headerRow: true, style: { theme: "TableStyleMedium2", showRowStripes: true }, columns: spec.rows[0]!.map((name) => ({ name })), rows: spec.rows.slice(1) });
+    }
+    await sandbox.fs.uploadFile(Buffer.from(await workbook.xlsx.writeBuffer()), path);
+    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet);
+    return { ...artifact, generated: true };
+  }
+
   async createPdf(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; pageCount?: number }> {
     const title = presentationText(args.title, "title", 240, true)!;
     const sections = pdfSections(args.sections);
-    const style = pdfStyle(args.style);
+    const style = pdfStyle(mergeBrandStyle(args.style, brandInput(args.brand)));
     const requestedPath = args.path === undefined
       ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "document"}`, "pdf")}`
       : safeDaytonaPath(args.path, "path");
@@ -1499,7 +1719,7 @@ export class DaytonaEngine {
   async createPresentation(userId: number, args: Record<string, unknown>): Promise<ArtifactRecord & { __chuskyArtifactReady: true; generated: true; slideCount: number }> {
     const title = presentationText(args.title, "title", 200, true)!;
     const slides = presentationSlides(args.slides);
-    const style = presentationStyle(args.style);
+    const style = presentationStyle(mergeBrandStyle(args.style, brandInput(args.brand)));
     const requestedPath = args.path === undefined
       ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "presentation"}`, "presentation")}`
       : safeDaytonaPath(args.path, "path");

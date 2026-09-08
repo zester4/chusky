@@ -1,7 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { registerHandlers } from "../src/handlers.js";
-import { createApproval, getApproval, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
+import { appendChannelConversationMessages, createApproval, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
 class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
@@ -42,6 +42,25 @@ test("clear history preserves the Composio session while clear session removes i
   await bot.commands.get("clear")!(sessionCtx);
   assert.equal((await getSession(userId)).composioSessionId, undefined);
   assert.match(sessionCtx.sent.at(-1).text, /Fresh start/);
+});
+
+test("clear group resets only the Telegram group's shared context", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840010;
+  const groupId = -100840010;
+  const conversationId = `telegram:-:${groupId}:-`;
+  await appendChannelConversationMessages({
+    id: conversationId, accountId: `account_${userId}`, userId, provider: "telegram", scope: "shared",
+    messages: [{ role: "user", content: "previous group work", createdAt: Date.now() - 1_000 }],
+  });
+  const groupCtx = context(userId, "group");
+  groupCtx.chat = { id: groupId, type: "group" };
+  groupCtx.api.getChatMember = async () => ({ status: "administrator" });
+  await bot.commands.get("clear")!(groupCtx);
+  assert.deepEqual((await getChannelConversation(conversationId))?.history, []);
+  assert.match(groupCtx.sent.at(-1).text, /fresh start/i);
+  assert.notEqual((await getSession(userId)).history, undefined);
 });
 
 test("approval callback is scoped to the requesting user and deny never executes", async () => {

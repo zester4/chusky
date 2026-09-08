@@ -439,6 +439,33 @@ test("shared channel model command changes only that conversation", async () => 
   assert.match(adapter.sent[0].text ?? "", /openai\/gpt-5\.6/);
 });
 
+test("shared group clear resets only that group's context and preserves its model", async () => {
+  const id = "slack:T1:C-clear:-";
+  await linkChannelIdentity(42, { provider: "slack", externalUserId: "U1", workspaceId: "T1" });
+  await appendChannelConversationMessages({
+    id, accountId: "account_42", userId: 42, provider: "slack", scope: "shared",
+    messages: [{ role: "user", content: "old group context", createdAt: Date.now() - 1_000 }, { role: "assistant", content: "old answer", createdAt: Date.now() - 1_000 }],
+  });
+  await setChannelConversationModel(id, "openai/gpt-5.6");
+  const adapter = new FakeAdapter();
+  const gateway = new ChannelGateway(async () => { throw new Error("agent loop should not run for /clear group"); });
+  gateway.register(adapter);
+  const message: InboundMessage = { provider: "slack", providerEventId: "slack-group-clear", providerUserId: "U1", providerWorkspaceId: "T1", providerConversationId: "C-clear", text: "/clear group", attachments: [], receivedAt: Date.now(), scope: "shared" };
+  const result = await gateway.processInbound(message);
+  const record = await getChannelConversation(id);
+  assert.equal(result.linked, true);
+  assert.deepEqual(record?.history, []);
+  assert.deepEqual(record?.summaries, []);
+  assert.equal(record?.model, "openai/gpt-5.6");
+  assert.match(adapter.sent[0].text ?? "", /fresh start/i);
+  // A slow response from before the reset must not recreate the cleared turn.
+  await appendChannelConversationMessages({
+    id, accountId: "account_42", userId: 42, provider: "slack", scope: "shared",
+    messages: [{ role: "user", content: "stale in-flight request", createdAt: Date.now() - 10_000 }, { role: "assistant", content: "stale reply", createdAt: Date.now() - 10_000 }],
+  });
+  assert.deepEqual((await getChannelConversation(id))?.history, []);
+});
+
 test("outbox idempotency prevents duplicate provider sends and records receipts", async () => {
   const adapter = new FakeAdapter();
   const outbox = new ChannelOutbox();

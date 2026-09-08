@@ -1,7 +1,7 @@
 import { acquireUserLock, claimChannelEvent, completeChannelEvent, releaseChannelEvent, releaseUserLock, renewUserLock } from "../store.js";
 import { buildConversation, buildReplyTarget } from "./conversations.js";
 import { activateSendblueGroup, redeemLinkCode, resolveIdentity, resolveSendblueGroupAuthorization } from "./identity.js";
-import { appendChannelConversationMessages, getChannelConversation, revokeSendblueGroupAuthorization, saveSendblueGroupAuthorization, setChannelConversationModel } from "../store.js";
+import { appendChannelConversationMessages, clearChannelConversationHistory, getChannelConversation, revokeSendblueGroupAuthorization, saveSendblueGroupAuthorization, setChannelConversationModel } from "../store.js";
 import { ChannelOutbox } from "./outbox.js";
 import type { ChannelAdapter, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import { randomUUID } from "node:crypto";
@@ -197,6 +197,16 @@ export class ChannelGateway {
 
     const conversation = buildConversation(identity.userId, message);
     if (!conversation.permissions.canUseAgent) throw new Error("Channel identity is not permitted to use Chusky");
+    if (message.scope === "shared" && /^\/clear\s+group$/i.test(message.text?.trim() ?? "")) {
+      if (groupAuthorization && message.providerUserId !== groupAuthorization.ownerExternalUserId) {
+        await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: "Only the linked iMessage account owner can clear this group's history.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-clear-denied`, kind: "notification" }, adapter);
+      } else {
+        await clearChannelConversationHistory({ id: conversation.conversationId, accountId: conversation.accountId, userId: conversation.userId, provider: conversation.provider, scope: "shared" });
+        await this.outbox.send({ accountId: conversation.accountId, userId: conversation.userId, target: buildReplyTarget(message), text: "🗑 This group's Chusky history has been cleared. I will treat the next message as a fresh start.", idempotencyKey: `${message.provider}:${message.providerEventId}:group-cleared`, kind: "notification" }, adapter);
+      }
+      await completeChannelEvent(message.provider, message.providerEventId);
+      return { duplicate: false, linked: true, conversation, delivered: [] };
+    }
     if (message.scope === "shared" && message.text?.trim().match(/^\/group-model(?:\s+(.+))?$/i)) {
       const match = message.text.trim().match(/^\/group-model(?:\s+(.+))?$/i)!;
       const requested = match[1]?.trim() ?? "";

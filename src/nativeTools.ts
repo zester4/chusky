@@ -427,6 +427,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_BROWSER": return daytonaEngine.browser(userId, args);
     case "CHUCK_CREATE_PDF": return daytonaEngine.createPdf(userId, args);
     case "CHUCK_CREATE_PRESENTATION": return daytonaEngine.createPresentation(userId, args);
+    case "CHUCK_CREATE_DOCUMENT": return daytonaEngine.createDocument(userId, args);
+    case "CHUCK_CREATE_SPREADSHEET": return daytonaEngine.createSpreadsheet(userId, args);
     case "CHUCK_ARTIFACT": return daytonaEngine.artifact(userId, args);
     case "CHUCK_DELEGATE_SUBAGENT":
       return runDelegationWithDurableContinuation(userId, args as any, runtime);

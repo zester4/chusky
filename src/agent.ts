@@ -928,7 +928,7 @@ export async function runAgent(
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
-          if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
+          if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
             const delivered = await daytonaEngine.downloadArtifact(userId, artifact.id);
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
@@ -952,7 +952,7 @@ export async function runAgent(
         if (e instanceof ApprovalRequiredError) throw e;
         logger.warn({ slug, err: e }, "Tool execution failed");
         result = `Error executing ${slug}: ${String(e)}`;
-        if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_ARTIFACT"].includes(slug)) {
+        if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }
       }

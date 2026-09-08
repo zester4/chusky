@@ -316,7 +316,8 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   };
   const result = await e.createPdf(820025, {
     title: "Quarterly Report",
-    sections: [{ heading: "Summary", body: "Verified.", bullets: ["One"], table: { headers: ["Metric", "Value"], rows: [["Revenue", "100"]] }, chart: undefined }],
+    sections: [{ heading: "Summary", body: "Verified.", bullets: ["One"], table: { headers: ["Metric", "Value"], rows: [["Revenue", "100"]] }, columnWidths: [3, 1], chart: undefined }],
+    style: { preset: "brand", fontFamily: "serif", header: "Quarterly board report", footer: "Private and confidential", includePageNumbers: false, author: "Chusky QA" },
   });
   assert.equal(result.__chuskyArtifactReady, true);
   assert.equal(result.type, "pdf");
@@ -324,12 +325,43 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(generatorScript, /LongTable/);
   assert.match(generatorScript, /ImageReader/);
   assert.match(generatorScript, /PdfReader/);
+  assert.match(generatorScript, /fontName=style\['fontName'\]/);
+  assert.match(generatorScript, /ROWBACKGROUNDS/);
+  assert.match(generatorScript, /columnWidths/);
+  assert.match(generatorScript, /includePageNumbers/);
   assert.doesNotMatch(generatorScript, /write_pure_pdf/);
   assert.match(commands[0], /^python3 artifacts\/\.chusky\/pdf-generator-/);
   const visualScript = Buffer.from(commands[2].match(/base64\.b64decode\('([^']+)'\)/)?.[1] ?? "", "base64").toString("utf8");
   assert.match(visualScript, /kind="pdf"/);
   // require_renderer is now emitted as a real Python boolean (capital True/False)
   assert.match(visualScript, /require_renderer=True/);
+});
+
+test("rejects unsupported PDF font themes and invalid table column weights before generation", async () => {
+  const e = engine();
+  await assert.rejects(() => e.createPdf(820027, { title: "Bad font", sections: [{ body: "Nope" }], style: { fontFamily: "Comic Sans" } }), /fontFamily must be sans, serif, or mono/);
+  await assert.rejects(() => e.createPdf(820027, { title: "Bad widths", sections: [{ table: [["One", "Two"]], columnWidths: [1] }] }), /columnWidths must contain one width/);
+});
+
+test("creates branded DOCX and XLSX artifacts with native Office builders", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820028) as any;
+  const uploads: Array<{ path: string; bytes: Buffer }> = [];
+  sandbox.fs.uploadFile = async (contents: Buffer, path: string) => { uploads.push({ path, bytes: Buffer.from(contents) }); };
+  const docx = await e.createDocument(820028, {
+    title: "Board brief",
+    sections: [{ heading: "Summary", body: "Ready for review.", table: { headers: ["Metric", "Value"], rows: [["Revenue", "100"]] } }],
+    brand: { companyName: "ZiloShift", tagline: "Work. Flex. Earn.", preset: "brand", primary: "123B5D", accent: "0F766E" },
+  });
+  const xlsx = await e.createSpreadsheet(820028, {
+    title: "Performance report",
+    sheets: [{ name: "Overview", rows: { headers: ["Metric", "Value"], rows: [["Revenue", "100"], ["Margin", "25%"]] } }],
+    brand: { companyName: "ZiloShift", preset: "modern", primary: "312E81", accent: "DB2777" },
+  });
+  assert.equal(docx.type, "docx");
+  assert.equal(xlsx.type, "spreadsheet");
+  assert.ok(uploads.some((item) => item.path.endsWith(".docx") && item.bytes.subarray(0, 2).equals(Buffer.from("PK"))));
+  assert.ok(uploads.some((item) => item.path.endsWith(".xlsx") && item.bytes.subarray(0, 2).equals(Buffer.from("PK"))));
 });
 
 test("moves PDF generation to the isolated renderer when the workspace lacks ReportLab", async () => {

@@ -9,7 +9,7 @@ import {
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
-  getChannelConversation, appendChannelConversationMessages, setChannelConversationModel,
+  getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask,
 } from "./store.js";
@@ -156,7 +156,7 @@ async function telegramConversationHistory(ctx: Context, privateHistory: Awaited
 }
 
 async function saveTelegramConversation(ctx: Context, userId: number, text: string, response: string, createdAt: number): Promise<void> {
-  const messages = [{ role: "user" as const, content: text, createdAt }, { role: "assistant" as const, content: response }];
+  const messages = [{ role: "user" as const, content: text, createdAt }, { role: "assistant" as const, content: response, createdAt }];
   if (!isTelegramShared(ctx)) {
     await appendMessages(userId, messages);
     return;
@@ -328,7 +328,8 @@ export function registerHandlers(bot: Bot): void {
       `  /connect <code>[toolkit]</code> — connect an app\n` +
       `  /apps — see connected apps\n` +
       `  /model — switch AI model\n` +
-      `  /clear history — clear conversation history\n` +
+      `  /clear history — clear private conversation history\n` +
+      `  /clear group — clear this group's shared history (group admin)\n` +
       `  /clear session — clear history and reset session\n` +
       `  /export — download conversation\n` +
       `  /usage — session stats\n` +
@@ -353,7 +354,7 @@ export function registerHandlers(bot: Bot): void {
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
-      `/clear history — wipe conversation history\n` +
+      `/clear group — wipe this group's shared history (group admin)\n` +
       `/clear session — wipe history &amp; reset session\n` +
       `/triggers — list your Composio triggers\n` +
       `/trigger create|enable|disable|delete — manage triggers\n` +
@@ -789,7 +790,21 @@ export function registerHandlers(bot: Bot): void {
   bot.command("clear", async (ctx) => {
     if (!(await guard(ctx))) return;
     const action = ctx.match?.trim().toLowerCase();
-    if (action === "history") {
+    if (action === "group") {
+      if (!isTelegramShared(ctx)) {
+        await ctx.reply("/clear group can only be used inside a Telegram group.");
+        return;
+      }
+      if (!(await isTelegramGroupAdmin(ctx))) {
+        await ctx.reply("Only a Telegram group administrator can clear this group's history.");
+        return;
+      }
+      await clearChannelConversationHistory({
+        id: telegramConversationId(ctx), accountId: `account_${ctx.from!.id}`, userId: ctx.from!.id,
+        provider: "telegram", scope: "shared",
+      });
+      await ctx.reply("🗑 This group's Chusky history has been cleared. I will treat the next message as a fresh start.");
+    } else if (action === "history") {
       await clearHistory(ctx.from!.id);
       await ctx.reply("🗑 History cleared. Your Composio session was kept.");
     } else if (action === "session") {
@@ -797,7 +812,7 @@ export function registerHandlers(bot: Bot): void {
       await clearSession(ctx.from!.id);
       await ctx.reply("🗑 Session and history cleared. Fresh start — what's next?");
     } else {
-      await ctx.reply("Usage: /clear history or /clear session");
+      await ctx.reply("Usage: /clear history, /clear session, or /clear group (inside a group)");
     }
   });
 

@@ -555,6 +555,8 @@ export interface ChannelConversationRecord {
   model?: string;
   history: Message[];
   summaries: string[];
+  /** Turns received before this instant must not be appended after a group reset. */
+  historyClearedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -647,6 +649,7 @@ interface Backend {
   getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined>;
   saveChannelConversation(record: ChannelConversationRecord): Promise<void>;
   setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined>;
+  clearChannelConversationHistory(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt" | "historyClearedAt">): Promise<ChannelConversationRecord>;
   enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void>;
   takeChannelDebounce(key: string): Promise<InboundMessage[]>;
 }
@@ -1423,6 +1426,18 @@ class RedisBackend implements Backend {
     await this.saveChannelConversation(next);
     return next;
   }
+  async clearChannelConversationHistory(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt" | "historyClearedAt">): Promise<ChannelConversationRecord> {
+    const current = await this.getChannelConversation(input.id);
+    const now = Date.now();
+    const next: ChannelConversationRecord = {
+      ...input,
+      ...(current?.model ? { model: current.model } : {}),
+      history: [], summaries: [], historyClearedAt: now,
+      createdAt: current?.createdAt ?? now, updatedAt: now,
+    };
+    await this.saveChannelConversation(next);
+    return next;
+  }
   async enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds: number): Promise<void> {
     const redisKey = this.channelDebounceKey(key);
     await this.r.rpush(redisKey, JSON.stringify(message));
@@ -1798,6 +1813,18 @@ class MemoryBackend implements Backend {
     if (!current) return undefined;
     const next = { ...current, ...(model ? { model } : { model: undefined }), updatedAt: Date.now() };
     this.channelConversations.set(id, next);
+    return next;
+  }
+  async clearChannelConversationHistory(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt" | "historyClearedAt">) {
+    const current = this.channelConversations.get(input.id);
+    const now = Date.now();
+    const next: ChannelConversationRecord = {
+      ...input,
+      ...(current?.model ? { model: current.model } : {}),
+      history: [], summaries: [], historyClearedAt: now,
+      createdAt: current?.createdAt ?? now, updatedAt: now,
+    };
+    this.channelConversations.set(input.id, next);
     return next;
   }
   async enqueueChannelDebounce(key: string, message: InboundMessage, _ttlSeconds: number) { this.channelDebounce.set(key, [...(this.channelDebounce.get(key) ?? []), message].slice(-20)); }
@@ -2930,7 +2957,11 @@ export async function getChannelConversation(id: string): Promise<ChannelConvers
 export async function appendChannelConversationMessages(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt"> & { messages: Message[] }): Promise<ChannelConversationRecord> {
   const current = await backend.getChannelConversation(input.id);
   const now = Date.now();
-  const history = [...(current?.history ?? []), ...input.messages];
+  // A group reset may race with a slow agent response. Its incoming message
+  // carries the original receive timestamp, so discard that entire stale turn
+  // instead of allowing it to recreate context the group explicitly cleared.
+  const staleTurn = Boolean(current?.historyClearedAt && input.messages.some((message) => (message.createdAt ?? now) < current.historyClearedAt!));
+  const history = staleTurn ? [...(current?.history ?? [])] : [...(current?.history ?? []), ...input.messages];
   const cap = config.maxHistory * 2;
   const overflow = history.length > cap ? history.slice(0, history.length - cap) : [];
   const summaries = [...(current?.summaries ?? []), ...(overflow.length ? [overflow.map((m) => `${m.role}: ${m.content}`).join(" ").slice(0, 1800)] : [])].slice(-10);
@@ -2943,6 +2974,7 @@ export async function appendChannelConversationMessages(input: Omit<ChannelConve
     ...(current?.model ? { model: current.model } : {}),
     history: history.slice(-cap),
     summaries,
+    ...(current?.historyClearedAt ? { historyClearedAt: current.historyClearedAt } : {}),
     createdAt: current?.createdAt ?? now,
     updatedAt: now,
   };
@@ -2952,6 +2984,11 @@ export async function appendChannelConversationMessages(input: Omit<ChannelConve
 
 export async function setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined> {
   return backend.setChannelConversationModel(id, model);
+}
+
+/** Clear only one provider/thread conversation; private account history is unaffected. */
+export async function clearChannelConversationHistory(input: Omit<ChannelConversationRecord, "history" | "summaries" | "createdAt" | "updatedAt" | "historyClearedAt">): Promise<ChannelConversationRecord> {
+  return backend.clearChannelConversationHistory(input);
 }
 
 export async function enqueueChannelDebounce(key: string, message: InboundMessage, ttlSeconds = 30): Promise<void> {
