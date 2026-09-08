@@ -339,6 +339,15 @@ export interface DelegationPlanStep {
   dependsOn: CapabilityWorkerName[];
 }
 
+/**
+ * The full request stays in structured delegation context. This role-specific
+ * stage text prevents validation from re-detecting every domain in a mixed
+ * project when a specialist receives its individual handoff.
+ */
+export function delegationStageObjective(worker: CapabilityWorkerName): string {
+  return `Complete the ${WORKER_CAPABILITIES[worker].displayName} stage for the supervisor-provided project. Use the supplied delegation context and return a concise handoff for the next stage.`;
+}
+
 /** Build a deterministic, reviewable plan for mixed objectives before any
  * worker is created. The supervisor can execute these steps independently and
  * pass each prior result forward, preserving the dependency boundary. */
@@ -348,7 +357,7 @@ export function planDelegationObjective(objective: string, allowedTools: string[
   const workers = order.filter((worker) => matches.includes(worker));
   return workers.map((worker, index) => ({
     worker,
-    objective: `${objective.trim()}\n\nYou own only the ${WORKER_CAPABILITIES[worker].domain.toLowerCase()} portion. Return a concise handoff for the next step.`,
+    objective: delegationStageObjective(worker),
     dependsOn: workers.slice(0, index),
   }));
 }

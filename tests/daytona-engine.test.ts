@@ -1,7 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
-import { DaytonaEngine } from "../src/lib/daytona/engine.js";
+import { appScaffoldCommand, DaytonaEngine } from "../src/lib/daytona/engine.js";
 import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 
 let sandboxes: Map<string, any>;
@@ -81,6 +81,15 @@ function engine() {
     create: async (params: Record<string, unknown>) => { creates++; lastCreateParams = params; return fakeSandbox(`sandbox-${creates}`); },
   } as any));
 }
+
+test("retries only transient npm registry failures while safely resetting an unregistered scaffold directory", () => {
+  const command = appScaffoldCommand("vite-react", "client-portal");
+  assert.match(command, /while \[ "\$attempt" -le 3 \]/);
+  assert.match(command, /rm -rf "workspace\/apps\/client-portal"/);
+  assert.match(command, /EAI_AGAIN\|ENOTFOUND\|ECONNRESET/);
+  assert.match(command, /NPM_CONFIG_FETCH_RETRIES=2/);
+  assert.match(command, /npm create vite@latest client-portal/);
+});
 
 test("creates one workspace and persists its provider ID", async () => {
   const e = engine();

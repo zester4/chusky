@@ -20,7 +20,7 @@ import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { executeDelegation } from "./subagents/executor.js";
-import { planDelegationObjective } from "./subagents/capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 
@@ -91,6 +91,58 @@ async function runDelegationWithDurableContinuation(
   if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
   const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
   return { ...result, durableContinuation: { queued: true, ...continuation } };
+}
+
+/**
+ * A mixed supervisor request must never leak a routing error to the user. Each
+ * stage remains a normal durable least-privilege delegation; later stages see
+ * only a bounded prior handoff, and are not started after a paused/failed one.
+ */
+async function runPlannedDelegation(
+  userId: number,
+  contract: Parameters<typeof executeDelegation>[1],
+  runtime: NativeToolRuntime,
+): Promise<unknown> {
+  if (runtime.worker) return runDelegationWithDurableContinuation(userId, contract, runtime);
+  const plan = planDelegationObjective(contract.objective, contract.allowedTools ?? []);
+  if (plan.length < 2) return runDelegationWithDurableContinuation(userId, contract, runtime);
+
+  await runtime.onStatus?.(`🧭 Coordinating ${plan.map((step) => WORKER_CAPABILITIES[step.worker].displayName).join(" → ")}`);
+  const stages: Array<{ worker: string; handoffId?: string; taskId?: string; status: string; output: string }> = [];
+  let priorHandoff = "";
+  for (let index = 0; index < plan.length; index += 1) {
+    const step = plan[index]!;
+    const capability = WORKER_CAPABILITIES[step.worker];
+    const sourceContext = { ...(contract.context ?? {}) } as Record<string, unknown>;
+    const requestedTool = sourceContext.toolCall as { name?: unknown } | undefined;
+    if (requestedTool?.name && !capability.allowedTools.includes(String(requestedTool.name))) delete sourceContext.toolCall;
+    const result = await runDelegationWithDurableContinuation(userId, {
+      ...contract,
+      worker: step.worker,
+      objective: step.objective,
+      expectedOutput: `${capability.displayName} handoff for the supervisor and any dependent specialist.`,
+      allowedTools: contract.allowedTools?.filter((tool) => capability.allowedTools.includes(tool)),
+      allowedComposioTools: contract.allowedComposioTools?.filter((tool) => isComposioToolAllowedForWorker(step.worker, tool)),
+      context: {
+        ...sourceContext,
+        supervisorObjective: contract.objective,
+        stage: { index: index + 1, total: plan.length, worker: step.worker, dependsOn: step.dependsOn },
+        ...(priorHandoff ? { priorSpecialistHandoff: priorHandoff } : {}),
+      },
+    }, runtime) as { status?: string; output?: string; handoffRecord?: { id?: string }; taskId?: string };
+    const status = String(result.status ?? "failed");
+    const output = String(result.output ?? "");
+    stages.push({ worker: step.worker, status, output: output.slice(0, 4000), handoffId: result.handoffRecord?.id, taskId: result.taskId });
+    priorHandoff = output.slice(0, 6000);
+    if (status !== "success" && status !== "fallback_executed") {
+      return {
+        orchestration: "multi_specialist", status, originalObjective: contract.objective, completedStages: stages,
+        pendingStages: plan.slice(index + 1).map((pending) => pending.worker),
+        note: "The remaining specialists were not started; Chusky will continue only after this durable stage is resolved.",
+      };
+    }
+  }
+  return { orchestration: "multi_specialist", status: "success", originalObjective: contract.objective, completedStages: stages };
 }
 
 async function reviewSubagentAction(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
@@ -432,7 +484,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_CREATE_SPREADSHEET": return daytonaEngine.createSpreadsheet(userId, args);
     case "CHUCK_ARTIFACT": return daytonaEngine.artifact(userId, args);
     case "CHUCK_DELEGATE_SUBAGENT":
-      return runDelegationWithDurableContinuation(userId, args as any, runtime);
+      return runPlannedDelegation(userId, args as any, runtime);
     case "CHUCK_HANDOFF_SUBAGENT":
       return runDelegationWithDurableContinuation(userId, {
         worker: args.targetWorker as any,

@@ -1,7 +1,8 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { executeDelegation } from "../src/subagents/executor.js";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
+import { nativeTool } from "../src/nativeTools.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -41,6 +42,24 @@ test("routes a focused research objective to Nora", () => {
     () => validateDelegationTarget("lucas", "Research current competitors, compare their pricing, and return cited evidence"),
     /matches Nora.*worker=nora/
   );
+});
+
+test("builds routable role-specific stages for a mixed objective", () => {
+  const plan = planDelegationObjective("Build a product website and create its brand images");
+  assert.deepEqual(plan.map((step) => step.worker), ["leo", "lucas"]);
+  for (const step of plan) validateDelegationTarget(step.worker, step.objective);
+});
+
+test("automatically sequences a mixed supervisor delegation instead of surfacing a routing error", async () => {
+  const result = await nativeTool(991015, "CHUCK_DELEGATE_SUBAGENT", {
+    worker: "lucas",
+    objective: "Build a product website and create its brand images",
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "brand" } } },
+  }) as { orchestration: string; status: string; completedStages: Array<{ worker: string }> };
+  assert.equal(result.orchestration, "multi_specialist");
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.completedStages.map((stage) => stage.worker), ["leo", "lucas"]);
+  assert.equal((await listHandoffRecords(991015)).length, 2);
 });
 
 test("gives Lucas a complete private engineering loop while keeping provider tools role-scoped", () => {
@@ -352,5 +371,14 @@ test("emits real-time status update callbacks to Telegram during execution", asy
   );
 
   assert.ok(statusLogs.length >= 2);
-  assert.match(statusLogs[0], /🤖 Lucas/);
+  assert.match(statusLogs[0], /Delegated to Lucas/);
+  assert.match(statusLogs[0], /Task: Inspect project status/);
+});
+
+test("formats a bounded specialist handoff preview without hidden worker context", () => {
+  const objective = `Create a dashboard\nwith customer-facing metrics and a release checklist. ${"x".repeat(200)}`;
+  const status = delegationStartedStatus("Lucas — Lead Engineer", objective);
+  assert.match(status, /^🤝 Delegated to Lucas — Lead Engineer\nTask: Create a dashboard with customer-facing metrics/);
+  assert.match(status, /…$/);
+  assert.ok(status.length <= 220);
 });

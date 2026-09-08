@@ -28,6 +28,43 @@ const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
 const DAYTONA_MAX_EXECUTION_SECONDS = 900;
 const DAYTONA_PREVIEW_MIN_SECONDS = 60;
 const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
+const APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS = 3;
+const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo)\b|network\s+(?:request|error)/i;
+
+/**
+ * New sandboxes occasionally resolve registry.npmjs.org before their DNS is
+ * ready. Retry only known transient network failures and clean only the
+ * validated, not-yet-registered app directory between attempts.
+ */
+export function appScaffoldCommand(framework: DaytonaAppFramework, id: string): string {
+  const appPath = `workspace/apps/${id}`;
+  const scaffold = framework === "vite-react"
+    ? `mkdir -p workspace/apps && cd workspace/apps && npm create vite@latest ${id} -- --template react-ts && cd ${id} && npm install`
+    : `mkdir -p workspace/apps && npx --yes create-next-app@latest ${id} --yes --use-npm && cd ${id} && npm install`;
+  return [
+    "set +e",
+    "attempt=1",
+    "log=/tmp/chusky-app-scaffold.log",
+    `while [ \"$attempt\" -le ${APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS} ]; do`,
+    `  rm -rf \"${appPath}\"`,
+    `  ( NPM_CONFIG_FETCH_RETRIES=2 NPM_CONFIG_FETCH_RETRY_FACTOR=2 NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=1000 NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=8000 ${scaffold} ) >\"$log\" 2>&1`,
+    "  code=$?",
+    "  cat \"$log\"",
+    "  if [ \"$code\" -eq 0 ]; then exit 0; fi",
+    `  if ! grep -Eqi 'EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo|network[[:space:]]+(request|error)' \"$log\"; then exit \"$code\"; fi`,
+    `  if [ \"$attempt\" -ge ${APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS} ]; then echo \"Temporary npm registry network failure after ${APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS} attempts.\"; exit \"$code\"; fi`,
+    "  sleep $((attempt * 3))",
+    "  attempt=$((attempt + 1))",
+    "done",
+  ].join("\n");
+}
+
+function appScaffoldFailure(output: string): string {
+  if (TRANSIENT_NPM_REGISTRY_FAILURE.test(output)) {
+    return "App scaffold could not reach the npm registry after bounded automatic retries. This is a temporary Daytona network/DNS issue; retry scaffold later. The incomplete app directory was safely removed before each retry.";
+  }
+  return `App scaffold failed: ${output.slice(-800)}`;
+}
 
 function boundedInt(value: unknown, fallback: number, max: number): number {
   const n = Number(value ?? fallback);
@@ -1410,11 +1447,9 @@ export class DaytonaEngine {
       if (framework !== "vite-react" && framework !== "nextjs") throw new DaytonaInputError("framework must be vite-react or nextjs");
       const path = `workspace/apps/${id}`;
       const branch = `chusky/${id}`;
-      const scaffold = framework === "vite-react"
-        ? `mkdir -p workspace/apps && cd workspace/apps && npm create vite@latest ${id} -- --template react-ts && cd ${id} && npm install`
-        : `mkdir -p workspace/apps && cd workspace/apps && npx create-next-app@latest ${id} --yes --use-npm && cd ${id} && npm install`;
+      const scaffold = appScaffoldCommand(framework, id);
       const run = await this.execute(userId, scaffold, undefined, 900);
-      if (run.exitCode !== 0) throw new DaytonaInputError(`App scaffold failed: ${run.output.slice(-800)}`);
+      if (run.exitCode !== 0) throw new DaytonaInputError(appScaffoldFailure(run.output));
       // Keep generated work isolated from the outset. It is local-only: remote
       // repository creation, push and deployment retain their approval gates.
       const gitSetup = await this.execute(userId, `git init -b main && git add -A && git -c user.name=Chusky -c user.email=chusky@localhost commit -m "chore: scaffold ${id}" && git checkout -b ${branch}`, path, 120);

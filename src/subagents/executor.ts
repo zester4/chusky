@@ -14,6 +14,20 @@ import type { ReplyTarget } from "../channels/contracts.js";
 import { relevantSkillContext } from "../skills/catalog.js";
 import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
 
+const DELEGATION_STATUS_PREVIEW_LENGTH = 160;
+
+/**
+ * User-facing handoff text. Keep this limited to the task objective—not the
+ * worker system prompt, tools, memories, or hidden execution context.
+ */
+export function delegationStartedStatus(displayName: string, objective: string): string {
+  const compactObjective = objective.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim();
+  const preview = compactObjective.length > DELEGATION_STATUS_PREVIEW_LENGTH
+    ? `${compactObjective.slice(0, DELEGATION_STATUS_PREVIEW_LENGTH - 1).trimEnd()}…`
+    : compactObjective;
+  return `🤝 Delegated to ${displayName}\nTask: ${preview || "Specialist task"}`;
+}
+
 export async function executeDelegation(
   userId: number,
   contractInput: Partial<DelegationContract> & { worker: CapabilityWorkerName; objective: string },
@@ -139,9 +153,10 @@ export async function executeDelegation(
   let approvalId: string | undefined;
   let toolRequest: DelegationResult["toolRequest"] | undefined;
 
-  // Telegram status update notification
+  // The shared status callback is used by every channel. Make the selected
+  // specialist and a bounded preview visible before any worker work begins.
   if (options?.onStatus) {
-    await options.onStatus(`🤖 ${manifest.displayName} is initializing task: "${contract.objective.slice(0, 100)}"...`);
+    await options.onStatus(delegationStartedStatus(manifest.displayName, contract.objective));
   }
 
   // Retrieve capability-scoped memories from shared Memory Router
