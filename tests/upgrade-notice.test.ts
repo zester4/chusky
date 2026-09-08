@@ -23,3 +23,11 @@ test("loads and writes the release manifest", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("current upgrade manifest announces resilient Daytona workspace networking", async () => {
+  const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
+  assert.equal(notice?.id, "release-3.1.3");
+  assert.equal(notice?.version, "3.1.3");
+  assert.match(formatAgentUpgradeNotice(notice!), /tier-enforced network blocks/);
+  assert.match(formatAgentUpgradeNotice(notice!), /replacement workspaces/);
+});

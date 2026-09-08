@@ -30,6 +30,7 @@ const DAYTONA_PREVIEW_MIN_SECONDS = 60;
 const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
 const APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS = 3;
 const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo)\b|network\s+(?:request|error)/i;
+const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and cannot be overridden|tier[- ]based network restriction/i;
 
 /**
  * New sandboxes occasionally resolve registry.npmjs.org before their DNS is
@@ -1157,7 +1158,43 @@ async function brieflyCollect(handle: PtyHandle, milliseconds = 250): Promise<vo
 }
 
 export class DaytonaEngine {
+  private networkPolicyOverrideUnavailable = false;
+
   constructor(private readonly clientFactory: typeof getDaytonaClient = getDaytonaClient) {}
+
+  /**
+   * A sandbox can outlive a deployment configuration change. In particular,
+   * an older Chusky workspace may retain `networkBlockAll: true` even after
+   * the deployment has been changed to permit npm access. Reconcile the
+   * retained sandbox with the configured policy before using it.
+   */
+  private async reconcileNetworkPolicy(sandbox: Sandbox): Promise<void> {
+    if (this.networkPolicyOverrideUnavailable) return;
+    const domainAllowList = config.daytonaDomainAllowList.trim();
+    try {
+      if (domainAllowList) {
+        if (sandbox.domainAllowList !== domainAllowList) {
+          await sandbox.updateNetworkSettings({ domainAllowList });
+          await sandbox.refreshData();
+        }
+        return;
+      }
+      // Older SDK responses can omit this optional field. In that case there is
+      // no explicit retained policy to repair, so preserve the provider default.
+      if (typeof sandbox.networkBlockAll !== "boolean" || sandbox.networkBlockAll === config.daytonaNetworkBlockAll) return;
+      await sandbox.updateNetworkSettings({ networkBlockAll: config.daytonaNetworkBlockAll });
+      await sandbox.refreshData();
+    } catch (error) {
+      // On Daytona Tier 1/2, the organization firewall is authoritative. Do
+      // not turn every normal filesystem/artifact call into a failure by
+      // retrying an update the provider has explicitly forbidden.
+      if (DAYTONA_TIER_NETWORK_RESTRICTION.test(String(error))) {
+        this.networkPolicyOverrideUnavailable = true;
+        return;
+      }
+      throw error;
+    }
+  }
 
   private async getSandbox(userId: number): Promise<Sandbox | undefined> {
     const stored = await getDaytonaWorkspace(userId);
@@ -1167,6 +1204,7 @@ export class DaytonaEngine {
       await sandbox.refreshData();
       if (sandbox.recoverable && sandbox.state !== "started") await sandbox.recover(60);
       else if (sandbox.state !== "started") await sandbox.start(60);
+      await this.reconcileNetworkPolicy(sandbox);
       await sandbox.refreshActivity();
       await saveDaytonaWorkspace(userId, { ...stored, name: sandbox.name, updatedAt: Date.now(), lastKnownState: sandbox.state });
       return sandbox;
@@ -1219,6 +1257,7 @@ export class DaytonaEngine {
             await sandbox.refreshData();
             if (sandbox.recoverable && sandbox.state !== "started") await sandbox.recover(60);
             else if (sandbox.state !== "started") await sandbox.start(60);
+            await this.reconcileNetworkPolicy(sandbox);
             await sandbox.refreshActivity();
             await saveDaytonaWorkspace(userId, { ...workspaceRecord(sandbox), lastKnownState: sandbox.state });
             return sandbox;
@@ -1445,6 +1484,9 @@ export class DaytonaEngine {
       if (existing) throw new DaytonaInputError(`An app named '${id}' already exists; use its project actions instead.`);
       const framework = boundedText(args.framework, "framework", 20) as DaytonaAppFramework;
       if (framework !== "vite-react" && framework !== "nextjs") throw new DaytonaInputError("framework must be vite-react or nextjs");
+      if (sandbox.networkBlockAll === true && this.networkPolicyOverrideUnavailable) {
+        throw new DaytonaInputError("This Daytona organization tier blocks outbound network access, so npm dependencies cannot be installed in this workspace. The project files are unchanged. Use a Daytona tier or organization policy that permits npm registry access, then retry scaffold.");
+      }
       const path = `workspace/apps/${id}`;
       const branch = `chusky/${id}`;
       const scaffold = appScaffoldCommand(framework, id);

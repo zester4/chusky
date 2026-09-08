@@ -101,6 +101,52 @@ test("creates one workspace and persists its provider ID", async () => {
   assert.equal(lastCreateParams?.autoPauseInterval, undefined);
 });
 
+test("restores npm access for a retained workspace that was previously network-blocked", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820001) as any;
+  sandbox.networkBlockAll = true;
+  let settings: unknown;
+  sandbox.updateNetworkSettings = async (value: unknown) => {
+    settings = value;
+    sandbox.networkBlockAll = (value as { networkBlockAll?: boolean }).networkBlockAll;
+  };
+
+  await e.getOrCreateWorkspace(820001);
+
+  assert.deepEqual(settings, { networkBlockAll: false });
+  assert.equal(sandbox.networkBlockAll, false);
+});
+
+test("keeps normal workspace operations available when Daytona enforces a tier network policy", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820001) as any;
+  sandbox.networkBlockAll = true;
+  let attempts = 0;
+  sandbox.updateNetworkSettings = async () => {
+    attempts++;
+    throw new Error("Network access is restricted and cannot be overridden at the sandbox level");
+  };
+
+  await e.getOrCreateWorkspace(820001);
+  await e.getOrCreateWorkspace(820001);
+
+  assert.equal(attempts, 1);
+});
+
+test("reports a tier-enforced network block before attempting an app scaffold", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820001) as any;
+  sandbox.networkBlockAll = true;
+  sandbox.updateNetworkSettings = async () => {
+    throw new Error("Network access is restricted and cannot be overridden at the sandbox level");
+  };
+
+  await assert.rejects(
+    () => e.app(820001, { action: "scaffold", id: "portal", framework: "vite-react" }),
+    /organization tier blocks outbound network access/,
+  );
+});
+
 test("recovers a retained named sandbox after the local workspace record is lost", async () => {
   const orphan = fakeSandbox("sandbox-retained");
   orphan.name = "chusky-820050";
