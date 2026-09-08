@@ -74,6 +74,31 @@ function modelsForProvider(models: Array<{ id: string; name: string }>, provider
     .filter((model) => provider === "all" || model.id.startsWith(`${provider}/`))
     .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id) || a.id.localeCompare(b.id));
 }
+
+function channelLinkKeyboard(userId: number): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("💼 Slack", `chlink:p:slack:${userId}`)
+    .text("🟢 WhatsApp", `chlink:p:whatsapp:${userId}`).row()
+    .text("📱 iMessage", `chlink:p:sendblue:${userId}`)
+    .text("✉️ Telegram", `chlink:t:${userId}`).row()
+    .text("👥 Link an iMessage group", `chlink:g:sendblue:${userId}`);
+}
+
+async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue"): Promise<void> {
+  const code = await createLinkCode(ctx.from!.id, provider);
+  if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
+    const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
+    await replyHtml(ctx, `<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`);
+    return;
+  }
+  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider;
+  await replyHtml(ctx, `<b>Link ${label}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${label} account you want to link. It expires in 10 minutes.`);
+}
+
+async function sendGroupChannelLink(ctx: Context): Promise<void> {
+  const code = await createSendblueGroupLinkCode(ctx.from!.id);
+  await replyHtml(ctx, `<b>Link an iMessage group</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link-group ${code}</code> inside the iMessage group from the linked Sendblue number. It expires in 10 minutes.`);
+}
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
   while (!(await acquireUserLock(userId, token))) {
     if (signal.aborted) throw new DOMException("Request cancelled", "AbortError");
@@ -336,8 +361,8 @@ export function registerHandlers(bot: Bot): void {
       `  /voice on|off — enable or disable spoken replies\n` +
       `  /video-status — check video generation jobs\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
-      `  /channel link slack|whatsapp|sendblue — link another channel\n` +
-      `  /channel link sendblue-group — create an iMessage group link code\n` +
+      `  /channel — choose a private channel or iMessage group to link\n` +
+      `  /linkgroup — open the group-link menu\n` +
       `  /group-access owner|all — set iMessage group access (inside the group)\n` +
       `  /group-model <model-id|default> — choose the model for this Telegram group\n` +
       `  /unlink-group — unlink an iMessage group (inside the group)\n` +
@@ -367,10 +392,10 @@ export function registerHandlers(bot: Bot): void {
       `/agent-cancel <code>handoff-id</code> — cancel a queued worker run\n` +
       `/call <code>+number purpose</code> — request an approval-gated phone call\n` +
       `/cancel — cancel the active request\n` +
-      `/channel link slack|whatsapp|sendblue — link another channel securely\n` +
-      `/channel link sendblue-group — create an iMessage group link code\n` +
+      `/channel — choose a private channel or iMessage group to link securely\n` +
+      `/linkgroup — open the iMessage group-link menu\n` +
       `/channel list — show linked channel identities\n` +
-      `/linkgroup <code> — activate the group (send inside iMessage)\n` +
+      `Inside iMessage, send /link-group <code> to activate a generated group code\n` +
       `/group-access owner|all — control group access (send inside iMessage)\n` +
       `/group-model <model-id|default> — choose the model for this Telegram group\n` +
       `/unlink-group — unlink the iMessage group (send inside iMessage)\n` +
@@ -475,20 +500,20 @@ export function registerHandlers(bot: Bot): void {
 
   bot.command("channel", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const [action, provider] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
-    if (action === "link" && provider === "sendblue-group") {
-      const code = await createSendblueGroupLinkCode(ctx.from!.id);
-      await replyHtml(ctx, `<b>Link an iMessage group</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link-group ${code}</code> inside the iMessage group from your linked Sendblue number. It expires in 10 minutes.`);
+    const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+    const action = parts[0]?.toLowerCase();
+    const rawProvider = parts[1]?.toLowerCase();
+    const provider = rawProvider === "imessage" ? "sendblue" : rawProvider;
+    if (!action || (action === "link" && !provider)) {
+      await ctx.reply("Choose the channel to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
+      return;
+    }
+    if (action === "linkgroup" || (action === "link" && provider === "sendblue-group")) {
+      await sendGroupChannelLink(ctx);
       return;
     }
     if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
-      const code = await createLinkCode(ctx.from!.id, provider);
-      if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
-        const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
-        await replyHtml(ctx, `<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`);
-      } else {
-        await replyHtml(ctx, `<b>Link ${provider}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${provider} account you want to link. It expires in 10 minutes.`);
-      }
+      await sendPrivateChannelLink(ctx, provider);
       return;
     }
     if (action === "list") {
@@ -502,7 +527,12 @@ export function registerHandlers(bot: Bot): void {
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
       return;
     }
-    await ctx.reply("Usage: /channel link slack|whatsapp|sendblue|sendblue-group | /channel list | /channel notify slack|whatsapp|sendblue on|off");
+    await ctx.reply("Choose a valid channel action:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
+  });
+
+  bot.command("linkgroup", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    await ctx.reply("Choose the channel group to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
   });
 
   bot.command("group-model", async (ctx) => {
@@ -909,6 +939,35 @@ export function registerHandlers(bot: Bot): void {
       `✅ <b>Model switched to:</b>\n<code>${modelId}</code>\n\n<i>Your history and Composio session were kept.</i>`,
       { parse_mode: "HTML" }
     );
+  });
+
+  bot.callbackQuery(/^chlink:(p|g|t):([a-z-]+):(\d+)$/, async (ctx) => {
+    const kind = ctx.match[1];
+    const target = ctx.match[2];
+    const ownerId = Number(ctx.match[3]);
+    if (ctx.from.id !== ownerId) {
+      await ctx.answerCallbackQuery({ text: "This channel menu belongs to another user.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    try {
+      if (kind === "t") {
+        await ctx.editMessageText("✅ You are already using Telegram. Choose another channel if you want to link an external account.", { reply_markup: channelLinkKeyboard(ownerId) });
+        return;
+      }
+      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue")) {
+        await sendPrivateChannelLink(ctx, target);
+        return;
+      }
+      if (kind === "g" && target === "sendblue") {
+        await sendGroupChannelLink(ctx);
+        return;
+      }
+      await ctx.editMessageText("That channel option is no longer available. Use /channel to open a fresh menu.");
+    } catch (error) {
+      await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
   });
 
   bot.callbackQuery(/^appr:(approve|deny):(.+)$/, async (ctx) => {
