@@ -29,7 +29,12 @@ test("gives Nora only scoped Composio research-provider families", () => {
   for (const tool of ["TAVILY_SEARCH", "EXA_SEARCH", "FIRECRAWL_SCRAPE"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be allowed for Nora when Chusky verifies it`);
   }
-  for (const tool of ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "GITHUB_CREATE_PULL_REQUEST"]) {
+  for (const tool of ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"]) {
+    assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be scoped to Nora`);
+  }
+  assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOLS"), false, "Nora must request tool discovery from Chusky");
+  assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOL"), false, "Nora must not use the legacy search alias");
+  for (const tool of ["GITHUB_CREATE_PULL_REQUEST"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} must not be available to Nora`);
   }
   assert.match(nora.systemPrompt, /Tavily or Exa/);
@@ -68,7 +73,7 @@ test("gives Lucas a complete private engineering loop while keeping provider too
     assert.ok(lucas.allowedTools.includes(tool), `${tool} should be available to Lucas`);
   }
   assert.equal(isComposioToolAllowedForWorker("lucas", "GITHUB_CREATE_PULL_REQUEST"), true);
-  assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_SEARCH_TOOL"), false);
+  assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_SEARCH_TOOLS"), false);
   assert.equal(isComposioToolAllowedForWorker("lucas", "COMPOSIO_REMOTE_BASH_TOOL"), false);
   assert.equal(isComposioToolAllowedForWorker("leo", "GITHUB_CREATE_PULL_REQUEST"), false);
   assert.deepEqual(WORKER_CAPABILITIES.maya.starterComposioTools, [

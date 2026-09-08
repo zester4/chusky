@@ -304,6 +304,61 @@ interface ComposioSession {
   sessionId: string;
 }
 
+export interface ConnectedComposioAccount {
+  id: string;
+  alias?: string;
+  toolkit: string;
+  status: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+function composioUserId(userId: number): string {
+  return `user_${userId}`;
+}
+
+/**
+ * Add the reserved account selector to direct app-tool schemas. Composio
+ * consumes it as an execution option; it must never be forwarded as a
+ * provider argument. Multi-execute already defines account per nested item.
+ */
+function addAccountSelector(tool: any): any {
+  const name = String(tool?.function?.name ?? tool?.name ?? "");
+  if (!config.composioMultiAccountEnabled || !name || name.startsWith("COMPOSIO_") || name.startsWith("CHUCK_")) return tool;
+  const parameters = tool?.function?.parameters;
+  if (!parameters || typeof parameters !== "object" || parameters.type !== "object") return tool;
+  return {
+    ...tool,
+    function: {
+      ...tool.function,
+      parameters: {
+        ...parameters,
+        properties: {
+          ...(parameters.properties ?? {}),
+          account: {
+            type: "string",
+            description: "Optional Composio connected-account alias or ID. Required when multiple accounts for this toolkit are active; use /accounts to see aliases.",
+          },
+        },
+      },
+    },
+  };
+}
+
+function splitAccountSelector(args: Record<string, unknown>): { account?: string; arguments: Record<string, unknown> } {
+  const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
+  if (!account) return { arguments: args };
+  const arguments_ = { ...args };
+  delete arguments_.account;
+  return { account, arguments: arguments_ };
+}
+
+function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>): Promise<any> {
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return sessionObj.execute(slug, args);
+  const selected = splitAccountSelector(args);
+  return sessionObj.execute(slug, selected.arguments, selected.account ? { account: selected.account } : undefined);
+}
+
 const sessionCache = new Map<number, ComposioSession>();
 
 /** Replace provider dependencies in contract tests without contacting Composio. */
@@ -337,10 +392,27 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
       enable: config.enableSandbox,
       sandboxSize: config.sandboxSize,
     },
+    multiAccount: config.composioMultiAccountEnabled ? {
+      enable: true,
+      maxAccountsPerToolkit: config.composioMaxAccountsPerToolkit,
+      requireExplicitSelection: config.composioRequireExplicitAccount,
+    } : { enable: false },
   });
   const sessionObj = stored.composioSessionId
     ? await composio.sessions.use(stored.composioSessionId).catch(createSession)
     : await createSession();
+
+  // Existing sessions predate multi-account support. Patch them in place so
+  // Composio keeps all existing connections and sandbox state.
+  if (config.composioMultiAccountEnabled && typeof sessionObj.update === "function") {
+    await sessionObj.update({
+      multiAccount: {
+        enable: true,
+        maxAccountsPerToolkit: config.composioMaxAccountsPerToolkit,
+        requireExplicitSelection: config.composioRequireExplicitAccount,
+      },
+    }).catch((error: unknown) => logger.warn({ err: error, userId }, "Could not update existing Composio session for multi-account mode"));
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sessionId = (sessionObj as any).sessionId ?? (sessionObj as any).id ?? userId_str;
@@ -390,7 +462,7 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
     throw error;
   }
   const nameOf = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
-  const byName = new Map(available.map((tool) => [nameOf(tool), tool]));
+  const byName = new Map(available.map((tool) => [nameOf(tool), addAccountSelector(tool)]));
   const missing = unique.filter((slug) => !byName.has(slug));
   const requiredMissing = missing.filter((slug) => !optional.has(slug));
   if (requiredMissing.length) {
@@ -417,7 +489,7 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
     missing,
     execute: (slug, args) => {
       if (!byName.has(slug)) throw new Error(`Composio tool ${slug} was not delegated to this worker.`);
-      return sessionObj.execute(slug, args);
+      return composioExecute(sessionObj, slug, args);
     },
   };
 }
@@ -562,9 +634,9 @@ export async function runAgent(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = await sessionObj.tools();
   const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
-  const composioTools = fullComposioTools.length > 80
+  const composioTools = (fullComposioTools.length > 80
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
-    : fullComposioTools;
+    : fullComposioTools).map(addAccountSelector);
   composioTools.push(...LOCAL_TOOLS);
   const availableTools = composioTools.filter((tool) => {
     const name = toolName(tool);
@@ -646,6 +718,19 @@ export async function runAgent(
       ? `Recently available private image assets (metadata only; call CHUCK_GET_IMAGE_ASSET with the exact ID when an image is needed):\n${durable.imageAssets.slice(-8).reverse().map((asset) => `- ${asset.id} | ${asset.name} | ${asset.purpose} | tags: ${asset.tags.join(", ")}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n\n");
+  let accountContext = "";
+  // Connected-account metadata is private context. Never expose a user's
+  // account aliases or tool access to a shared channel conversation.
+  if (channelContext?.scope !== "shared") {
+    try {
+      const accounts = await listConnectedAccounts(userId);
+      if (accounts.length) {
+        accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
+      }
+    } catch (error) {
+      logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
+    }
+  }
   // Project skills are trusted, versioned operating guidance. Select a small
   // relevant subset before the first model call so the agent does not have to
   // remember to search for a workflow when creating a deliverable or changing
@@ -663,7 +748,7 @@ export async function runAgent(
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
+    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
@@ -797,7 +882,7 @@ export async function runAgent(
       let execResult: unknown;
       try {
         const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
-          || ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"].includes(slug);
+          || ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"].includes(slug);
         if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
         const previousResult = toolResultsByCallId.get(call.id);
         if (previousResult !== undefined) {
@@ -951,7 +1036,7 @@ export async function runAgent(
             execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
           }
         } else {
-          execResult = await sessionObj.execute(slug, executionArgs);
+          execResult = await composioExecute(sessionObj, slug, executionArgs);
         }
         result = typeof execResult === "string"
           ? execResult
@@ -1009,29 +1094,53 @@ export async function runAgent(
 
 export async function getConnectionUrl(
   userId: number,
-  toolkit: string
+  toolkit: string,
+  alias?: string
 ): Promise<string> {
   const { sessionObj } = await getOrCreateComposioSession(userId);
   const req = await sessionObj.authorize(toolkit, {
+    ...(alias ? { alias } : {}),
     ...(config.composioCallbackUrl ? { callbackUrl: config.composioCallbackUrl } : {}),
   });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (req as any).redirectUrl ?? (req as any).url ?? String(req);
 }
 
+/** Return safe connected-account metadata; credential fields are never exposed. */
+export async function listConnectedAccounts(userId: number, toolkit?: string): Promise<ConnectedComposioAccount[]> {
+  const result = await composio.connectedAccounts.list({
+    userIds: [composioUserId(userId)],
+    ...(toolkit ? { toolkitSlugs: [toolkit.toLowerCase()] } : {}),
+  });
+  const items = Array.isArray(result) ? result : (result?.items ?? []);
+  return items.map((item: any) => ({
+    id: String(item.id ?? ""),
+    alias: item.alias ? String(item.alias) : undefined,
+    toolkit: String(item.toolkit?.slug ?? item.toolkit?.name ?? item.toolkitSlug ?? "unknown"),
+    status: String(item.status ?? (item.isDisabled ? "DISABLED" : "ACTIVE")),
+    createdAt: item.createdAt ? String(item.createdAt) : undefined,
+    updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
+  })).filter((item: ConnectedComposioAccount) => item.id);
+}
+
 // ── Get toolkit connection states ─────────────────────────────────────────────
 
 export async function getToolkitStates(
   userId: number
-): Promise<{ slug: string; name: string; connected: boolean; logo?: string }[]> {
+): Promise<{ slug: string; name: string; connected: boolean; logo?: string; accountCount?: number; aliases?: string[] }[]> {
   const { sessionObj } = await getOrCreateComposioSession(userId);
   const result = await sessionObj.toolkits();
+  const accounts = await listConnectedAccounts(userId).catch(() => []);
+  const byToolkit = new Map<string, ConnectedComposioAccount[]>();
+  for (const account of accounts) byToolkit.set(account.toolkit.toLowerCase(), [...(byToolkit.get(account.toolkit.toLowerCase()) ?? []), account]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (result.items as any[]).map((t: any) => ({
     slug: t.slug as string,
     name: t.name as string,
     logo: t.logo as string | undefined,
-    connected: Boolean(t.connection?.isActive),
+    connected: Boolean(t.connection?.isActive) || (byToolkit.get(String(t.slug).toLowerCase())?.length ?? 0) > 0,
+    accountCount: byToolkit.get(String(t.slug).toLowerCase())?.length ?? (t.connection?.isActive ? 1 : 0),
+    aliases: byToolkit.get(String(t.slug).toLowerCase())?.map((account) => account.alias ?? account.id) ?? [],
   }));
 }
 

@@ -1,11 +1,11 @@
 {
-  "id": "release-3.1.4",
-  "version": "3.1.4",
+  "id": "release-3.1.5",
+  "version": "3.1.5",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Daytona browser control now supports explicit desktop lifecycle, accessibility-first navigation, display inspection, and focused screenshots.",
-    "Browser diagnostics and screen recordings can be managed inside the user's private Daytona workspace without sending data to another browser provider.",
-    "The browser tool now gives agents clearer verification and recording instructions before they interact with a page."
+    "Group chats now use the approved web-search and URL-fetch tools for current information.",
+    "Nora can research with scoped web tools but must request additional tool discovery from Chusky.",
+    "Composio tool permissions remain role-scoped, with external side effects behind the normal approval boundary."
   ],
-  "createdAt": "2026-09-08T00:00:00.000Z"
+  "createdAt": "2026-09-08T21:39:39.336Z"
 }

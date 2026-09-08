@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
 import {
-  runAgent, fetchModels, getConnectionUrl, getToolkitStates, invalidateSession, ApprovalRequiredError,
+  runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
   listTriggers, createTrigger, setTriggerState, deleteTrigger,
   searchTools
@@ -360,6 +360,8 @@ export function registerHandlers(bot: Bot): void {
       `  /usage — session stats\n` +
       `  /voice on|off — enable or disable spoken replies\n` +
       `  /video-status — check video generation jobs\n` +
+      `  /connect <toolkit> [alias] — connect one or more app accounts\n` +
+      `  /accounts [toolkit] — list connected Composio accounts\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
       `  /channel — choose a private channel or iMessage group to link\n` +
       `  /linkgroup — open the group-link menu\n` +
@@ -394,6 +396,8 @@ export function registerHandlers(bot: Bot): void {
       `/cancel — cancel the active request\n` +
       `/channel — choose a private channel or iMessage group to link securely\n` +
       `/linkgroup — open the iMessage group-link menu\n` +
+      `/connect <toolkit> [alias] — connect an app account, including multiple accounts\n` +
+      `/accounts [toolkit] — list connected Composio accounts and aliases\n` +
       `/channel list — show linked channel identities\n` +
       `Inside iMessage, send /link-group <code> to activate a generated group code\n` +
       `/group-access owner|all — control group access (send inside iMessage)\n` +
@@ -407,7 +411,9 @@ export function registerHandlers(bot: Bot): void {
       `• <code>COMPOSIO_MANAGE_CONNECTIONS</code> — surfaces OAuth links inline\n` +
       `• <code>COMPOSIO_REMOTE_BASH_TOOL</code> — runs shell commands\n` +
       `• <code>COMPOSIO_REMOTE_WORKBENCH</code> — persistent remote environment\n` +
-      `• <code>COMPOSIO_SEARCH_TOOL</code> — discovers tools by intent\n\n` +
+      `• <code>COMPOSIO_SEARCH_WEB</code> — searches current web information\n` +
+      `• <code>COMPOSIO_SEARCH_FETCH_URL_CONTENT</code> — reads a supplied URL\n` +
+      `• <code>COMPOSIO_SEARCH_TOOLS</code> — discovers tools by intent\n\n` +
       `Just describe what you need — Chusky figures out the tools.`
     );
   });
@@ -662,10 +668,11 @@ export function registerHandlers(bot: Bot): void {
   // /connect ─────────────────────────────────────────────────────────────────
   bot.command("connect", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const toolkit = ctx.match?.trim().toLowerCase();
+    const [toolkit, alias] = (ctx.match?.trim() ?? "").toLowerCase().split(/\s+/).filter(Boolean);
     if (!toolkit) {
       await replyHtml(ctx,
-        `<b>Connect an app</b>\n\nUsage: <code>/connect github</code>\n\n` +
+        `<b>Connect an app</b>\n\nUsage: <code>/connect gmail work-gmail</code>\n\n` +
+        `Run the command again with a different alias to connect another account for the same app.\n\n` +
         `Or just tell Chusky what you need and he'll surface the connection link automatically.`
       );
       return;
@@ -673,13 +680,14 @@ export function registerHandlers(bot: Bot): void {
 
     const statusMsg = await ctx.reply(`🔗 Generating connection link for <b>${toolkit}</b>…`, { parse_mode: "HTML" });
     try {
-      const url = await getConnectionUrl(ctx.from!.id, toolkit);
+      const url = await getConnectionUrl(ctx.from!.id, toolkit, alias);
       await ctx.api.editMessageText(
         ctx.chat!.id,
         statusMsg.message_id,
-        `🔗 <b>Connect ${toolkit}</b>\n\n` +
+        `🔗 <b>Connect ${toolkit}${alias ? ` (${alias})` : ""}</b>\n\n` +
         `Click the link below to authorise Chusky to use your <b>${toolkit}</b> account:\n\n` +
         `<a href="${url}">→ Connect ${toolkit}</a>\n\n` +
+        `${alias ? `Alias: <code>${escapeTelegramHtml(alias)}</code>\n\n` : ""}` +
         `<i>The link expires after a short time. Run the command again if needed.</i>`,
         { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
       );
@@ -692,6 +700,26 @@ export function registerHandlers(bot: Bot): void {
         `Make sure the toolkit slug is correct. Try: <code>/apps</code> to see available apps.`,
         { parse_mode: "HTML" }
       );
+    }
+  });
+
+  bot.command("accounts", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    const toolkit = (ctx.match?.trim() ?? "").toLowerCase() || undefined;
+    const status = await ctx.reply("🔌 Loading connected accounts…");
+    try {
+      const accounts = await listConnectedAccounts(ctx.from!.id, toolkit);
+      const lines = accounts.map((account) => {
+        const label = account.alias ? `${account.alias} <code>${account.id}</code>` : `<code>${account.id}</code>`;
+        return `• <b>${escapeTelegramHtml(account.toolkit)}</b> — ${label} — ${escapeTelegramHtml(account.status)}`;
+      });
+      const body = lines.length
+        ? `<b>Connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}</b>\n\n${lines.join("\n")}`
+        : `No connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}.\n\nUse <code>/connect gmail work-gmail</code> to add one.`;
+      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, body, { parse_mode: "HTML" });
+    } catch (error) {
+      logger.error({ err: error, userId: ctx.from!.id, toolkit }, "Failed to list Composio connected accounts");
+      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `❌ Could not load connected accounts: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
     }
   });
 
@@ -710,7 +738,7 @@ export function registerHandlers(bot: Bot): void {
 
       if (connected.length > 0) {
         html += `<b>✅ Connected (${connected.length})</b>\n`;
-        html += connected.map((s) => `  • ${s.name} <code>${s.slug.toLowerCase()}</code>`).join("\n");
+        html += connected.map((s) => `  • ${s.name} <code>${s.slug.toLowerCase()}</code>${s.accountCount && s.accountCount > 1 ? ` — ${s.accountCount} accounts (${s.aliases?.map((alias) => escapeTelegramHtml(alias)).join(", ")})` : ""}`).join("\n");
         html += "\n\n";
       } else {
         html += `<i>No apps connected yet.</i>\n\n`;
@@ -1140,6 +1168,11 @@ function toolFooterLabel(slug: string): string {
     COMPOSIO_REMOTE_BASH_TOOL: "🖥️",
     COMPOSIO_REMOTE_WORKBENCH: "🛠️",
     COMPOSIO_SEARCH_TOOL: "🔎",
+    COMPOSIO_SEARCH_TOOLS: "🔎",
+    COMPOSIO_SEARCH_WEB: "🌐",
+    COMPOSIO_SEARCH_FETCH_URL_CONTENT: "🔗",
+    COMPOSIO_GET_TOOL_SCHEMAS: "🧩",
+    COMPOSIO_EXECUTE_TOOL: "⚡",
     COMPOSIO_MULTI_EXECUTE_TOOL: "⚡",
   };
   if (map[slug]) return map[slug];

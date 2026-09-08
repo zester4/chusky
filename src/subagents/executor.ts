@@ -321,9 +321,11 @@ ${options?.historySummary ? `Parent Conversation History Summary:\n${options.his
 Delegated Composio Actions: ${scopedComposio.tools.map((tool: any) => String(tool?.function?.name ?? tool?.name ?? "")).filter(Boolean).join(", ") || "none"}
 Unavailable starter actions (connection required): ${scopedComposio.missing.filter((slug) => starterComposioTools.includes(slug)).join(", ") || "none"}
 Do not attempt a tool outside those lists. External actions remain approval-gated.
-If an integration action is unavailable or its slug appears wrong, do not guess,
-search broadly, or retry variants. Stop and ask Chusky to use the supervisor-only
-COMPOSIO_SEARCH_TOOL, verify the connected action, and delegate one exact slug.
+For research, use the scoped COMPOSIO_SEARCH_WEB and COMPOSIO_SEARCH_FETCH_URL_CONTENT
+tools directly when available. If an integration action is unavailable or its slug
+appears wrong, do not guess or retry variants. Use COMPOSIO_SEARCH_TOOLS (or the
+legacy COMPOSIO_SEARCH_TOOL name), inspect the schema, and ask Chusky to delegate
+one exact verified slug.
 ${options?.resume ? `This is durable continuation #${(options.resume.resumeCount ?? 0) + 1} of the same task. Preserve the earlier objective and report only new work performed after the capability was granted.` : ""}
 
 Delegation Context:

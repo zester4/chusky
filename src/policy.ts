@@ -27,6 +27,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
   "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_REMOTE_BASH_TOOL",
   "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_SEARCH_TOOL",
+  "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_WEB",
+  "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS",
 ]);
 
 /**
@@ -53,6 +55,10 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     });
     return hasSideEffect ? "approval_required" : "private";
   }
+  if (slug === "COMPOSIO_EXECUTE_TOOL") {
+    const nestedSlug = String(args.tool_slug ?? args.slug ?? "");
+    return RISKY_TOOL_PATTERN.test(nestedSlug) ? "approval_required" : "private";
+  }
   if (slug.startsWith("CHUCK_")) return "approval_required";
   return RISKY_TOOL_PATTERN.test(slug) ? "approval_required" : "private";
 }
@@ -70,6 +76,11 @@ const STATUSES: Record<string, string> = {
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",
   COMPOSIO_REMOTE_WORKBENCH: "🛠️ I’m working in your remote workspace…",
   COMPOSIO_SEARCH_TOOL: "🔎 I’m looking for the best tool…",
+  COMPOSIO_SEARCH_TOOLS: "🔎 I’m looking for the best tool…",
+  COMPOSIO_SEARCH_WEB: "🌐 I’m searching the live web…",
+  COMPOSIO_SEARCH_FETCH_URL_CONTENT: "🔗 I’m reading that URL…",
+  COMPOSIO_GET_TOOL_SCHEMAS: "🧩 I’m checking the tool schema…",
+  COMPOSIO_EXECUTE_TOOL: "⚡ I’m running the verified action…",
   COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ I’m carrying out those steps…",
   CHUCK_GENERATE_IMAGE: "🎨 I’m creating your image…",
   CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
