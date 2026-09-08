@@ -368,11 +368,19 @@ function brandInput(value: unknown): BrandInput {
   if (preset !== undefined && !(preset in PDF_STYLE_PRESETS)) throw new DaytonaInputError("brand.preset must be executive, modern, bold, minimal, or brand");
   const fontFamily = input.fontFamily === undefined ? undefined : String(input.fontFamily).toLowerCase();
   if (fontFamily !== undefined && !(fontFamily in PDF_FONT_FAMILIES)) throw new DaytonaInputError("brand.fontFamily must be sans, serif, or mono");
-  const text = (key: keyof BrandInput, max = 180) => input[key] === undefined ? undefined : presentationText(input[key], `brand.${key}`, max, true);
+  const text = (key: keyof BrandInput, max = 180) => {
+    const value = input[key];
+    // Optional brand fields are often emitted as an empty string by the
+    // model. Treat that exactly like an omitted field; non-empty values still
+    // receive the normal length/content validation.
+    if (value === undefined || value === null || (typeof value === "string" && !value.trim())) return undefined;
+    return presentationText(value, `brand.${key}`, max, true);
+  };
+  const logoPath = text("logoPath", 500);
   return {
     ...(text("companyName") ? { companyName: text("companyName") } : {}),
     ...(text("tagline") ? { tagline: text("tagline") } : {}),
-    ...(input.logoPath === undefined ? {} : { logoPath: safeDaytonaPath(presentationText(input.logoPath, "brand.logoPath", 500, true)!) }),
+    ...(logoPath ? { logoPath: safeDaytonaPath(logoPath) } : {}),
     ...(text("header") ? { header: text("header") } : {}),
     ...(text("footer") ? { footer: text("footer") } : {}),
     ...(preset === undefined ? {} : { preset: preset as BrandInput["preset"] }),

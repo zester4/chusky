@@ -440,6 +440,17 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(visualScript, /require_renderer=True/);
 });
 
+test("treats blank optional brand fields as omitted", async () => {
+  const e = engine();
+  const result = await e.createPdf(820027, {
+    title: "Blank brand fields",
+    brand: { companyName: "", tagline: "", header: "", footer: "", logoPath: "" },
+    sections: [{ body: "The optional brand identity is omitted safely." }],
+  });
+  assert.equal(result.generated, true);
+  assert.equal(result.type, "pdf");
+});
+
 test("rejects unsupported PDF font themes and invalid table column weights before generation", async () => {
   const e = engine();
   await assert.rejects(() => e.createPdf(820027, { title: "Bad font", sections: [{ body: "Nope" }], style: { fontFamily: "Comic Sans" } }), /fontFamily must be sans, serif, or mono/);
