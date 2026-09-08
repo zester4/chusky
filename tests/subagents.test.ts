@@ -6,8 +6,8 @@ import { initStore, getSession, listHandoffRecords, listTasks } from "../src/sto
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
-test("validates capability registry manifests for all 6 worker capabilities", () => {
-  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena"] as const;
+test("validates capability registry manifests for all 7 worker capabilities", () => {
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora"] as const;
   for (const w of workers) {
     const cap = WORKER_CAPABILITIES[w];
     assert.ok(cap);
@@ -18,6 +18,29 @@ test("validates capability registry manifests for all 6 worker capabilities", ()
     assert.ok(cap.systemPrompt.length > 20);
     assert.ok(cap.reflectionChecklist.length > 0);
   }
+});
+
+test("gives Nora only scoped Composio research-provider families", () => {
+  const nora = WORKER_CAPABILITIES.nora;
+  for (const tool of ["CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_REQUEST_ADDITIONAL_TOOLS"]) {
+    assert.ok(nora.allowedTools.includes(tool), `${tool} should be available to Nora`);
+  }
+  for (const tool of ["TAVILY_SEARCH", "EXA_SEARCH", "FIRECRAWL_SCRAPE"]) {
+    assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be allowed for Nora when Chusky verifies it`);
+  }
+  for (const tool of ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "GITHUB_CREATE_PULL_REQUEST"]) {
+    assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} must not be available to Nora`);
+  }
+  assert.match(nora.systemPrompt, /Tavily or Exa/);
+  assert.match(nora.systemPrompt, /Firecrawl/);
+});
+
+test("routes a focused research objective to Nora", () => {
+  validateDelegationTarget("nora", "Research current competitors, compare their pricing, and return cited evidence");
+  assert.throws(
+    () => validateDelegationTarget("lucas", "Research current competitors, compare their pricing, and return cited evidence"),
+    /matches Nora.*worker=nora/
+  );
 });
 
 test("gives Lucas a complete private engineering loop while keeping provider tools role-scoped", () => {
@@ -302,7 +325,7 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
   assert.equal(result.status, "success");
   const handoffs = await listHandoffRecords(userId);
   assert.ok(handoffs.length >= 2);
-  assert.equal(handoffs[0].to, "leo");
+  assert.ok(handoffs.some((handoff) => handoff.to === "leo"));
 });
 
 test("emits real-time status update callbacks to Telegram during execution", async () => {

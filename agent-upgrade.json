@@ -1,11 +1,11 @@
 {
-  "id": "upgrade-notices-2026-09-06",
-  "version": "3.1.1",
+  "id": "release-3.1.2",
+  "version": "3.1.2",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Upgrade notices are now packaged into production deployments.",
-    "Chusky can see the release update before composing its reply.",
-    "Delivery is recorded once per user with an atomic Redis claim."
+    "The web workspace now supports verified app projects: scaffold, test, preview, inspect, and release.",
+    "Nora is available as Chusky's source-backed research worker with scoped research and workspace access.",
+    "Workers return evidence, progress, and artifacts to the same conversation without expanding their permissions."
   ],
-  "createdAt": "2026-09-06T00:00:00.000Z"
+  "createdAt": "2026-09-08T00:00:00.000Z"
 }

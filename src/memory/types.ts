@@ -37,7 +37,7 @@ export interface MemoryQueryOptions {
   includeSuperseded?: boolean;
 }
 
-export type CapabilityWorkerName = "lucas" | "maya" | "leo" | "sofia" | "dexter" | "elena" | "chusky";
+export type CapabilityWorkerName = "lucas" | "maya" | "leo" | "sofia" | "dexter" | "elena" | "nora" | "chusky";
 
 export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, MemoryCategory[]> = {
   lucas: ["project", "procedural", "asset"],
@@ -46,5 +46,8 @@ export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, Memor
   sofia: ["relationship", "business"],
   dexter: ["project"], // Private user memory excluded by default
   elena: ["project", "procedural", "episodic"],
+  // Research may use project and business context, but never broad personal
+  // history. Findings are evidence, not permanent memory by default.
+  nora: ["project", "business", "procedural"],
   chusky: ["profile", "relationship", "business", "project", "episodic", "procedural", "negative", "asset"],
 };
