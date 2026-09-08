@@ -1807,7 +1807,10 @@ export class DaytonaEngine {
       const params = {
         name: "chusky-qa-" + randomUUID(),
         language: "python",
-        networkBlockAll: true,
+        // The on-demand renderer image installs LibreOffice and Poppler while
+        // Daytona prepares the image. A blocked sandbox cannot prepare that
+        // image reliably. A prebuilt snapshot can remain network-blocked.
+        networkBlockAll: Boolean(config.daytonaRendererSnapshot),
         public: false,
         autoStopInterval: 15,
         autoDeleteInterval: 0,
@@ -1816,7 +1819,7 @@ export class DaytonaEngine {
       };
       renderer = config.daytonaRendererSnapshot
         ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
-        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 10 } }, { timeout: 900 });
+        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 8 } }, { timeout: 900 });
       const renderPath = "document." + ARTIFACT_EXTENSION[type];
       await renderer.fs.uploadFile(bytes, renderPath);
       const encoded = Buffer.from(artifactVisualQaScript(type, renderPath), "utf8").toString("base64");
@@ -1964,7 +1967,7 @@ export class DaytonaEngine {
       const params = { name: `chusky-pdf-${randomUUID()}`, language: "python", networkBlockAll: false, public: false, autoStopInterval: 15, autoDeleteInterval: 0, ttlMinutes: 30, labels: { agent: "chusky", purpose: "artifact-pdf-generation", source_sandbox: source.id } };
       renderer = config.daytonaRendererSnapshot
         ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
-        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 10 } }, { timeout: 900 });
+        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 8 } }, { timeout: 900 });
       const rendererScriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
       const rendererScript = script.replace(/dependency_dir=os\.path\.abspath\(os\.path\.join\('workspace', '\.chusky', 'python-reportlab'\)\)/, "dependency_dir='/tmp/chusky-reportlab'");
       await renderer.fs.uploadFile(Buffer.from(rendererScript, "utf8"), rendererScriptPath);

@@ -12,8 +12,9 @@ let movedFiles: Array<{ source: string; destination: string }>;
 function fakeSandbox(id: string, state = "started") {
   const ptyOutputs = new Map<string, (data: Uint8Array) => void>();
   const sandbox: any = {
-    id, name: `chusky-${id}`, state, recoverable: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    id, name: `chusky-${id}`, state, recoverable: false, networkBlockAll: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     refreshData: async () => undefined,
+    updateNetworkSettings: async (settings: { networkBlockAll?: boolean }) => { sandbox.networkBlockAll = settings.networkBlockAll; },
     getUserHomeDir: async () => "/home/user",
     refreshActivity: async () => undefined,
     start: async () => { sandbox.state = "started"; },
@@ -684,7 +685,8 @@ for (const outcome of ["success", "invalid-document", "missing-tools", "create-f
       get: async () => source,
       create: async (params: any) => {
         if (params.labels.purpose !== "artifact-qa") return source;
-        assert.equal(params.networkBlockAll, true);
+        assert.equal(params.networkBlockAll, false);
+        assert.deepEqual(params.resources, { cpu: 2, memory: 4, disk: 8 });
         assert.equal(params.autoDeleteInterval, 0);
         assert.equal(params.ttlMinutes, 30);
         assert.equal(params.labels.source_sandbox, source.id);
