@@ -52,6 +52,13 @@ const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
+const GROUP_ARTIFACT_TOOLS = new Set([
+  "CHUCK_ARTIFACT",
+  "CHUCK_CREATE_PDF",
+  "CHUCK_CREATE_PRESENTATION",
+  "CHUCK_CREATE_DOCUMENT",
+  "CHUCK_CREATE_SPREADSHEET",
+]);
 
 function requestSignal(signal?: AbortSignal): AbortSignal {
   const timeout = AbortSignal.timeout(config.openRouterTimeoutMs);
@@ -901,6 +908,7 @@ export async function runAgent(
         const args = parseToolArguments(call.function.arguments);
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
         let executionArgs = args;
+        const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
         const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
         const approvedForTool = approved?.toolSlug === slug;
         if (approvedForTool) {
@@ -909,7 +917,7 @@ export async function runAgent(
           // Always execute the exact arguments the user reviewed instead of
           // requiring the model to reproduce the original serialization.
           executionArgs = approved.args;
-        } else if (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args)) {
+        } else if (!groupArtifactTool && (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args))) {
           const approval = await createApproval({
             userId,
             ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
