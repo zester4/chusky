@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getSession, initStore } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, invalidateSession, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -76,6 +76,42 @@ test("agent executes a safe tool and feeds its result into the next model round"
     assert.deepEqual(executed, [{ slug: "TEST_SAFE_TOOL", args: { value: 7 } }]);
     assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
   });
+});
+
+test("routes a direct Composio tool to the requested connected-account alias", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830016);
+  const executed: any[] = [];
+  await withAgentMocks([
+    toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7, account: "work-gmail" })),
+    chatResponse({ role: "assistant", content: "tool complete" }),
+  ], async (slug, args, options) => {
+    executed.push({ slug, args, options });
+    return { ok: true };
+  }, async () => {
+    const result = await runAgent(830016, "read from work email", [], "test/model");
+    assert.equal(result.text, "tool complete");
+  });
+  assert.deepEqual(executed, [{ slug: "TEST_SAFE_TOOL", args: { value: 7 }, options: { account: "work-gmail" } }]);
+});
+
+test("lists only safe connected-account metadata", async () => {
+  setAgentDependenciesForTests({
+    composio: {
+      connectedAccounts: {
+        list: async () => ({ items: [
+          { id: "ca_work", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "ACTIVE", data: { access_token: "secret" } },
+          { id: "ca_personal", alias: "personal-gmail", toolkit: { slug: "gmail" }, status: "ACTIVE", data: { refresh_token: "secret" } },
+        ] }),
+      },
+    },
+  });
+  const accounts = await listConnectedAccounts(830016, "gmail");
+  assert.deepEqual(accounts, [
+    { id: "ca_work", alias: "work-gmail", toolkit: "gmail", status: "ACTIVE", createdAt: undefined, updatedAt: undefined },
+    { id: "ca_personal", alias: "personal-gmail", toolkit: "gmail", status: "ACTIVE", createdAt: undefined, updatedAt: undefined },
+  ]);
+  assert.equal(JSON.stringify(accounts).includes("secret"), false);
 });
 
 test("risky tool calls stop before execution and approved exact calls execute once", async () => {

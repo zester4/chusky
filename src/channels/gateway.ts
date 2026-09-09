@@ -108,7 +108,7 @@ export class ChannelGateway {
         accountId: identity?.accountId ?? "unlinked",
         userId: identity?.userId ?? 0,
         target: buildReplyTarget(message),
-        text: "To link this iMessage group, open Telegram and use /channel or /linkgroup, choose ‘Link an iMessage group’, then send /link-group <code> here from the linked owner account. WhatsApp group linking is not available through the WhatsApp Business API.",
+        text: "To link this iMessage group, open Telegram and use /channel or /linkgroup (or /channel link sendblue-group), choose ‘Link an iMessage group’, then send /linkgroup <code> or /link-group <code> here from the linked owner account. WhatsApp group linking is not available through the WhatsApp Business API.",
         idempotencyKey: `${message.provider}:${message.providerEventId}:group-link-help`,
         kind: "notification",
       }, adapter);
