@@ -1,11 +1,11 @@
 {
-  "id": "release-3.1.6",
-  "version": "3.1.6",
+  "id": "release-3.1.7",
+  "version": "3.1.7",
   "title": "Chusky has been upgraded",
   "bullets": [
     "Added encrypted XChat DMs and groups with verified webhooks, mentions, media, typing, and reactions.",
-    "Added Twilio SMS and MMS through Messaging Services with signed inbound and delivery-status callbacks.",
-    "Added Telegram channel linking and durable gateway delivery for the new channels."
+    "Added automatic XChat bot identity checks, encrypted setup diagnostics, and idempotent activity subscriptions.",
+    "Added Twilio SMS and MMS through Messaging Services plus Telegram channel linking and durable gateway delivery."
   ],
   "createdAt": "2026-09-09T01:05:58.549Z"
 }

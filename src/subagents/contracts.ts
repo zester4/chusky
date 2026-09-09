@@ -35,6 +35,8 @@ export interface DelegationContract {
 export type DelegationStatus =
   | "success"
   | "queued"
+  | "cancel_requested"
+  | "interrupted"
   | "failed"
   | "timed_out"
   | "max_tool_calls_exceeded"
@@ -79,7 +81,7 @@ export interface DelegationResult {
   status: DelegationStatus;
   output: string;
   toolCallsCount: number;
-  toolCallsLog: Array<{ tool: string; args: unknown; result?: unknown; error?: string }>;
+  toolCallsLog: import("../cancellation.js").SafeToolAudit[];
   proposal?: {
     actionName: string;
     payload: Record<string, unknown>;

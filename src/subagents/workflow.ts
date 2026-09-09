@@ -36,6 +36,13 @@ function client(): WorkflowClient {
   return new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
 }
 
+/** Cancel the durable Upstash run as well as the local worker signal. */
+export async function cancelSubagentWorkflow(workflowRunId: string): Promise<boolean> {
+  if (!workflowRunId.trim() || !config.qstashToken) return false;
+  await client().cancel({ ids: workflowRunId });
+  return true;
+}
+
 /** Start a durable waiter only after a worker has already stopped at a safe tool-request boundary. */
 export async function enqueueSubagentToolContinuation(userId: number, handoffId: string): Promise<{ workflowRunId: string }> {
   const record = await getHandoffRecord(userId, handoffId);

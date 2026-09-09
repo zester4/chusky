@@ -351,9 +351,10 @@ X_CONSUMER_SECRET=<X app consumer secret>
 X_BOT_USERNAME=<optional bot handle>
 X_VERIFY_SIGNATURES=true
 XCHAT_WEBHOOK_URL=https://your-domain.example/xchat/webhook
+XCHAT_WEBHOOK_ID=<webhook id returned by X>
 ```
 
-Configure both `GET` and `POST https://your-domain.example/xchat/webhook` in X. The adapter answers the CRC challenge and verifies the encrypted webhook envelope before it reaches Chusky. From Telegram, use `/channel link xchat`, then send the generated `/link <code>` from the XChat account. Group messages are handled when the bot is explicitly mentioned; they use shared channel context and never inherit private Telegram history.
+Configure both `GET` and `POST https://your-domain.example/xchat/webhook` in X, then copy the created webhook ID into `XCHAT_WEBHOOK_ID`. On startup Chusky verifies the token owner, creates or reuses the `chat.received` and `chat.conversation.join` activity subscriptions, and reports the setup state through `/health`. The bot account must already have registered XChat public keys and Juicebox private-key storage for `XCHAT_PIN`; webhook registration alone is not enough. From Telegram, use `/channel link xchat`, then send the generated `/link <code>` from the personal X account in a DM to the bot account. The personal account must be able to follow or trust the bot before its first encrypted DM. Group messages are handled when the bot is explicitly mentioned; they use shared channel context and never inherit private Telegram history.
 
 ### Sendblue iMessage channel
 

@@ -24,10 +24,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the XChat and SMS channel release", async () => {
+test("current upgrade manifest announces the XChat setup and SMS channel release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.1.6");
-  assert.equal(notice?.version, "3.1.6");
+  assert.equal(notice?.id, "release-3.1.7");
+  assert.equal(notice?.version, "3.1.7");
   assert.match(formatAgentUpgradeNotice(notice!), /encrypted XChat/);
   assert.match(formatAgentUpgradeNotice(notice!), /Twilio SMS/);
+  assert.match(formatAgentUpgradeNotice(notice!), /activity subscriptions/);
 });

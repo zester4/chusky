@@ -108,6 +108,7 @@ export const config = {
   xchatBotUsername: optional("X_BOT_USERNAME", ""),
   xchatVerifySignatures: optional("X_VERIFY_SIGNATURES", "true") !== "false",
   xchatWebhookUrl: optional("XCHAT_WEBHOOK_URL", ""),
+  xchatWebhookId: optional("XCHAT_WEBHOOK_ID", ""),
   twilioCallerId: optional("TWILIO_CALLER_ID", ""),
   twilioWebhookBaseUrl: optional("TWILIO_WEBHOOK_BASE_URL", ""),
   twilioMediaStreamUrl: optional("TWILIO_MEDIA_STREAM_URL", ""),

@@ -19,10 +19,11 @@ import {
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startFaceTimeCallForUser } from "./calls/facetime.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
-import { executeDelegation } from "./subagents/executor.js";
+import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
+import { abortable, throwIfAborted } from "./cancellation.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -35,6 +36,8 @@ export interface NativeToolRuntime {
   onStatus?: (statusText: string) => Promise<void> | void;
   approvedApprovalId?: string;
   signal?: AbortSignal;
+  /** Worker-owned resources can register bounded cleanup on cancellation. */
+  registerCancellationCleanup?: (cleanup: () => Promise<void>) => void;
   deliveryTarget?: import("./channels/contracts.js").ReplyTarget;
   /** Present only when a specialist is executing its own native tool call. */
   worker?: Exclude<import("./memory/types.js").CapabilityWorkerName, "chusky">;
@@ -63,7 +66,7 @@ function fileContent(value: unknown): string {
 function taskStatuses(value: unknown): TaskStatus[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) throw new Error("statuses must be an array");
-  const allowed: TaskStatus[] = ["queued", "running", "blocked", "completed", "failed", "cancelled"];
+  const allowed: TaskStatus[] = ["queued", "running", "blocked", "completed", "failed", "cancel_requested", "cancelled"];
   const statuses = value.map((item) => String(item));
   if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as TaskStatus))) throw new Error("Invalid task status filter");
   return [...new Set(statuses)] as TaskStatus[];
@@ -91,6 +94,13 @@ async function runDelegationWithDurableContinuation(
   if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
   const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
   return { ...result, durableContinuation: { queued: true, ...continuation } };
+}
+
+async function daytonaCall<T>(runtime: NativeToolRuntime, operation: () => Promise<T>): Promise<T> {
+  throwIfAborted(runtime.signal);
+  const result = await abortable(operation(), runtime.signal);
+  throwIfAborted(runtime.signal);
+  return result;
 }
 
 /**
@@ -458,31 +468,38 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       await setTaskWorkflowRunId(userId, id, await enqueueTaskWorkflow(userId, id, runAt));
       return await getTask(userId, id);
     }
-    case "CHUCK_DAYTONA_WORKSPACE": return daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status");
-    case "CHUCK_DAYTONA_EXECUTE": return daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds));
-    case "CHUCK_DAYTONA_LIST_FILES": return daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth));
-    case "CHUCK_DAYTONA_READ_FILE": return daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars));
-    case "CHUCK_DAYTONA_WRITE_FILE": return daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content));
-    case "CHUCK_DAYTONA_FIND_FILES": return daytonaEngine.findFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern));
-    case "CHUCK_DAYTONA_SEARCH_FILES": return daytonaEngine.searchFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern));
-    case "CHUCK_DAYTONA_FILE_DETAILS": return daytonaEngine.fileDetails(userId, text(args.path));
-    case "CHUCK_DAYTONA_CREATE_FOLDER": return daytonaEngine.createFolder(userId, text(args.path));
-    case "CHUCK_DAYTONA_MOVE_FILES": return daytonaEngine.moveFiles(userId, text(args.source), text(args.destination));
-    case "CHUCK_DAYTONA_DELETE_FILE": return daytonaEngine.deleteFile(userId, text(args.path), args.recursive === true);
-    case "CHUCK_DAYTONA_DELETE_WORKSPACE": return daytonaEngine.deleteWorkspace(userId);
-    case "CHUCK_DAYTONA_PREVIEW": return daytonaEngine.preview(userId, Number(args.port));
-    case "CHUCK_DAYTONA_APP": return daytonaEngine.app(userId, args);
-    case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaEngine.createSnapshot(userId, text(args.name));
-    case "CHUCK_DAYTONA_COMPUTER": return daytonaEngine.computer(userId, args);
-    case "CHUCK_DAYTONA_PAUSE": return daytonaEngine.pause(userId);
-    case "CHUCK_DAYTONA_PTY": return daytonaEngine.pty(userId, args);
-    case "CHUCK_DAYTONA_GIT": return daytonaEngine.git(userId, args);
-    case "CHUCK_DAYTONA_BROWSER": return daytonaEngine.browser(userId, args);
-    case "CHUCK_CREATE_PDF": return daytonaEngine.createPdf(userId, args);
-    case "CHUCK_CREATE_PRESENTATION": return daytonaEngine.createPresentation(userId, args);
-    case "CHUCK_CREATE_DOCUMENT": return daytonaEngine.createDocument(userId, args);
-    case "CHUCK_CREATE_SPREADSHEET": return daytonaEngine.createSpreadsheet(userId, args);
-    case "CHUCK_ARTIFACT": return daytonaEngine.artifact(userId, args);
+    case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
+    case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));
+    case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
+    case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
+    case "CHUCK_DAYTONA_WRITE_FILE": return daytonaCall(runtime, () => daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content)));
+    case "CHUCK_DAYTONA_FIND_FILES": return daytonaCall(runtime, () => daytonaEngine.findFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern)));
+    case "CHUCK_DAYTONA_SEARCH_FILES": return daytonaCall(runtime, () => daytonaEngine.searchFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern)));
+    case "CHUCK_DAYTONA_FILE_DETAILS": return daytonaCall(runtime, () => daytonaEngine.fileDetails(userId, text(args.path)));
+    case "CHUCK_DAYTONA_CREATE_FOLDER": return daytonaCall(runtime, () => daytonaEngine.createFolder(userId, text(args.path)));
+    case "CHUCK_DAYTONA_MOVE_FILES": return daytonaCall(runtime, () => daytonaEngine.moveFiles(userId, text(args.source), text(args.destination)));
+    case "CHUCK_DAYTONA_DELETE_FILE": return daytonaCall(runtime, () => daytonaEngine.deleteFile(userId, text(args.path), args.recursive === true));
+    case "CHUCK_DAYTONA_DELETE_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.deleteWorkspace(userId));
+    case "CHUCK_DAYTONA_PREVIEW": return daytonaCall(runtime, () => daytonaEngine.preview(userId, Number(args.port)));
+    case "CHUCK_DAYTONA_APP": return daytonaCall(runtime, () => daytonaEngine.app(userId, args));
+    case "CHUCK_DAYTONA_CREATE_SNAPSHOT": return daytonaCall(runtime, () => daytonaEngine.createSnapshot(userId, text(args.name)));
+    case "CHUCK_DAYTONA_COMPUTER": return daytonaCall(runtime, () => daytonaEngine.computer(userId, args));
+    case "CHUCK_DAYTONA_PAUSE": return daytonaCall(runtime, () => daytonaEngine.pause(userId));
+    case "CHUCK_DAYTONA_PTY": return (async () => {
+      const result = await daytonaCall(runtime, () => daytonaEngine.pty(userId, args));
+      if (runtime.registerCancellationCleanup && args.action === "create" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
+        const ptyId = (result as { sessionId: string }).sessionId;
+        runtime.registerCancellationCleanup(async () => { await daytonaEngine.pty(userId, { action: "kill", id: ptyId }); });
+      }
+      return result;
+    })();
+    case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
+    case "CHUCK_DAYTONA_BROWSER": return daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+    case "CHUCK_CREATE_PDF": return daytonaCall(runtime, () => daytonaEngine.createPdf(userId, args));
+    case "CHUCK_CREATE_PRESENTATION": return daytonaCall(runtime, () => daytonaEngine.createPresentation(userId, args));
+    case "CHUCK_CREATE_DOCUMENT": return daytonaCall(runtime, () => daytonaEngine.createDocument(userId, args));
+    case "CHUCK_CREATE_SPREADSHEET": return daytonaCall(runtime, () => daytonaEngine.createSpreadsheet(userId, args));
+    case "CHUCK_ARTIFACT": return daytonaCall(runtime, () => daytonaEngine.artifact(userId, args));
     case "CHUCK_DELEGATE_SUBAGENT":
       return runPlannedDelegation(userId, args as any, runtime);
     case "CHUCK_HANDOFF_SUBAGENT":
@@ -529,10 +546,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const records = await listHandoffRecords(userId);
       const record = records.find((r) => r.id === id);
       if (!record) throw new Error("Handoff record not found or not owned by you");
-      if (record.taskId) await cancelTask(userId, record.taskId);
-      const updated = { ...record, status: "cancelled" as const };
-      await saveHandoffRecord(userId, updated);
-      return { cancelled: true, id, worker: record.to, reason, taskId: record.taskId };
+      const updated = await requestDelegationCancellation(userId, id, reason);
+      return { cancelled: true, id, worker: record.to, reason, taskId: updated?.taskId };
     }
     default: throw new Error(`Unknown native tool: ${slug}`);
   }

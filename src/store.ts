@@ -121,7 +121,7 @@ export interface SdkRunRecord {
  * deliberately separate from UserSession so a long-running run never rewrites
  * chat history, memories, or SDK metadata on every checkpoint.
  */
-export type AgentRunStatus = "queued" | "running" | "waiting_approval" | "waiting_tools" | "paused" | "completed" | "failed" | "cancelled";
+export type AgentRunStatus = "queued" | "running" | "waiting_approval" | "waiting_tools" | "paused" | "cancel_requested" | "interrupted" | "completed" | "failed" | "cancelled";
 export interface AgentRunEvent {
   id: string;
   type: string;
@@ -209,7 +209,7 @@ export interface DaytonaAppRecord {
   updatedAt: number;
 }
 
-export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled";
 
 export interface TaskStep {
   id: string;
@@ -228,7 +228,7 @@ export interface TaskLease {
 
 export interface TaskEvent {
   id: string;
-  type: "created" | "scheduled" | "claimed" | "checkpointed" | "blocked" | "completed" | "failed" | "cancelled" | "retried";
+  type: "created" | "scheduled" | "claimed" | "checkpointed" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled" | "retried";
   message: string;
   at: number;
   attempt: number;
@@ -2217,26 +2217,58 @@ export async function setTaskWorkflowRunId(userId: number, id: string, workflowR
 
 export async function checkpointTask(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
-  if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
+  if (!task || ["completed", "cancel_requested", "cancelled"].includes(task.status)) return undefined;
   return updateTask(userId, id, { status: "running", checkpoint, nextAction, error: undefined });
 }
 
 export async function blockTask(userId: number, id: string, error: string, nextAction?: string): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
-  if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
+  if (!task || ["completed", "cancel_requested", "cancelled"].includes(task.status)) return undefined;
   return updateTask(userId, id, { status: "blocked", error, nextAction });
 }
 
 export async function completeTask(userId: number, id: string, result: string): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
-  if (!task || task.status === "cancelled") return undefined;
+  if (!task || ["cancel_requested", "cancelled"].includes(task.status)) return undefined;
   return updateTask(userId, id, { status: "completed", result, nextAction: undefined, error: undefined });
 }
 
-export async function cancelTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+/** Request cancellation without racing an in-flight worker into a false success. */
+export async function requestTaskCancellation(userId: number, id: string, reason = "Cancellation requested by the user."): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || ["completed", "cancelled"].includes(task.status)) return undefined;
-  return updateTask(userId, id, { status: "cancelled", nextAction: undefined });
+  if (["queued", "blocked", "failed"].includes(task.status)) {
+    return updateTask(userId, id, { status: "cancelled", error: reason, nextAction: undefined });
+  }
+  const next = await updateTask(userId, id, { status: "cancel_requested", error: reason, nextAction: "The active worker is stopping at its next cancellation checkpoint." });
+  if (!next) return undefined;
+  next.events = [...next.events, taskEvent("cancel_requested", reason, next.attempt)].slice(-100);
+  const tasks = await backend.getTasks(userId);
+  const index = tasks.findIndex((item) => item.id === id);
+  if (index >= 0) {
+    tasks[index] = next;
+    await backend.saveTasks(userId, tasks);
+  }
+  return next;
+}
+
+export async function finalizeTaskCancellation(userId: number, id: string, reason = "Task cancelled."): Promise<TaskRecord | undefined> {
+  const task = await getTask(userId, id);
+  if (!task || task.status === "completed") return undefined;
+  const next = await updateTask(userId, id, { status: "cancelled", error: reason, nextAction: undefined });
+  if (!next) return undefined;
+  next.events = [...next.events, taskEvent("cancelled", reason, next.attempt)].slice(-100);
+  const tasks = await backend.getTasks(userId);
+  const index = tasks.findIndex((item) => item.id === id);
+  if (index >= 0) {
+    tasks[index] = next;
+    await backend.saveTasks(userId, tasks);
+  }
+  return next;
+}
+
+export async function cancelTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+  return requestTaskCancellation(userId, id);
 }
 
 export async function retryTask(userId: number, id: string): Promise<TaskRecord | undefined> {
@@ -2256,9 +2288,12 @@ export async function claimTask(userId: number, id: string, workerId: string, le
   return backend.claimTask(userId, id, workerId.slice(0, 120), Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued"; message: string; checkpoint?: string; nextAction?: string; result?: string }): Promise<TaskRecord | undefined> {
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; result?: string }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
+  if (["cancel_requested", "cancelled"].includes(task.status)) {
+    return backend.settleTask(userId, id, leaseToken, { status: "cancelled", nextAction: undefined, error: outcome.message }, taskEvent("cancelled", "Cancellation completed before task settlement", task.attempt));
+  }
   const retryable = outcome.status === "failed" && task.attempt < task.maxAttempts;
   const status = retryable ? "queued" : outcome.status;
   const delayMs = retryable ? Math.min(15 * 60_000, 5_000 * 2 ** Math.max(0, task.attempt - 1)) : undefined;

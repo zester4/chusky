@@ -22,6 +22,7 @@ import { WhatsAppAdapter } from "./channels/whatsapp.js";
 import { SendblueAdapter } from "./channels/sendblue.js";
 import { TwilioSmsAdapter } from "./channels/sms.js";
 import { XchatAdapter } from "./channels/xchat.js";
+import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./channels/xchatSetup.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
@@ -34,7 +35,7 @@ import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCa
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
-import { executeDelegation } from "./subagents/executor.js";
+import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
@@ -106,6 +107,7 @@ async function main(): Promise<void> {
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
   const app = new Hono();
+  let xchatSetup: XchatSetupStatus | undefined;
   if (config.betterAuthEnabled) registerAuthRoutes(app);
   const telegramWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/webhook`;
   const registerTelegramWebhook = async () => {
@@ -174,6 +176,41 @@ async function main(): Promise<void> {
         processInbound: (message) => channelGateway.processInbound(message),
       })
       : undefined;
+    if (config.xchatEnabled) {
+      if (!xchatAdapter) {
+        xchatSetup = {
+          status: "misconfigured",
+          subscriptions: [],
+          error: "XChat requires XCHAT_BOT_TOKEN, XCHAT_PIN, and X_CONSUMER_SECRET",
+        };
+      } else {
+        try {
+          xchatSetup = await ensureXchatActivitySubscriptions({
+            accessToken: config.xchatBotToken,
+            webhookId: config.xchatWebhookId,
+            expectedUsername: config.xchatBotUsername || undefined,
+          });
+          try {
+            await xchatAdapter.initialize();
+          } catch (error) {
+            xchatSetup = {
+              ...xchatSetup,
+              status: "misconfigured",
+              error: `XChat encryption initialization failed: ${error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)}`,
+            };
+          }
+        } catch (error) {
+          xchatSetup = {
+            status: "misconfigured",
+            webhookId: config.xchatWebhookId || undefined,
+            subscriptions: [],
+            error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+          };
+        }
+        if (xchatSetup.status === "ready") logger.info({ botUserId: xchatSetup.botUserId, botUsername: xchatSetup.botUsername, webhookId: xchatSetup.webhookId, subscriptions: xchatSetup.subscriptions }, "XChat is ready");
+        else logger.warn({ botUserId: xchatSetup.botUserId, botUsername: xchatSetup.botUsername, webhookId: xchatSetup.webhookId, error: xchatSetup.error }, "XChat setup is incomplete");
+      }
+    }
     if (config.slackEnabled) channelGateway.register(slackAdapter);
     if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
     if (config.sendblueEnabled) channelGateway.register(sendblueAdapter);
@@ -566,9 +603,8 @@ async function main(): Promise<void> {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const record = await getHandoffRecord(device.userId, c.req.param("id"));
       if (!record) return c.json({ ok: false, error: "worker not found" }, 404);
-      if (record.taskId) await cancelTask(device.userId, record.taskId);
-      const updated = await saveHandoffRecord(device.userId, { ...record, status: "cancelled" });
-      return c.json({ ok: true, worker: cliWorkerView(updated) });
+      const updated = await requestDelegationCancellation(device.userId, record.id);
+      return updated ? c.json({ ok: true, worker: cliWorkerView(updated), status: "cancel_requested" }, 202) : c.json({ ok: false, error: "worker is already finished" }, 409);
     });
 
     app.get("/cli/skills", async (c) => {
@@ -1195,9 +1231,24 @@ async function main(): Promise<void> {
                 if (sdkRun && sdkRun.status === "queued") { sdkRun.status = "running"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.started", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); }
               }
               const budgetAbort = new AbortController(); const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
+              const cancellationPoll = setInterval(() => {
+                void getTask(task.userId, task.id).then((latest) => {
+                  if (latest?.status === "cancel_requested" || latest?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));
+                }).catch(() => undefined);
+              }, 500);
+              const initialTaskState = await getTask(task.userId, task.id);
+              if (initialTaskState?.status === "cancel_requested" || initialTaskState?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));
               let result;
               try { result = await runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions: await sdkTaskSkillInstructions(task.sdkSkills), runId: task.sdkRunId, parentRunId: task.sdkThreadId }); }
-              finally { if (budgetTimer) clearTimeout(budgetTimer); }
+              catch (error) {
+                const cancelled = (await getTask(task.userId, task.id))?.status === "cancel_requested" || (await getTask(task.userId, task.id))?.status === "cancelled";
+                if (cancelled && task.sdkRunId && task.sdkThreadId) {
+                  const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
+                  if (sdkRun) { sdkRun.status = "cancelled"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); }
+                }
+                throw error;
+              }
+              finally { if (budgetTimer) clearTimeout(budgetTimer); clearInterval(cancellationPoll); }
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
                 if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); }
@@ -1448,9 +1499,10 @@ async function main(): Promise<void> {
         const me = await bot.api.getMe();
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled", xchat: config.xchatEnabled ? (config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin ? "configured" : "misconfigured") : "disabled" } as const;
+        const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
         const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
-        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
+        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
         return c.json({ ok: false, error: String(e) }, 503);

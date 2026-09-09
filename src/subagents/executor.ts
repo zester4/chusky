@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "./capabilities.js";
-import { enqueueSubagentContinuation } from "./workflow.js";
+import { cancelSubagentWorkflow, enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, type AgentRunRecord } from "../store.js";
+import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
 import type { ApiMessage } from "../types.js";
@@ -13,8 +13,25 @@ import type { CapabilityWorkerName } from "../memory/types.js";
 import type { ReplyTarget } from "../channels/contracts.js";
 import { relevantSkillContext } from "../skills/catalog.js";
 import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
+import { CancellationError, isCancellationError, safeToolAudit, throwIfAborted } from "../cancellation.js";
 
 const DELEGATION_STATUS_PREVIEW_LENGTH = 160;
+const activeWorkerControllers = new Map<string, AbortController>();
+
+/** Request both local interruption and durable Upstash cancellation. */
+export async function requestDelegationCancellation(userId: number, handoffId: string, reason = "Worker cancellation requested by the user."): Promise<HandoffRecord | undefined> {
+  const record = await getHandoffRecord(userId, handoffId);
+  if (!record) return undefined;
+  if (["success", "failed", "timed_out", "max_tool_calls_exceeded", "fallback_executed", "cancelled", "interrupted"].includes(record.status)) return undefined;
+  if (record.taskId) await requestTaskCancellation(userId, record.taskId, reason);
+  activeWorkerControllers.get(handoffId)?.abort(new CancellationError(reason));
+  if (record.workflowRunId) {
+    try { await cancelSubagentWorkflow(record.workflowRunId); } catch { /* local cancellation remains authoritative */ }
+  }
+  const updated = { ...record, status: "cancel_requested" as const };
+  await saveHandoffRecord(userId, updated);
+  return updated;
+}
 
 /**
  * User-facing handoff text. Keep this limited to the task objective—not the
@@ -121,7 +138,7 @@ export async function executeDelegation(
     context: contract.context ?? {},
     expectedOutput: contract.expectedOutput,
     timestamp: Date.now(),
-    status: "success",
+    status: "queued",
     taskId: durableTask.id,
   };
   handoffRecord.delegation = {
@@ -143,9 +160,19 @@ export async function executeDelegation(
 
   // Active timeout cancellation signal combined with parent signal
   const timeoutSignal = AbortSignal.timeout(contract.timeoutSeconds * 1000);
-  const activeSignal = options?.signal ? AbortSignal.any([timeoutSignal, options.signal]) : timeoutSignal;
+  const workerController = new AbortController();
+  activeWorkerControllers.set(handoffRecord.id, workerController);
+  const activeSignal = AbortSignal.any([timeoutSignal, workerController.signal, ...(options?.signal ? [options.signal] : [])]);
 
   const logs: DelegationResult["toolCallsLog"] = [];
+  const cancellationCleanups: Array<() => Promise<void>> = [];
+  const runCancellationCleanups = async (): Promise<void> => {
+    await Promise.allSettled(cancellationCleanups.splice(0).map((cleanup) => cleanup()));
+  };
+  const registerCancellationCleanup = (cleanup: () => Promise<void>): void => {
+    if (activeSignal.aborted) void cleanup().catch(() => undefined);
+    else cancellationCleanups.push(cleanup);
+  };
   let toolCallsCount = 0;
   let status: DelegationStatus = "success";
   let outputSummary = "";
@@ -196,11 +223,7 @@ export async function executeDelegation(
       if (!allowedToolNames.has(actionPayload.name)) {
         status = "failed";
         outputSummary = `Security boundary error: Tool ${actionPayload.name} is not permitted for worker capability ${workerName}.`;
-        logs.push({
-          tool: actionPayload.name,
-          args: actionPayload.args,
-          error: `Tool access denied for worker capability ${workerName}`,
-        });
+        logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "failed", error: `Tool access denied for worker capability ${workerName}` }));
       } else if (actionPayload.name === "CHUCK_REQUEST_ADDITIONAL_TOOLS") {
         toolCallsCount++;
         toolRequest = {
@@ -215,7 +238,7 @@ export async function executeDelegation(
           status = "requires_tool_request";
           outputSummary = `${manifest.displayName} requested an additional capability: ${toolRequest.intent}. Reason: ${toolRequest.reason}`;
           await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky tool discovery and scoped re-delegation");
-          logs.push({ tool: actionPayload.name, args: actionPayload.args, result: { requested: true, ...toolRequest } });
+          logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "completed", requested: true }));
         }
       } else {
         toolCallsCount++;
@@ -287,15 +310,17 @@ export async function executeDelegation(
                       deliveryTarget: options?.deliveryTarget,
                       onStatus: options?.onStatus,
                       signal: activeSignal,
+                      registerCancellationCleanup,
                     });
                   })()
-                : await scopedComposio.execute(actionPayload.name, executionArgs);
-              logs.push({ tool: actionPayload.name, args: executionArgs, result: toolResult });
+                : await scopedComposio.execute(actionPayload.name, executionArgs, activeSignal);
+              logs.push(safeToolAudit({ tool: actionPayload.name, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: "completed" }));
               outputSummary = `Successfully executed ${actionPayload.name}. Result: ${JSON.stringify(toolResult).slice(0, 1000)}`;
               await checkpointTask(userId, durableTask.id, outputSummary, "Tool execution completed");
             } catch (err) {
+              if (isCancellationError(err, activeSignal)) throw err;
               const errMsg = String((err as Error)?.message ?? err);
-              logs.push({ tool: actionPayload.name, args: executionArgs, error: errMsg });
+              logs.push(safeToolAudit({ tool: actionPayload.name, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: isCancellationError(err, activeSignal) ? "cancelled" : "failed", error: errMsg }));
               outputSummary = `Execution error in ${actionPayload.name}: ${errMsg}. Reflection checklist: ${manifest.reflectionChecklist.join("; ")}`;
               status = "failed";
             }
@@ -380,10 +405,11 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
       await checkpointRun("running", { eventType: options?.resume ? "worker.resumed" : "worker.started", round: 0 });
 
       for (let round = 0; round < contract.maxToolCalls + 1; round++) {
-        if (activeSignal.aborted) {
-          status = "timed_out";
-          outputSummary = `Worker capability ${workerName} execution aborted or timed out.`;
-          break;
+        throwIfAborted(activeSignal);
+        const taskBeforeRound = await getTask(userId, durableTask.id);
+        if (taskBeforeRound?.status === "cancel_requested" || taskBeforeRound?.status === "cancelled") {
+          workerController.abort(new CancellationError());
+          throw new CancellationError();
         }
 
         const duration = Date.now() - startTime;
@@ -453,7 +479,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           if (!allowedToolNames.has(slug)) {
             status = "failed";
             outputSummary = `Security boundary error: Tool ${slug} is not permitted for worker capability ${workerName}.`;
-            logs.push({ tool: slug, args: rawArgs, error: `Tool access denied for worker capability ${workerName}` });
+            logs.push(safeToolAudit({ tool: slug, args: rawArgs, userId, runId: handoffRecord.delegation.runId, status: "failed", error: `Tool access denied for worker capability ${workerName}` }));
             messages.push({
               role: "tool",
               tool_call_id: call.id,
@@ -480,11 +506,11 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             if (!toolRequest.intent || !toolRequest.reason) {
               status = "failed";
               outputSummary = "A worker tool request requires both intent and reason.";
-              logs.push({ tool: slug, args: rawArgs, error: outputSummary });
+              logs.push(safeToolAudit({ tool: slug, args: rawArgs, userId, runId: handoffRecord.delegation.runId, status: "failed", error: outputSummary }));
             } else {
               status = "requires_tool_request";
               outputSummary = `${manifest.displayName} requested an additional capability: ${toolRequest.intent}. Reason: ${toolRequest.reason}`;
-              logs.push({ tool: slug, args: rawArgs, result: { requested: true, ...toolRequest } });
+              logs.push(safeToolAudit({ tool: slug, args: rawArgs, userId, runId: handoffRecord.delegation.runId, status: "completed", requested: true }));
               messages.push({ role: "tool", tool_call_id: call.id, content: "Capability request recorded. Stop here; Chusky will decide whether to discover and delegate a narrowly scoped tool." });
               await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky tool discovery and scoped re-delegation");
               await checkpointRun("waiting_tools", { eventType: "worker.tool_request", checkpoint: outputSummary, nextAction: "Await Chusky tool discovery and scoped re-delegation" });
@@ -567,19 +593,21 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
                     deliveryTarget: options?.deliveryTarget,
                     onStatus: options?.onStatus,
                     signal: activeSignal,
+                    registerCancellationCleanup,
                   });
                 })()
-              : await scopedComposio.execute(slug, executionArgs);
+              : await scopedComposio.execute(slug, executionArgs, activeSignal);
 
             const resultStr = typeof result === "string" ? result : JSON.stringify(result);
-            logs.push({ tool: slug, args: executionArgs, result });
+            logs.push(safeToolAudit({ tool: slug, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: "completed" }));
             messages.push({ role: "tool", tool_call_id: call.id, content: resultStr.slice(0, 20000) });
             await checkpointTask(userId, durableTask.id, `Executed ${slug}`, "Proceed to next step");
             await checkpointRun("running", { eventType: "worker.tool_completed", tool: slug, round, checkpoint: `Executed ${slug}`, nextAction: "Proceed to next step" });
             if (approvedForTool && isRisky) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
           } catch (err) {
+            if (isCancellationError(err, activeSignal)) throw err;
             const errMsg = String((err as Error)?.message ?? err);
-            logs.push({ tool: slug, args: executionArgs, error: errMsg });
+            logs.push(safeToolAudit({ tool: slug, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: isCancellationError(err, activeSignal) ? "cancelled" : "failed", error: errMsg }));
 
             // 1-turn reflection prompt on error
             messages.push({
@@ -602,8 +630,15 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
       outputSummary = `Worker capability [${manifest.displayName}] received objective: "${contract.objective}". Output expected: "${contract.expectedOutput}". Scope verified clean. ${memorySnippet}`;
     }
   } catch (err) {
-    status = "failed";
-    outputSummary = `Unhandled exception in worker capability ${workerName}: ${String((err as Error)?.message ?? err)}`;
+    if (isCancellationError(err, activeSignal)) {
+      await runCancellationCleanups();
+      if (actionPayload?.name) logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "cancelled", error: "Cancellation requested while the provider call was in flight." }));
+      status = "interrupted";
+      outputSummary = "Worker delegation was interrupted by a cancellation request.";
+    } else {
+      status = "failed";
+      outputSummary = `Unhandled exception in worker capability ${workerName}: ${String((err as Error)?.message ?? err)}`;
+    }
   }
 
   const durationMs = Date.now() - startTime;
@@ -611,8 +646,9 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
   // A /agent-cancel can arrive while a provider turn is completing. Preserve
   // the user's cancellation rather than allowing a late worker response to
   // overwrite it with success.
-  if ((await getTask(userId, durableTask.id))?.status === "cancelled") {
-    status = "cancelled";
+  const finalTask = await getTask(userId, durableTask.id);
+  if (finalTask?.status === "cancel_requested" || finalTask?.status === "cancelled" || status === "interrupted") {
+    if (status !== "interrupted") status = "cancelled";
     outputSummary = "Worker delegation was cancelled by the user before completion.";
   }
   if (durationMs > contract.timeoutSeconds * 1000 && status === "success") {
@@ -629,6 +665,8 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
 
   if (status === "success") {
     await completeTask(userId, durableTask.id, outputSummary);
+  } else if (status === "cancelled" || status === "interrupted") {
+    await finalizeTaskCancellation(userId, durableTask.id, outputSummary || "Worker delegation cancelled.");
   } else if (status === "queued") {
     await updateTask(userId, durableTask.id, { status: "queued", checkpoint: outputSummary, nextAction: "Continue from the latest checkpoint in the next execution slice." });
   } else if (status === "failed" || status === "max_tool_calls_exceeded" || status === "timed_out") {
@@ -672,13 +710,14 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
     if (finalRun) {
       await saveAgentRun({
         ...finalRun,
-        status: status === "success" ? "completed" : status === "cancelled" ? "cancelled" : status === "queued" ? "queued" : status === "requires_approval" ? "waiting_approval" : status === "requires_tool_request" ? "waiting_tools" : "failed",
+        status: status === "success" ? "completed" : status === "cancelled" ? "cancelled" : status === "interrupted" ? "interrupted" : status === "queued" ? "queued" : status === "requires_approval" ? "waiting_approval" : status === "requires_tool_request" ? "waiting_tools" : "failed",
         state: { ...(finalRun.state ?? {}), output: outputSummary.slice(0, 20_000), checkpoint: outputSummary.slice(0, 4_000), nextAction: status === "queued" ? "Continue from the latest durable checkpoint." : "" },
         events: [...finalRun.events, { id: `evt_${randomUUID()}`, type: `run.${status}`, at: Date.now(), data: { output: outputSummary.slice(0, 2_000) } }].slice(-200),
       }, finalRun.version);
     }
   }
 
+  activeWorkerControllers.delete(handoffRecord.id);
   return {
     contractId: contract.id,
     worker: workerName,

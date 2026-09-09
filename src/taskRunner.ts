@@ -4,7 +4,7 @@ import { logger } from "./logger.js";
 export interface TaskRunPayload { userId: number; taskId: string; }
 
 export interface TaskRunResult {
-  status: "completed" | "blocked" | "failed" | "queued";
+  status: "completed" | "blocked" | "failed" | "queued" | "cancelled";
   message: string;
   checkpoint?: string;
   nextAction?: string;
@@ -34,6 +34,15 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
     return { claimed: true, task: settled };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Task worker failed";
+    const current = await inspectDurableTask(payload);
+    if (current?.status === "cancel_requested" || current?.status === "cancelled") {
+      const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, {
+        status: "cancelled",
+        message: "Task cancellation completed while the worker was running.",
+        checkpoint: task.checkpoint,
+      });
+      return { claimed: true, task: settled };
+    }
     const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, {
       status: "failed",
       message: message.slice(0, 1000),

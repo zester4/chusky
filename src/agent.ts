@@ -43,6 +43,7 @@ import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { relevantSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
+import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -360,10 +361,12 @@ function splitAccountSelector(args: Record<string, unknown>): { account?: string
   return { account, arguments: arguments_ };
 }
 
-function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>): Promise<any> {
-  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return sessionObj.execute(slug, args);
+function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+  const options = signal ? { signal } : undefined;
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return abortable(sessionObj.execute(slug, args, options), signal);
   const selected = splitAccountSelector(args);
-  return sessionObj.execute(slug, selected.arguments, selected.account ? { account: selected.account } : undefined);
+  const executeOptions = selected.account || signal ? { ...(selected.account ? { account: selected.account } : {}), ...(signal ? { signal } : {}) } : undefined;
+  return abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
 }
 
 const sessionCache = new Map<number, ComposioSession>();
@@ -442,7 +445,7 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   tools: any[];
   missing: string[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  execute: (slug: string, args: Record<string, unknown>) => Promise<any>;
+  execute: (slug: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<any>;
 }> {
   const unique = [...new Set(allowedSlugs.map((slug) => slug.trim()).filter(Boolean))];
   if (!unique.length) return { tools: [], missing: [], execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
@@ -494,9 +497,9 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   return {
     tools: unique.filter((slug) => byName.has(slug)).map((slug) => byName.get(slug)!),
     missing,
-    execute: (slug, args) => {
+    execute: (slug, args, signal) => {
       if (!byName.has(slug)) throw new Error(`Composio tool ${slug} was not delegated to this worker.`);
-      return composioExecute(sessionObj, slug, args);
+      return composioExecute(sessionObj, slug, args, signal);
     },
   };
 }
@@ -882,7 +885,10 @@ export async function runAgent(
       if (!toolsUsed.includes(slug)) toolsUsed.push(slug);
 
       if (onStatus) await onStatus(toolStatus(slug));
-      logger.debug({ slug, args: call.function.arguments }, "Tool call");
+      const toolStartedAt = Date.now();
+      let auditArgs: Record<string, unknown> | undefined;
+      try { auditArgs = parseToolArguments(call.function.arguments); } catch { /* malformed provider args are logged by shape only */ }
+      logger.debug(safeToolAudit({ tool: slug, args: auditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "started" }), "Tool call");
       await persistRun("running", "run.tool_started", undefined, { tool: slug, callId: call.id, round });
 
       let result: string;
@@ -950,7 +956,7 @@ export async function runAgent(
             outputFormat: normalizeImageOutputFormat(args.outputFormat),
             background: args.background === "transparent" || args.background === "opaque" || args.background === "auto" ? args.background : undefined,
             seed: args.seed === undefined ? undefined : imageSeed(args.seed),
-          });
+          }, signal);
           const destination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
           const daytona = [];
           const assets: Array<{ id: string; name: string; downloadUrl: string; contentType: string }> = [];
@@ -982,7 +988,7 @@ export async function runAgent(
             for (const [index, image] of images.entries()) {
               const extension = image.mediaType === "image/jpeg" ? "jpg" : image.mediaType === "image/webp" ? "webp" : "png";
               const workspacePath = resolveImageWorkspacePath(args.workspacePath, index, images.length, extension);
-              daytona.push(await daytonaEngine.writeBinaryFile(userId, workspacePath, image.data));
+              daytona.push(await abortable(daytonaEngine.writeBinaryFile(userId, workspacePath, image.data), signal));
             }
           }
           generatedReferenceImages.push(...images);
@@ -1023,7 +1029,7 @@ export async function runAgent(
           }
           if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
-            const delivered = await daytonaEngine.downloadArtifact(userId, artifact.id);
+            const delivered = await abortable(daytonaEngine.downloadArtifact(userId, artifact.id), signal);
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
             execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact was delivered to the user." };
           }
@@ -1044,7 +1050,7 @@ export async function runAgent(
             execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
           }
         } else {
-          execResult = await composioExecute(sessionObj, slug, executionArgs);
+          execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
         }
         result = typeof execResult === "string"
           ? execResult
@@ -1054,7 +1060,8 @@ export async function runAgent(
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;
-        logger.warn({ slug, err: e }, "Tool execution failed");
+        if (signal?.aborted) throw e;
+        logger.warn(safeToolAudit({ tool: slug, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
         result = `Error executing ${slug}: ${String(e)}`;
         if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
@@ -1287,7 +1294,7 @@ function supportedGrokReferenceCount(references: ImageGenerationOptions["inputRe
   return count;
 }
 
-export async function generateImages(prompt: string, count = 1, options: ImageGenerationOptions = {}): Promise<GeneratedImage[]> {
+export async function generateImages(prompt: string, count = 1, options: ImageGenerationOptions = {}, signal?: AbortSignal): Promise<GeneratedImage[]> {
   const normalizedCount = normalizeImageCount(count);
   const model = config.imageModel.trim();
   const museModel = isMuseImageModel(model);
@@ -1324,10 +1331,12 @@ export async function generateImages(prompt: string, count = 1, options: ImageGe
   });
 
   const responses = await Promise.all(requestBodies.map(async (body) => {
+    throwIfAborted(signal);
     const res = await fetch("https://openrouter.ai/api/v1/images", {
       method: "POST",
       headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal,
     });
     if (!res.ok) throw new Error(`OpenRouter image generation ${res.status}: ${await res.text()}`);
     return await res.json() as { data?: { b64_json?: string; media_type?: string }[]; usage?: { cost?: number } };
