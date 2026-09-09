@@ -8,6 +8,8 @@ import { ChannelVerificationError } from "./contracts.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "./slack.js";
 import { normalizeWhatsAppMessages, normalizeWhatsAppStatuses, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "./whatsapp.js";
 import { normalizeSendblueMessage, normalizeSendblueStatus, SendblueAdapter, verifySendblueSignature } from "./sendblue.js";
+import { normalizeTwilioMessage, verifyTwilioSignature, TwilioSmsAdapter } from "./sms.js";
+import { XchatAdapter } from "./xchat.js";
 import { ChannelDebouncer } from "./debounce.js";
 import { logger } from "../logger.js";
 
@@ -16,6 +18,8 @@ interface ChannelRouteOptions {
   slack?: { adapter: SlackAdapter; signingSecret: string };
   whatsapp?: { adapter: WhatsAppAdapter; appSecret: string; verifyToken: string };
   sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void> };
+  twilioSms?: { adapter: TwilioSmsAdapter; authToken: string; webhookUrl?: string; statusWebhookUrl?: string };
+  xchat?: { adapter: XchatAdapter };
 }
 
 function errorStatus(error: unknown): 400 | 401 | 403 | 500 | 503 {
@@ -198,5 +202,47 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
         return c.json({ ok: false, error: error instanceof ChannelVerificationError ? error.message : error instanceof SyntaxError ? "invalid Sendblue JSON" : "invalid Sendblue event" }, error instanceof SyntaxError ? 400 : errorStatus(error));
       }
     });
+  }
+
+  if (options.twilioSms) {
+    const twilioSms = options.twilioSms;
+    app.post("/twilio/sms/status", async (c) => {
+      try {
+        const form = await c.req.parseBody();
+        const params = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, String(value)]));
+        verifyTwilioSignature(twilioSms.statusWebhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", twilioSms.authToken);
+        const sid = String(params.MessageSid ?? "").trim();
+        if (sid) {
+          const record = await getOutboxByProviderMessageId("sms", sid);
+          if (record) await updateOutbox(record.id, { providerStatus: String(params.MessageStatus ?? params.SmsStatus ?? "unknown") });
+        }
+        return c.text("ok", 200);
+      } catch (error) {
+        logger.warn({ err: error }, "Rejected Twilio SMS status callback");
+        return c.text("Forbidden", errorStatus(error), { "Content-Type": "text/plain" });
+      }
+    });
+    app.post("/twilio/sms", async (c) => {
+      try {
+        const form = await c.req.parseBody();
+        const params = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, String(value)]));
+        verifyTwilioSignature(twilioSms.webhookUrl || c.req.url, params, c.req.header("X-Twilio-Signature") ?? "", twilioSms.authToken);
+        const message = normalizeTwilioMessage(params);
+        if (!message) return c.text("<Response></Response>", 200, { "Content-Type": "text/xml" });
+        void twilioSms.adapter.hydrateInbound(message).then((hydrated) => gateway.processInbound(hydrated)).catch((error) => logger.error({ err: error, eventId: message.providerEventId }, "Twilio SMS processing failed"));
+        return c.text("<Response></Response>", 200, { "Content-Type": "text/xml" });
+      } catch (error) {
+        logger.warn({ err: error }, "Rejected Twilio SMS webhook");
+        return c.text(error instanceof ChannelVerificationError ? "Forbidden" : "Bad Request", errorStatus(error) as 400 | 401 | 403, { "Content-Type": "text/plain" });
+      }
+    });
+  }
+
+  if (options.xchat) {
+    const xchat = options.xchat;
+    // Pass the untouched Request through so XChat can validate CRC/signatures
+    // over the exact encrypted body and headers received from X.
+    app.get("/xchat/webhook", async (c) => xchat.adapter.handleWebhook(c.req.raw));
+    app.post("/xchat/webhook", async (c) => xchat.adapter.handleWebhook(c.req.raw));
   }
 }

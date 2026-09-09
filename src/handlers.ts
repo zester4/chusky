@@ -81,17 +81,19 @@ function channelLinkKeyboard(userId: number): InlineKeyboard {
     .text("🟢 WhatsApp", `chlink:p:whatsapp:${userId}`).row()
     .text("📱 iMessage", `chlink:p:sendblue:${userId}`)
     .text("✉️ Telegram", `chlink:t:${userId}`).row()
+    .text("💬 SMS", `chlink:p:sms:${userId}`)
+    .text("𝕏 XChat", `chlink:p:xchat:${userId}`).row()
     .text("👥 Link an iMessage group", `chlink:g:sendblue:${userId}`);
 }
 
-async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue"): Promise<void> {
+async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "xchat"): Promise<void> {
   const code = await createLinkCode(ctx.from!.id, provider);
   if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
     const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
     await replyHtml(ctx, `<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`);
     return;
   }
-  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider;
+  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "sms" ? "SMS/Twilio" : provider === "xchat" ? "XChat" : provider;
   await replyHtml(ctx, `<b>Link ${label}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${label} account you want to link. It expires in 10 minutes.`);
 }
 
@@ -509,7 +511,7 @@ export function registerHandlers(bot: Bot): void {
     const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
     const action = parts[0]?.toLowerCase();
     const rawProvider = parts[1]?.toLowerCase();
-    const provider = rawProvider === "imessage" ? "sendblue" : rawProvider;
+    const provider = rawProvider === "imessage" ? "sendblue" : rawProvider === "x" ? "xchat" : rawProvider;
     if (!action || (action === "link" && !provider)) {
       await ctx.reply("Choose the channel to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
       return;
@@ -518,7 +520,7 @@ export function registerHandlers(bot: Bot): void {
       await sendGroupChannelLink(ctx);
       return;
     }
-    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
+    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "sms" || provider === "xchat")) {
       await sendPrivateChannelLink(ctx, provider);
       return;
     }
@@ -984,7 +986,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.editMessageText("✅ You are already using Telegram. Choose another channel if you want to link an external account.", { reply_markup: channelLinkKeyboard(ownerId) });
         return;
       }
-      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue")) {
+      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "xchat")) {
         await sendPrivateChannelLink(ctx, target);
         return;
       }

@@ -20,6 +20,8 @@ import { registerChannelRoutes } from "./channels/routes.js";
 import { SlackAdapter } from "./channels/slack.js";
 import { WhatsAppAdapter } from "./channels/whatsapp.js";
 import { SendblueAdapter } from "./channels/sendblue.js";
+import { TwilioSmsAdapter } from "./channels/sms.js";
+import { XchatAdapter } from "./channels/xchat.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
@@ -157,9 +159,26 @@ async function main(): Promise<void> {
     );
     const whatsappAdapter = new WhatsAppAdapter(config.whatsappAccessToken, config.whatsappPhoneNumberId, config.whatsappGraphVersion);
     const sendblueAdapter = new SendblueAdapter(config.sendblueApiKey, config.sendblueApiSecret, config.sendblueNumber, `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/status`);
+    const twilioSmsWebhookUrl = config.twilioSmsWebhookUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms`;
+    const twilioSmsStatusCallbackUrl = config.twilioSmsStatusCallbackUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms/status`;
+    const twilioSmsAdapter = config.twilioSmsEnabled && config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid)
+      ? new TwilioSmsAdapter({ accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken, phoneNumber: config.twilioPhoneNumber, messagingServiceSid: config.twilioMessagingServiceSid, statusCallbackUrl: twilioSmsStatusCallbackUrl })
+      : undefined;
+    const xchatAdapter = config.xchatEnabled && config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin
+      ? new XchatAdapter({
+        accessToken: config.xchatBotToken,
+        pin: config.xchatPin || undefined,
+        consumerSecret: config.xchatConsumerSecret,
+        userName: config.xchatBotUsername || undefined,
+        verifySignatures: config.xchatVerifySignatures,
+        processInbound: (message) => channelGateway.processInbound(message),
+      })
+      : undefined;
     if (config.slackEnabled) channelGateway.register(slackAdapter);
     if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
     if (config.sendblueEnabled) channelGateway.register(sendblueAdapter);
+    if (twilioSmsAdapter) channelGateway.register(twilioSmsAdapter);
+    if (xchatAdapter) channelGateway.register(xchatAdapter);
     registerChannelRoutes(app, {
       gateway: channelGateway,
       ...(config.slackEnabled ? { slack: { adapter: slackAdapter, signingSecret: config.slackSigningSecret } } : {}),
@@ -174,6 +193,8 @@ async function main(): Promise<void> {
           await workflowClient().trigger({ url, body: { eventId }, workflowRunId: `sendblue-${eventId}`, retries: 3 });
         },
       } } : {}),
+      ...(twilioSmsAdapter ? { twilioSms: { adapter: twilioSmsAdapter, authToken: config.twilioAuthToken, webhookUrl: twilioSmsWebhookUrl, statusWebhookUrl: twilioSmsStatusCallbackUrl } } : {}),
+      ...(xchatAdapter ? { xchat: { adapter: xchatAdapter } } : {}),
     });
     if (config.sendblueEnabled) {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
@@ -1427,9 +1448,9 @@ async function main(): Promise<void> {
         const me = await bot.api.getMe();
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled" } as const;
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioInbound !== "misconfigured";
-        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled", xchat: config.xchatEnabled ? (config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin ? "configured" : "misconfigured") : "disabled" } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
+        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
         return c.json({ ok: false, error: String(e) }, 503);

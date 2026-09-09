@@ -5,7 +5,7 @@ Chusky is a production-oriented personal AI agent with access to **1,000+ tools*
 The service has two layers:
 
 - The agent layer owns model inference, Composio sessions, native tools, approvals, memory, tasks, and durable workflows.
-- The transport layer owns Telegram, CLI, Slack, WhatsApp, and Sendblue delivery. Provider-specific payloads never enter the agent layer directly.
+- The transport layer owns Telegram, CLI, Slack, WhatsApp, Sendblue, Twilio SMS, and XChat delivery. Provider-specific payloads never enter the agent layer directly.
 
 Production deployments should use Redis and QStash. In-memory persistence is intended for local development and tests only; it does not survive restarts and must not be used for production reminders, approvals, memories, or channel deduplication.
 
@@ -35,7 +35,7 @@ Production deployments should use Redis and QStash. In-memory persistence is int
 | **Verified Slack adapter** | Signed Events API/interactions, DMs, mentions, threads, OAuth installation, and Block Kit approvals |
 | **Verified WhatsApp adapter** | Signed Cloud API webhooks, text/media normalization, and durable outbound receipts |
 | **Verified Sendblue adapter** | iMessage webhooks, durable workflows, direct/group replies, media, typing indicators, and iMessage-safe formatting |
-| **Provider boundaries** | SMS and voice contracts are available for provider injection; live provider routes are not enabled yet |
+| **Provider boundaries** | SMS/Twilio, encrypted XChat, and voice use provider-specific adapters behind the normalized channel gateway |
 
 ---
 
@@ -247,7 +247,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli link` | Create a one-time terminal pairing code |
 | `/cli devices` | List linked terminals |
 | `/cli revoke <name>` | Revoke a linked terminal |
-| `/channel link slack|whatsapp|sendblue` | Create a one-time verified external-channel link |
+| `/channel link slack|whatsapp|sendblue|sms|xchat` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
 | `/channel notify slack|whatsapp|sendblue on|off` | Enable or disable proactive notifications for a linked channel |
 | `/link web_<one-time-code>` | Link the authenticated dashboard workspace to this verified Telegram account |
@@ -336,6 +336,24 @@ The channel gateway keeps the internal account identity (`account_<telegram-user
 Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease. WhatsApp also supports explicit approved-template delivery through the outbound contract: set `template.name`, `template.languageCode`, and optional Meta `components`; the adapter sends `type: "template"`. Normal replies remain text messages with WhatsApp formatting, and templates are never selected implicitly.
 
 Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
+
+### XChat channel
+
+XChat uses the official `@chat-adapter/x` encrypted messaging adapter. Chusky handles direct messages and explicit group mentions through the same normalized gateway as its other channels; identity linking, Redis history, shared/private scope, locks, approvals, and the durable outbox remain Chusky-owned. The adapter also handles XChat encryption, media encryption/decryption, typing pills, read receipts, reactions, edits, and webhook CRC/signature validation.
+
+Enable it only when the XChat bot has been provisioned with an OAuth access token, Juicebox PIN, webhook consumer secret, and a public HTTPS callback:
+
+```text
+XCHAT_ENABLED=true
+XCHAT_BOT_TOKEN=<X OAuth access token>
+XCHAT_PIN=<Juicebox PIN>
+X_CONSUMER_SECRET=<X app consumer secret>
+X_BOT_USERNAME=<optional bot handle>
+X_VERIFY_SIGNATURES=true
+XCHAT_WEBHOOK_URL=https://your-domain.example/xchat/webhook
+```
+
+Configure both `GET` and `POST https://your-domain.example/xchat/webhook` in X. The adapter answers the CRC challenge and verifies the encrypted webhook envelope before it reaches Chusky. From Telegram, use `/channel link xchat`, then send the generated `/link <code>` from the XChat account. Group messages are handled when the bot is explicitly mentioned; they use shared channel context and never inherit private Telegram history.
 
 ### Sendblue iMessage channel
 
@@ -431,10 +449,11 @@ Sendblue `content` is plain text, not rendered Markdown. Chusky converts common 
 | Slack | Implemented | DMs use private account history; channel threads are shared-scope conversations |
 | WhatsApp | Implemented | Linked private chats use the account session; proactive notifications require explicit opt-in |
 | Sendblue | Implemented | Linked private iMessages use the account session; groups use shared scope; replies use the durable outbox |
-| SMS | Boundary only | Requires a provider sender, webhook route, signature scheme, and deployment wiring |
+| SMS | Twilio Messaging | Configure a Twilio sender or Messaging Service, `/twilio/sms` webhook, and signature validation |
+| XChat | Implemented | Official encrypted X DMs/groups, media, mentions, typing, receipts, edits, and reactions through `/xchat/webhook` |
 | Voice | Boundary only | Requires a telephony/STT/TTS provider and deployment wiring |
 
-To connect Slack, WhatsApp, or Sendblue, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
+To connect Slack, WhatsApp, Sendblue, SMS, or XChat, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
 
 In webhook mode, provider routes must be publicly reachable over HTTPS. Slack uses `/slack/events` and `/slack/interactions`; WhatsApp Cloud API uses `GET` and `POST /whatsapp/webhook`. Both routes verify the raw request signature, reject invalid requests with a non-2xx status, acknowledge provider webhooks quickly, and dispatch work asynchronously. Duplicate events are claimed in Redis, and every outbound reply is persisted in the Redis outbox before provider delivery.
 
@@ -447,7 +466,7 @@ The core agent and Sendblue conversation loop are operational. Remaining product
 - Dashboard operations pages now expose provider readiness, channel status, runtime failure counters, and delivery health through the authenticated `/v1/ops/health` endpoint.
 - The CLI doctor now prints the same provider checks and runtime failure summary; Redis is fail-closed in production and webhook mode.
 - Add Sendblue App Cards for interactive actions where a plain URL is not sufficient.
-- Add SMS and Voice provider implementations; their current contracts are intentionally provider-neutral boundaries.
+- Voice remains provider-specific and opt-in. Twilio SMS/MMS and XChat are implemented through provider adapters, signed webhook routes, one-time account linking, and the shared channel gateway.
 - Expand end-to-end deployment tests for Redis outages, provider retries, duplicate webhooks, concurrent messages, and long-running tool calls.
 
 Treat this list as a roadmap, not as a claim that these capabilities are already complete.
