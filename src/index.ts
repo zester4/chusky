@@ -194,7 +194,7 @@ async function main(): Promise<void> {
         },
       } } : {}),
       ...(twilioSmsAdapter ? { twilioSms: { adapter: twilioSmsAdapter, authToken: config.twilioAuthToken, webhookUrl: twilioSmsWebhookUrl, statusWebhookUrl: twilioSmsStatusCallbackUrl } } : {}),
-      ...(xchatAdapter ? { xchat: { adapter: xchatAdapter } } : {}),
+      ...(xchatAdapter ? { xchat: { adapter: xchatAdapter, consumerSecret: config.xchatConsumerSecret } } : {}),
     });
     if (config.sendblueEnabled) {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
