@@ -24,10 +24,10 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces resilient Daytona workspace networking", async () => {
+test("current upgrade manifest announces the XChat and SMS channel release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.1.4");
-  assert.equal(notice?.version, "3.1.4");
-  assert.match(formatAgentUpgradeNotice(notice!), /Daytona browser control/);
-  assert.match(formatAgentUpgradeNotice(notice!), /screen recordings/);
+  assert.equal(notice?.id, "release-3.1.6");
+  assert.equal(notice?.version, "3.1.6");
+  assert.match(formatAgentUpgradeNotice(notice!), /encrypted XChat/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Twilio SMS/);
 });

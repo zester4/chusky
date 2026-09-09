@@ -1,11 +1,11 @@
 {
-  "id": "release-3.1.5",
-  "version": "3.1.5",
+  "id": "release-3.1.6",
+  "version": "3.1.6",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Group chats now use the approved web-search and URL-fetch tools for current information.",
-    "Nora can research with scoped web tools but must request additional tool discovery from Chusky.",
-    "Composio tool permissions remain role-scoped, with external side effects behind the normal approval boundary."
+    "Added encrypted XChat DMs and groups with verified webhooks, mentions, media, typing, and reactions.",
+    "Added Twilio SMS and MMS through Messaging Services with signed inbound and delivery-status callbacks.",
+    "Added Telegram channel linking and durable gateway delivery for the new channels."
   ],
-  "createdAt": "2026-09-08T21:39:39.336Z"
+  "createdAt": "2026-09-09T01:05:58.549Z"
 }
