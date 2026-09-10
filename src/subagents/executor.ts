@@ -626,8 +626,11 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
       else if (status === "timed_out" || status === "max_tool_calls_exceeded") await checkpointRun("queued", { eventType: "worker.slice_exhausted", checkpoint: outputSummary, nextAction: "Continue from the latest durable checkpoint.", round: contract.maxToolCalls });
       else if (status === "failed") await checkpointRun("failed", { eventType: "worker.failed", checkpoint: outputSummary, nextAction: "Inspect the failure and retry when safe." });
     } else {
-      // Direct summary execution
-      outputSummary = `Worker capability [${manifest.displayName}] received objective: "${contract.objective}". Output expected: "${contract.expectedOutput}". Scope verified clean. ${memorySnippet}`;
+      // Never turn missing inference infrastructure into a synthetic success.
+      // Contract tests can still exercise native/action-only workers, but a
+      // normal delegated objective needs a real model response.
+      status = "failed";
+      outputSummary = "Worker model is unavailable. Configure a live OPENROUTER_API_KEY before starting delegated work.";
     }
   } catch (err) {
     if (isCancellationError(err, activeSignal)) {

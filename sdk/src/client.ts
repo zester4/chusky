@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { Activity, Approval, Artifact, AuditEvent, ChannelConnection, ChuskyClientOptions, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, Webhook, WebhookDelivery, Worker } from "./types.js";
+import type { Activity, Approval, ApprovalDecision, Artifact, AuditEvent, ChannelConnection, ChuskyClientOptions, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, Webhook, WebhookDelivery, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -101,7 +101,9 @@ export class Chusky {
 
   /** @internal Upload bytes to a presigned storage URL using the configured fetch implementation. */
   async uploadBytes(url: string, data: Uint8Array, contentType: string): Promise<Response> {
-    return this.fetchImpl(url, { method: "PUT", body: Buffer.from(data), headers: { "Content-Type": contentType } });
+    // Uint8Array is a standards-based BodyInit in browsers, workers, and
+    // Node's fetch. Buffer would make this otherwise portable SDK Node-only.
+    return this.fetchImpl(url, { method: "PUT", body: data as BodyInit, headers: { "Content-Type": contentType } });
   }
 
   /** @internal Shared transport for resource streams. */
@@ -139,8 +141,8 @@ export class ThreadsResource {
   constructor(private readonly client: Chusky) {}
   create(params: CreateThreadParams = {}, options?: RequestOptions): Promise<Thread> { return this.client.request("/threads", { method: "POST", body: JSON.stringify(params) }, options); }
   get(threadId: string, options?: RequestOptions): Promise<Thread> { return this.client.request(`/threads/${encodeURIComponent(threadId)}`, {}, options); }
-  list(params: { cursor?: string; limit?: number } = {}, options?: RequestOptions): Promise<Page<Thread>> {
-    const query = new URLSearchParams(); if (params.cursor) query.set("cursor", params.cursor); if (params.limit) query.set("limit", String(params.limit));
+  list(params: { cursor?: string; limit?: number; includeArchived?: boolean } = {}, options?: RequestOptions): Promise<Page<Thread>> {
+    const query = new URLSearchParams(); if (params.cursor) query.set("cursor", params.cursor); if (params.limit) query.set("limit", String(params.limit)); if (params.includeArchived) query.set("includeArchived", "true");
     return this.client.request(`/threads${query.size ? `?${query}` : ""}`, {}, options);
   }
   runs(threadId: string): RunsResource { return new RunsResource(this.client, threadId); }
@@ -181,7 +183,7 @@ export class TasksResource {
 export class ApprovalsResource {
   constructor(private readonly client: Chusky) {}
   get(approvalId: string, options?: RequestOptions): Promise<Approval> { return this.client.request(`/approvals/${encodeURIComponent(approvalId)}`, {}, options); }
-  decide(approvalId: string, decision: "approve" | "deny", options?: RequestOptions): Promise<Run> { return this.client.request(`/approvals/${encodeURIComponent(approvalId)}`, { method: "POST", body: JSON.stringify({ decision }) }, options); }
+  decide(approvalId: string, decision: "approve" | "deny", options?: RequestOptions): Promise<Run | ApprovalDecision> { return this.client.request(`/approvals/${encodeURIComponent(approvalId)}`, { method: "POST", body: JSON.stringify({ decision }) }, options); }
   list(options?: RequestOptions): Promise<Page<Approval>> { return this.client.request("/approvals", {}, options); }
 }
 export class FilesResource {

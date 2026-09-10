@@ -19,13 +19,10 @@ export function identityKey(provider: ChannelProvider, externalUserId: string, w
 }
 
 export async function resolveIdentity(message: Pick<InboundMessage, "provider" | "providerUserId" | "providerWorkspaceId">): Promise<ChannelIdentityRecord | undefined> {
-  // A Sendblue direct message has no workspace ID, while a group message uses
-  // the Chusky sending number as its workspace ID. Prefer an explicitly
-  // group-scoped link, but let a user who linked privately use Chusky in a
-  // group too. Other providers remain strictly workspace-scoped.
-  const exact = await getChannelIdentity(message.provider, message.providerUserId, message.providerWorkspaceId);
-  if (exact || message.provider !== "sendblue" || !message.providerWorkspaceId) return exact;
-  return getChannelIdentity(message.provider, message.providerUserId);
+  // Group identity is intentionally strict. A private Sendblue link proves
+  // ownership of the sender, not authorization to inject that account into a
+  // shared conversation. Groups must have their own explicit authorization.
+  return getChannelIdentity(message.provider, message.providerUserId, message.providerWorkspaceId);
 }
 
 export async function linkChannelIdentity(userId: number, input: { provider: ChannelProvider; externalUserId: string; workspaceId?: string; displayName?: string }): Promise<ChannelIdentityRecord> {

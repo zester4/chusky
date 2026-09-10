@@ -41,6 +41,7 @@ export interface Run {
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
   model?: string;
+  attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   output?: string;
   taskId?: string;
   approvalId?: string;
@@ -48,6 +49,7 @@ export interface Run {
   budget?: RunBudget;
   tools?: RunToolPolicy;
   skills?: string[];
+  events?: RunEvent[];
   error?: { code: string; message: string };
   createdAt: string;
   updatedAt: string;
@@ -83,6 +85,11 @@ export interface Task {
   updatedAt: string;
   attempt?: number;
   maxAttempts?: number;
+  sdkRunId?: string;
+  sdkThreadId?: string;
+  sdkModel?: string;
+  sdkBudget?: RunBudget;
+  sdkSkills?: string[];
   events?: Array<{ id: string; type: string; message: string; at: number; attempt: number }>;
 }
 
@@ -92,10 +99,12 @@ export interface Approval {
   toolSlug: string;
   args: JsonObject;
   expiresAt: string;
+  createdAt?: string;
   request?: string;
   channelProvider?: string;
   handoffId?: string;
 }
+export interface ApprovalDecision { id: string; status: "denied" | "consumed"; text?: string; }
 
 export interface Skill { name: string; description: string; path: string; bytes?: number; updatedAt?: string; files?: number; }
 export interface SkillFile { name?: string; path: string; bytes: number; binary: boolean; content?: string; truncated?: boolean; }

@@ -685,7 +685,7 @@ interface Backend {
   claimOutbox(id: string, leaseMs: number): Promise<OutboxRecord | undefined>;
   updateOutbox(id: string, patch: Partial<OutboxRecord>): Promise<OutboxRecord | undefined>;
   getOutboxByProviderMessageId(provider: ChannelProvider, providerMessageId: string): Promise<OutboxRecord | undefined>;
-  listOutbox(statuses?: OutboxRecord["status"][], limit?: number): Promise<OutboxRecord[]>;
+  listOutbox(statuses?: OutboxRecord["status"][], limit?: number, userId?: number): Promise<OutboxRecord[]>;
   getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined>;
   saveChannelConversation(record: ChannelConversationRecord): Promise<void>;
   setChannelConversationModel(id: string, model: string | undefined): Promise<ChannelConversationRecord | undefined>;
@@ -1407,9 +1407,9 @@ class RedisBackend implements Backend {
     }
   }
 
-  private async listRecoverableOutbox(statuses: typeof RECOVERABLE_OUTBOX_STATUSES[number][], limit: number): Promise<OutboxRecord[]> {
+  private async listRecoverableOutbox(statuses: typeof RECOVERABLE_OUTBOX_STATUSES[number][], limit: number, userId?: number): Promise<OutboxRecord[]> {
     await this.ensurePendingOutboxIndexes();
-    const idGroups = await Promise.all(statuses.map((status) => this.r.zrange(this.outboxPendingIndexKey(status), 0, limit - 1)));
+    const idGroups = await Promise.all(statuses.map((status) => this.r.zrange(this.outboxPendingIndexKey(status), 0, userId === undefined ? limit - 1 : -1)));
     const ids = [...new Set(idGroups.flat())];
     if (!ids.length) return [];
     const values = await this.r.mget(...ids.map((id) => this.outboxKey(id)));
@@ -1419,7 +1419,7 @@ class RedisBackend implements Backend {
       if (!raw) { staleIds.push(ids[index]); continue; }
       try {
         const record = JSON.parse(raw) as OutboxRecord;
-        if (statuses.includes(record.status as typeof RECOVERABLE_OUTBOX_STATUSES[number])) records.push(record);
+        if (statuses.includes(record.status as typeof RECOVERABLE_OUTBOX_STATUSES[number]) && (userId === undefined || record.userId === userId)) records.push(record);
         else staleIds.push(record.id);
       } catch { staleIds.push(ids[index]); }
     }
@@ -1431,9 +1431,9 @@ class RedisBackend implements Backend {
     return records.sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
   }
 
-  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
+  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100, userId?: number): Promise<OutboxRecord[]> {
     if (statuses?.length && statuses.every(isRecoverableOutboxStatus)) {
-      return this.listRecoverableOutbox([...new Set(statuses)], limit);
+      return this.listRecoverableOutbox([...new Set(statuses)], limit, userId);
     }
     const records: OutboxRecord[] = [];
     let cursor = "0";
@@ -1445,7 +1445,7 @@ class RedisBackend implements Backend {
         if (!raw) continue;
         try {
           const record = JSON.parse(raw) as OutboxRecord;
-          if (!statuses?.length || statuses.includes(record.status)) records.push(record);
+          if ((!statuses?.length || statuses.includes(record.status)) && (userId === undefined || record.userId === userId)) records.push(record);
         } catch { /* corrupt records cannot be delivered safely */ }
       }
     } while (cursor !== "0" && records.length < limit);
@@ -1843,8 +1843,8 @@ class MemoryBackend implements Backend {
     const id = this.outboxByProvider.get(`${provider}:${providerMessageId}`);
     return id ? this.outbox.get(id) : undefined;
   }
-  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
-    return [...this.outbox.values()].filter((record) => !statuses?.length || statuses.includes(record.status)).sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
+  async listOutbox(statuses?: OutboxRecord["status"][], limit = 100, userId?: number): Promise<OutboxRecord[]> {
+    return [...this.outbox.values()].filter((record) => (!statuses?.length || statuses.includes(record.status)) && (userId === undefined || record.userId === userId)).sort((a, b) => a.createdAt - b.createdAt).slice(0, limit);
   }
   async getChannelConversation(id: string) { return this.channelConversations.get(id); }
   async saveChannelConversation(record: ChannelConversationRecord) { this.channelConversations.set(record.id, record); }
@@ -3021,8 +3021,8 @@ export async function getOutboxByProviderMessageId(provider: ChannelProvider, pr
   return backend.getOutboxByProviderMessageId(provider, providerMessageId);
 }
 
-export async function listOutbox(statuses?: OutboxRecord["status"][], limit = 100): Promise<OutboxRecord[]> {
-  return backend.listOutbox(statuses, Math.max(1, Math.min(500, limit)));
+export async function listOutbox(statuses?: OutboxRecord["status"][], limit = 100, userId?: number): Promise<OutboxRecord[]> {
+  return backend.listOutbox(statuses, Math.max(1, Math.min(500, limit)), userId);
 }
 
 export async function getChannelConversation(id: string): Promise<ChannelConversationRecord | undefined> {

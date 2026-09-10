@@ -152,6 +152,9 @@ test("verified dashboard users can only manage their own bounded project keys", 
   const create = await api.fetch(web("alice", "/account/projects", { method: "POST", body: JSON.stringify({ name: "Production" }) }));
   assert.equal(create.status, 201);
   const created = await create.json() as { id: string; key: string; keyPrefix: string; scopes: string[] };
+  const browserHeaderSpoof = await api.fetch(web("alice", "/threads", { method: "POST", headers: { "X-Chusky-User-Id": "bob" }, body: "{}" }));
+  assert.equal(browserHeaderSpoof.status, 201);
+  assert.equal((await browserHeaderSpoof.json() as { externalId: string }).externalId, "alice");
   assert.match(created.key, /^chsk_/);
   assert.deepEqual(created.scopes, ["*"]);
   const control = await getSession(0);

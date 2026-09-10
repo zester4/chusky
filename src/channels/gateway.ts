@@ -89,7 +89,10 @@ export class ChannelGateway {
     if (isSendblueGroup && !groupAuthorization && message.text) {
       const groupLink = message.text.trim().match(/^\/link[-_]?group\s+(\d{6})$/i);
       if (groupLink) {
-        const linkedOwner = await resolveIdentity(message);
+        // The owner proves the group-link request through their private
+        // Sendblue identity; the resulting authorization is still scoped to
+        // this exact group and workspace.
+        const linkedOwner = await resolveIdentity({ ...message, providerWorkspaceId: undefined });
         try {
           if (!linkedOwner) throw new Error("Activate this group from the linked iMessage account");
           groupAuthorization = await activateSendblueGroup(linkedOwner.userId, message, groupLink[1], message.providerUserId);

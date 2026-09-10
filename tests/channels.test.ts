@@ -272,20 +272,15 @@ test("channel identity ownership and gateway event deduplication are durable bou
   assert.equal(adapter.sent[0].accountId, "account_42");
 });
 
-test("a Sendblue identity linked in a direct chat can use Chusky in a group", async () => {
+test("a private Sendblue link cannot authorize a shared group", async () => {
   await linkChannelIdentity(42, { provider: "sendblue", externalUserId: "+15550001" });
   const requests: Array<{ url: string; body: any }> = [];
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
     requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
     return new Response(JSON.stringify({ message_handle: "sb-out-1" }), { status: 200 });
   }) as typeof fetch);
-  const gateway = new ChannelGateway(async (_message, conversation) => ({
-    accountId: conversation.accountId,
-    userId: conversation.userId,
-    target: conversation.replyTarget,
-    text: "Group reply",
-    idempotencyKey: "sendblue-group-reply-1",
-  }));
+  let agentCalled = false;
+  const gateway = new ChannelGateway(async () => { agentCalled = true; throw new Error("unlinked group must not enter the agent loop"); });
   gateway.register(adapter);
   const group = normalizeSendblueMessage({
     message_handle: "sb-group-in-1",
@@ -296,15 +291,10 @@ test("a Sendblue identity linked in a direct chat can use Chusky in a group", as
     participants: ["+15550001", "+15550002"],
   });
   const result = await gateway.processInbound(group!);
-  assert.equal(result.linked, true);
-  assert.equal(requests[0].url.endsWith("/send-group-message"), true);
-  assert.deepEqual(requests[0].body, {
-    from_number: "+15550002",
-    content: "Group reply",
-    group_id: "group-1",
-    numbers: ["+15550001", "+15550002"],
-    reply_to: { message_handle: "sb-group-in-1" },
-  });
+  assert.equal(result.linked, false);
+  assert.equal(agentCalled, false);
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/send-(?:message|group-message)$/);
 });
 
 test("Sendblue carries newly added group participants into outbound delivery", async () => {
