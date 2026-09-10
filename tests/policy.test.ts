@@ -2,9 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
 
-test("recognizes destructive and externally visible tools", () => {
-  for (const slug of ["GMAIL_SEND_EMAIL", "GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "SLACK_POST_MESSAGE", "AWS_UPDATE_PERMISSION"]) {
+test("recognizes materially risky tools", () => {
+  for (const slug of ["GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "AWS_UPDATE_PERMISSION", "GITHUB_DEPLOY_PRODUCTION"]) {
     assert.equal(isRiskyToolSlug(slug), true, slug);
+  }
+});
+
+test("allows routine autonomous communication and content actions", () => {
+  for (const slug of ["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "X_PUBLISH_POST", "NEWSLETTER_SEND_CAMPAIGN"]) {
+    assert.equal(isRiskyToolSlug(slug), false, slug);
   }
 });
 
@@ -15,16 +21,20 @@ test("does not gate read-only tools", () => {
 });
 
 test("uses explicit native policies and gates only side-effecting Composio batches", () => {
-  assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_START_FACETIME_CALL"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_LIST_FACETIME_CALLS"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PRESENTATION"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PDF"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_CREATE_DOCUMENT"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_CREATE_SPREADSHEET"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_UPDATE_MEMORY"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
-  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), true);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: {} }] }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), false);
 });
 

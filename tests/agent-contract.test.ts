@@ -24,13 +24,13 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
     sessionId: "test-composio-session",
     tools: async () => [
       { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
-      { type: "function", function: { name: "GMAIL_SEND_EMAIL", description: "Test-only risky tool", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", description: "Test-only risky tool", parameters: { type: "object" } } },
     ],
     execute,
   };
   if (includeMultiExecute) session.tools = async () => [
     { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
-    { type: "function", function: { name: "GMAIL_SEND_EMAIL", description: "Test-only risky tool", parameters: { type: "object" } } },
+    { type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", description: "Test-only risky tool", parameters: { type: "object" } } },
     { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Test-only multi tool", parameters: { type: "object" } } },
   ];
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
@@ -114,18 +114,18 @@ test("lists only safe connected-account metadata", async () => {
   assert.equal(JSON.stringify(accounts).includes("secret"), false);
 });
 
-test("risky tool calls stop before execution and approved exact calls execute once", async () => {
+test("materially risky tool calls stop before execution and approved exact calls execute once", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830003);
   let executions = 0;
-  await withAgentMocks([toolResponse("GMAIL_SEND_EMAIL", JSON.stringify({ to: "user@example.com" }))], async () => { executions++; }, async () => {
+  await withAgentMocks([toolResponse("GITHUB_DELETE_REPOSITORY", JSON.stringify({ owner: "acme", repo: "demo" }))], async () => { executions++; }, async () => {
     await assert.rejects(() => runAgent(830003, "send it", [], "test/model"), (error: unknown) => error instanceof ApprovalRequiredError);
     assert.equal(executions, 0);
     const approval = (await getSession(830003)).approvals[0];
-    assert.equal(approval.toolSlug, "GMAIL_SEND_EMAIL");
+    assert.equal(approval.toolSlug, "GITHUB_DELETE_REPOSITORY");
     await import("../src/store.js").then(({ setApprovalStatus }) => setApprovalStatus(830003, approval.id, "approved"));
     await withAgentMocks([
-      toolResponse("GMAIL_SEND_EMAIL", JSON.stringify({ to: "user@example.com" })),
+      toolResponse("GITHUB_DELETE_REPOSITORY", JSON.stringify({ owner: "acme", repo: "demo" })),
       chatResponse({ role: "assistant", content: "sent" }),
     ], async () => { executions++; }, async () => {
       const result = await runAgent(830003, approval.request, approval.history, approval.model, undefined, undefined, undefined, approval.id);
@@ -138,8 +138,8 @@ test("risky tool calls stop before execution and approved exact calls execute on
 test("approved multi-tool calls execute the stored arguments when the model regenerates different JSON", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830014);
-  const reviewedArgs = { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "user@example.com" } }] };
-  const regeneratedArgs = { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "different@example.com" } }] };
+  const reviewedArgs = { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: { owner: "acme", repo: "demo" } }] };
+  const regeneratedArgs = { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: { owner: "other", repo: "demo" } }] };
   const executed: any[] = [];
   await withAgentMocks([toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify(reviewedArgs))], async (slug, args) => { executed.push({ slug, args }); }, async () => {
     await assert.rejects(() => runAgent(830014, "send it", [], "test/model"), (error: unknown) => error instanceof ApprovalRequiredError);

@@ -1,10 +1,14 @@
-export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|SEND|POST|PUBLISH|CREATE_PAYMENT|CHARGE|TRANSFER|INVITE|REVOKE|UPDATE_PERMISSION|MERGE|DEPLOY)(_|$)/i;
+// Routine communications and content publishing are autonomous. Keep the
+// approval boundary for destructive, financial, permission-changing, and
+// deployment actions that can cause material or irreversible harm.
+export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|CREATE_PAYMENT|CHARGE|TRANSFER|INVITE|REVOKE|UPDATE_PERMISSION|MERGE|DEPLOY)(_|$)/i;
 
 export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
+  "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
   "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
   "CHUCK_ATTENTION_STATE",
@@ -43,11 +47,10 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     return String(args.action ?? "") === "push" ? "approval_required" : "private";
   }
   if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
-  if (slug === "CHUCK_CREATE_TRIGGER") return "approval_required";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
-    // Batch execution gets one approval boundary only when at least one nested
-    // action is side-effecting. Read-only verification batches stay automatic.
+    // Batch execution stays autonomous for routine communication/content
+    // actions and pauses only when a nested action is materially risky.
     const nested = Array.isArray(args.tools) ? args.tools : [];
     const hasSideEffect = nested.some((item) => {
       const name = item && typeof item === "object" ? String((item as Record<string, unknown>).tool_slug ?? (item as Record<string, unknown>).name ?? "") : "";
