@@ -26,6 +26,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_PLAN_DELEGATION",
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
+  "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
 ]);
 
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
@@ -42,6 +43,10 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
  * they are deliberately added here.
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
+  if (slug === "CHUCK_DAYTONA_BROWSER") {
+    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method"].includes(String(args.vaultAction ?? ""))) return "approval_required";
+    return "private";
+  }
   if (slug === "CHUCK_DAYTONA_GIT") {
     // Daytona is Chusky's private workspace; only pushing leaves it.
     return String(args.action ?? "") === "push" ? "approval_required" : "private";
@@ -108,6 +113,11 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_PTY: "⌨️ I’m working in your persistent terminal…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
   CHUCK_DAYTONA_BROWSER: "🌐 I’m browsing with my private computer workspace…",
+  CHUCK_VAULT_SAVE: "🔐 I’m opening a private encrypted website-login form…",
+  CHUCK_VAULT_LIST: "🔐 I’m checking your connected websites…",
+  CHUCK_VAULT_STATUS: "🔐 I’m checking your secure browser session…",
+  CHUCK_VAULT_LOGIN: "🔐 I’m signing in through your encrypted website identity…",
+  CHUCK_VAULT_LOGOUT: "🔐 I’m ending Chusky’s saved browser session…",
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
   CHUCK_CREATE_PDF: "📄 I’m building and checking your PDF…",
   CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking your presentation…",

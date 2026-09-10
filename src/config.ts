@@ -323,6 +323,13 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Use Neon's direct (non-pooler) URL only for explicit schema migrations.
   betterAuthMigrationDatabaseUrl: optional("BETTER_AUTH_MIGRATION_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
+  // ── Credential vault (opt-in; Cloudflare Worker + D1) ───────────────
+  // The encryption master key is deliberately *not* available in this
+  // process. It is held only by the Cloudflare Worker. Railway has just the
+  // request-authentication secret needed to call the broker over HTTPS.
+  vaultEnabled: optional("VAULT_ENABLED", "false") === "true",
+  vaultBrokerUrl: optional("VAULT_BROKER_URL", ""),
+  vaultBrokerHmacSecret: optional("VAULT_BROKER_HMAC_SECRET", ""),
   // Private Oracle root/bootstrap key for the self-hosted Developer API. It is
   // never a CLI device token or a developer project's scoped chsk_ key.
   apiKey: optional("CHUSKY_PROJECT_KEY", ""),

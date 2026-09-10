@@ -6,6 +6,7 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
+import { guardVaultBrowserAction, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
@@ -1765,6 +1766,7 @@ export class DaytonaEngine {
   async browser(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultBrowserAction(userId, sandbox.id, args);
     if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args);
     if (action === "status") {
       const stored = await getDaytonaWorkspace(userId);
@@ -1787,7 +1789,9 @@ export class DaytonaEngine {
       return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }) };
     }
     if (action === "find") {
-      return { sandboxId: sandbox.id, matches: await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) }) };
+      const matches = await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) });
+      await rememberVaultBrowserNodes(userId, sandbox.id, matches);
+      return { sandboxId: sandbox.id, matches };
     }
     if (action === "focus") return this.computer(userId, { action: "accessibility_focus", nodeId: args.nodeId });
     if (action === "invoke") return this.computer(userId, { action: "accessibility_invoke", nodeId: args.nodeId, nodeAction: args.nodeAction });
@@ -1803,6 +1807,38 @@ export class DaytonaEngine {
       return this.computer(userId, { action: "keyboard_hotkey", keys: key });
     }
     throw new DaytonaInputError(`Unsupported browser action: ${action}`);
+  }
+
+  /**
+   * Trusted vault-only path. This method is intentionally not reachable from
+   * CHUCK_DAYTONA_BROWSER: it receives secrets only from the credential broker
+   * and returns no accessibility tree, screenshot, or typed values.
+   */
+  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean }> {
+    const login = new URL(input.loginUrl);
+    if (login.origin !== input.origin || login.protocol !== "https:") throw new DaytonaInputError("Vault login URL does not match its authorised origin");
+    await this.browser(userId, { action: "open", url: login.toString() });
+    const node = async (role: string, name: string, field: string): Promise<string> => {
+      const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }) as any;
+      const matches = Array.isArray(result) ? result : Array.isArray(result?.matches) ? result.matches : [];
+      if (matches.length !== 1) throw new DaytonaInputError(`Vault login needs exactly one ${field} matching its configured accessibility label`);
+      const id = matches[0]?.nodeId ?? matches[0]?.id;
+      if (typeof id !== "string" || !id) throw new DaytonaInputError(`Daytona did not return an accessible node for ${field}`);
+      return id;
+    };
+    const usernameNode = await node("textbox", input.usernameFieldLabel, "username field");
+    const passwordNode = await node("textbox", input.passwordFieldLabel, "password field");
+    const submitNode = await node("button", input.submitButtonLabel, "submit button");
+    await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username });
+    await this.computer(userId, { action: "accessibility_set_value", nodeId: passwordNode, value: input.password });
+    await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode });
+    // Never claim success merely because the form was submitted. A site that
+    // still exposes its password field is treated as requiring re-auth.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const after = await this.computer(userId, { action: "accessibility_find", role: "textbox", name: input.passwordFieldLabel, nameMatch: "exact", limit: 1 }) as any;
+    const remaining = Array.isArray(after) ? after : Array.isArray(after?.matches) ? after.matches : [];
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    return { workspaceId: sandbox.id, authenticated: remaining.length === 0 };
   }
 
   private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<void> {

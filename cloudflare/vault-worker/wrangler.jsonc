@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/wrangler@latest/config-schema.json",
+  "name": "chusky-vault-broker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "d1_databases": [{
+    "binding": "VAULT_DB",
+    "database_name": "chusky-vault-prod",
+    "database_id": "ff68b333-dc28-48b8-93cf-e2a0c82f62ae",
+    "migrations_dir": "migrations"
+  }]
+}

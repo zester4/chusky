@@ -24,6 +24,8 @@ import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObje
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
+import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
+import { loginWithVault } from "./vault/broker.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -495,6 +497,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     })();
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
     case "CHUCK_DAYTONA_BROWSER": return daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+    case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
+    case "CHUCK_VAULT_LIST": return listVault(userId);
+    case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined);
+    case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, () => loginWithVault(userId, text(args.service), { login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }));
+    case "CHUCK_VAULT_LOGOUT": return logoutVault(userId, text(args.service));
     case "CHUCK_CREATE_PDF": return daytonaCall(runtime, () => daytonaEngine.createPdf(userId, args));
     case "CHUCK_CREATE_PRESENTATION": return daytonaCall(runtime, () => daytonaEngine.createPresentation(userId, args));
     case "CHUCK_CREATE_DOCUMENT": return daytonaCall(runtime, () => daytonaEngine.createDocument(userId, args));
