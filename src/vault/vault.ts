@@ -10,7 +10,10 @@ function safeUrl(value: string, origin: string, field: string): string { const u
 function account(userId: number): string { return `account_${userId}`; }
 function assertEnabled(): void { if (!config.vaultEnabled || !vaultBroker.enabled()) throw new Error("Vault is not enabled. Configure VAULT_ENABLED=true, VAULT_BROKER_URL, and VAULT_BROKER_HMAC_SECRET."); }
 
-export async function initVault(): Promise<void> { assertEnabled(); }
+// Vault availability is checked at tool execution time. An incomplete
+// optional integration must not prevent Telegram, health checks, and the
+// other channels from starting.
+export async function initVault(): Promise<void> { return; }
 export async function beginVaultSetup(userId: number, request: VaultSetupRequest) {
   assertEnabled(); const service = normaliseVaultService(request.service); const origin = normaliseVaultOrigin(request.origin);
   const result = await vaultBroker.beginSetup(account(userId), { service, origin, loginUrl: safeUrl(request.loginUrl || origin, origin, "loginUrl"), logoutUrl: request.logoutUrl ? safeUrl(request.logoutUrl, origin, "logoutUrl") : undefined, usernameFieldLabel: text(request.usernameFieldLabel || "Email or username", "usernameFieldLabel", 120), passwordFieldLabel: text(request.passwordFieldLabel || "Password", "passwordFieldLabel", 120), submitButtonLabel: text(request.submitButtonLabel || "Sign in", "submitButtonLabel", 120) });

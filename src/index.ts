@@ -89,12 +89,10 @@ import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
 import { processSendblueWorkflow } from "./sendblueWorkflow.js";
 import { posthog } from "./posthog.js";
-import { initVault } from "./vault/vault.js";
 
 async function main(): Promise<void> {
   await initStore();
   if (config.betterAuthEnabled) await initAuth();
-  if (config.vaultEnabled) await initVault();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
