@@ -24,11 +24,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the XChat setup and SMS channel release", async () => {
+test("current upgrade manifest announces the Cloudflare vault and Daytona release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.1.7");
-  assert.equal(notice?.version, "3.1.7");
-  assert.match(formatAgentUpgradeNotice(notice!), /encrypted XChat/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Twilio SMS/);
-  assert.match(formatAgentUpgradeNotice(notice!), /activity subscriptions/);
+  assert.equal(notice?.id, "release-3.1.8");
+  assert.equal(notice?.version, "3.1.8");
+  assert.match(formatAgentUpgradeNotice(notice!), /Cloudflare D1/);
+  assert.match(formatAgentUpgradeNotice(notice!), /replay protection/);
+  assert.match(formatAgentUpgradeNotice(notice!), /trusted Daytona/);
 });

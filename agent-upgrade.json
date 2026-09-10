@@ -1,11 +1,11 @@
 {
-  "id": "release-3.1.7",
-  "version": "3.1.7",
+  "id": "release-3.1.8",
+  "version": "3.1.8",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added encrypted XChat DMs and groups with verified webhooks, mentions, media, typing, and reactions.",
-    "Added automatic XChat bot identity checks, encrypted setup diagnostics, and idempotent activity subscriptions.",
-    "Added Twilio SMS and MMS through Messaging Services plus Telegram channel linking and durable gateway delivery."
+    "Added a Cloudflare D1 credential vault with envelope-encrypted website logins and one-time private setup links.",
+    "Added signed broker requests, replay protection, audit metadata, and safe session status without exposing credentials to Chusky's model.",
+    "Connected vault login to the trusted Daytona browser path with autonomous browsing controls and protected high-impact actions."
   ],
-  "createdAt": "2026-09-09T01:05:58.549Z"
+  "createdAt": "2026-09-10T12:15:59.614Z"
 }
