@@ -14,7 +14,10 @@ export class VaultBrokerClient {
   private async request<T>(path: string, body: Record<string, unknown>): Promise<T> {
     if (!this.enabled()) throw new Error("Vault is unavailable. Configure VAULT_ENABLED=true, VAULT_BROKER_URL, and VAULT_BROKER_HMAC_SECRET.");
     const payload = JSON.stringify(body); const timestamp = String(Date.now()); const nonce = randomUUID(); const requestId = randomUUID();
-    const digest = createHash("sha256").update(payload).digest("hex");
+    // The Cloudflare Worker signs the base64url SHA-256 body digest. Keep the
+    // canonical representation identical on both sides or every request is
+    // rejected as unauthorized even when the secret is correct.
+    const digest = createHash("sha256").update(payload).digest("base64url");
     const signature = createHmac("sha256", this.secret).update(`POST\n${path}\n${timestamp}\n${nonce}\n${digest}`).digest("base64url");
     const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 15_000);
     try {

@@ -17,6 +17,7 @@ For deep work, load only the references relevant to the task:
 - [Security and trust boundaries](references/security.md) for authentication, ownership, approvals, prompt injection, webhooks, locks, and secrets.
 - [Operations and deployment](references/operations.md) for startup checks, logging, incident response, and release discipline.
 - [Testing strategy](references/testing.md) for the test matrix and evaluation cases.
+- [Browser, vault, and Cloudflare](references/browser.md) for Daytona browser operation, private website identities, the credential broker, Cloudflare Worker/D1 deployment, and browser verification.
 - [Developer API and SDK](references/sdk/developer-api.md) when changing the `/v1` API, `sdk/` package, project credentials, R2 files, or developer webhooks.
 
 ## Identity and compatibility
@@ -38,6 +39,8 @@ For deep work, load only the references relevant to the task:
 - `src/nativeTools.ts`: reminder, recurring-job, scratchpad, and structured-memory implementations.
 - `src/store.ts`: Redis/in-memory persistence, session records, histories, summaries, memories, approvals, locks, and deduplication.
 - `src/policy.ts`: risky-tool detection and human-readable progress messages.
+- `src/vault/`: private website identity storage, Cloudflare broker client, Daytona browser-session handling, credential injection, policy, and audit boundaries.
+- `cloudflare/vault-worker/`: Cloudflare Worker broker source, D1 migration, and Wrangler configuration. The Worker owns decryption and never returns plaintext credentials.
 - `src/types.ts`: shared API-message, tool-call, and media types.
 - `src/markdown.ts`: Markdown-to-Telegram-HTML conversion and message splitting.
 - `src/channels/sendblueFormatting.ts`: Sendblue-specific Markdown-to-plain-text conversion for iMessage.
@@ -226,6 +229,8 @@ Current native capabilities include:
 - `CHUCK_SCRATCHPAD_WRITE`, `CHUCK_SCRATCHPAD_READ`, `CHUCK_SCRATCHPAD_CLEAR`: private working notes.
 - `CHUCK_SAVE_MEMORY`, `CHUCK_SEARCH_MEMORY`, `CHUCK_FORGET_MEMORY`: explicit structured facts and preferences.
 - `CHUCK_ARTIFACT`: durable user-owned websites, reports, presentations, PDFs, spreadsheets, images, videos, projects, and ZIP deliverables. Text websites/reports can be created directly; binary files must be generated and verified in Daytona before registration and delivery.
+- `CHUCK_DAYTONA_BROWSER` and `CHUCK_DAYTONA_COMPUTER`: private isolated browser/desktop operations. Inspect before acting and verify the result after every interaction.
+- `CHUCK_VAULT_SAVE`, `CHUCK_VAULT_LIST`, `CHUCK_VAULT_STATUS`, `CHUCK_VAULT_LOGIN`, and `CHUCK_VAULT_LOGOUT`: private website identity setup and retained-session management. Credentials must never be accepted from model arguments or chat.
 
 Require the agent to call a tool before claiming completion. Validate all tool arguments, enforce user ownership, keep responses bounded, and do not expose unrelated users' records.
 
