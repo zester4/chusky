@@ -140,6 +140,36 @@ function boundedText(value: unknown, label: string, max: number): string {
   return text;
 }
 
+/** Daytona Computer Use exposes desktop processes, not Chrome/browser names. */
+function computerProcessName(value: unknown, fallback?: "novnc"): "novnc" | "x11vnc" | "xfce4" | "xvfb" {
+  const requested = String(value ?? fallback ?? "").trim().toLowerCase();
+  const aliases: Record<string, "novnc" | "x11vnc" | "xfce4" | "xvfb"> = {
+    novnc: "novnc", browser: "novnc", chrome: "novnc",
+    x11vnc: "x11vnc", vnc: "x11vnc",
+    xfce4: "xfce4", desktop: "xfce4", xvfb: "xvfb",
+  };
+  const processName = aliases[requested];
+  if (!processName) throw new DaytonaInputError("processName must be one of novnc, x11vnc, xfce4, or xvfb. Use ordinary browser status/snapshot tools to inspect a website.");
+  return processName;
+}
+
+/** A handoff must be a direct signed preview, never the Daytona dashboard. */
+function directHandoffUrl(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new DaytonaInputError("Daytona returned an invalid private browser handoff URL");
+  }
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.toLowerCase();
+  if (url.protocol !== "https:" || host === "app.daytona.io" || /\/(?:login|signin)(?:\/|$)/.test(path)) {
+    throw new DaytonaInputError("Daytona returned a dashboard login URL instead of a direct private browser session. Please retry the handoff.");
+  }
+  return url.toString();
+}
+
 const ARTIFACT_TYPES = new Set<ArtifactType>(["website", "report", "docx", "presentation", "pdf", "spreadsheet", "image", "video", "zip", "project"]);
 const ARTIFACT_MIME: Record<ArtifactType, string> = {
   website: "text/html", report: "text/markdown", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1453,8 +1483,7 @@ export class DaytonaEngine {
     const requestedTtl = Number(config.daytonaBrowserHandoffTtlSeconds);
     const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
     const preview = await sandbox.getSignedPreviewUrl(port, ttlSeconds);
-    const url = String(preview.url ?? "").trim();
-    if (!/^https:\/\//i.test(url)) throw new DaytonaInputError("Daytona returned an invalid private browser handoff URL");
+    const url = directHandoffUrl(preview.url);
     return {
       sandboxId: sandbox.id,
       url,
@@ -1662,7 +1691,7 @@ export class DaytonaEngine {
     const computer = sandbox.computerUse;
     if (action === "status") return computer.getStatus();
     if (action === "stop") return computer.stop();
-    if (action === "process_status") return computer.getProcessStatus(boundedText(args.processName, "processName", 40));
+    if (action === "process_status") return computer.getProcessStatus(computerProcessName(args.processName, "novnc"));
     if (action === "recording_list") return computer.recording.list();
     if (action === "recording_get") return computer.recording.get(boundedText(args.recordingId, "recordingId", 200));
     if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
@@ -1690,9 +1719,9 @@ export class DaytonaEngine {
       case "display": return computer.display.getInfo();
       case "display_info": return computer.display.getInfo();
       case "windows": return computer.display.getWindows();
-      case "process_restart": return computer.restartProcess(boundedText(args.processName, "processName", 40));
-      case "process_logs": return computer.getProcessLogs(boundedText(args.processName, "processName", 40));
-      case "process_errors": return computer.getProcessErrors(boundedText(args.processName, "processName", 40));
+      case "process_restart": return computer.restartProcess(computerProcessName(args.processName));
+      case "process_logs": return computer.getProcessLogs(computerProcessName(args.processName));
+      case "process_errors": return computer.getProcessErrors(computerProcessName(args.processName));
       case "mouse_position": return computer.mouse.getPosition();
       case "recording_start": return computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined);
       case "recording_download": {

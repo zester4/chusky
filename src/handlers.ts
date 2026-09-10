@@ -283,7 +283,14 @@ async function saveTelegramConversation(ctx: Context, userId: number, text: stri
 /** Send expiring browser handoff URLs outside saved conversational history. */
 async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): Promise<void> {
   for (const link of links ?? []) {
-    await ctx.reply(`${link.label}\n${link.url}\n\nThis private link expires soon. Complete the website step there, then return here and say continue.`);
+    // A Telegram URL button preserves the signed Daytona preview exactly and
+    // avoids an automatic chat-link preview navigating to a dashboard login.
+    await ctx.reply(`${link.label}\n\nThis private session expires soon. Complete the website step there, then return here and say continue.`, {
+      link_preview_options: { is_disabled: true },
+      reply_markup: {
+        inline_keyboard: [[{ text: "Open private browser session", url: link.url }]],
+      },
+    });
   }
 }
 

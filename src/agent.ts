@@ -904,6 +904,7 @@ export async function runAgent(
 
       let result: string;
       let execResult: unknown;
+      let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
       try {
         const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
           || ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"].includes(slug);
@@ -947,6 +948,7 @@ export async function runAgent(
           await persistRun("waiting_approval", "run.approval_requested", undefined, { approvalId: approval.id, tool: slug, callId: call.id, round });
           throw new ApprovalRequiredError(approval.id, slug, args);
         }
+        effectiveAuditArgs = executionArgs;
         // Approval records are durable and may be resumed after a model retry.
         // Validate the *effective* argument object as well as the model's
         // current proposal: otherwise an older/incomplete approval can bypass
@@ -1096,7 +1098,7 @@ export async function runAgent(
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;
         if (signal?.aborted) throw e;
-        logger.warn(safeToolAudit({ tool: slug, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
+        logger.warn(safeToolAudit({ tool: slug, args: effectiveAuditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
         result = `Error executing ${slug}: ${String(e)}`;
         if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";

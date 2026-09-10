@@ -235,6 +235,17 @@ test("computer-use actions start the desktop and return screenshots or structure
   assert.equal(screenshot.mediaType, "image/jpeg");
 });
 
+test("computer process diagnostics use Daytona desktop names and a bare status defaults to noVNC", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820061) as any;
+  const names: string[] = [];
+  sandbox.computerUse.getProcessStatus = async (name: string) => { names.push(name); return { name, status: "running" }; };
+  await e.computer(820061, { action: "process_status" });
+  await e.computer(820061, { action: "process_status", processName: "browser" });
+  assert.deepEqual(names, ["novnc", "novnc"]);
+  await assert.rejects(() => e.computer(820061, { action: "process_logs", processName: "postgres" }), /novnc, x11vnc, xfce4, or xvfb/);
+});
+
 test("computer-use rejects invalid coordinates and oversized keyboard input", async () => {
   const e = engine();
   await assert.rejects(() => e.computer(820007, { action: "mouse_click", x: -1, y: 20 }), /coordinate/);
@@ -332,6 +343,14 @@ test("creates a short-lived private handoff into the retained noVNC browser", as
   assert.match(handoff.url, /^https:\/\/preview\.test\/signed\/6080\?/);
   assert.equal(requested[0]?.ttl, 300);
   assert.match(handoff.message, /same retained browser/i);
+});
+
+test("rejects a Daytona dashboard URL as a private browser handoff", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820018) as any;
+  sandbox.computerUse.getProcessStatus = async () => ({ status: "running" });
+  sandbox.getSignedPreviewUrl = async () => ({ url: "https://app.daytona.io/login" });
+  await assert.rejects(() => e.browserHandoff(820018), /dashboard login URL/i);
 });
 
 test("app projects create an isolated branch, verify before preview, retain evidence, and stop cleanly", async () => {
