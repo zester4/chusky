@@ -27,6 +27,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
+  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
 ]);
 
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
@@ -118,6 +120,17 @@ const STATUSES: Record<string, string> = {
   CHUCK_VAULT_STATUS: "🔐 I’m checking your secure browser session…",
   CHUCK_VAULT_LOGIN: "🔐 I’m signing in through your encrypted website identity…",
   CHUCK_VAULT_LOGOUT: "🔐 I’m ending Chusky’s saved browser session…",
+  CHUCK_DAYTONA_BROWSER_HANDOFF: "🔐 I’m preparing a private browser handoff…",
+  CHUCK_SHOPPING_START: "🛒 I’m setting up your shopping plan…",
+  CHUCK_SHOPPING_LIST: "🛒 I’m checking your shopping plans…",
+  CHUCK_SHOPPING_SELECT_RETAILER: "🛒 I’m selecting that retailer…",
+  CHUCK_SHOPPING_UPDATE: "🛒 I’m updating your shopping plan…",
+  CHUCK_SHOPPING_CANCEL: "🛒 I’m cancelling that shopping plan…",
+  CHUCK_SHOPPING_PAUSE: "🛒 I’m preserving your shopping session while you complete that website step…",
+  CHUCK_SHOPPING_RESUME: "🛒 I’m resuming your retained shopping browser…",
+  CHUCK_SHOPPING_SAVE_SITE: "🛒 I’m saving that shopping site for you…",
+  CHUCK_SHOPPING_LIST_SITES: "🛒 I’m checking your saved shopping sites…",
+  CHUCK_SHOPPING_REMOVE_SITE: "🛒 I’m removing that saved shopping site…",
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
   CHUCK_CREATE_PDF: "📄 I’m building and checking your PDF…",
   CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking your presentation…",

@@ -258,6 +258,10 @@ const SHARED_GROUP_TOOL_DENY = [
   // A setup link is a bearer credential and an authenticated identity belongs
   // to one account, never a shared group conversation.
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
+  // Shopping plans include private purchase intent and lead into a private
+  // website identity, so a shared group must not create or inspect them.
+  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
 ] as const;
 
 async function telegramConversationHistory(ctx: Context, privateHistory: Awaited<ReturnType<typeof getSession>>["history"]) {
@@ -274,6 +278,13 @@ async function saveTelegramConversation(ctx: Context, userId: number, text: stri
   await appendChannelConversationMessages({
     id: telegramConversationId(ctx), accountId: `account_${userId}`, userId, provider: "telegram", scope: "shared", messages,
   });
+}
+
+/** Send expiring browser handoff URLs outside saved conversational history. */
+async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): Promise<void> {
+  for (const link of links ?? []) {
+    await ctx.reply(`${link.label}\n${link.url}\n\nThis private link expires soon. Complete the website step there, then return here and say continue.`);
+  }
 }
 
 function telegramAgentOptions(ctx: Context, receivedAt: number) {
@@ -370,6 +381,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
     await saveTelegramConversation(ctx, userId, historyLabel, result.text, receivedAt);
     if (result.cost) await addUsage(userId, result.cost);
     await editMarkdown(ctx, status.message_id, result.text);
+    await sendPrivateBrowserLinks(ctx, result.privateLinks);
     await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
     // Media-originated requests can also create verified Daytona artifacts.
     // ctx.replyWithDocument preserves the current Telegram group/thread, just
@@ -1292,6 +1304,7 @@ export function registerHandlers(bot: Bot): void {
       }
 
       await editMarkdown(ctx, statusMsg.message_id, result.text, html);
+      await sendPrivateBrowserLinks(ctx, result.privateLinks);
       await sendVoiceReply(ctx, result.text, s.voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
       const generatedImages = result.generatedImages ?? [];

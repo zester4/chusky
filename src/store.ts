@@ -12,6 +12,7 @@ import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
+import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -45,6 +46,8 @@ export interface UserSession {
   sdkProjects?: SdkProjectRecord[];
   faceTimeCalls?: FaceTimeCallRecord[];
   videoJobs?: VideoJobRecord[];
+  shoppingRuns?: ShoppingRun[];
+  shoppingSites?: ShoppingSite[];
   handoffRecords?: HandoffRecord[];
   createdAt: number;
   updatedAt: number;
@@ -1873,7 +1876,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -1937,7 +1940,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2498,6 +2501,72 @@ export async function clearScratchpad(uid: number, key?: string): Promise<void> 
   const s = await getSession(uid);
   if (key) delete s.scratchpad[key]; else s.scratchpad = {};
   await saveSession(uid, s);
+}
+
+/** Durable private shopping state. Retailer choices and items are stored here;
+ * website credentials and cookies remain exclusively in the vault broker. */
+export async function createShoppingRun(uid: number, input: Omit<ShoppingRun, "userId" | "createdAt" | "updatedAt">): Promise<ShoppingRun> {
+  const s = await getSession(uid);
+  const now = Date.now();
+  const run: ShoppingRun = { ...input, userId: uid, createdAt: now, updatedAt: now };
+  s.shoppingRuns = [run, ...(s.shoppingRuns ?? []).filter((item) => item.id !== run.id)].slice(0, 50);
+  await saveSession(uid, s);
+  return run;
+}
+
+export async function getShoppingRun(uid: number, id: string): Promise<ShoppingRun | undefined> {
+  return (await getSession(uid)).shoppingRuns?.find((run) => run.id === id && run.userId === uid);
+}
+
+export async function listShoppingRuns(uid: number, limit = 10): Promise<ShoppingRun[]> {
+  const capped = Math.max(1, Math.min(50, Math.floor(limit)));
+  return ((await getSession(uid)).shoppingRuns ?? []).filter((run) => run.userId === uid).slice(0, capped);
+}
+
+export async function updateShoppingRun(uid: number, id: string, patch: Partial<Omit<ShoppingRun, "id" | "userId" | "createdAt">>): Promise<ShoppingRun | undefined> {
+  const s = await getSession(uid);
+  const index = (s.shoppingRuns ?? []).findIndex((run) => run.id === id && run.userId === uid);
+  if (index < 0) return undefined;
+  const current = s.shoppingRuns![index]!;
+  const updated: ShoppingRun = { ...current, ...patch, id: current.id, userId: uid, createdAt: current.createdAt, updatedAt: Date.now() };
+  s.shoppingRuns![index] = updated;
+  await saveSession(uid, s);
+  return updated;
+}
+
+/**
+ * A saved shopping site is a convenience preference, not a website identity.
+ * Its separate bounded collection keeps credentials, browser cookies, and
+ * address/payment information out of the general Chusky session record.
+ */
+export async function saveShoppingSite(uid: number, input: Omit<ShoppingSite, "userId" | "createdAt" | "updatedAt">): Promise<ShoppingSite> {
+  const s = await getSession(uid);
+  const now = Date.now();
+  const existing = (s.shoppingSites ?? []).find((site) => site.id === input.id || site.origin === input.origin);
+  const site: ShoppingSite = { ...existing, ...input, userId: uid, createdAt: existing?.createdAt ?? now, updatedAt: now };
+  s.shoppingSites = [site, ...(s.shoppingSites ?? []).filter((item) => item.id !== site.id && item.origin !== site.origin)].slice(0, 100);
+  await saveSession(uid, s);
+  return site;
+}
+
+export async function listShoppingSites(uid: number, limit = 25): Promise<ShoppingSite[]> {
+  const capped = Math.max(1, Math.min(100, Math.floor(limit)));
+  return ((await getSession(uid)).shoppingSites ?? []).filter((site) => site.userId === uid).slice(0, capped);
+}
+
+export async function findShoppingSite(uid: number, input: string): Promise<ShoppingSite | undefined> {
+  const query = input.trim().toLowerCase();
+  return (await listShoppingSites(uid, 100)).find((site) => site.id === query || site.name.toLowerCase() === query || site.origin.toLowerCase() === query);
+}
+
+export async function removeShoppingSite(uid: number, id: string): Promise<boolean> {
+  const s = await getSession(uid);
+  const current = s.shoppingSites ?? [];
+  const next = current.filter((site) => site.userId !== uid || site.id !== id);
+  if (next.length === current.length) return false;
+  s.shoppingSites = next;
+  await saveSession(uid, s);
+  return true;
 }
 
 export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | "updatedAt" | "createdAt" | "source" | "sensitivity"> & Partial<Pick<MemoryFact, "id" | "createdAt" | "source" | "sensitivity">>): Promise<MemoryFact> {

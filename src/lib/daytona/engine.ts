@@ -1427,6 +1427,34 @@ export class DaytonaEngine {
   }
 
   /**
+   * Creates a deliberately short-lived bearer URL to the noVNC process that
+   * Computer Use started inside the caller's retained sandbox. This is the
+   * one controlled way for a person to solve CAPTCHA/2FA in exactly the
+   * browser Chusky is using; it neither creates a second profile nor exports
+   * cookies/credentials to the model. The returned URL is private output and
+   * must only be delivered by the caller's direct channel.
+   */
+  async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    await sandbox.computerUse.start();
+    const vnc = await sandbox.computerUse.getProcessStatus("novnc") as { status?: unknown; state?: unknown };
+    const state = String(vnc?.status ?? vnc?.state ?? "").toLowerCase();
+    if (/(failed|stopped|error|not.?running)/.test(state)) throw new DaytonaInputError("Daytona's private browser handoff is unavailable because the noVNC process is not running.");
+    const port = boundedInt(config.daytonaVncPort, 6080, 65535);
+    const requestedTtl = Number(config.daytonaBrowserHandoffTtlSeconds);
+    const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
+    const preview = await sandbox.getSignedPreviewUrl(port, ttlSeconds);
+    const url = String(preview.url ?? "").trim();
+    if (!/^https:\/\//i.test(url)) throw new DaytonaInputError("Daytona returned an invalid private browser handoff URL");
+    return {
+      sandboxId: sandbox.id,
+      url,
+      expiresAt: Date.now() + ttlSeconds * 1000,
+      message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.`,
+    };
+  }
+
+  /**
    * App-project control plane. This deliberately keeps a project's source,
    * verification evidence, local branch and preview process together rather
    * than treating a preview URL as proof that an application works.

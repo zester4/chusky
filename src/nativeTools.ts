@@ -26,6 +26,7 @@ import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js
 import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
+import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -497,11 +498,26 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     })();
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
     case "CHUCK_DAYTONA_BROWSER": return daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+    case "CHUCK_DAYTONA_BROWSER_HANDOFF": return daytonaCall(runtime, async () => {
+      const handoff = await daytonaEngine.browserHandoff(userId, args.reason ? text(args.reason) : undefined);
+      const shoppingPlan = args.shoppingPlanId ? await pauseShopping(userId, { id: text(args.shoppingPlanId), reason: args.reason ?? "site_challenge" }) : undefined;
+      return { ...handoff, ...(shoppingPlan ? { shoppingPlan: { id: shoppingPlan.id, status: shoppingPlan.status, pausedReason: shoppingPlan.pausedReason } } : {}) };
+    });
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
     case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined);
     case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, () => loginWithVault(userId, text(args.service), { login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }));
     case "CHUCK_VAULT_LOGOUT": return logoutVault(userId, text(args.service));
+    case "CHUCK_SHOPPING_START": return startShopping(userId, args);
+    case "CHUCK_SHOPPING_LIST": return listShopping(userId, args.limit === undefined ? undefined : Number(args.limit));
+    case "CHUCK_SHOPPING_SELECT_RETAILER": return selectShoppingRetailer(userId, args);
+    case "CHUCK_SHOPPING_UPDATE": return updateShopping(userId, args);
+    case "CHUCK_SHOPPING_CANCEL": return cancelShopping(userId, text(args.id));
+    case "CHUCK_SHOPPING_PAUSE": return pauseShopping(userId, args);
+    case "CHUCK_SHOPPING_RESUME": return resumeShopping(userId, text(args.id));
+    case "CHUCK_SHOPPING_SAVE_SITE": return saveShoppingSitePreference(userId, args);
+    case "CHUCK_SHOPPING_LIST_SITES": return listSavedShoppingSites(userId, args.limit === undefined ? undefined : Number(args.limit));
+    case "CHUCK_SHOPPING_REMOVE_SITE": return removeSavedShoppingSite(userId, text(args.id));
     case "CHUCK_CREATE_PDF": return daytonaCall(runtime, () => daytonaEngine.createPdf(userId, args));
     case "CHUCK_CREATE_PRESENTATION": return daytonaCall(runtime, () => daytonaEngine.createPresentation(userId, args));
     case "CHUCK_CREATE_DOCUMENT": return daytonaCall(runtime, () => daytonaEngine.createDocument(userId, args));

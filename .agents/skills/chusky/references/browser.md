@@ -49,8 +49,12 @@ because a user asks to connect a website account.
    resulting page or state.
 5. Re-check the page after navigation, form submission, or any consequential
    action. Keep browser state in the retained Daytona workspace.
-6. If CAPTCHA, MFA/2FA, consent, or a site-specific challenge appears, pause and
-   ask the user to complete it in the private browser session.
+6. If CAPTCHA, MFA/2FA, consent, or a site-specific challenge appears, pause
+   the affected workflow and use `CHUCK_DAYTONA_BROWSER_HANDOFF`. It creates a
+   short-lived signed noVNC link into the same retained private desktop, so the
+   user completes the step without losing browser state. Deliver it only to the
+   owner’s direct channel; after they reply “continue”, inspect the page before
+   resuming. Never export cookies, credentials, or a permanent VNC endpoint.
 
 During a vault-authenticated session, normal browser tools must not receive a
 password or cookie. The browser policy requires a matching `vaultAction` for
@@ -92,6 +96,11 @@ Railway runtime variables:
 - `VAULT_ENABLED=true`
 - `VAULT_BROKER_URL=https://chusky-vault-broker.<account>.workers.dev`
 - `VAULT_BROKER_HMAC_SECRET=<same value as the Worker secret>`
+
+Browser handoff configuration (Railway):
+
+- `DAYTONA_VNC_PORT=6080` for the Computer Use snapshot’s noVNC port.
+- `DAYTONA_BROWSER_HANDOFF_TTL_SECONDS=300`, bounded to 60–900 seconds.
 
 Never put `VAULT_MASTER_KEY` in Railway. Chusky signs broker requests with the
 HMAC secret and the Worker verifies timestamp, nonce, request ID, and body hash.

@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { vaultBroker } from "./client.js";
 import { vaultStatus } from "./vault.js";
 import { classifyBrowserTarget, vaultActionPolicy, type VaultAction } from "./policy.js";
 
@@ -12,7 +13,10 @@ function matches(value: unknown): Array<{ nodeId?: unknown; id?: unknown; name?:
 }
 
 export async function rememberVaultBrowserNodes(userId: number, workspaceId: string, result: unknown): Promise<void> {
-  if (!config.vaultEnabled) return;
+  // An optional or temporarily misconfigured broker must not break ordinary
+  // Daytona browsing. Once the broker is actually configured, all retained
+  // authenticated sessions continue through the strict guard below.
+  if (!config.vaultEnabled || !vaultBroker.enabled()) return;
   for (const item of matches(result)) {
     const nodeId = typeof item.nodeId === "string" ? item.nodeId : typeof item.id === "string" ? item.id : undefined;
     if (nodeId && typeof item.name === "string") knownNodes.set(key(userId, workspaceId, nodeId), item.name.slice(0, 300));
@@ -21,7 +25,7 @@ export async function rememberVaultBrowserNodes(userId: number, workspaceId: str
 
 /** Enforces a narrow UI policy only while a matching retained identity is authenticated. */
 export async function guardVaultBrowserAction(userId: number, workspaceId: string, args: Record<string, unknown>): Promise<void> {
-  if (!config.vaultEnabled) return;
+  if (!config.vaultEnabled || !vaultBroker.enabled()) return;
   const active = (await vaultStatus(userId)).some((session) => session.workspaceId === workspaceId && session.status === "authenticated");
   if (!active) return;
   const action = String(args.action ?? "");

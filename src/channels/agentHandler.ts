@@ -33,6 +33,12 @@ function reply(conversation: ChuskyConversation, text: string, idempotencySeed: 
   };
 }
 
+/** Private handoff links are never written to Chusky conversation history. */
+function withPrivateLinks(text: string, links: Awaited<ReturnType<typeof runAgent>>["privateLinks"]): string {
+  if (!links?.length) return text;
+  return `${text}\n\n${links.map((link) => `${link.label}: ${link.url}\nThis private link expires soon; complete the website step, then reply “continue”.`).join("\n\n")}`;
+}
+
 function agentInstructions(conversation: ChuskyConversation): string | undefined {
   if (conversation.scope !== "shared") return undefined;
   return sharedGroupInstructions(conversation.provider);
@@ -172,12 +178,12 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     try {
       const prepared = await buildAgentInput(message);
       await persistInboundImages(message, conversation.userId);
-      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
+      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT", "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
       const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
-      return reply(conversation, result.text, message.providerEventId, { kind: "message", ...(attachments.length ? { attachments } : {}) });
+      return reply(conversation, withPrivateLinks(result.text, result.privateLinks), message.providerEventId, { kind: "message", ...(attachments.length ? { attachments } : {}) });
     } catch (error) {
       if (error instanceof ApprovalRequiredError) {
         const blocks = conversation.provider === "slack" ? approvalBlocks(error.approvalId, error.toolSlug) : undefined;

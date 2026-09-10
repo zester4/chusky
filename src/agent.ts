@@ -46,6 +46,7 @@ import { relevantSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
+import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -521,6 +522,8 @@ export interface AgentResult {
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
+  /** Short-lived bearer links are delivered separately and excluded from history. */
+  privateLinks?: { url: string; expiresAt?: number; label: string }[];
 }
 
 export interface AgentChannelContext {
@@ -765,7 +768,7 @@ export async function runAgent(
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
+    { role: "system", content: `${config.chuckSystemPrompt}${channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}` : ""}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
@@ -780,6 +783,7 @@ export async function runAgent(
   const generatedReferenceImages: AgentResult["generatedImages"] = [];
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
+  const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
   const addUpgradeNotice = async (text: string): Promise<string> => {
@@ -877,7 +881,7 @@ export async function runAgent(
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
-      return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+      return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -1034,27 +1038,39 @@ export async function runAgent(
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
+          if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" && execResult && typeof execResult === "object") {
+            const handoff = execResult as { url?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
+            const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
+            if (!/^https:\/\//i.test(url)) throw new Error("Daytona did not return a valid private browser handoff link");
+            privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
+            // The model only needs confirmation that delivery will occur. Do
+            // not put a short-lived bearer URL into model context, run state,
+            // logs, or the saved conversation history.
+            execResult = { browserHandoffIssued: true, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
+          }
           if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
             const delivered = await abortable(daytonaEngine.downloadArtifact(userId, artifact.id), signal);
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
             execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact was delivered to the user." };
           }
-          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
             generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
-            // A screenshot used for visual QA must be visible to the model too,
-            // not only delivered to the user. The following model turn can
-            // therefore honestly review the rendered application and record a
-            // pass/fail result through CHUCK_DAYTONA_APP review.
-            messages.push({
-              role: "user",
-              content: [
-                { type: "text", text: `Live app visual-QA screenshot${screenshot.app?.id ? ` for ${screenshot.app.id}` : ""}. Inspect the actual rendered UI. If it meets the requested design and is readable, call CHUCK_DAYTONA_APP with action=review, passed=true and concise evidence. If it does not, call review with passed=false, then fix the app; never claim a visual pass without inspecting this image.` },
-                { type: "image_url", image_url: { url: `data:${screenshot.mediaType};base64,${screenshot.base64}` } },
-              ],
-            });
-            execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
+            if (slug === "CHUCK_DAYTONA_APP") {
+              // An app-QA screenshot must be visible to the model too so the
+              // following review is based on the rendered UI, not tool JSON.
+              messages.push({
+                role: "user",
+                content: [
+                  { type: "text", text: `Live app visual-QA screenshot${screenshot.app?.id ? ` for ${screenshot.app.id}` : ""}. Inspect the actual rendered UI. If it meets the requested design and is readable, call CHUCK_DAYTONA_APP with action=review, passed=true and concise evidence. If it does not, call review with passed=false, then fix the app; never claim a visual pass without inspecting this image.` },
+                  { type: "image_url", image_url: { url: `data:${screenshot.mediaType};base64,${screenshot.base64}` } },
+                ],
+              });
+              execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
+            } else {
+              execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The current Daytona browser screenshot was sent through the active private channel. No browser interaction was performed after capture." };
+            }
           }
         } else {
           execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
@@ -1109,7 +1125,7 @@ export async function runAgent(
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
   const finalText = await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks));
   await persistRun("completed", "run.completed_after_round_limit", finalText);
-  return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles };
+  return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

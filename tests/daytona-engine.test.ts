@@ -53,6 +53,7 @@ function fakeSandbox(id: string, state = "started") {
     computerUse: {
       start: async () => undefined,
       getStatus: async () => ({ status: "running" }),
+      getProcessStatus: async (name: string) => ({ name, status: "running" }),
       display: { getInfo: async () => ({ displays: [{ width: 800, height: 600 }] }), getWindows: async () => ({ windows: [] }) },
       screenshot: { takeCompressed: async () => ({ screenshot: Buffer.from("image").toString("base64"), sizeBytes: 5 }) },
       mouse: { move: async (x: number, y: number) => ({ x, y }), click: async () => ({ x: 1, y: 2 }), drag: async () => ({ x: 3, y: 4 }), scroll: async () => true },
@@ -279,6 +280,21 @@ test("returns a signed browser-accessible preview URL and rejects provider URL f
   assert.ok((preview.expiresAt ?? 0) > Date.now());
   sandbox.previewUrl = "localhost:3003";
   await assert.rejects(() => e.preview(820014, 3003), /invalid preview URL/);
+});
+
+test("creates a short-lived private handoff into the retained noVNC browser", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820017) as any;
+  const requested: Array<{ port: number; ttl: number }> = [];
+  sandbox.getSignedPreviewUrl = async (port: number, ttl: number) => {
+    requested.push({ port, ttl });
+    return { url: `https://preview.test/signed/${port}?handoff=opaque` };
+  };
+  const handoff = await e.browserHandoff(820017, "a CAPTCHA");
+  assert.equal(handoff.sandboxId, sandbox.id);
+  assert.match(handoff.url, /^https:\/\/preview\.test\/signed\/6080\?/);
+  assert.equal(requested[0]?.ttl, 300);
+  assert.match(handoff.message, /same retained browser/i);
 });
 
 test("app projects create an isolated branch, verify before preview, retain evidence, and stop cleanly", async () => {
