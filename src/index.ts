@@ -7,7 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getFaceTimeCall, updateFaceTimeCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, type ReminderDeliveryTarget } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow } from "./agent.js";
+import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -78,6 +78,7 @@ async function sdkTaskSkillInstructions(skills: string[] | undefined): Promise<s
 function sdkDurationSeconds(value: string | undefined): number | undefined { return ({ "5m": 300, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600, "3d": 259200, "1w": 604800 } as Record<string, number>)[value ?? ""]; }
 import { registerSdkApi } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
+import type { ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { registerAuthRoutes } from "./authRoutes.js";
 import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
@@ -108,6 +109,23 @@ async function main(): Promise<void> {
   channelGateway.register(new TelegramAdapter(bot));
   const app = new Hono();
   let xchatSetup: XchatSetupStatus | undefined;
+  let composioTriggerSetup: ComposioTriggerSetupStatus | undefined;
+  const composioWebhookUrl = config.composioWebhookUrl || (config.webhookUrl ? `${config.webhookUrl.replace(/\/+$/, "")}/composio/triggers` : "");
+  if (config.composioWebhookSecret || config.composioWebhookUrl) {
+    if (!config.composioWebhookSecret) {
+      composioTriggerSetup = { status: "misconfigured", error: "COMPOSIO_WEBHOOK_SECRET is required for trigger verification" };
+    } else if (!composioWebhookUrl) {
+      composioTriggerSetup = { status: "misconfigured", error: "COMPOSIO_WEBHOOK_URL or WEBHOOK_URL is required for trigger delivery" };
+    } else {
+      try {
+        composioTriggerSetup = await reconcileComposioTriggerWebhook(composioWebhookUrl);
+        logger.info({ webhookUrl: composioTriggerSetup.webhookUrl, subscriptionId: composioTriggerSetup.subscriptionId, version: composioTriggerSetup.version }, "Composio trigger subscription reconciled");
+      } catch (error) {
+        composioTriggerSetup = { status: "misconfigured", webhookUrl: composioWebhookUrl, error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300) };
+        logger.warn({ error }, "Composio trigger subscription reconciliation failed");
+      }
+    }
+  }
   if (config.betterAuthEnabled) registerAuthRoutes(app);
   const telegramWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/webhook`;
   const registerTelegramWebhook = async () => {
@@ -1500,9 +1518,10 @@ async function main(): Promise<void> {
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
         const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
-        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
+        const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: config.sendblueFaceTimeEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.facetime !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
+        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, composioTriggers: composioTriggerSetup, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
         return c.json({ ok: false, error: String(e) }, 503);

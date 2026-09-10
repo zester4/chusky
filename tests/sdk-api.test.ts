@@ -57,6 +57,14 @@ test("SDK file intents enforce the configured allowlist and maximum size before 
   assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_file");
 });
 
+test("SDK trigger catalogue rejects malformed toolkit route parameters before provider access", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user" };
+  const response = await api.fetch(new Request("http://local/v1/triggers/catalog/toolkits/not%20a%20toolkit", { headers }));
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_toolkit");
+});
+
 test("SDK webhook creation replays the same subscription on a lost response", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": "webhook_once" };

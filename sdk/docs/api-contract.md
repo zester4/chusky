@@ -35,6 +35,7 @@ remain ownerless operator records and are not visible through account routes.
 | Files | `POST /v1/files`, `POST /v1/files/:fileId/complete`, `GET/DELETE /v1/files/:fileId` | Direct R2 upload URLs are short-lived; a `HEAD` verification must succeed before download; deletion is owner-scoped. |
 | Webhooks | `POST /v1/webhooks`, `GET /v1/webhooks`, `DELETE /v1/webhooks/:id` | HTTPS-only subscription; secret is encrypted at rest and returned only on creation. |
 | Delivery history | `GET /v1/webhooks/:id/deliveries` | Bounded, safe delivery status for operational diagnosis; delete disables future deliveries. |
+| Trigger catalogue | `GET /v1/triggers/catalog/toolkits`, `GET /v1/triggers/catalog/toolkits/:toolkit` | Composio-backed, paginated trigger types for connected apps; the dashboard uses the same catalogue as Telegram. `POST /v1/triggers` can pin creation to a verified `connectedAccountId`. |
 | Observability | `GET /v1/audit-events`, `GET /v1/usage` | Bounded per-user audit trail and current usage snapshot. |
 
 ## Event stream

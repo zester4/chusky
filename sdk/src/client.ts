@@ -263,7 +263,17 @@ export class AccountResource {
   apps(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/apps", {}, options); }
   connectApp(toolkit: string, options?: RequestOptions): Promise<{ toolkit: string; url: string }> { return this.client.request(`/apps/${encodeURIComponent(toolkit)}/connect`, { method: "POST", body: "{}" }, options); }
   triggers(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/triggers", {}, options); }
-  createTrigger(params: { slug: string; triggerConfig?: Record<string, unknown> }, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/triggers", { method: "POST", body: JSON.stringify(params) }, options); }
+  triggerToolkits(params: { connectedOnly?: boolean } = {}, options?: RequestOptions): Promise<Page<Record<string, unknown>>> {
+    const query = params.connectedOnly === false ? "?connectedOnly=false" : "";
+    return this.client.request(`/triggers/catalog/toolkits${query}`, {}, options);
+  }
+  triggerTypes(toolkit: string, params: { page?: number; pageSize?: number } = {}, options?: RequestOptions): Promise<Page<Record<string, unknown>>> {
+    const query = new URLSearchParams();
+    if (params.page) query.set("page", String(params.page));
+    if (params.pageSize) query.set("pageSize", String(params.pageSize));
+    return this.client.request(`/triggers/catalog/toolkits/${encodeURIComponent(toolkit)}${query.size ? `?${query}` : ""}`, {}, options);
+  }
+  createTrigger(params: { slug: string; connectedAccountId?: string; triggerConfig?: Record<string, unknown> }, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/triggers", { method: "POST", body: JSON.stringify(params) }, options); }
   setTriggerState(triggerId: string, enabled: boolean, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }, options); }
   deleteTrigger(triggerId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "DELETE" }, options); }
   telegramLink(options?: RequestOptions): Promise<{ code: string; expiresAt: string }> { return this.client.request("/account/telegram-link", { method: "POST", body: "{}" }, options); }

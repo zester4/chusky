@@ -274,6 +274,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   composioRequireExplicitAccount: optional("COMPOSIO_REQUIRE_EXPLICIT_ACCOUNT", "true") === "true",
   composioCallbackUrl: optional("COMPOSIO_CALLBACK_URL", ""),
   composioWebhookSecret: optional("COMPOSIO_WEBHOOK_SECRET", ""),
+  composioWebhookUrl: optional("COMPOSIO_WEBHOOK_URL", ""),
 
   // ── Rate limiting ──────────────────────────────────────────────────
   rateLimit: positiveInt("RATE_LIMIT", 10),

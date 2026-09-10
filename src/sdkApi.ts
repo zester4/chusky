@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, deleteTrigger, fetchModels, getConnectionUrl, getToolkitStates, listTriggers, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, fetchModels, getConnectionUrl, getToolkitStates, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
@@ -338,12 +338,34 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 502, "triggers_unavailable", error instanceof Error ? error.message : "Triggers are temporarily unavailable."); }
   });
 
+  // These read-only catalogue routes power the dashboard's future trigger
+  // picker and deliberately share the same Composio-backed source as Telegram.
+  app.get("/v1/triggers/catalog/toolkits", async (c) => {
+    const connectedOnly = c.req.query("connectedOnly") !== "false";
+    try { return c.json({ data: await listAvailableTriggerToolkits(sdkUser(c)!.userId, connectedOnly) }); }
+    catch (error) { return apiError(c, 502, "trigger_catalog_unavailable", error instanceof Error ? error.message : "Trigger catalogue is temporarily unavailable."); }
+  });
+
+  app.get("/v1/triggers/catalog/toolkits/:toolkit", async (c) => {
+    const toolkit = c.req.param("toolkit").trim();
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(toolkit)) return apiError(c, 400, "invalid_toolkit", "Invalid toolkit name.");
+    const requestedPage = Math.max(1, Number(c.req.query("page") ?? "1") || 1);
+    const pageSize = Math.min(50, Math.max(1, Number(c.req.query("pageSize") ?? "8") || 8));
+    try {
+      const types = await listAvailableTriggerTypes(toolkit);
+      const totalPages = Math.max(1, Math.ceil(types.length / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      return c.json({ data: types.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: types.length, totalPages });
+    } catch (error) { return apiError(c, 502, "trigger_catalog_unavailable", error instanceof Error ? error.message : "Trigger catalogue is temporarily unavailable."); }
+  });
+
   app.post("/v1/triggers", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { slug?: unknown; triggerConfig?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { slug?: unknown; connectedAccountId?: unknown; triggerConfig?: unknown };
     const slug = String(body.slug ?? "").trim();
     if (!/^[A-Z0-9][A-Z0-9_.-]{1,150}$/.test(slug)) return apiError(c, 400, "invalid_trigger", "Provide a valid trigger slug.");
+    if (body.connectedAccountId !== undefined && (typeof body.connectedAccountId !== "string" || body.connectedAccountId.length < 1 || body.connectedAccountId.length > 200)) return apiError(c, 400, "invalid_connected_account", "connectedAccountId must be a valid connected account ID.");
     if (body.triggerConfig !== undefined && (typeof body.triggerConfig !== "object" || body.triggerConfig === null || Array.isArray(body.triggerConfig))) return apiError(c, 400, "invalid_trigger_config", "triggerConfig must be an object.");
-    try { return c.json(await createTrigger(sdkUser(c)!.userId, slug, { triggerConfig: body.triggerConfig ?? {} }), 201); }
+    try { return c.json(await createTrigger(sdkUser(c)!.userId, slug, { ...(body.connectedAccountId ? { connectedAccountId: body.connectedAccountId } : {}), triggerConfig: body.triggerConfig ?? {} }), 201); }
     catch (error) { return apiError(c, 502, "trigger_create_failed", error instanceof Error ? error.message : "Could not create the trigger."); }
   });
 

@@ -3,9 +3,10 @@ import { config } from "./config.js";
 import {
   runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
-  listTriggers, createTrigger, setTriggerState, deleteTrigger,
+  listTriggers, createTrigger, setTriggerState, deleteTrigger, listAvailableTriggerToolkits, listAvailableTriggerTypes, getAvailableTriggerType,
   searchTools
 } from "./agent.js";
+import { requiredTriggerConfigFields, type TriggerCatalogueItem } from "./triggerCatalog.js";
 import type { ContentPart } from "./types.js";
 import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
@@ -33,6 +34,7 @@ import { sharedGroupInstructions } from "./channels/groupInstructions.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
+const TRIGGER_PAGE_SIZE = 8;
 
 type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepseek" | "mistralai" | "minimax" | "all";
 
@@ -73,6 +75,84 @@ function modelsForProvider(models: Array<{ id: string; name: string }>, provider
   return models
     .filter((model) => provider === "all" || model.id.startsWith(`${provider}/`))
     .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id) || a.id.localeCompare(b.id));
+}
+
+function triggerMenuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("➕ Add a trigger", "trg:apps:0").row()
+    .text("📋 My triggers", "trg:my").row()
+    .text("ℹ️ How triggers work", "trg:help");
+}
+
+function triggerToolkitKeyboard(toolkits: Array<{ slug: string; name: string; triggerCount: number; accountCount: number }>, page: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const start = page * TRIGGER_PAGE_SIZE;
+  for (const toolkit of toolkits.slice(start, start + TRIGGER_PAGE_SIZE)) {
+    keyboard.text(`${toolkit.name} (${toolkit.triggerCount})`, `trg:types:${toolkit.slug}:${page}`).row();
+  }
+  const totalPages = Math.max(1, Math.ceil(toolkits.length / TRIGGER_PAGE_SIZE));
+  if (page > 0) keyboard.text("← Previous", `trg:apps:${page - 1}`);
+  keyboard.text(`Page ${page + 1}/${totalPages}`, "trg:noop");
+  if (page + 1 < totalPages) keyboard.text("Next →", `trg:apps:${page + 1}`);
+  return keyboard.row().text("← Triggers", "trg:menu");
+}
+
+function triggerTypeKeyboard(types: TriggerCatalogueItem[], toolkit: string, toolkitPage: number, page: number): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const start = page * TRIGGER_PAGE_SIZE;
+  for (const trigger of types.slice(start, start + TRIGGER_PAGE_SIZE)) {
+    keyboard.text(trigger.name.slice(0, 55), `trg:type:${trigger.token}:${toolkitPage}`).row();
+  }
+  const totalPages = Math.max(1, Math.ceil(types.length / TRIGGER_PAGE_SIZE));
+  if (page > 0) keyboard.text("← Previous", `trg:typepage:${toolkit}:${toolkitPage}:${page - 1}`);
+  keyboard.text(`Page ${page + 1}/${totalPages}`, "trg:noop");
+  if (page + 1 < totalPages) keyboard.text("Next →", `trg:typepage:${toolkit}:${toolkitPage}:${page + 1}`);
+  return keyboard.row().text("← Apps", `trg:apps:${toolkitPage}`);
+}
+
+async function triggerToolkitView(ctx: Context, requestedPage: number): Promise<void> {
+  const toolkits = await listAvailableTriggerToolkits(ctx.from!.id, true);
+  if (!toolkits.length) {
+    await ctx.editMessageText("<b>Create a trigger</b>\n\nConnect an app first with <code>/apps</code> or <code>/connect gmail</code>, then return here.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Triggers", "trg:menu") });
+    return;
+  }
+  const pageCount = Math.max(1, Math.ceil(toolkits.length / TRIGGER_PAGE_SIZE));
+  const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
+  await ctx.editMessageText(
+    `<b>Choose an app</b>\n\nShowing connected apps with available triggers. Select an app, then choose what should wake Chusky.\n\n<i>${toolkits.length} connected app${toolkits.length === 1 ? "" : "s"} · page ${page + 1}/${pageCount}</i>`,
+    { parse_mode: "HTML", reply_markup: triggerToolkitKeyboard(toolkits, page) }
+  );
+}
+
+async function triggerTypeView(ctx: Context, toolkit: string, toolkitPage: number, requestedPage: number): Promise<void> {
+  const types = await listAvailableTriggerTypes(toolkit);
+  if (!types.length) {
+    await ctx.editMessageText("No trigger types are currently available for that app.", { reply_markup: new InlineKeyboard().text("← Apps", `trg:apps:${toolkitPage}`) });
+    return;
+  }
+  const pageCount = Math.max(1, Math.ceil(types.length / TRIGGER_PAGE_SIZE));
+  const page = Math.min(Math.max(0, requestedPage), pageCount - 1);
+  const label = escapeTelegramHtml(types[0].toolkit.name);
+  await ctx.editMessageText(`<b>${label} triggers</b>\n\nChoose the event that should wake Chusky.\n\n<i>${types.length} available · page ${page + 1}/${pageCount}</i>`, { parse_mode: "HTML", reply_markup: triggerTypeKeyboard(types, toolkit, toolkitPage, page) });
+}
+
+async function showTriggerConfirmation(ctx: Context, trigger: TriggerCatalogueItem, accountId: string, toolkitPage: number): Promise<void> {
+  const required = requiredTriggerConfigFields(trigger.config);
+  const base = `<b>${escapeTelegramHtml(trigger.name)}</b>\n\n${escapeTelegramHtml(trigger.description || "This event will wake Chusky.")}`;
+  if (required.length) {
+    const example = Object.fromEntries(required.map((field) => [field, "…"]));
+    await ctx.editMessageText(
+      `${base}\n\n<b>Configuration required</b>\nSend:\n<code>/trigger create ${escapeTelegramHtml(trigger.slug)} ${escapeTelegramHtml(JSON.stringify({ connectedAccountId: accountId, triggerConfig: example }))}</code>\n\nRequired: ${required.map((field) => `<code>${escapeTelegramHtml(field)}</code>`).join(", ")}`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Triggers", `trg:types:${trigger.toolkit.slug}:${toolkitPage}`) }
+    );
+    return;
+  }
+  const accountIndex = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE").findIndex((account) => account.id === accountId);
+  if (accountIndex < 0) throw new Error("That connected account is no longer available");
+  await ctx.editMessageText(`${base}\n\nReady to activate this trigger for the selected ${escapeTelegramHtml(trigger.toolkit.name)} account.`, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("✅ Create trigger", `trg:create:${trigger.token}:${accountIndex}`).row().text("← Triggers", `trg:types:${trigger.toolkit.slug}:${toolkitPage}`),
+  });
 }
 
 function channelLinkKeyboard(userId: number): InlineKeyboard {
@@ -767,13 +847,7 @@ export function registerHandlers(bot: Bot): void {
 
   bot.command("triggers", async (ctx) => {
     if (!(await guard(ctx))) return;
-    try {
-      const triggers = await listTriggers(ctx.from!.id);
-      const text = triggers.length
-        ? triggers.map((t: any) => `${t.id || t.trigger_id} — ${t.trigger_slug || t.slug || "trigger"} — ${t.status || (t.enabled === false ? "disabled" : "active")}`).join("\n")
-        : "No triggers found.";
-      await replyHtml(ctx, `<b>Composio triggers</b>\n\n<pre>${text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`);
-    } catch (e) { await ctx.reply(`❌ Failed to list triggers: ${String(e).slice(0, 300)}`); }
+    await ctx.reply("<b>Composio triggers</b>\n\nChoose an action. Chusky only shows apps connected to your account, and asks which account to use when you have more than one.", { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() });
   });
 
   bot.command("tools", async (ctx) => {
@@ -797,6 +871,10 @@ export function registerHandlers(bot: Bot): void {
     const args = ctx.match?.trim() || "";
     const [action, idOrSlug, ...rest] = args.split(/\s+/);
     try {
+      if (!action) {
+        await ctx.reply("<b>Composio triggers</b>\n\nChoose an action.", { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() });
+        return;
+      }
       if (action === "create" && idOrSlug) {
         const body = rest.length ? JSON.parse(rest.join(" ")) : {};
         const result = await createTrigger(ctx.from!.id, idOrSlug, body);
@@ -812,6 +890,94 @@ export function registerHandlers(bot: Bot): void {
       }
     } catch (e) { await ctx.reply(`❌ Trigger operation failed: ${String(e).slice(0, 500)}`); }
   });
+
+  bot.callbackQuery(/^trg:menu$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    await ctx.editMessageText("<b>Composio triggers</b>\n\nChoose an action. Chusky only shows apps connected to your account.", { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^trg:apps:(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    try { await triggerToolkitView(ctx, Number(ctx.match[1])); }
+    catch (error) { await ctx.editMessageText(`❌ Could not load trigger apps: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
+  });
+
+  bot.callbackQuery(/^trg:(?:types|typepage):([a-zA-Z0-9_-]{1,100}):(\d+)(?::(\d+))?$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const toolkit = ctx.match[1];
+    const toolkitPage = Number(ctx.match[2]);
+    const page = ctx.match[3] ? Number(ctx.match[3]) : 0;
+    try { await triggerTypeView(ctx, toolkit, toolkitPage, page); }
+    catch (error) { await ctx.editMessageText(`❌ Could not load trigger types: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Apps", `trg:apps:${toolkitPage}`) }); }
+  });
+
+  bot.callbackQuery(/^trg:type:([a-z0-9]+):(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const token = ctx.match[1];
+    const toolkitPage = Number(ctx.match[2]);
+    try {
+      const trigger = await getAvailableTriggerType(token);
+      if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
+      const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+      if (!accounts.length) { await ctx.editMessageText(`Connect ${escapeTelegramHtml(trigger.toolkit.name)} first, then reopen /triggers.`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("← Apps", `trg:apps:${toolkitPage}`) }); return; }
+      if (accounts.length > 1) {
+        const keyboard = new InlineKeyboard();
+        accounts.slice(0, 8).forEach((account, index) => keyboard.text((account.alias ?? `Account ${index + 1}`).slice(0, 50), `trg:account:${token}:${index}`).row());
+        keyboard.text("← Triggers", `trg:types:${trigger.toolkit.slug}:${toolkitPage}`);
+        await ctx.editMessageText(`<b>${escapeTelegramHtml(trigger.name)}</b>\n\nChoose the ${escapeTelegramHtml(trigger.toolkit.name)} account Chusky should watch.`, { parse_mode: "HTML", reply_markup: keyboard });
+        return;
+      }
+      await showTriggerConfirmation(ctx, trigger, accounts[0].id, toolkitPage);
+    } catch (error) { await ctx.editMessageText(`❌ Could not prepare this trigger: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
+  });
+
+  bot.callbackQuery(/^trg:account:([a-z0-9]+):(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const trigger = await getAvailableTriggerType(ctx.match[1]);
+    if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
+    const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+    const account = accounts[Number(ctx.match[2])];
+    if (!account) { await ctx.editMessageText("That account is no longer available. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
+    await showTriggerConfirmation(ctx, trigger, account.id, 0);
+  });
+
+  bot.callbackQuery(/^trg:create:([a-z0-9]+):(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Creating trigger…" });
+    if (!(await guard(ctx))) return;
+    const trigger = await getAvailableTriggerType(ctx.match[1]);
+    if (!trigger) { await ctx.editMessageText("That trigger menu expired. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
+    const accounts = (await listConnectedAccounts(ctx.from!.id, trigger.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+    const account = accounts[Number(ctx.match[2])];
+    if (!account) { await ctx.editMessageText("That account is no longer available. Open /triggers to refresh it.", { reply_markup: triggerMenuKeyboard() }); return; }
+    try {
+      const result: any = await createTrigger(ctx.from!.id, trigger.slug, { connectedAccountId: account.id, triggerConfig: {} });
+      const id = String(result?.triggerId ?? result?.id ?? "created");
+      await ctx.editMessageText(`✅ <b>Trigger created</b>\n\n${escapeTelegramHtml(trigger.name)} is now watching ${escapeTelegramHtml(trigger.toolkit.name)}.\n\n<code>${escapeTelegramHtml(id)}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("📋 My triggers", "trg:my").row().text("➕ Add another", "trg:apps:0") });
+    } catch (error) { await ctx.editMessageText(`❌ Could not create this trigger: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
+  });
+
+  bot.callbackQuery(/^trg:my$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    try {
+      const triggers = await listTriggers(ctx.from!.id);
+      const entries = triggers.slice(0, 20).map((item: any) => `• ${escapeTelegramHtml(String(item.triggerName ?? item.trigger_slug ?? item.slug ?? "trigger"))} — ${escapeTelegramHtml(String(item.disabledAt || item.enabled === false ? "disabled" : "active"))}`);
+      await ctx.editMessageText(`<b>My triggers</b>\n\n${entries.length ? entries.join("\n") : "No triggers yet."}`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("➕ Add a trigger", "trg:apps:0").row().text("← Triggers", "trg:menu") });
+    } catch (error) { await ctx.editMessageText(`❌ Could not load triggers: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() }); }
+  });
+
+  bot.callbackQuery(/^trg:help$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    await ctx.editMessageText("<b>How triggers work</b>\n\n1. Connect an app with <code>/connect &lt;app&gt;</code>.\n2. Choose an event.\n3. Chusky receives the event through the verified Composio webhook.\n\nSome events need filters (for example, a repository or mailbox). Chusky will show the required fields before it creates one.", { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("➕ Add a trigger", "trg:apps:0").row().text("← Triggers", "trg:menu") });
+  });
+
+  bot.callbackQuery(/^trg:noop$/, async (ctx) => { await ctx.answerCallbackQuery(); });
 
   // /info ────────────────────────────────────────────────────────────────────
   bot.command("info", async (ctx) => {

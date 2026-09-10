@@ -26,6 +26,7 @@
 import { Composio } from "@composio/core";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
+import { getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
@@ -44,9 +45,15 @@ import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { relevantSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
+import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
+
+/** Configure the project webhook through Composio's current v3.1 API. */
+export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promise<ComposioTriggerSetupStatus> {
+  return reconcileComposioTriggerSubscription(composio.triggers, webhookUrl);
+}
 
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
@@ -1170,6 +1177,31 @@ export async function listTriggers(userId: number): Promise<unknown[]> {
   const items = Array.isArray(result) ? result : ((result as any).items ?? []);
   const owned = new Set((await getSession(userId)).triggerIds ?? []);
   return items.filter((t: any) => owned.has(String(t.id ?? t.trigger_id ?? t.triggerId)));
+}
+
+/** Trigger-capable apps, with the caller's connected accounts reflected in the result. */
+export async function listAvailableTriggerToolkits(userId: number, connectedOnly = true): Promise<Array<TriggerToolkit & { connected: boolean; accountCount: number }>> {
+  const [toolkits, accounts] = await Promise.all([
+    listCatalogueToolkits(composio.triggers),
+    listConnectedAccounts(userId),
+  ]);
+  const accountCounts = new Map<string, number>();
+  for (const account of accounts) {
+    if (account.status.toUpperCase() !== "ACTIVE") continue;
+    const key = account.toolkit.toLowerCase();
+    accountCounts.set(key, (accountCounts.get(key) ?? 0) + 1);
+  }
+  return toolkits
+    .map((toolkit) => ({ ...toolkit, connected: (accountCounts.get(toolkit.slug.toLowerCase()) ?? 0) > 0, accountCount: accountCounts.get(toolkit.slug.toLowerCase()) ?? 0 }))
+    .filter((toolkit) => !connectedOnly || toolkit.connected);
+}
+
+export async function listAvailableTriggerTypes(toolkit: string): Promise<TriggerCatalogueItem[]> {
+  return listTriggerTypesForToolkit(composio.triggers, toolkit);
+}
+
+export async function getAvailableTriggerType(token: string): Promise<TriggerCatalogueItem | undefined> {
+  return getTriggerTypeByToken(composio.triggers, token);
 }
 
 export async function createTrigger(userId: number, slug: string, body: Record<string, unknown>): Promise<unknown> {

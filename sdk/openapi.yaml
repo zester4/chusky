@@ -43,6 +43,10 @@ paths:
   /triggers:
     get: { summary: List account triggers, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Create an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
+  /triggers/catalog/toolkits:
+    get: { summary: List Composio trigger-capable app toolkits, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /triggers/catalog/toolkits/{toolkit}:
+    get: { summary: List paginated trigger types for an app toolkit, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: toolkit, in: path, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
   /triggers/{triggerId}:
     patch: { summary: Enable or disable an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
     delete: { summary: Delete an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }

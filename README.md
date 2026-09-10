@@ -202,10 +202,9 @@ gcloud run deploy chuck \
 
 Chusky can receive real-time events from connected apps (new Slack message, GitHub commit, incoming email, etc.).
 
-1. Deploy Chusky and note your public URL
-2. In the [Composio dashboard](https://app.composio.dev) → **Triggers** → set webhook URL to:
-   `https://your-domain.com/composio/triggers`
-3. Chusky will receive events at `/composio/triggers` and can notify you via Telegram
+1. Deploy Chusky and note your public URL.
+2. Set `COMPOSIO_WEBHOOK_SECRET` and optionally `COMPOSIO_WEBHOOK_URL=https://your-domain.com/composio/triggers`. When the URL is blank, Chusky derives it from `WEBHOOK_URL`.
+3. On startup, Chusky reconciles the project subscription through Composio's current **v3.1** API and explicitly requests the V3 `composio.trigger.message` payload. Check `/health`: `checks.composioTriggers` must be `configured` before relying on triggers.
 
 To create a trigger programmatically, tell Chusky:
 > *"Create a trigger for new GitHub commits on my repo my-org/my-repo"*
