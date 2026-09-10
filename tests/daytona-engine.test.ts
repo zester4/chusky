@@ -241,6 +241,43 @@ test("computer-use rejects invalid coordinates and oversized keyboard input", as
   await assert.rejects(() => e.computer(820007, { action: "keyboard_type", text: "x".repeat(4001) }), /1-4000/);
 });
 
+test("retries only the Computer Use startup handshake after a transient transport disconnect", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820071) as any;
+  let starts = 0;
+  sandbox.computerUse.start = async () => {
+    starts++;
+    if (starts === 1) throw new Error("connection is shut down");
+  };
+  const screenshot = await e.computer(820071, { action: "screenshot" }) as any;
+  assert.equal(starts, 2);
+  assert.equal(screenshot.__daytonaScreenshot, true);
+});
+
+test("vault login falls back to standard accessibility labels or requests owner interaction without typing", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820072) as any;
+  const writes: string[] = [];
+  sandbox.computerUse.accessibility.findNodes = async ({ name }: { name?: string }) => {
+    if (name === "Email") return { matches: [{ nodeId: "email" }] };
+    if (name === "Password") return { matches: [{ nodeId: "password" }] };
+    if (name === "Continue") return { matches: [{ nodeId: "submit" }] };
+    return { matches: [] };
+  };
+  sandbox.computerUse.accessibility.setNodeValue = async (id: string) => { writes.push(id); };
+  const loggedIn = await e.vaultLogin(820072, {
+    origin: "https://example.com", loginUrl: "https://example.com/login", usernameFieldLabel: "Email or username", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "private", password: "private",
+  });
+  assert.deepEqual(writes, ["email", "password"]);
+  assert.equal(loggedIn.authenticated, false);
+  sandbox.computerUse.accessibility.findNodes = async () => ({ matches: [] });
+  const needsOwner = await e.vaultLogin(820072, {
+    origin: "https://example.com", loginUrl: "https://example.com/login", usernameFieldLabel: "Email", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "private", password: "private",
+  });
+  assert.equal(needsOwner.needsUserInteraction, true);
+  assert.deepEqual(writes, ["email", "password"]);
+});
+
 test("persists and reuses owned PTY sessions", async () => {
   const e = engine();
   const created = await e.pty(820008, { action: "create", id: "dev", cwd: "workspace" });

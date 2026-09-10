@@ -506,7 +506,17 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
     case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined);
-    case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, () => loginWithVault(userId, text(args.service), { login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }));
+    case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, async () => {
+      const login = await loginWithVault(userId, text(args.service), { login: (owner, input) => daytonaEngine.vaultLogin(owner, input) });
+      // A CAPTCHA, 2FA prompt, or an unfamiliar login form must not fail the
+      // entire sign-in or expose credentials. Give the owner a short-lived
+      // direct browser handoff and retain the same browser session instead.
+      if (!login.needsUserInteraction) return login;
+      return {
+        ...login,
+        browserHandoff: await daytonaEngine.browserHandoff(userId, "Complete the website's sign-in or verification step, then return to Chusky."),
+      };
+    });
     case "CHUCK_VAULT_LOGOUT": return logoutVault(userId, text(args.service));
     case "CHUCK_SHOPPING_START": return startShopping(userId, args);
     case "CHUCK_SHOPPING_LIST": return listShopping(userId, args.limit === undefined ? undefined : Number(args.limit));

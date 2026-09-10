@@ -947,6 +947,11 @@ export async function runAgent(
           await persistRun("waiting_approval", "run.approval_requested", undefined, { approvalId: approval.id, tool: slug, callId: call.id, round });
           throw new ApprovalRequiredError(approval.id, slug, args);
         }
+        // Approval records are durable and may be resumed after a model retry.
+        // Validate the *effective* argument object as well as the model's
+        // current proposal: otherwise an older/incomplete approval can bypass
+        // the native schema and reach a provider with missing fields.
+        if (slug.startsWith("CHUCK_") && executionArgs !== args) validateNativeToolArguments(slug, executionArgs);
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
@@ -1038,15 +1043,22 @@ export async function runAgent(
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
-          if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" && execResult && typeof execResult === "object") {
-            const handoff = execResult as { url?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
+          if ((slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN") && execResult && typeof execResult === "object") {
+            const vaultResult = execResult as { browserHandoff?: unknown };
+            const handoff = (slug === "CHUCK_VAULT_LOGIN" && vaultResult.browserHandoff && typeof vaultResult.browserHandoff === "object"
+              ? vaultResult.browserHandoff
+              : execResult) as { url?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
             const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
-            if (!/^https:\/\//i.test(url)) throw new Error("Daytona did not return a valid private browser handoff link");
-            privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
+            if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" && !/^https:\/\//i.test(url)) throw new Error("Daytona did not return a valid private browser handoff link");
+            if (url) privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
             // The model only needs confirmation that delivery will occur. Do
             // not put a short-lived bearer URL into model context, run state,
             // logs, or the saved conversation history.
-            execResult = { browserHandoffIssued: true, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
+            if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF") {
+              execResult = { browserHandoffIssued: true, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
+            } else if (url) {
+              execResult = { ...(execResult as Record<string, unknown>), browserHandoffIssued: true, browserHandoff: { issued: true, expiresAt: handoff.expiresAt } };
+            }
           }
           if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };

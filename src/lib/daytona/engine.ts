@@ -32,6 +32,15 @@ const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
 const APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS = 3;
 const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo)\b|network\s+(?:request|error)/i;
 const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and cannot be overridden|tier[- ]based network restriction/i;
+const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|connection reset|transport.*closed/i;
+
+function isTransientComputerConnection(error: unknown): boolean {
+  return DAYTONA_TRANSIENT_COMPUTER_CONNECTION.test(String((error as { message?: unknown })?.message ?? error));
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 /**
  * New sandboxes occasionally resolve registry.npmjs.org before their DNS is
@@ -1658,7 +1667,24 @@ export class DaytonaEngine {
     if (action === "recording_get") return computer.recording.get(boundedText(args.recordingId, "recordingId", 200));
     if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
     if (action === "recording_delete") { await computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)); return { deleted: true }; }
-    await computer.start();
+    // Daytona's Computer Use transport can occasionally be closed while the
+    // sandbox itself remains healthy. Retry only this idempotent startup
+    // handshake, before any click/type/invoke action is issued, so a recovery
+    // can never duplicate a user-visible browser action.
+    try {
+      await computer.start();
+    } catch (error) {
+      if (!isTransientComputerConnection(error)) throw error;
+      await sleep(350);
+      try {
+        await computer.start();
+      } catch (retryError) {
+        if (isTransientComputerConnection(retryError)) {
+          throw new DaytonaInputError("Daytona's browser is temporarily reconnecting. No browser action was performed; retry in a few seconds.");
+        }
+        throw retryError;
+      }
+    }
     switch (action) {
       case "start": return { started: true, status: await computer.getStatus() };
       case "display": return computer.display.getInfo();
@@ -1842,21 +1868,31 @@ export class DaytonaEngine {
    * CHUCK_DAYTONA_BROWSER: it receives secrets only from the credential broker
    * and returns no accessibility tree, screenshot, or typed values.
    */
-  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean }> {
+  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
     const login = new URL(input.loginUrl);
     if (login.origin !== input.origin || login.protocol !== "https:") throw new DaytonaInputError("Vault login URL does not match its authorised origin");
     await this.browser(userId, { action: "open", url: login.toString() });
-    const node = async (role: string, name: string, field: string): Promise<string> => {
-      const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }) as any;
-      const matches = Array.isArray(result) ? result : Array.isArray(result?.matches) ? result.matches : [];
-      if (matches.length !== 1) throw new DaytonaInputError(`Vault login needs exactly one ${field} matching its configured accessibility label`);
-      const id = matches[0]?.nodeId ?? matches[0]?.id;
-      if (typeof id !== "string" || !id) throw new DaytonaInputError(`Daytona did not return an accessible node for ${field}`);
-      return id;
+    const node = async (role: string, configuredName: string, fallbacks: string[]): Promise<string | undefined> => {
+      const candidates = [...new Set([configuredName, ...fallbacks].map((value) => value.trim()).filter(Boolean))];
+      for (const name of candidates) {
+        const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }) as any;
+        const matches = Array.isArray(result) ? result : Array.isArray(result?.matches) ? result.matches : [];
+        if (matches.length !== 1) continue;
+        const id = matches[0]?.nodeId ?? matches[0]?.id;
+        if (typeof id === "string" && id) return id;
+      }
+      return undefined;
     };
-    const usernameNode = await node("textbox", input.usernameFieldLabel, "username field");
-    const passwordNode = await node("textbox", input.passwordFieldLabel, "password field");
-    const submitNode = await node("button", input.submitButtonLabel, "submit button");
+    const usernameNode = await node("textbox", input.usernameFieldLabel, ["Email", "Email address", "Email or username", "Username", "User name", "Phone number", "Mobile number"]);
+    const passwordNode = await node("textbox", input.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
+    const submitNode = await node("button", input.submitButtonLabel, ["Sign in", "Log in", "Login", "Continue", "Next", "Submit"]);
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    // Do not guess or type into an ambiguous/unrecognised form. The trusted
+    // caller turns this into a direct owner handoff for CAPTCHA, 2FA, or a
+    // site-specific sign-in page while preserving the retained browser state.
+    if (!usernameNode || !passwordNode || !submitNode) {
+      return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
+    }
     await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username });
     await this.computer(userId, { action: "accessibility_set_value", nodeId: passwordNode, value: input.password });
     await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode });
@@ -1865,7 +1901,6 @@ export class DaytonaEngine {
     await new Promise((resolve) => setTimeout(resolve, 350));
     const after = await this.computer(userId, { action: "accessibility_find", role: "textbox", name: input.passwordFieldLabel, nameMatch: "exact", limit: 1 }) as any;
     const remaining = Array.isArray(after) ? after : Array.isArray(after?.matches) ? after.matches : [];
-    const sandbox = await this.getOrCreateWorkspace(userId);
     return { workspaceId: sandbox.id, authenticated: remaining.length === 0 };
   }
 
