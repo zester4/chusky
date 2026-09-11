@@ -120,6 +120,13 @@ export const config = {
   twilioInboundEnabled: optional("TWILIO_INBOUND_ENABLED", "false") === "true",
   twilioInboundOwnerUserId: optional("TWILIO_INBOUND_OWNER_USER_ID", ""),
   twilioInboundAllowedCallers: optional("TWILIO_INBOUND_ALLOWED_CALLERS", ""),
+  // Bland is an optional parallel phone provider. Twilio remains available
+  // independently and is selected when BLAND_VOICE_ENABLED=false.
+  blandVoiceEnabled: optional("BLAND_VOICE_ENABLED", "false") === "true",
+  blandApiKey: optional("BLAND_API_KEY", ""),
+  blandWebhookSecret: optional("BLAND_WEBHOOK_SECRET", ""),
+  blandWebhookUrl: optional("BLAND_WEBHOOK_URL", ""),
+  blandVoice: optional("BLAND_VOICE", "maya"),
 
   // ── Daytona computer ───────────────────────────────────────────────
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),

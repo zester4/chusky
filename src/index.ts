@@ -10,7 +10,7 @@ import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, c
 import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
@@ -435,6 +435,35 @@ async function main(): Promise<void> {
         if (!speculative || !c.req.raw.signal.aborted) logger.warn({ err: error, callId, userId }, "Voice turn failed");
         return c.json({ ok: false, error: "voice turn failed" }, 502);
       }
+    });
+
+    // Bland post-call callbacks are signed over the exact raw JSON body.
+    // They update the same owner-scoped call history used by Twilio.
+    app.post("/bland/webhook", async (c) => {
+      if (!config.blandVoiceEnabled || !config.blandWebhookSecret) return c.text("Not found", 404);
+      const raw = await c.req.text();
+      const signature = c.req.header("X-Webhook-Signature") ?? "";
+      const expected = createHmac("sha256", config.blandWebhookSecret).update(raw).digest("hex");
+      const actual = Buffer.from(signature, "utf8");
+      const wanted = Buffer.from(expected, "utf8");
+      if (!signature || actual.length !== wanted.length || !timingSafeEqual(actual, wanted)) return c.json({ ok: false, error: "invalid Bland webhook signature" }, 401);
+      let body: Record<string, unknown>;
+      try { body = JSON.parse(raw) as Record<string, unknown>; } catch { return c.json({ ok: false, error: "invalid Bland webhook JSON" }, 400); }
+      const metadata = (body.metadata && typeof body.metadata === "object" ? body.metadata : {}) as Record<string, unknown>;
+      const callId = String(metadata.chusky_call_id ?? "").trim();
+      const userId = Number(metadata.chusky_user_id);
+      if (!/^blc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: false, error: "invalid Bland callback identity" }, 400);
+      const call = await getFaceTimeCall(userId, callId);
+      if (!call || call.provider !== "bland") return c.json({ ok: false, error: "unknown Bland call" }, 404);
+      const deliveryKey = `bland-postcall:${callId}`;
+      if (!(await claimDelivery(deliveryKey, 7 * 24 * 60 * 60 * 1000))) return c.json({ ok: true, duplicate: true });
+      const completed = body.completed === true || String(body.queue_status ?? "").toLowerCase() === "complete";
+      const errorMessage = String(body.error_message ?? "").trim();
+      const transcript = String(body.concatenated_transcript ?? body.transcript ?? "").trim().slice(0, 12000);
+      await updateFaceTimeCall(userId, callId, { status: errorMessage ? "failed" : completed ? "ended" : "active", providerCallId: String(body.call_id ?? call.providerCallId ?? "").slice(0, 100), ...(errorMessage ? { error: errorMessage.slice(0, 500) } : {}) });
+      if (transcript) await appendMessages(userId, [{ role: "assistant", content: `[Bland call ${callId} transcript]\n${transcript}` }]);
+      await completeDelivery(deliveryKey, 30 * 24 * 60 * 60 * 1000);
+      return c.json({ ok: true });
     });
 
     // Streaming voice turn endpoint. It deliberately does not write history:
@@ -1539,8 +1568,8 @@ async function main(): Promise<void> {
         const production = process.env.NODE_ENV === "production";
         const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
         const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", facetime: "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (config.blandApiKey && config.blandWebhookSecret && config.blandWebhookUrl ? "configured" : "misconfigured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.bland !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, composioTriggers: composioTriggerSetup, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });

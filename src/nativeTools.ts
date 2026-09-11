@@ -5,7 +5,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, listJobs, listReminders,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, listJobs, listReminders,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
@@ -18,6 +18,7 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
+import { startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
@@ -423,7 +424,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     // Never send a legacy call through Sendblue/FaceTime.
     case "CHUCK_START_FACETIME_CALL": return startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_FACETIME_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
-    case "CHUCK_START_PHONE_CALL": return startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
+    case "CHUCK_START_PHONE_CALL": return config.blandVoiceEnabled
+      ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), context: (await getSession(userId)).history.slice(-8).map((message) => `${message.role}: ${String(message.content)}`).join("\n") })
+      : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
     case "CHUCK_VIDEO_STATUS": {
       const id = args.id ? text(args.id) : undefined;

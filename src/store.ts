@@ -75,7 +75,7 @@ export interface FaceTimeCallRecord {
   id: string;
   userId: number;
   /** Explicit provider keeps shared safe call storage transport-aware. */
-  provider?: "facetime" | "twilio";
+  provider?: "facetime" | "twilio" | "bland";
   direction?: "inbound" | "outbound";
   phoneNumber: string;
   purpose: string;
