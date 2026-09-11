@@ -40,6 +40,7 @@ import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWo
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
+import { normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 
 function xmlEscape(value: string): string {
@@ -406,7 +407,7 @@ async function main(): Promise<void> {
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
       const speculative = body.speculative === true;
-      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getFaceTimeCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
@@ -427,7 +428,7 @@ async function main(): Promise<void> {
           await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(userId, result.cost);
         }
-        return c.json({ ok: true, text: result.text.slice(0, 5000), cost: result.cost ?? 0, speculative });
+        return c.json({ ok: true, text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
       } catch (error) {
         // A Flux eager draft is intentionally aborted when the caller resumes
         // speaking. Avoid treating that normal client disconnect as an error.
@@ -447,7 +448,7 @@ async function main(): Promise<void> {
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
       const speculative = body.speculative === true;
-      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid voice turn" }, 400);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000) return c.json({ ok: false, error: "invalid Twilio voice turn" }, 400);
       const call = await getFaceTimeCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       if (!(await checkRateLimit(userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
@@ -464,7 +465,7 @@ async function main(): Promise<void> {
                 toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_PHONE_CALLS"],
               });
             });
-            send({ type: "done", text: result.text.slice(0, 5000), cost: result.cost ?? 0, speculative });
+            send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
           } catch (error) {
             if (!c.req.raw.signal.aborted) send({ type: "error", error: "voice turn failed" });
           } finally {
@@ -487,13 +488,13 @@ async function main(): Promise<void> {
       const text = String(body.text ?? "").trim();
       const turnId = String(body.turnId ?? "").trim();
       const cost = Number(body.cost ?? 0);
-      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000 || !text || text.length > 5000 || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10) return c.json({ ok: false, error: "invalid voice turn commit" }, 400);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !transcript || transcript.length > 5000 || !text || text.length > 5000 || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10) return c.json({ ok: false, error: "invalid Twilio voice turn commit" }, 400);
       const call = await getFaceTimeCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       const key = `voice-turn:${callId}:${turnId}`;
       if (!(await claimDelivery(key, 60_000))) return c.json({ ok: true, duplicate: true });
       try {
-        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: text }]);
+        await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: normalizeVoiceText(text) }]);
         if (cost) await addUsage(userId, cost);
         await completeDelivery(key, 7 * 24 * 60 * 60);
         return c.json({ ok: true });
@@ -509,7 +510,7 @@ async function main(): Promise<void> {
       const callId = String(body.callId ?? "").trim();
       const userId = Number(body.userId);
       const status = String(body.status ?? "");
-      if (!/^(?:ftc|twc)_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status)) return c.json({ ok: false, error: "invalid call status" }, 400);
+      if (!/^twc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0 || !["active", "ended", "failed"].includes(status)) return c.json({ ok: false, error: "invalid Twilio call status" }, 400);
       const call = await updateFaceTimeCall(userId, callId, { status: status as "active" | "ended" | "failed", ...(status === "failed" && body.error ? { error: String(body.error).slice(0, 500) } : {}) });
       if (!call) return c.json({ ok: false, error: "unknown call" }, 404);
       return c.json({ ok: true });

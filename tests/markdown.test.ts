@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mdToTelegramHtml, splitHtml } from "../src/markdown.js";
 import { markdownToTelegramRichHtml } from "../src/telegramRich.js";
+import { normalizeVoiceText } from "../src/voiceText.js";
 
 test("escapes user-controlled HTML", () => {
   assert.equal(mdToTelegramHtml("<script>alert(1)</script> & ok"), "&lt;script&gt;alert(1)&lt;/script&gt; &amp; ok");
@@ -36,4 +37,10 @@ test("renders valid Markdown tables as Rich HTML", () => {
 test("leaves ordinary Markdown on the existing formatter path", () => {
   assert.equal(markdownToTelegramRichHtml("**bold** and `a|b`").html, mdToTelegramHtml("**bold** and `a|b`"));
   assert.equal(markdownToTelegramRichHtml("not a table | just text").hasTable, false);
+});
+
+test("voice text removes Markdown syntax before speech", () => {
+  const text = normalizeVoiceText("**Chusky** can help.\n\n# Next steps\n* one\n[Open](https://example.com)");
+  assert.equal(text, "Chusky can help.\nNext steps\none\nOpen: https://example.com");
+  assert.doesNotMatch(normalizeVoiceText("**Chusky** #ready *now*"), /[*#]/);
 });
