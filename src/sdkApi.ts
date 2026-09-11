@@ -21,19 +21,12 @@ import { chuckTools } from "./agentTools.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation } from "./subagents/executor.js";
+import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
 const SELF_SERVICE_PROJECT_LIMIT = 10;
-const SELF_SERVICE_SCOPES = new Set([
-  "*", "threads:read", "threads:write", "tasks:read", "tasks:write",
-  "approvals:read", "approvals:write", "files:read", "files:write",
-  "webhooks:read", "webhooks:write", "audit-events:read", "usage:read",
-  "tools:read", "skills:read", "artifacts:read", "artifacts:write", "videos:read", "videos:write",
-  "workers:read", "workers:write", "channels:read", "activity:read", "deliveries:read",
-  "account:read", "account:write", "apps:read", "apps:write", "triggers:read", "triggers:write",
-  "reminders:read", "reminders:write", "jobs:read", "jobs:write", "memory:read", "memory:write", "scratchpad:read", "scratchpad:write",
-]);
+const SELF_SERVICE_SCOPES = new Set<string>(SELF_SERVICE_PROJECT_SCOPES);
 
 type WebAuthSession = { user?: { id?: string; emailVerified?: boolean } } | null;
 const defaultWebAuthSessionResolver = (headers: Headers): Promise<WebAuthSession> => getAuth().api.getSession({ headers }) as Promise<WebAuthSession>;

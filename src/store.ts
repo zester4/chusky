@@ -95,6 +95,8 @@ export interface SdkProjectRecord {
   createdAt: number;
   /** Better Auth user that owns a self-service dashboard project. Root-created projects have no owner. */
   ownerWebAuthUserId?: string;
+  /** Telegram owner for keys generated through Chusky's private Telegram UI. */
+  ownerTelegramUserId?: number;
   rotatedAt?: number;
   revokedAt?: number;
 }

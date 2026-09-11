@@ -29,12 +29,40 @@ import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { createTelegramProject, listTelegramProjects, revokeTelegramProject, rotateTelegramProjectKey } from "./developerProjects.js";
 import { conversationIdFor } from "./channels/contracts.js";
 import { sharedGroupInstructions } from "./channels/groupInstructions.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
 const TRIGGER_PAGE_SIZE = 8;
+const TELEGRAM_API_EMBED_SCOPES = ["threads:read", "threads:write", "tasks:read", "tasks:write", "tools:read", "skills:read", "files:read", "files:write", "artifacts:read", "artifacts:write"];
+
+function apiKeyMenuKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("⚡ Create full-access key", "api:new:full").row()
+    .text("🤖 Create app-embed key", "api:new:embed").row()
+    .text("📋 My API keys", "api:list").row()
+    .text("ℹ️ Integration guide", "api:help");
+}
+
+function apiKeyProjectKeyboard(projects: Array<{ id: string; name: string }>): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const project of projects.slice(0, 8)) {
+    keyboard.text(`🔄 ${project.name}`.slice(0, 58), `api:rotate:${project.id}`).text("🗑", `api:revoke:${project.id}`).row();
+  }
+  return keyboard.text("➕ Create key", "api:menu");
+}
+
+function apiKeyDelivery(project: { name: string; key: string; keyPrefix: string; scopes: string[] }, rotated = false): string {
+  const baseUrl = (config.webhookUrl || config.dashboardUrl || "https://your-chusky-host").replace(/\/+$/, "");
+  return `${rotated ? "🔄" : "✅"} <b>${rotated ? "API key rotated" : "API key created"}</b> — ${escapeTelegramHtml(project.name)}\n\n` +
+    `<b>Copy it now. It will not be shown again.</b>\n<code>${escapeTelegramHtml(project.key)}</code>\n\n` +
+    `<b>Use it only on your server:</b>\n<pre>Authorization: Bearer ${escapeTelegramHtml(project.key)}\nX-Chusky-User-Id: your-user-id</pre>\n` +
+    `<i>Base URL:</i> <code>${escapeTelegramHtml(baseUrl)}/v1</code>\n` +
+    `Scopes: <code>${escapeTelegramHtml(project.scopes.join(", "))}</code>\n\n` +
+    `Never put this key in browser code, a public repository, or a client app. Prefix: <code>${escapeTelegramHtml(project.keyPrefix)}</code>`;
+}
 
 type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepseek" | "mistralai" | "minimax" | "all";
 
@@ -466,6 +494,7 @@ export function registerHandlers(bot: Bot): void {
       `  /video-status — check video generation jobs\n` +
       `  /connect <toolkit> [alias] — connect one or more app accounts\n` +
       `  /accounts [toolkit] — list connected Composio accounts\n` +
+      `  /api — create and manage project API keys\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
       `  /channel — choose a private channel or iMessage group to link\n` +
       `  /linkgroup — open the group-link menu\n` +
@@ -502,6 +531,7 @@ export function registerHandlers(bot: Bot): void {
       `/linkgroup — open the iMessage group-link menu\n` +
       `/connect <toolkit> [alias] — connect an app account, including multiple accounts\n` +
       `/accounts [toolkit] — list connected Composio accounts and aliases\n` +
+      `/api — create, rotate, revoke, or list your private project API keys\n` +
       `/channel list — show linked channel identities\n` +
       `Inside iMessage, send /link-group <code> to activate a generated group code\n` +
       `/group-access owner|all — control group access (send inside iMessage)\n` +
@@ -527,6 +557,40 @@ export function registerHandlers(bot: Bot): void {
     const url = config.dashboardUrl || config.webhookUrl;
     if (!url) { await ctx.reply("The dashboard is not configured yet. Set DASHBOARD_URL in the Chusky deployment."); return; }
     await ctx.reply("Open your Chusky workspace:", { reply_markup: new InlineKeyboard().url("Open dashboard", `${url.replace(/\/+$/, "")}/app`) });
+  });
+
+  // Project API keys are deliberately a private-chat operation. A key sent in
+  // a Telegram group would be visible to every group participant and cannot be
+  // safely recalled after delivery.
+  bot.command("api", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) {
+      await ctx.reply("For your security, create and manage API keys in a private chat with Chusky.");
+      return;
+    }
+    const [action, ...nameParts] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+    if (action?.toLowerCase() === "create") {
+      const name = nameParts.join(" ").trim();
+      if (!name) {
+        await ctx.reply("Usage: /api create <project name>", { reply_markup: apiKeyMenuKeyboard() });
+        return;
+      }
+      try {
+        const project = await createTelegramProject(ctx.from!.id, name);
+        await ctx.reply(apiKeyDelivery(project), { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+      } catch (error) {
+        await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+      }
+      return;
+    }
+    if (action?.toLowerCase() === "list") {
+      const projects = await listTelegramProjects(ctx.from!.id);
+      await ctx.reply(projects.length
+        ? `<b>Your API keys</b>\n\n${projects.map((project) => `• <b>${escapeTelegramHtml(project.name)}</b>\n<code>${escapeTelegramHtml(project.keyPrefix)}…</code> · ${escapeTelegramHtml(project.scopes.join(", "))}`).join("\n\n")}\n\nRotate replaces a key immediately. Revoke permanently disables it.`
+        : "<b>Your API keys</b>\n\nYou have no active API keys yet.", { parse_mode: "HTML", reply_markup: projects.length ? apiKeyProjectKeyboard(projects) : apiKeyMenuKeyboard() });
+      return;
+    }
+    await ctx.reply("<b>Chusky API keys</b>\n\nCreate a project key for your backend to embed Chusky in an app or workflow. Each key is isolated from Chusky's root/operator credential and can be revoked at any time.\n\nUse <code>/api create My product</code> to create a full-access project key, or choose a scoped starter key below.", { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
   });
 
   bot.command("cancel", async (ctx) => {
@@ -1100,6 +1164,77 @@ export function registerHandlers(bot: Bot): void {
       `Active model: <code>${model}</code>\n\nChoose a provider:`,
       { parse_mode: "HTML", reply_markup: modelProviderKeyboard() }
     );
+  });
+
+  bot.callbackQuery(/^api:menu$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, create API keys in a private chat with Chusky."); return; }
+    await ctx.editMessageText("<b>Chusky API keys</b>\n\nChoose a key type. Full access covers all public project API endpoints. App embed is limited to agent runs, tasks, tools, skills, and files.", { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^api:new:(full|embed)$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Creating your API key…" });
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, create API keys in a private chat with Chusky."); return; }
+    const mode = ctx.match[1];
+    try {
+      const project = await createTelegramProject(
+        ctx.from!.id,
+        mode === "full" ? `Telegram project ${new Date().toISOString().slice(0, 10)}` : `Telegram app embed ${new Date().toISOString().slice(0, 10)}`,
+        mode === "full" ? ["*"] : TELEGRAM_API_EMBED_SCOPES,
+      );
+      await ctx.editMessageText(apiKeyDelivery(project), { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+    } catch (error) {
+      await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+    }
+  });
+
+  bot.callbackQuery(/^api:list$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
+    const projects = await listTelegramProjects(ctx.from!.id);
+    await ctx.editMessageText(projects.length
+      ? `<b>Your API keys</b>\n\n${projects.map((project) => `• <b>${escapeTelegramHtml(project.name)}</b>\n<code>${escapeTelegramHtml(project.keyPrefix)}…</code> · ${escapeTelegramHtml(project.scopes.join(", "))}`).join("\n\n")}\n\nRotate replaces a key immediately. Revoke permanently disables it.`
+      : "<b>Your API keys</b>\n\nYou have no active API keys yet.", { parse_mode: "HTML", reply_markup: projects.length ? apiKeyProjectKeyboard(projects) : apiKeyMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^api:rotate:(proj_[0-9a-f-]{36})$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Rotating API key…" });
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
+    try {
+      const project = await rotateTelegramProjectKey(ctx.from!.id, ctx.match[1]);
+      await ctx.editMessageText(apiKeyDelivery(project, true), { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+    } catch (error) {
+      await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
+    }
+  });
+
+  bot.callbackQuery(/^api:revoke:(proj_[0-9a-f-]{36})$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
+    const project = (await listTelegramProjects(ctx.from!.id)).find((item) => item.id === ctx.match[1]);
+    if (!project) { await ctx.editMessageText("That API key is no longer active.", { reply_markup: apiKeyMenuKeyboard() }); return; }
+    await ctx.editMessageText(`<b>Revoke ${escapeTelegramHtml(project.name)}?</b>\n\nThis disables <code>${escapeTelegramHtml(project.keyPrefix)}…</code> immediately. Existing apps using it will stop working.`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🗑 Revoke permanently", `api:revoke-confirm:${project.id}`).text("Cancel", "api:list") });
+  });
+
+  bot.callbackQuery(/^api:revoke-confirm:(proj_[0-9a-f-]{36})$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Revoking API key…" });
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, manage API keys in a private chat with Chusky."); return; }
+    const revoked = await revokeTelegramProject(ctx.from!.id, ctx.match[1]);
+    await ctx.editMessageText(revoked ? "✅ API key revoked. Requests using it are now rejected." : "That API key is no longer active.", { reply_markup: apiKeyMenuKeyboard() });
+  });
+
+  bot.callbackQuery(/^api:help$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("For your security, create API keys in a private chat with Chusky."); return; }
+    const baseUrl = (config.webhookUrl || config.dashboardUrl || "https://your-chusky-host").replace(/\/+$/, "");
+    await ctx.editMessageText(`<b>Embed Chusky</b>\n\n1. Create a key here.\n2. Keep it in your server environment, never in frontend code.\n3. Send <code>Authorization: Bearer chsk_…</code> and <code>X-Chusky-User-Id: your-user-id</code> to <code>${escapeTelegramHtml(baseUrl)}/v1</code>.\n\nUse a stable ID from your own product for each customer. Chusky keeps each project/user combination isolated.`, { parse_mode: "HTML", reply_markup: apiKeyMenuKeyboard() });
   });
 
   bot.callbackQuery(/^mpv:(.+)$/, async (ctx) => {
