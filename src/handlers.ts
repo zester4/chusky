@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask,
+  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -32,6 +32,7 @@ import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { createTelegramProject, listTelegramProjects, revokeTelegramProject, rotateTelegramProjectKey } from "./developerProjects.js";
 import { conversationIdFor } from "./channels/contracts.js";
 import { sharedGroupInstructions } from "./channels/groupInstructions.js";
+import { telegramCardFallbackHtml, telegramCardFallbackKeyboard, telegramCardRichHtml, type TelegramCard } from "./telegramCards.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
@@ -68,6 +69,165 @@ type ModelProvider = "anthropic" | "openai" | "google" | "meta-llama" | "deepsee
 
 function escapeTelegramHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * grammY 1.x intentionally does not yet type Bot API 10.x Rich Message
+ * methods. Keep this narrow raw transport at the Telegram boundary instead
+ * of weakening types throughout the rest of Chusky.
+ */
+async function telegramRaw(method: string, payload: Record<string, unknown>): Promise<boolean> {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      logger.debug({ method, status: response.status }, "Telegram rich feature unavailable; using compatibility fallback");
+      return false;
+    }
+    const body = await response.json() as { ok?: boolean };
+    return body.ok === true;
+  } catch (error) {
+    logger.debug({ err: error, method }, "Telegram rich feature request failed; using compatibility fallback");
+    return false;
+  }
+}
+
+async function replyCard(ctx: Context, card: TelegramCard): Promise<void> {
+  const replyMarkup = telegramCardFallbackKeyboard(card);
+  const richSent = await telegramRaw("sendRichMessage", {
+    chat_id: ctx.chat!.id,
+    rich_message: { html: telegramCardRichHtml(card) },
+  });
+  if (!richSent) await ctx.reply(telegramCardFallbackHtml(card), { parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+}
+
+async function editCard(ctx: Context, messageId: number, card: TelegramCard): Promise<void> {
+  const replyMarkup = telegramCardFallbackKeyboard(card);
+  const richEdited = await telegramRaw("editMessageText", {
+    chat_id: ctx.chat!.id,
+    message_id: messageId,
+    rich_message: { html: telegramCardRichHtml(card) },
+  });
+  if (!richEdited) await ctx.api.editMessageText(ctx.chat!.id, messageId, telegramCardFallbackHtml(card), { parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+}
+
+function approvalCard(toolSlug: string, approvalId: string): TelegramCard {
+  return {
+    title: "⚠️ Approval required",
+    body: ["Chusky prepared an external action that needs your review.", `Requested capability: ${toolSlug}`],
+    detail: "Approve executes the exact action reviewed by Chusky. Deny leaves everything unchanged.",
+    buttons: [[
+      { text: "✅ Approve", callbackData: `appr:approve:${approvalId}`, style: "success" },
+      { text: "🛑 Deny", callbackData: `appr:deny:${approvalId}`, style: "danger" },
+    ]],
+  };
+}
+
+async function canSendEphemeralToOwner(ctx: Context): Promise<boolean> {
+  if (!ctx.chat || !ctx.from || !isTelegramShared(ctx)) return false;
+  try {
+    const me = await ctx.api.getMe();
+    const membership = await ctx.api.getChatMember(ctx.chat.id, me.id);
+    return membership.status === "administrator" || membership.status === "creator";
+  } catch (error) {
+    logger.debug({ err: error, chatId: ctx.chat.id }, "Could not check ephemeral-message administrator permission");
+    return false;
+  }
+}
+
+/**
+ * Group chats never receive approval details. Prefer Telegram's owner-only
+ * ephemeral delivery when Chusky is an administrator; if Telegram cannot
+ * deliver it, use the owner's existing private Chusky chat. The approval
+ * record—not either presentation—is the authority for execution.
+ */
+async function deliverGroupApproval(ctx: Context, card: TelegramCard): Promise<"ephemeral" | "private"> {
+  const replyMarkup = telegramCardFallbackKeyboard(card);
+  if (await canSendEphemeralToOwner(ctx)) {
+    const delivered = await telegramRaw("sendRichMessage", {
+      chat_id: ctx.chat!.id,
+      rich_message: { html: telegramCardRichHtml(card) },
+      ephemeral_message_parameters: { receiver_user_id: ctx.from!.id },
+    });
+    if (delivered) return "ephemeral";
+  }
+
+  // A private chat ID is the owner's Telegram user ID. This does not use the
+  // current group chat ID, which would risk sending sensitive review UI back
+  // into the group after a restart.
+  const richDelivered = await telegramRaw("sendRichMessage", {
+    chat_id: ctx.from!.id,
+    rich_message: { html: telegramCardRichHtml(card) },
+  });
+  if (!richDelivered) await ctx.api.sendMessage(ctx.from!.id, telegramCardFallbackHtml(card), { parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
+  return "private";
+}
+
+async function editApprovalOutcome(ctx: Context, text: string): Promise<void> {
+  const message = ctx.callbackQuery?.message as { ephemeral_message_id?: number; message_id?: number } | undefined;
+  if (message?.ephemeral_message_id && ctx.chat && ctx.from) {
+    const edited = await telegramRaw("editEphemeralMessageText", {
+      chat_id: ctx.chat.id,
+      receiver_user_id: ctx.from.id,
+      ephemeral_message_id: message.ephemeral_message_id,
+      text,
+    });
+    if (edited) return;
+  }
+  await ctx.editMessageText(text);
+}
+
+function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number }): TelegramCard {
+  const connectionLine = input.connectedApps
+    ? `🟢 ${input.connectedApps} app${input.connectedApps === 1 ? "" : "s"} connected across ${input.connectedAccounts} account${input.connectedAccounts === 1 ? "" : "s"}`
+    : "⚪ No connected apps yet";
+  return {
+    title: "⚡ Chusky Workspace",
+    body: [
+      connectionLine,
+      `🧠 Model: ${input.model}`,
+      `📌 ${input.pendingApprovals} pending approval${input.pendingApprovals === 1 ? "" : "s"} · ${input.activeWorkers} active task${input.activeWorkers === 1 ? "" : "s"}`,
+      `⚡ ${input.triggerCount} active trigger${input.triggerCount === 1 ? "" : "s"}`,
+    ],
+    detail: "Connected accounts, tasks, and approvals remain private to your Chusky account.",
+    buttons: [
+      [{ text: "🧩 Apps", callbackData: "home:apps", style: "primary" }, { text: "⚡ Triggers", callbackData: "home:triggers" }],
+      [{ text: "✅ Approvals", callbackData: "home:approvals" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
+    ],
+  };
+}
+
+async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
+  if (isTelegramShared(ctx)) {
+    const card: TelegramCard = {
+      title: "⚡ Chusky in this group",
+      body: ["This is a shared workspace. Personal apps, browser sessions, API keys, memory, and approval details stay private."],
+      buttons: [[{ text: "🧩 Group apps", callbackData: "home:apps", style: "primary" }, { text: "⚡ Triggers", callbackData: "home:triggers" }]],
+    };
+    if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
+    return;
+  }
+  const [session, states, approvals, handoffs, triggers] = await Promise.all([
+    getSession(ctx.from!.id),
+    getToolkitStates(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace app summary"); return []; }),
+    listApprovals(ctx.from!.id, 50),
+    listHandoffRecords(ctx.from!.id),
+    listTriggers(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace trigger summary"); return []; }),
+  ]);
+  const connected = states.filter((state) => state.connected);
+  const activeWorkerStatuses = new Set(["queued", "cancel_requested", "interrupted", "requires_approval", "requires_tool_request"]);
+  const card = workspaceCard({
+    model: session.model,
+    connectedApps: connected.length,
+    connectedAccounts: connected.reduce((total, state) => total + (state.accountCount ?? 0), 0),
+    pendingApprovals: approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).length,
+    activeWorkers: handoffs.filter((handoff) => activeWorkerStatuses.has(handoff.status)).length,
+    triggerCount: triggers.length,
+  });
+  if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
 }
 
 function modelProviderKeyboard(): InlineKeyboard {
@@ -225,7 +385,9 @@ function isAllowed(ctx: Context): boolean {
 
 async function guard(ctx: Context): Promise<boolean> {
   if (ctx.from && ctx.chat && isAllowed(ctx)) {
-    await setTelegramChatId(ctx.from.id, ctx.chat.id);
+    // Keep a direct-chat route for private fallback delivery. A group ID must
+    // never replace it, otherwise a later approval could be sent publicly.
+    if (ctx.chat.type === "private") await setTelegramChatId(ctx.from.id, ctx.chat.id);
     await linkChannelIdentity(ctx.from.id, { provider: "telegram", externalUserId: String(ctx.from.id), displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ") });
   }
   if (isAllowed(ctx)) return true;
@@ -482,6 +644,7 @@ export function registerHandlers(bot: Bot): void {
       `I have access to <b>1,000+ tools</b> across every major platform — GitHub, Gmail, Slack, Notion, Linear, Stripe, and more. Just tell me what you need.\n\n` +
       `<b>Active model:</b> <code>${model}</code>\n\n` +
       `<b>Commands:</b>\n` +
+      `  /home — open your Chusky workspace\n` +
       `  /connect <code>[toolkit]</code> — connect an app\n` +
       `  /apps — see connected apps\n` +
       `  /model — switch AI model\n` +
@@ -511,6 +674,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     await replyHtml(ctx,
       `<b>Chusky — Commands</b>\n\n` +
+      `/home — connected apps, tasks, approvals, and triggers\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -557,6 +721,17 @@ export function registerHandlers(bot: Bot): void {
     const url = config.dashboardUrl || config.webhookUrl;
     if (!url) { await ctx.reply("The dashboard is not configured yet. Set DASHBOARD_URL in the Chusky deployment."); return; }
     await ctx.reply("Open your Chusky workspace:", { reply_markup: new InlineKeyboard().url("Open dashboard", `${url.replace(/\/+$/, "")}/app`) });
+  });
+
+  // /home ────────────────────────────────────────────────────────────────────
+  bot.command("home", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    try {
+      await showWorkspace(ctx);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id }, "Could not render Telegram workspace");
+      await ctx.reply("❌ I could not load your workspace right now. Please try /home again.");
+    }
   });
 
   // Project API keys are deliberately a private-chat operation. A key sent in
@@ -634,11 +809,13 @@ export function registerHandlers(bot: Bot): void {
     }
     try {
       const approval = await requestPhoneCallApproval(ctx.from!.id, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`);
-      const keyboard = new InlineKeyboard().text("✅ Approve", `appr:approve:${approval.id}`).text("🛑 Deny", `appr:deny:${approval.id}`);
-      await ctx.reply(
-        `⚠️ <b>Approval required</b>\n\nI will call <code>${escapeTelegramHtml(approval.args.phoneNumber as string)}</code> about: ${escapeTelegramHtml(approval.args.purpose as string)}.`,
-        { parse_mode: "HTML", reply_markup: keyboard },
-      );
+      const card = approvalCard(approval.toolSlug, approval.id);
+      if (isTelegramShared(ctx)) {
+        await ctx.reply("⚠️ This phone call needs its owner's private review. I sent the approval card privately.");
+        await deliverGroupApproval(ctx, card);
+      } else {
+        await replyCard(ctx, card);
+      }
     } catch (error) {
       await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
     }
@@ -1323,29 +1500,87 @@ export function registerHandlers(bot: Bot): void {
     }
   });
 
+  // Workspace card actions. They deliberately reuse the existing command
+  // handlers' data sources instead of creating a second session model.
+  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const action = ctx.match[1];
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    try {
+      if (action === "refresh") {
+        await showWorkspace(ctx, messageId);
+        return;
+      }
+      if (action === "triggers") {
+        await ctx.editMessageText("<b>Composio triggers</b>\n\nChoose an action. Chusky only shows apps connected to your account, and asks which account to use when you have more than one.", { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() });
+        return;
+      }
+      if (action === "apps") {
+        const states = await getToolkitStates(ctx.from!.id);
+        const connected = states.filter((state) => state.connected);
+        const card: TelegramCard = {
+          title: "🧩 Connected apps",
+          body: connected.length
+            ? connected.slice(0, 8).map((state) => `🟢 ${state.name} · ${state.accountCount ?? 1} account${(state.accountCount ?? 1) === 1 ? "" : "s"}`)
+            : ["No apps are connected yet."],
+          detail: connected.length > 8 ? `${connected.length - 8} more connected app${connected.length - 8 === 1 ? "" : "s"}. Use /apps for the full list.` : "Use /connect gmail work-gmail to add another account safely.",
+          buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }, { text: "⚡ Triggers", callbackData: "home:triggers" }]],
+        };
+        await editCard(ctx, messageId, card);
+        return;
+      }
+      const pending = (await listApprovals(ctx.from!.id, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
+      const card: TelegramCard = {
+        title: "✅ Pending approvals",
+        body: pending.length ? pending.map((approval) => `⚠️ ${approval.toolSlug}`) : ["Nothing is waiting for approval."],
+        detail: pending.length ? "Choose an approval below to review it privately." : "Chusky will surface a review card whenever an action needs your confirmation.",
+        buttons: pending.length
+          ? [...pending.map((approval) => [{ text: `Review ${approval.toolSlug}`.slice(0, 54), callbackData: `appr:review:${approval.id}`, style: "primary" as const }]), [{ text: "← Workspace", callbackData: "home:refresh" }]]
+          : [[{ text: "← Workspace", callbackData: "home:refresh" }]],
+      };
+      await editCard(ctx, messageId, card);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, action }, "Telegram workspace action failed");
+      await ctx.editMessageText("❌ I could not load that workspace view. Use /home to try again.");
+    }
+  });
+
+  bot.callbackQuery(/^appr:review:(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const approval = await getApproval(ctx.from!.id, ctx.match[1]);
+    if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) {
+      await ctx.editMessageText("⚠️ This approval has expired or was already handled.");
+      return;
+    }
+    await editCard(ctx, ctx.callbackQuery.message!.message_id, approvalCard(approval.toolSlug, approval.id));
+  });
+
   bot.callbackQuery(/^appr:(approve|deny):(.+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     const id = ctx.match[2];
     const approval = await getApproval(ctx.from.id, id);
     if (!approval || approval.status !== "pending" || approval.expiresAt <= Date.now()) {
-      await ctx.editMessageText("⚠️ This approval has expired or was already handled.");
+      await editApprovalOutcome(ctx, "⚠️ This approval has expired or was already handled.");
       return;
     }
     if (ctx.match[1] === "deny") {
       if (!(await setApprovalStatus(ctx.from.id, id, "denied"))) {
-        await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
+        await editApprovalOutcome(ctx, "⚠️ This approval was already handled or has expired.");
         return;
       }
       if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
-      await ctx.editMessageText("🛑 Action denied. Nothing was executed.");
+      await editApprovalOutcome(ctx, "🛑 Action denied. Nothing was executed.");
       return;
     }
     if (!(await claimApproval(ctx.from.id, id))) {
-      await ctx.editMessageText("⚠️ This approval was already handled or has expired.");
+      await editApprovalOutcome(ctx, "⚠️ This approval was already handled or has expired.");
       return;
     }
-    await ctx.editMessageText("✅ Approved. Chusky is executing the action…");
+    await editApprovalOutcome(ctx, "✅ Approved. Chusky is executing the action…");
     if (approval.triggerEventId) {
       await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
       return;
@@ -1463,8 +1698,24 @@ export function registerHandlers(bot: Bot): void {
     } catch (e) {
       clearInterval(typingInterval);
       if (e instanceof ApprovalRequiredError) {
-        const kb = new InlineKeyboard().text("✅ Approve", `appr:approve:${e.approvalId}`).text("🛑 Deny", `appr:deny:${e.approvalId}`);
-        await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, `⚠️ <b>Approval required</b>\n\nChusky wants to execute <code>${e.toolSlug}</code>.\n\nReview the requested action and choose:`, { parse_mode: "HTML", reply_markup: kb });
+        const card = approvalCard(e.toolSlug, e.approvalId);
+        if (isTelegramShared(ctx)) {
+          // Never expose tool names, arguments, or approval controls to the
+          // rest of a group. Delivery is owner-only or safely falls back to
+          // the owner's direct Chusky chat.
+          await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, "⚠️ <b>Approval required</b>\n\nThis action needs its owner's review. I sent the private approval card.", { parse_mode: "HTML" });
+          try {
+            const route = await deliverGroupApproval(ctx, card);
+            logger.info({ userId, chatId: ctx.chat!.id, route, approvalId: e.approvalId }, "Delivered private Telegram group approval");
+          } catch (deliveryError) {
+            // The durable record remains pending. Never replace the generic
+            // group status with an error containing sensitive action details.
+            logger.warn({ err: deliveryError, userId, chatId: ctx.chat!.id, approvalId: e.approvalId }, "Could not deliver private group approval");
+            await ctx.reply("I could not deliver the owner's private approval card. Open a private chat with me and use /home → Approvals.");
+          }
+          return;
+        }
+        await editCard(ctx, statusMsg.message_id, card);
         return;
       }
       logger.error({ err: e, userId, model }, "Chusky error");

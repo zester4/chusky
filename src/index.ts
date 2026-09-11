@@ -110,6 +110,7 @@ async function main(): Promise<void> {
   // so users can discover /api without knowing the command beforehand.
   await bot.api.setMyCommands([
     { command: "start", description: "Open Chusky" },
+    { command: "home", description: "Open your agent workspace" },
     { command: "help", description: "See commands and capabilities" },
     { command: "api", description: "Create and manage project API keys" },
     { command: "connect", description: "Connect an app account" },
