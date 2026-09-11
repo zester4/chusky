@@ -105,6 +105,21 @@ async function main(): Promise<void> {
   // before the HTTP server can accept one. Without this, handleUpdate throws
   // because bot.me has not been loaded yet.
   await bot.init();
+  // Telegram's native command picker is separate from grammY command
+  // handlers. Keep it aligned with the high-frequency private-chat actions
+  // so users can discover /api without knowing the command beforehand.
+  await bot.api.setMyCommands([
+    { command: "start", description: "Open Chusky" },
+    { command: "help", description: "See commands and capabilities" },
+    { command: "api", description: "Create and manage project API keys" },
+    { command: "connect", description: "Connect an app account" },
+    { command: "apps", description: "View connected apps" },
+    { command: "triggers", description: "Manage app triggers" },
+    { command: "model", description: "Choose an AI model" },
+    { command: "dashboard", description: "Open your dashboard" },
+    { command: "usage", description: "View session usage" },
+    { command: "cancel", description: "Cancel the active request" },
+  ]).catch((error) => logger.warn({ err: error }, "Could not register Telegram command menu"));
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
   const app = new Hono();
