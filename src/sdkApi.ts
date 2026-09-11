@@ -140,7 +140,7 @@ function phoneCallingAvailable(): boolean {
 function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; error?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
-  return { id: call.id, provider: call.provider ?? "facetime", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 function approvalView(approval: { id: string; status: string; toolSlug: string; args: Record<string, unknown>; request?: string; channelProvider?: string; handoffId?: string; createdAt: number; expiresAt: number }) {
   return { id: approval.id, status: approval.status, toolSlug: approval.toolSlug, args: approval.args, request: approval.request, channelProvider: approval.channelProvider, handoffId: approval.handoffId, createdAt: new Date(approval.createdAt).toISOString(), expiresAt: new Date(approval.expiresAt).toISOString() };
@@ -253,8 +253,7 @@ export function registerSdkApi(app: Hono): void {
 
   app.get("/v1/ops/health", async (c) => {
     const sendblueConfigured = !config.sendblueEnabled || Boolean(config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret);
-    const facetimeConfigured = !config.sendblueFaceTimeEnabled || Boolean(config.sendblueApiKey && config.sendblueApiSecret && config.sendblueFaceTimeNumber && config.faceTimeMediaBridgeUrl && config.faceTimeMediaBridgeSecret);
-    const twilioConfigured = !config.twilioVoiceEnabled || Boolean(config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.faceTimeMediaBridgeSecret);
+    const twilioConfigured = !config.twilioVoiceEnabled || Boolean(config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret);
     const twilioSmsConfigured = !config.twilioSmsEnabled || Boolean(config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid));
     const twilioInboundConfigured = !config.twilioInboundEnabled || Boolean(config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers);
     const xchatConfigured = !config.xchatEnabled || Boolean(config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin);
@@ -265,7 +264,7 @@ export function registerSdkApi(app: Hono): void {
       qstash: config.qstashToken ? "configured" : "disabled",
       composioTriggers: config.composioWebhookSecret && (config.composioWebhookUrl || config.webhookUrl) ? "configured" : "disabled",
       sendblue: config.sendblueEnabled ? (sendblueConfigured ? "configured" : "misconfigured") : "disabled",
-      facetime: config.sendblueFaceTimeEnabled ? (facetimeConfigured ? "configured" : "misconfigured") : "disabled",
+      facetime: "disabled",
       twilio: config.twilioVoiceEnabled ? (twilioConfigured ? "configured" : "misconfigured") : "disabled",
       twilioSms: config.twilioSmsEnabled ? (twilioSmsConfigured ? "configured" : "misconfigured") : "disabled",
       twilioInbound: config.twilioInboundEnabled ? (twilioInboundConfigured ? "configured" : "misconfigured") : "disabled",
@@ -670,7 +669,7 @@ export function registerSdkApi(app: Hono): void {
           validateNativeToolArguments(approval.toolSlug, approval.args);
           await nativeTool(owner.userId, approval.toolSlug, approval.args);
           await setApprovalStatus(owner.userId, approval.id, "consumed");
-          const label = approval.toolSlug === "CHUCK_START_PHONE_CALL" ? "Phone call" : "FaceTime call";
+          const label = "Phone call";
           const text = `${label} started. I’m joining the call now.`;
           await appendMessages(owner.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: text }]);
           return c.json({ id: approval.id, status: "consumed", text });

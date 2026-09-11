@@ -9,6 +9,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
+  // Read-only compatibility for old conversation history. It returns only
+  // Twilio records now; FaceTime is not an available call transport.
   "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
   "CHUCK_ATTENTION_STATE",
@@ -77,8 +79,6 @@ const STATUSES: Record<string, string> = {
   CHUCK_SEARCH_SKILLS: "🧭 I’m checking the relevant project skills…",
   CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the skill’s supporting files…",
   CHUCK_READ_SKILL_FILE: "📖 I’m reading the relevant skill guidance…",
-  CHUCK_START_FACETIME_CALL: "📞 I’m preparing that FaceTime call…",
-  CHUCK_LIST_FACETIME_CALLS: "📞 I’m checking your FaceTime call history…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking your phone-call history…",
   CHUCK_ATTENTION_STATE: "🧠 I’m updating your private attention state…",

@@ -1216,7 +1216,7 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     try {
-      // A FaceTime call is a real external side effect. Re-running the model
+      // A phone call is a real external side effect. Re-running the model
       // after approval can produce semantically similar but JSON-different
       // arguments, causing an unnecessary second approval. Execute precisely
       // the reviewed native request instead.
@@ -1224,7 +1224,7 @@ export function registerHandlers(bot: Bot): void {
         validateNativeToolArguments(approval.toolSlug, approval.args);
         await nativeTool(ctx.from.id, approval.toolSlug, approval.args);
         await setApprovalStatus(ctx.from.id, approval.id, "consumed");
-        const label = approval.toolSlug === "CHUCK_START_PHONE_CALL" ? "Phone call" : "FaceTime call";
+        const label = "Phone call";
         await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: `${label} started. I’m joining the call now.` }]);
         await ctx.reply(`📞 ${label} started. I’m joining the call now.`);
         return;

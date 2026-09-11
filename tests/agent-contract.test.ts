@@ -156,15 +156,18 @@ test("approved multi-tool calls execute the stored arguments when the model rege
   assert.deepEqual(executed, [{ slug: "COMPOSIO_MULTI_EXECUTE_TOOL", args: reviewedArgs }]);
 });
 
-test("malformed tool JSON becomes a controlled tool error and the loop continues", async () => {
+test("a malformed tool call is discarded without consuming the next valid tool-call budget", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830004);
+  let executions = 0;
   await withAgentMocks([
     toolResponse("TEST_SAFE_TOOL", "not-json"),
+    toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: "recovered" })),
     chatResponse({ role: "assistant", content: "recovered" }),
-  ], async () => undefined, async () => {
-    const result = await runAgent(830004, "recover", [], "test/model");
+  ], async () => { executions++; return { ok: true }; }, async () => {
+    const result = await runAgent(830004, "recover", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
     assert.equal(result.text, "recovered");
+    assert.equal(executions, 1);
   });
 });
 

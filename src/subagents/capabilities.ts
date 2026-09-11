@@ -152,13 +152,11 @@ Operating Rules:
   sofia: {
     name: "sofia",
     displayName: "Sofia (Voice Operations & Real-World Negotiator)",
-    domain: "Interactive phone calls (Twilio & FaceTime), vendor negotiations, appointment booking, voice call triage",
+    domain: "Interactive Twilio phone calls, vendor negotiations, appointment booking, voice call triage",
     allowedTools: [
       ...SKILL_TOOLS,
       "CHUCK_START_PHONE_CALL",
       "CHUCK_LIST_PHONE_CALLS",
-      "CHUCK_START_FACETIME_CALL",
-      "CHUCK_LIST_FACETIME_CALLS",
       "CHUCK_SCRATCHPAD_READ",
       "CHUCK_SCRATCHPAD_WRITE",
       "CHUCK_HANDOFF_SUBAGENT",
@@ -168,7 +166,7 @@ Operating Rules:
     starterComposioTools: [],
     allowedMemoryCategories: ["relationship", "business"],
     systemPrompt: `You are Sofia, Chusky's Voice Operations & Real-World Negotiator.
-Your focus is executing outbound phone calls (Twilio and FaceTime audio), formulating call scripts, conducting voice interactions, and logging call outcomes.
+Your focus is executing outbound Twilio phone calls, formulating call scripts, conducting voice interactions, and logging call outcomes.
 Operating Rules:
 1. Always construct a clear, structured call script and verify the destination phone number in E.164 format (+1...).
 2. All phone calls placed to external numbers strictly require explicit user approval.
@@ -333,7 +331,7 @@ export function classifyDelegationObjective(objective: string, allowedTools: str
   const creative = /\b(logo|image|video|visual|brand|branding|marketing|copywriting|campaign|ad creative|thumbnail|illustration|design asset)\b/.test(text) ||
     tools.some((tool) => /CHUCK_(GENERATE_IMAGE|GENERATE_VIDEO|VIDEO_STATUS|SAVE_IMAGE_ASSET|SEARCH_IMAGE_ASSETS|GET_IMAGE_ASSET|FORGET_IMAGE_ASSET)/.test(tool));
   const social = /\b(social media|publish|post to|linkedin|instagram|facebook|twitter|x post|slack|discord|webhook|integration|trigger)\b/.test(text);
-  const voice = /\b(phone call|telephone|call vendor|call customer|facetime|twilio|appointment by phone|voice call)\b/.test(text) || tools.some((tool) => /CHUCK_START_(PHONE|FACETIME)_CALL/.test(tool));
+  const voice = /\b(phone call|telephone|call vendor|call customer|twilio|appointment by phone|voice call)\b/.test(text) || tools.some((tool) => tool === "CHUCK_START_PHONE_CALL");
   const computer = /\b(browser|gui|desktop|computer use|click|fill a form|web app navigation|screenshot)\b/.test(text) || tools.some((tool) => /CHUCK_DAYTONA_(COMPUTER|BROWSER|PREVIEW)/.test(tool));
   const workflow = /\b(reminder|recurring|cron|schedule|durable task|checkpoint|attention loop|background task)\b/.test(text) || tools.some((tool) => /CHUCK_(TASK_|SET_REMINDER|LIST_REMINDERS|CANCEL_REMINDER|SCHEDULE_JOB|LIST_JOBS|CANCEL_JOB|ATTENTION_STATE)/.test(tool));
   const research = /\b(research|researcher|investigate|investigation|evidence|sources?|citations?|market analysis|market research|competitor|competitive intelligence|literature review|technical review|due diligence)\b/.test(text) || tools.some((tool) => /^(TAVILY_|EXA_|FIRECRAWL_)/.test(tool));

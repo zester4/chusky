@@ -171,6 +171,15 @@ export function parseToolArguments(raw: unknown): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/** Safe retry guidance for a provider tool call that was never executed. */
+function malformedToolArgumentsResult(slug: string): string {
+  const local = chuckTools.find((tool) => tool.function.name === slug);
+  const schema = local?.function.parameters as { required?: readonly string[] } | undefined;
+  const required = schema?.required ?? [];
+  const requiredHint = required.length ? ` Include every required field: ${required.join(", ")}.` : "";
+  return `Tool call discarded: ${slug} received malformed or truncated JSON and was not executed. Reissue the same tool once with one complete JSON object only—no prose, code fence, or partial object.${requiredHint}`;
+}
+
 function decodeLegacyDsml(value: string): string {
   return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
 }
@@ -904,6 +913,7 @@ export async function runAgent(
 
       let result: string;
       let execResult: unknown;
+      let toolFailed = false;
       let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
       try {
         const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
@@ -922,8 +932,10 @@ export async function runAgent(
           messages.push({ role: "tool", tool_call_id: call.id, content: result });
           continue;
         }
-        toolCallsExecuted += 1;
         const args = parseToolArguments(call.function.arguments);
+        // A malformed provider payload was never a real tool attempt. Do not
+        // charge it against the user's bounded execution budget.
+        toolCallsExecuted += 1;
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
         let executionArgs = args;
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
@@ -1098,8 +1110,11 @@ export async function runAgent(
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;
         if (signal?.aborted) throw e;
+        toolFailed = true;
         logger.warn(safeToolAudit({ tool: slug, args: effectiveAuditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
-        result = `Error executing ${slug}: ${String(e)}`;
+        result = String(e).includes("Tool arguments are malformed or truncated JSON")
+          ? malformedToolArgumentsResult(slug)
+          : `Error executing ${slug}: ${String(e)}`;
         if (e instanceof DaytonaInputError && ["CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(slug)) {
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }
@@ -1110,7 +1125,7 @@ export async function runAgent(
         tool_call_id: call.id,
         content: result,
       });
-      await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !result.startsWith("Error executing ") });
+      await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed });
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
         const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
