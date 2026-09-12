@@ -44,7 +44,7 @@ import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
-import { applyRecallStatusWebhook, authorizeRecallMedia, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
+import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook } from "./meetings/webhook.js";
 import { meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
@@ -674,11 +674,15 @@ async function main(): Promise<void> {
     });
 
     app.post("/internal/recall/media-authorize", async (c) => {
-      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.text("Not found", 404);
+      if (!config.recallMeetingsEnabled) return c.text("Not found", 404);
+      if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret)) return c.text("Unauthorized", 401);
       const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !(await authorizeRecallMedia(userId, meetingId))) return c.text("Not found", 404);
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Not found", 404);
+      const state = await getRecallMediaAuthorizationState(userId, meetingId);
+      if (state === "denied") return c.text("Not found", 404, { "Cache-Control": "no-store" });
+      if (state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
       return c.body(null, 204, { "Cache-Control": "no-store" });
     });
 

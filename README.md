@@ -450,6 +450,13 @@ key, region, Recall status-webhook signing secret, and matching 32+-byte
 **Bot Status Change** webhook to `/recall/webhook`; see the bridge README for
 the full settings and test procedure.
 
+The voice bridge briefly retries an authenticated `425` while the signed bot
+status webhook is still progressing through joining/waiting-room states. This
+avoids rejecting a valid Output Media page during startup without authorizing
+pre-call or ended sessions. The voice service's `/recall/health` endpoint
+shows content-free aggregate counters for ticket checks, audio frames, Flux
+turns, agent requests, and speech output.
+
 Optional in-meeting chat adds a signed per-bot `participant_events.chat_message`
 endpoint without enabling retained recordings/transcripts. Set
 `RECALL_REALTIME_SECRET` to the Recall **workspace verification secret** (this

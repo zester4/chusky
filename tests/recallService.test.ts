@@ -2,7 +2,7 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { applyRecallStatusWebhook, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
+import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
 const originalConfig = {
@@ -231,6 +231,20 @@ test("signed provider status updates only the owning meeting and ignores stale l
   assert.equal(stale, "ignored");
   assert.equal(providerCalls, 1, "a complete signed Recall status payload needs no serial API lookup");
   assert.equal((await listRecallMeetings(ownerId)).some((item) => item.id === meeting.id), true);
+});
+
+test("Recall media authorization waits for the owned bot to enter the call and rejects terminal states", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/media-auth-race" });
+
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "waiting_room" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "ended" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "denied");
+  assert.equal(await getRecallMediaAuthorizationState(ownerId + 1, meeting.id), "denied");
 });
 
 test("an ended representative meeting schedules post-meeting follow-through and retries can re-enqueue it", async () => {

@@ -281,12 +281,21 @@ export async function getRecallMeetingForUser(userId: number, id: string) {
   return record ? safeMeeting(record) : undefined;
 }
 
-export async function authorizeRecallMedia(userId: number, id: string): Promise<boolean> {
-  if (!config.recallMeetingsEnabled || !config.recallMediaBridgeSecret) return false;
+export type RecallMediaAuthorizationState = "authorized" | "pending" | "denied";
+
+export async function getRecallMediaAuthorizationState(userId: number, id: string): Promise<RecallMediaAuthorizationState> {
+  if (!config.recallMeetingsEnabled || !config.recallMediaBridgeSecret) return "denied";
   assertUserId(userId);
-  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return false;
+  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return "denied";
   const meeting = await getRecallMeeting(userId, id);
-  return meeting?.status === "in_call";
+  if (!meeting) return "denied";
+  if (meeting.status === "in_call") return "authorized";
+  if (["creating", "scheduled", "joining", "waiting_room"].includes(meeting.status)) return "pending";
+  return "denied";
+}
+
+export async function authorizeRecallMedia(userId: number, id: string): Promise<boolean> {
+  return (await getRecallMediaAuthorizationState(userId, id)) === "authorized";
 }
 
 export async function leaveRecallMeeting(userId: number, id: string, signal?: AbortSignal) {
