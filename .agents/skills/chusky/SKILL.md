@@ -167,8 +167,11 @@ credentials, webhook contracts, or provider assumptions.
 
 ### Low-latency Deepgram voice path
 
-- Twilio Media Streams are raw `audio/x-mulaw` at 8 kHz. Pass that codec
-  directly to and from Deepgram; do not transcode or add file/container
+- Twilio Media Streams carry raw `audio/x-mulaw` at 8 kHz. The current bridge
+  converts inbound audio to linear16/48 kHz for Flux STT and Flux TTS output
+  from linear16/24 kHz back to μ-law/8 kHz for Twilio. Keep resampling state
+  across frames and never send a codec under a mismatched sample-rate label.
+  Twilio's external wire format remains μ-law/8 kHz; do not add file/container
   headers.
 - Use Deepgram Flux STT at `/v2/listen` with `flux-general-en`, explicit
   `eager_eot_threshold`, `eot_threshold`, and `eot_timeout_ms`. Start a
