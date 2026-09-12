@@ -13,6 +13,9 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   // Twilio records now; FaceTime is not an available call transport.
   "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
+  // Meeting participation is available only after the user's explicit join
+  // request and uses a visible bot identity; leave/status/list are owner-scoped.
+  "CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE", "CHUCK_MEETING_PROFILE_GET", "CHUCK_MEETING_PROFILE_UPDATE",
   "CHUCK_ATTENTION_STATE",
   "CHUCK_FORGET_MEMORY", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
@@ -81,6 +84,10 @@ const STATUSES: Record<string, string> = {
   CHUCK_READ_SKILL_FILE: "📖 I’m reading the relevant skill guidance…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking your phone-call history…",
+  CHUCK_MEETING_JOIN: "🎥 I’m joining that meeting as Chusky Meeting Assistant…",
+  CHUCK_MEETING_LIST: "🎥 I’m checking your meeting assistants…",
+  CHUCK_MEETING_STATUS: "🎥 I’m checking that meeting’s status…",
+  CHUCK_MEETING_LEAVE: "🎥 I’m asking the meeting assistant to leave…",
   CHUCK_ATTENTION_STATE: "🧠 I’m updating your private attention state…",
   COMPOSIO_MANAGE_CONNECTIONS: "🔗 I’m opening the connection screen…",
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",

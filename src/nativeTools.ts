@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, listJobs, listReminders,
+  getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
@@ -27,6 +28,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
+import { getRecallMeetingForUser, joinRecallMeeting, leaveRecallMeeting, listRecallMeetingsForUser } from "./meetings/service.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -428,6 +430,19 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), context: (await getSession(userId)).history.slice(-8).map((message) => `${message.role}: ${String(message.content)}`).join("\n") })
       : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
+    case "CHUCK_MEETING_JOIN": {
+      const profile = await getMeetingRepresentativeProfile(userId);
+      const interactionMode = args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
+      return joinRecallMeeting(userId, { meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode }, runtime.signal);
+    }
+    case "CHUCK_MEETING_PROFILE_GET": return getMeetingRepresentativeProfile(userId);
+    case "CHUCK_MEETING_PROFILE_UPDATE": return updateMeetingRepresentativeProfile(userId, args);
+    case "CHUCK_MEETING_LIST": return listRecallMeetingsForUser(userId, args.limit === undefined ? 10 : Number(args.limit));
+    case "CHUCK_MEETING_STATUS": {
+      const meeting = await getRecallMeetingForUser(userId, text(args.id));
+      return meeting ?? { found: false, reason: "Meeting not found or not owned by you" };
+    }
+    case "CHUCK_MEETING_LEAVE": return leaveRecallMeeting(userId, text(args.id), runtime.signal);
     case "CHUCK_VIDEO_STATUS": {
       const id = args.id ? text(args.id) : undefined;
       const limit = args.limit === undefined ? 5 : Math.max(1, Math.min(10, Math.floor(Number(args.limit))));

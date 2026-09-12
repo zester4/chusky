@@ -67,7 +67,7 @@ test("approval callback is scoped to the requesting user and deny never executes
   const bot = new FakeBot();
   registerHandlers(bot as any);
   const approval = await createApproval({ userId: 840002, toolSlug: "CHUCK_DAYTONA_EXECUTE", args: { command: "rm -rf", purpose: "test" }, request: "remove", history: [], model: "test/model" });
-  const callback = bot.callbacks.find((item) => item.pattern.source.includes("appr:"))!;
+  const callback = bot.callbacks.find((item) => item.pattern.source.startsWith("^appr:(approve|deny)"))!;
   const foreign = context(840003);
   foreign.match = ["appr:deny:" + approval.id, "deny", approval.id];
   await callback.handler(foreign);

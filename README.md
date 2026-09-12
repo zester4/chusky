@@ -25,6 +25,7 @@ Production deployments should use Redis and QStash. In-memory persistence is int
 | **Redis persistence** | Sessions, memories, approvals, tasks, and channel events survive restarts; memory mode is development-only |
 | **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
 | **Voice replies** | `/voice on` adds an OpenRouter TTS audio reply while retaining the readable text response |
+| **Meeting representative** | Disclosed Recall bots can represent an owner-approved sales, onboarding, or customer-success role, contribute proactively, and use narrowly granted connected-app actions, reminders, and tasks |
 | **Private scratchpad** | Chusky can save and retrieve per-user working notes across turns |
 | **Daytona computer** | Optional isolated per-user workspace for code, files, and commands |
 | **Rate limiting** | Per-user throttling |
@@ -406,6 +407,67 @@ The adapter verifies timestamped HMAC signatures when present and supports the l
 
 Apple inline voice notes arrive as Opus-in-CAF (`audio/x-caf`). Chusky accepts that documented Sendblue format and converts it privately to Ogg/Opus before transcription. The checked-in Railway Docker image includes `ffmpeg` for this conversion; no Railway variable or interactive install is needed. For outbound attachments, Sendblue relies on a real filename extension: Chusky maps MP3 to `.mp3`, M4A to `.m4a`, and CAF to `.caf` rather than deriving invalid extensions from MIME subtypes. Chusky keeps generated media private in R2, then uploads it directly to Sendblue's media endpoint before delivery because Sendblue does not accept signed URLs in `media_url`. A `.caf` file is required for an inline iMessage voice-note bubble; MP3/M4A are regular audio attachments.
 
+#### Interactive meeting assistant (optional)
+
+Chusky can join meeting links on Zoom, Google Meet, Microsoft Teams, and Webex.
+Ask Chusky to join and provide the meeting URL; there is no automatic calendar
+scan or auto-join in this release. A host may still need to admit the bot, and
+platform-specific setup can apply. Chusky requests the name **Chusky Meeting
+Assistant**, but authenticated Google Meet bots display the connected Google
+account name and ignore Recall's `bot_name`; use an appropriately branded
+connected account and keep the spoken/chat AI disclosure enabled. Recall supports GoTo Meeting bots, but its current Output Media
+support matrix does not list GoTo, so Chusky does not enable GoTo for interactive
+voice until that capability is documented and tested.
+
+The separate [`chusky-voice`](chusky-voice/README.md) service runs Recall
+Output Media and Deepgram Flux; Chusky's configured model remains the agent
+brain. Without a business profile, it behaves as a proactive copilot and speaks
+only when it can add value, within a per-call evaluation cap. An owner can
+configure a sales, client-onboarding, employee-onboarding, customer-success, or
+custom representative profile with its objective, approved company facts,
+boundaries, exact connected-app action grants, and native reminder/task tools.
+In that mode Chusky can contribute naturally, answer questions, create
+follow-ups, and use those exact tools during the meeting. It cannot search for
+or invoke arbitrary tools, access private memories, or let participants choose
+which connected account to use; account aliases are pinned by the owner. Ask
+Chusky to configure the role, objective, approved company facts/boundaries,
+exact tool grants, and any required account aliases. The profile remains
+disabled until you explicitly enable it. A bounded
+rolling text window is held in bridge memory only; it is not saved. Only turns
+Chusky answers and its replies may be kept as bounded meeting history. The
+media page and spoken intro disclose audio processing and retention. Twilio
+phone calling stays independent and unchanged.
+
+Copilot's proactive-evaluation budget is enforced atomically in the root
+service's Redis store across voice-bridge reconnects and replicas. Configure
+`RECALL_COPILOT_MIN_INTERVAL_SECONDS` and `RECALL_COPILOT_MAX_EVALUATIONS` on
+both services with matching values; the voice-side gate only reduces avoidable
+bridge requests.
+
+Enable it only after configuring `RECALL_MEETINGS_ENABLED=true`, the Recall API
+key, region, Recall status-webhook signing secret, and matching 32+-byte
+`RECALL_MEDIA_BRIDGE_SECRET` on Chusky and `chusky-voice`. Register Recall's
+**Bot Status Change** webhook to `/recall/webhook`; see the bridge README for
+the full settings and test procedure.
+
+Optional in-meeting chat adds a signed per-bot `participant_events.chat_message`
+endpoint without enabling retained recordings/transcripts. Set
+`RECALL_REALTIME_SECRET` to the Recall **workspace verification secret** (this
+may differ from the Svix `RECALL_WEBHOOK_SECRET`), and ensure Chusky has Redis,
+`QSTASH_TOKEN`, and a public HTTPS `WEBHOOK_URL`. Health reports this separately
+as `checks.recallChat`. Recall sends a short AI/live-processing disclosure on
+join for Zoom, Meet, and Teams. Participants can address Chusky naturally or
+use `/chusky <question>`, `/chusky status`, `/chusky help`, or `/chusky leave`.
+With an enabled representative profile, relevant ambient chat may also be
+evaluated and answered proactively; otherwise unaddressed chat is ignored.
+Public prompts receive public replies, while Zoom direct messages are answered
+only to that sender. Representative actions use only the owner's explicitly
+granted tools and account routing, without access to private memories. Chat
+text is held briefly in Redis only while a durable reply is processed, then
+cleared; only answered meeting turns are added to the owner's bounded meeting
+history. Webex supports incoming chat events but not chat replies, so only its
+leave command is actionable through chat.
+
 #### Outbound FaceTime voice calls
 
 Chusky can start an **outbound** FaceTime call only when `SENDBLUE_FACETIME_ENABLED=true`, the sending line is purchased and FaceTime-enabled by Sendblue, and an HTTPS media bridge is configured. Sendblue's `POST /facetime/start-call` returns short-lived Agora credentials; Chusky passes them directly to the bridge, which must be a server-side Agora participant that streams remote audio to STT and sends TTS audio back. Chusky persists only call metadata and bridge session IDs—never Agora tokens or media. The `CHUCK_START_FACETIME_CALL` tool is approval-gated. Sendblue does not provide an inbound-call webhook, so automatic answering of incoming FaceTime calls is not supported.
@@ -451,7 +513,7 @@ Sendblue `content` is plain text, not rendered Markdown. Chusky converts common 
 | Sendblue | Implemented | Linked private iMessages use the account session; groups use shared scope; replies use the durable outbox |
 | SMS | Twilio Messaging | Configure a Twilio sender or Messaging Service, `/twilio/sms` webhook, and signature validation |
 | XChat | Implemented | Official encrypted X DMs/groups, media, mentions, typing, receipts, edits, and reactions through `/xchat/webhook` |
-| Voice | Boundary only | Requires a telephony/STT/TTS provider and deployment wiring |
+| Voice | Implemented | Twilio phone calls plus optional Recall meeting bots; the two transports and their credentials stay separate |
 
 To connect Slack, WhatsApp, Sendblue, SMS, or XChat, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
 

@@ -55,6 +55,22 @@ export const config = {
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),
   ttsVoice: optional("TTS_VOICE", "flux-kit-en"),
+  // Recall.ai meeting agents are opt-in and use a separate media bridge secret
+  // from Twilio. Twilio calling remains independently configured and unchanged.
+  recallMeetingsEnabled: optional("RECALL_MEETINGS_ENABLED", "false") === "true",
+  recallApiKey: optional("RECALL_API_KEY", ""),
+  recallRegion: optional("RECALL_REGION", "us-west-2"),
+  recallBotName: optional("RECALL_BOT_NAME", "Chusky Meeting Assistant"),
+  recallMediaPageUrl: optional("RECALL_MEDIA_PAGE_URL", ""),
+  recallWebhookSecret: optional("RECALL_WEBHOOK_SECRET", ""),
+  // Workspace-level Recall verification secret for per-bot real-time endpoints;
+  // this may differ from the Svix secret used by the status webhook above.
+  recallRealtimeSecret: optional("RECALL_REALTIME_SECRET", ""),
+  recallMediaBridgeSecret: optional("RECALL_MEDIA_BRIDGE_SECRET", ""),
+  // Authoritative, Redis-backed proactive meeting-evaluation gate. Mirror
+  // these values in chusky-voice; that service also prefilters locally.
+  recallCopilotMinIntervalSeconds: boundedInt("RECALL_COPILOT_MIN_INTERVAL_SECONDS", 8, 5, 120),
+  recallCopilotMaxEvaluations: boundedInt("RECALL_COPILOT_MAX_EVALUATIONS", 120, 1, 1_000),
   imageModel: optional("IMAGE_MODEL", "x-ai/grok-imagine-image-2.0"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   qstashUrl: optional("QSTASH_URL", ""),

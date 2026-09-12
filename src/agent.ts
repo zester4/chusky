@@ -47,6 +47,7 @@ import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, l
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
+import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -370,6 +371,14 @@ function addAccountSelector(tool: any): any {
   };
 }
 
+function hideMeetingAccountSelector(tool: any): any {
+  const parameters = tool?.function?.parameters;
+  if (!parameters?.properties?.account) return tool;
+  const properties = { ...parameters.properties };
+  delete properties.account;
+  return { ...tool, function: { ...tool.function, parameters: { ...parameters, properties } } };
+}
+
 function splitAccountSelector(args: Record<string, unknown>): { account?: string; arguments: Record<string, unknown> } {
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
   if (!account) return { arguments: args };
@@ -549,7 +558,11 @@ export interface AgentChannelContext {
 export interface AgentRunOptions {
   instructions?: string;
   toolAllow?: string[];
+  /** Meeting-only, owner-configured Composio account routing; participant selectors are ignored. */
+  meetingComposioAccountAliases?: Record<string, string>;
   toolDeny?: string[];
+  /** Run on volatile shared context: omit private context and durable run traces. */
+  ephemeral?: boolean;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
   maxToolCalls?: number;
@@ -643,74 +656,81 @@ export async function runAgent(
   if (onStatus) await onStatus("📜 I’m reading your message……");
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
-  const existingRun = await getAgentRun(userId, durableRunId);
+  const existingRun = options?.ephemeral ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
   let durableRunVersion = existingRun?.version;
 
   let requestModel = model;
 
-  // Get Composio session for this user
-  const { sessionObj } = await getOrCreateComposioSession(userId);
+  const allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
+  const toolsDisabled = allow?.size === 0;
+
+  // Meeting/shared volatile turns with no tool grants must not create or
+  // hydrate a user's Composio session merely to answer a spoken question.
+  const sessionObj = toolsDisabled ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
 
   if (onStatus) await onStatus("🧭 I’m getting the right tools for you…");
 
-  const allow = options?.toolAllow?.length ? new Set(options.toolAllow) : undefined;
   const deny = new Set(options?.toolDeny ?? []);
   // Composio sessions expose discovery and execution meta-tools by default.
   // Keep the model context bounded: direct actions explicitly allowlisted for
   // this run remain available, while the model can discover any other action
   // through COMPOSIO_SEARCH_TOOL and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const fullComposioTools: any[] = await sessionObj.tools();
+  const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
   const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
   const composioTools = (fullComposioTools.length > 80
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
-    : fullComposioTools).map(addAccountSelector);
+    : fullComposioTools).map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
   const availableTools = composioTools.filter((tool) => {
     const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);
   });
 
-  const capabilityModel = model.replace(/^~/, "");
-  try {
-    const modelRes = await fetch(`https://openrouter.ai/api/v1/models/${encodeURIComponent(capabilityModel)}`, {
-      headers: { Authorization: `Bearer ${config.openRouterApiKey}` }, signal,
-    });
-    if (modelRes.ok) {
-      const metadata = await modelRes.json() as any;
-      const architecture = metadata.data?.architecture ?? metadata.architecture ?? {};
-      const supported = metadata.data?.supported_parameters ?? metadata.supported_parameters ?? {};
-      const modality = requiredModality(userMessage);
-      const inputs = architecture.input_modalities ?? [];
-      if (modality && inputs.length && !inputs.includes(modality)) {
-        // OpenRouter's metadata is useful for diagnostics, but it is not a
-        // reliable authority for every provider's document representation.
-        // Some models accept a PDF/file even when the metadata only advertises
-        // text or image input. Try the user's selected model first; the chat
-        // request below is the source of truth and can trigger the fallback if
-        // the provider actually rejects the modality.
-        logger.debug({ model, modality, advertisedInputs: inputs }, "Selected model metadata does not advertise modality; trying selected model");
+  if (!options?.ephemeral) {
+    const capabilityModel = model.replace(/^~/, "");
+    try {
+      const modelRes = await fetch(`https://openrouter.ai/api/v1/models/${encodeURIComponent(capabilityModel)}`, {
+        headers: { Authorization: `Bearer ${config.openRouterApiKey}` }, signal,
+      });
+      if (modelRes.ok) {
+        const metadata = await modelRes.json() as any;
+        const architecture = metadata.data?.architecture ?? metadata.architecture ?? {};
+        const supported = metadata.data?.supported_parameters ?? metadata.supported_parameters ?? {};
+        const modality = requiredModality(userMessage);
+        const inputs = architecture.input_modalities ?? [];
+        if (modality && inputs.length && !inputs.includes(modality)) {
+          // OpenRouter's metadata is useful for diagnostics, but it is not a
+          // reliable authority for every provider's document representation.
+          // Some models accept a PDF/file even when the metadata only advertises
+          // text or image input. Try the user's selected model first; the chat
+          // request below is the source of truth and can trigger the fallback if
+          // the provider actually rejects the modality.
+          logger.debug({ model, modality, advertisedInputs: inputs }, "Selected model metadata does not advertise modality; trying selected model");
+        }
+        if (composioTools.length && Object.keys(supported).length && !supported.tools) {
+          logger.warn({ model }, "Selected model metadata does not advertise tool calling");
+        }
       }
-      if (composioTools.length && Object.keys(supported).length && !supported.tools) {
-        logger.warn({ model }, "Selected model metadata does not advertise tool calling");
-      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("does not support")) throw e;
+      logger.debug({ err: e, model }, "Model capability lookup unavailable");
     }
-  } catch (e) {
-    if (e instanceof Error && e.message.includes("does not support")) throw e;
-    logger.debug({ err: e, model }, "Model capability lookup unavailable");
   }
 
   logger.debug({ toolCount: composioTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Composio tools loaded");
 
   // Build message array for OpenRouter
-  const durable = await getSession(userId);
+  const durable = options?.ephemeral ? { summaries: [], imageAssets: [] } : await getSession(userId);
   let pendingUpgrade: AgentUpgradeNotice | undefined;
-  try {
-    const upgrade = await loadAgentUpgrade();
-    if (upgrade) pendingUpgrade = upgrade;
-  } catch (error) {
-    logger.warn({ err: error }, "Agent upgrade manifest unavailable; continuing without release notice");
+  if (!options?.ephemeral) {
+    try {
+      const upgrade = await loadAgentUpgrade();
+      if (upgrade) pendingUpgrade = upgrade;
+    } catch (error) {
+      logger.warn({ err: error }, "Agent upgrade manifest unavailable; continuing without release notice");
+    }
   }
   let announceUpgrade = false;
   if (pendingUpgrade) {
@@ -724,14 +744,14 @@ export async function runAgent(
     }
   }
   let relevantMemories: Awaited<ReturnType<typeof searchMemories>> = [];
-  if (channelContext?.scope !== "shared" && typeof userMessage === "string" && userMessage.trim()) {
+  if (!options?.ephemeral && channelContext?.scope !== "shared" && typeof userMessage === "string" && userMessage.trim()) {
     relevantMemories = await searchMemories(userId, userMessage, { limit: 8 });
   }
   let knowledgeContext = "";
   // Shared provider conversations must not search or receive the user's
   // private knowledge index. Their durable history is scoped separately by
   // the channel conversation record.
-  if (channelContext?.scope !== "shared" && vectorConfigured() && typeof userMessage === "string" && userMessage.trim()) {
+  if (!options?.ephemeral && channelContext?.scope !== "shared" && vectorConfigured() && typeof userMessage === "string" && userMessage.trim()) {
     try {
       const matches = await new UpstashKnowledgeStore().query(String(userId), userMessage, { topK: 5, filter: "sourceType != 'memory'" });
       knowledgeContext = matches.filter((match) => match.data).map((match) => `[Knowledge source ${match.metadata?.documentId ?? match.id}${match.metadata?.filename ? ` (${match.metadata.filename})` : ""}]\n${match.data}`).join("\n\n");
@@ -765,13 +785,15 @@ export async function runAgent(
   // remember to search for a workflow when creating a deliverable or changing
   // code. Supporting files remain on-demand through CHUCK_READ_SKILL_FILE.
   let skillContext = "";
-  try {
-    const skillQuery = typeof userMessage === "string"
-      ? userMessage
-      : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
-    skillContext = await relevantSkillContext(skillQuery);
-  } catch (error) {
-    logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
+  if (!options?.ephemeral) {
+    try {
+      const skillQuery = typeof userMessage === "string"
+        ? userMessage
+        : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+      skillContext = await relevantSkillContext(skillQuery);
+    } catch (error) {
+      logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
+    }
   }
   const upgradeContext = announceUpgrade && pendingUpgrade
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
@@ -811,6 +833,7 @@ export async function runAgent(
   };
 
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
+    if (options?.ephemeral) return;
     const record: AgentRunRecord = {
       ...(durableRunRecord ?? {
         id: durableRunId,
@@ -916,8 +939,11 @@ export async function runAgent(
       let toolFailed = false;
       let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
       try {
+        // A tool must be in the exact tool list shown to the model. In
+        // particular, meta-tools are not implicit grants when an allowlist is
+        // supplied (an empty allowlist means no tools at all).
         const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
-          || ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"].includes(slug);
+          && (!allow || allow.has(slug));
         if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
         const previousResult = toolResultsByCallId.get(call.id);
         if (previousResult !== undefined) {
@@ -937,7 +963,9 @@ export async function runAgent(
         // charge it against the user's bounded execution budget.
         toolCallsExecuted += 1;
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
-        let executionArgs = args;
+        let executionArgs = options?.meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
+          ? applyMeetingComposioAccountAlias(slug, args, options.meetingComposioAccountAliases)
+          : args;
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
         const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
         const approvedForTool = approved?.toolSlug === slug;

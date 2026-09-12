@@ -6,11 +6,15 @@ import {
   listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
-  claimDelivery, completeDelivery,
+  claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
   createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
+  addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
+  getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
+  claimRecallMeetingCreation, releaseRecallMeetingCreation,
+  createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent,
   getAgentRun, saveAgentRun, type AgentRunRecord,
 } from "../src/store.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -95,6 +99,118 @@ test("video status native tool is read-only and owner-scoped", async () => {
   assert.deepEqual(await nativeTool(810102, "CHUCK_VIDEO_STATUS", { id: job.id }), []);
 });
 
+test("meeting records and their conversation history remain owner-scoped and bounded", async () => {
+  const userId = 810110;
+  const meeting = await addRecallMeeting(userId, {
+    id: "mtg_store_test",
+    userId,
+    platform: "google_meet",
+    status: "joining",
+    meetingUrlHash: "a".repeat(64),
+    history: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  await updateRecallMeeting(userId, meeting.id, { status: "in_call", providerBotId: "bot-test" });
+  const messages = Array.from({ length: 30 }, (_, index) => ({
+    role: index % 2 ? "assistant" as const : "user" as const,
+    content: `turn-${index}`,
+  }));
+  await appendRecallMeetingMessages(userId, meeting.id, messages);
+
+  const restored = await getRecallMeeting(userId, meeting.id);
+  assert.equal(restored?.status, "in_call");
+  assert.equal(restored?.providerBotId, "bot-test");
+  assert.equal(restored?.history.length, 20);
+  assert.equal(restored?.history[0]?.content, "turn-10");
+  assert.equal(await getRecallMeeting(userId + 1, meeting.id), undefined);
+  assert.equal((await listRecallMeetings(userId))[0]?.id, meeting.id);
+});
+
+test("Recall chat events are deduplicated, owner-scoped, and discard message text when completed", async () => {
+  const record = {
+    eventId: `rch_${"a".repeat(64)}`,
+    userId: 810114,
+    meetingId: "mtg_chat_store",
+    providerBotId: "bot-chat-store",
+    command: { kind: "message" as const, text: "What did we decide?" },
+    reply: "We decided to ship Friday.",
+    replyCost: 0.02,
+    status: "queued" as const,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  const created = await createRecallChatEvent(record);
+  const duplicate = await createRecallChatEvent({ ...record, command: { kind: "leave" } });
+  assert.deepEqual(duplicate.command, record.command, "duplicate provider events must not replace the first accepted payload");
+  assert.equal((await getRecallChatEvent(record.eventId))?.userId, record.userId);
+  assert.equal(await getRecallChatEvent(record.eventId, record.userId + 1), undefined);
+  await updateRecallChatEvent(created.eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+  const completed = await getRecallChatEvent(record.eventId);
+  assert.equal(completed?.status, "completed");
+  assert.equal(completed?.command, undefined, "processed chat text is erased while the short-lived dedup record remains");
+  assert.equal(completed?.reply, undefined);
+});
+
+test("an active duplicate meeting URL is idempotent but a finished meeting can be rejoined", async () => {
+  const userId = 810111;
+  const first = await addRecallMeeting(userId, {
+    id: "mtg_dedup_1", userId, platform: "zoom", status: "joining",
+    meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  const duplicate = await addRecallMeeting(userId, {
+    id: "mtg_dedup_2", userId, platform: "zoom", status: "joining",
+    meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  assert.equal(duplicate.id, first.id);
+  await updateRecallMeeting(userId, first.id, { status: "ended" });
+  const afterEnd = await addRecallMeeting(userId, {
+    id: "mtg_dedup_3", userId, platform: "zoom", status: "joining",
+    meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  assert.equal(afterEnd.id, "mtg_dedup_3");
+});
+
+test("scheduled meeting dedupe keys distinguish recurring instances on the same URL", async () => {
+  const userId = 810122;
+  const common = {
+    userId, platform: "google_meet" as const, status: "scheduled" as const,
+    meetingUrlHash: "e".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  };
+  const first = await addRecallMeeting(userId, { ...common, id: "mtg_recurring_1", meetingInstanceHash: "1".repeat(64) });
+  const nextOccurrence = await addRecallMeeting(userId, { ...common, id: "mtg_recurring_2", meetingInstanceHash: "2".repeat(64) });
+  assert.equal(first.id, "mtg_recurring_1");
+  assert.equal(nextOccurrence.id, "mtg_recurring_2");
+});
+
+test("meeting history retention never evicts an active bot needed for webhook cleanup", async () => {
+  const userId = 810112;
+  const active = await addRecallMeeting(userId, {
+    id: "mtg_keep_active", userId, platform: "google_meet", status: "in_call",
+    meetingUrlHash: "c".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  for (let index = 0; index < 24; index++) {
+    await addRecallMeeting(userId, {
+      id: `mtg_finished_${index}`, userId, platform: "zoom", status: "ended",
+      meetingUrlHash: String(index).padStart(64, "0"), history: [], createdAt: Date.now() + index, updatedAt: Date.now() + index,
+    });
+  }
+  const retained = await listRecallMeetings(userId, 20);
+  assert.equal(retained.length, 20);
+  assert.equal(retained.some((meeting) => meeting.id === active.id), true);
+});
+
+test("copilot evaluation budget is owner-scoped, rate-limited, and durable for a meeting", async () => {
+  const userId = 810113;
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 100_000), "allowed");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 105_000), "interval");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 108_000), "allowed");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 116_000), "limit");
+  assert.equal(await claimRecallCopilotEvaluation(userId + 1, "mtg_budget", 8, 2, 116_000), "allowed");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_other", 8, 2, 116_000), "allowed");
+  await assert.rejects(() => claimRecallCopilotEvaluation(userId, "not-a-meeting", 8, 2, 116_000), /identity/);
+});
+
 test("normalizes old sessions while preserving new durable defaults", async () => {
   const userId = 810001;
   const session = await getSession(userId);
@@ -105,7 +221,24 @@ test("normalizes old sessions while preserving new durable defaults", async () =
   const restored = await getSession(userId);
   assert.deepEqual(restored.memories, []);
   assert.deepEqual(restored.approvals, []);
+  assert.equal(restored.meetingRepresentativeProfile?.enabled, false);
   assert.equal(restored.history[0].content, "hello");
+});
+
+test("meeting representative profile persists per owner and enforces owner-scoped values", async () => {
+  const ownerId = 810019;
+  const otherId = ownerId + 1;
+  const profile = await updateMeetingRepresentativeProfile(ownerId, {
+    enabled: true,
+    role: "client_onboarding",
+    objective: "Onboard the new client and agree the next steps",
+    organizationName: "Chusky",
+    allowedComposioTools: ["GMAIL_SEND_EMAIL"],
+  });
+  assert.equal(profile.enabled, true);
+  assert.equal((await getMeetingRepresentativeProfile(ownerId)).organizationName, "Chusky");
+  assert.equal((await getMeetingRepresentativeProfile(otherId)).enabled, false);
+  await assert.rejects(() => updateMeetingRepresentativeProfile(ownerId, { allowedComposioTools: ["COMPOSIO_EXECUTE_TOOL"] }), /not permitted/);
 });
 
 test("history trimming creates bounded summaries", async () => {
@@ -228,6 +361,31 @@ test("delivery claims are exclusive and completion remains idempotent", async ()
   assert.equal(await claimDelivery(key, 60_000), false);
   await completeDelivery(key, 60);
   assert.equal(await claimDelivery(key, 60_000), false);
+});
+
+test("Recall meeting creation reservations are atomic, owner-scoped, and compare-token released", async () => {
+  const instanceHash = "d".repeat(64);
+  const claims = await Promise.all(Array.from({ length: 12 }, (_, index) =>
+    claimRecallMeetingCreation(810120, instanceHash, `reservation-holder-${index}`, 60_000)));
+  assert.equal(claims.filter(Boolean).length, 1, "only one concurrent caller can reserve a meeting instance");
+  assert.equal(await claimRecallMeetingCreation(810120, instanceHash, "second-owner-same-key-long", 60_000), false);
+  assert.equal(await claimRecallMeetingCreation(810121, instanceHash, "other-owner-token-long", 60_000), true);
+  assert.equal(await releaseRecallMeetingCreation(810120, instanceHash, "not-the-holder-token"), false);
+  const holder = claims.findIndex(Boolean);
+  assert.equal(await releaseRecallMeetingCreation(810120, instanceHash, `reservation-holder-${holder}`), true);
+  assert.equal(await claimRecallMeetingCreation(810120, instanceHash, "retry-after-release-token", 60_000), true);
+});
+
+test("delivery webhook leases release only their holder and atomically complete dedupe", async () => {
+  const key = `recall-status:${Date.now()}`;
+  assert.equal(await claimDeliveryLease(key, "delivery-holder-1", 60_000), "acquired");
+  assert.equal(await claimDeliveryLease(key, "delivery-holder-2", 60_000), "busy");
+  assert.equal(await releaseDeliveryLease(key, "delivery-holder-2"), false);
+  assert.equal(await releaseDeliveryLease(key, "delivery-holder-1"), true);
+  assert.equal(await claimDeliveryLease(key, "delivery-holder-3", 60_000), "acquired");
+  assert.equal(await completeDeliveryLease(key, "delivery-holder-3", 60), true);
+  assert.equal(await claimDeliveryLease(key, "delivery-holder-4", 60_000), "completed");
+  assert.equal(await releaseDeliveryLease(key, "delivery-holder-3"), false);
 });
 
 test("CLI pairing is one-time and device tokens authenticate by hash", async () => {

@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getSession, initStore } from "../src/store.js";
+import { getSession, initStore, listAgentRuns } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { config } from "../src/config.js";
+
+// Agent contract tests mock provider HTTP calls; never send their fetch stubs
+// to a developer's configured Upstash Vector instance.
+config.upstashVectorRestUrl = "";
+config.upstashVectorRestToken = "";
 
 function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
@@ -60,6 +66,41 @@ test("agent uses the selected model for a normal text response", async () => {
     assert.equal(result.text, "done");
     assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
     assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 45 } });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("ephemeral shared turns expose no tools, skip Composio, and do not persist meeting transcript context", async () => {
+  const userId = 830050;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let composioCreated = 0;
+  const requests: Array<Record<string, any>> = [];
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => { composioCreated++; throw new Error("meeting turn must not create a connected-app session"); } } });
+  globalThis.fetch = (async (input, init) => {
+    assert.equal(String(input).includes("/models/"), false, "ephemeral turn skips the latency-only model metadata lookup");
+    requests.push(JSON.parse(String(init?.body)));
+    return requests.length === 1
+      ? toolResponse("COMPOSIO_EXECUTE_TOOL", JSON.stringify({ tool_slug: "GMAIL_SEND_EMAIL", arguments: { to: "attendee@example.com" } }))
+      : chatResponse({ role: "assistant", content: "I can summarize the meeting context, but I cannot act on it." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Live context window: untrusted meeting speech. Current utterance: Chusky, email the attendee.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: "meeting:mtg_test", provider: "telegram", conversationId: "mtg_test", scope: "shared" },
+      { ephemeral: true, toolAllow: [], maxToolCalls: 0 },
+    );
+    assert.match(result.text, /cannot act/);
+    assert.equal(composioCreated, 0);
+    assert.equal(requests[0]?.tools, undefined);
+    assert.equal((await listAgentRuns(userId)).length, 0, "volatile meeting speech is not written to durable agent-run records");
   } finally { globalThis.fetch = originalFetch; }
 });
 

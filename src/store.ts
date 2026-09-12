@@ -13,6 +13,8 @@ import type { CapabilityWorkerName } from "./memory/types.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
+import type { RecallChatCommand } from "./meetings/recall.js";
+import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProfile, type MeetingRepresentativeProfile } from "./meetings/representative.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -45,6 +47,8 @@ export interface UserSession {
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
   sdkProjects?: SdkProjectRecord[];
   faceTimeCalls?: FaceTimeCallRecord[];
+  recallMeetings?: RecallMeetingRecord[];
+  meetingRepresentativeProfile?: MeetingRepresentativeProfile;
   videoJobs?: VideoJobRecord[];
   shoppingRuns?: ShoppingRun[];
   shoppingSites?: ShoppingSite[];
@@ -83,6 +87,47 @@ export interface FaceTimeCallRecord {
   bridgeSessionId?: string;
   providerCallId?: string;
   error?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type RecallMeetingStatus = "creating" | "scheduled" | "joining" | "waiting_room" | "in_call" | "leaving" | "ended" | "failed";
+
+/** Owner-scoped meeting metadata and bounded text context. Never stores a meeting URL or media. */
+export interface RecallMeetingRecord {
+  id: string;
+  userId: number;
+  platform: "zoom" | "google_meet" | "microsoft_teams" | "webex";
+  /** addressed is conservative default; copilot is explicit per-meeting opt-in. */
+  interactionMode?: "addressed" | "copilot" | "representative";
+  status: RecallMeetingStatus;
+  providerBotId?: string;
+  /** SHA-256 of the link, used only to suppress concurrent duplicate joins. */
+  meetingUrlHash: string;
+  /** Hash of URL plus scheduled instance; legacy records omit it. */
+  meetingInstanceHash?: string;
+  title?: string;
+  joinAt?: string;
+  error?: string;
+  providerStatusAt?: number;
+  history: Message[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Short-lived, account-scoped queue item for an explicitly addressed meeting-chat event. */
+export interface RecallChatEventRecord {
+  eventId: string;
+  userId: number;
+  meetingId: string;
+  providerBotId: string;
+  command?: RecallChatCommand;
+  replyToParticipantId?: string;
+  /** Ephemeral prepared reply; cleared after delivery along with command text. */
+  reply?: string;
+  replyCost?: number;
+  status: "queued" | "running" | "completed" | "failed";
+  workflowRunId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -635,6 +680,15 @@ interface Backend {
   claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimDelivery(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery(key: string, ttlSeconds: number): Promise<void>;
+  claimDeliveryLease(key: string, token: string, leaseMs: number): Promise<"acquired" | "completed" | "busy">;
+  completeDeliveryLease(key: string, token: string, ttlSeconds: number): Promise<boolean>;
+  releaseDeliveryLease(key: string, token: string): Promise<boolean>;
+  claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
+  releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
+  claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, nowMs?: number): Promise<"allowed" | "interval" | "limit">;
+  createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord>;
+  getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined>;
+  updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>): Promise<RecallChatEventRecord | undefined>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
@@ -830,6 +884,8 @@ class RedisBackend implements Backend {
   private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
   private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
+  private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
+  private recallMeetingCreationKey = (userId: number, instanceHash: string) => `chuck:recall:meeting:create:${createHash("sha256").update(`${userId}:${instanceHash}`).digest("hex")}`;
   private channelIdentityKey = (provider: ChannelProvider, externalUserId: string, workspaceId?: string) => `chuck:channel:identity:${provider}:${createHash("sha256").update(`${workspaceId ?? "-"}:${externalUserId}`).digest("hex")}`;
   private channelIdentityUserKey = (userId: number) => `chuck:user:${userId}:channel-identities`;
   private channelInstallationKey = (provider: ChannelInstallationRecord["provider"], workspaceId: string) => `chuck:channel:installation:${provider}:${workspaceId}`;
@@ -962,6 +1018,30 @@ class RedisBackend implements Backend {
     return next;
   }
 
+  async createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord> {
+    const key = this.recallChatEventKey(record.eventId);
+    await this.r.set(key, JSON.stringify(record), "EX", 60 * 60, "NX");
+    return (await this.getRecallChatEvent(record.eventId)) ?? record;
+  }
+  async getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined> {
+    const raw = await this.r.get(this.recallChatEventKey(eventId));
+    if (!raw) return undefined;
+    try {
+      const record = JSON.parse(raw) as RecallChatEventRecord;
+      return userId === undefined || record.userId === userId ? record : undefined;
+    } catch { return undefined; }
+  }
+  async updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>): Promise<RecallChatEventRecord | undefined> {
+    const key = this.recallChatEventKey(eventId);
+    const current = await this.getRecallChatEvent(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    const ttl = await this.r.ttl(key);
+    if (ttl <= 0) return undefined;
+    await this.r.setex(key, ttl, JSON.stringify(next));
+    return next;
+  }
+
   async incrRate(userId: number): Promise<number> {
     const k = this.rk(userId);
     const n = await this.r.incr(k);
@@ -996,6 +1076,65 @@ class RedisBackend implements Backend {
   async completeDelivery(key: string, ttlSeconds: number): Promise<void> {
     const digest = createHash("sha256").update(key).digest("hex");
     await this.r.multi().set(`chuck:delivery:done:${digest}`, "1", "EX", ttlSeconds).del(`chuck:delivery:claim:${digest}`).exec();
+  }
+  async claimDeliveryLease(key: string, token: string, leaseMs: number): Promise<"acquired" | "completed" | "busy"> {
+    const digest = createHash("sha256").update(key).digest("hex");
+    const result = await this.r.eval(
+      "if redis.call('EXISTS',KEYS[1]) == 1 then return 2 end; " +
+      "if redis.call('SET',KEYS[2],ARGV[1],'PX',ARGV[2],'NX') then return 1 else return 0 end",
+      2, `chuck:delivery:done:${digest}`, `chuck:delivery:lease-claim:${digest}`, token, String(leaseMs),
+    );
+    return Number(result) === 1 ? "acquired" : Number(result) === 2 ? "completed" : "busy";
+  }
+  async completeDeliveryLease(key: string, token: string, ttlSeconds: number): Promise<boolean> {
+    const digest = createHash("sha256").update(key).digest("hex");
+    const result = await this.r.eval(
+      "if redis.call('GET',KEYS[1]) ~= ARGV[1] then return 0 end; " +
+      "redis.call('SET',KEYS[2],'1','EX',ARGV[2]); redis.call('DEL',KEYS[1]); return 1",
+      2, `chuck:delivery:lease-claim:${digest}`, `chuck:delivery:done:${digest}`, token, String(ttlSeconds),
+    );
+    return Number(result) === 1;
+  }
+  async releaseDeliveryLease(key: string, token: string): Promise<boolean> {
+    const digest = createHash("sha256").update(key).digest("hex");
+    const result = await this.r.eval(
+      "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) else return 0 end",
+      1, `chuck:delivery:lease-claim:${digest}`, token,
+    );
+    return Number(result) === 1;
+  }
+  async claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean> {
+    return (await this.r.set(this.recallMeetingCreationKey(userId, instanceHash), token, "PX", leaseMs, "NX")) === "OK";
+  }
+  async releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean> {
+    const result = await this.r.eval(
+      "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) else return 0 end",
+      1, this.recallMeetingCreationKey(userId, instanceHash), token,
+    );
+    return Number(result) === 1;
+  }
+  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, _nowMs?: number): Promise<"allowed" | "interval" | "limit"> {
+    const digest = createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
+    const ttlSeconds = 24 * 60 * 60;
+    const result = Number(await this.r.eval(
+      "local count = tonumber(redis.call('GET', KEYS[1]) or '0'); " +
+      "if count >= tonumber(ARGV[3]) then return 2 end; " +
+      "local last = tonumber(redis.call('GET', KEYS[2]) or '0'); " +
+      "local t = redis.call('TIME'); " +
+      "local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000); " +
+      "if last > 0 and now - last < tonumber(ARGV[1]) then return 0 end; " +
+      "redis.call('INCR', KEYS[1]); " +
+      "redis.call('EXPIRE', KEYS[1], ARGV[3]); " +
+      "redis.call('SET', KEYS[2], tostring(now), 'EX', ARGV[3]); " +
+      "return 1",
+      2,
+      `chuck:meeting:copilot:${digest}:count`,
+      `chuck:meeting:copilot:${digest}:last`,
+      String(minIntervalSeconds * 1000),
+      String(maxEvaluations),
+      String(ttlSeconds),
+    ));
+    return result === 1 ? "allowed" : result === 2 ? "limit" : "interval";
   }
   async getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined> {
     const raw = await this.r.get(this.dk(userId));
@@ -1527,6 +1666,10 @@ class MemoryBackend implements Backend {
   private channelDebounce = new Map<string, InboundMessage[]>();
   private deliveryClaims = new Map<string, number>();
   private completedDeliveries = new Map<string, number>();
+  private deliveryLeaseClaims = new Map<string, { token: string; expiresAt: number }>();
+  private recallMeetingCreationClaims = new Map<string, { token: string; expiresAt: number }>();
+  private recallCopilotEvaluations = new Map<string, { count: number; lastAt: number; expiresAt: number }>();
+  private recallChatEvents = new Map<string, { record: RecallChatEventRecord; expiresAt: number }>();
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
   private jobs = new Map<number, JobRecord[]>();
@@ -1591,6 +1734,25 @@ class MemoryBackend implements Backend {
     this.triggerEvents.set(eventId, next);
     return next;
   }
+  async createRecallChatEvent(record: RecallChatEventRecord) {
+    const existing = await this.getRecallChatEvent(record.eventId);
+    if (existing) return existing;
+    this.recallChatEvents.set(record.eventId, { record, expiresAt: Date.now() + 60 * 60 * 1000 });
+    return record;
+  }
+  async getRecallChatEvent(eventId: string, userId?: number) {
+    const value = this.recallChatEvents.get(eventId);
+    if (!value || value.expiresAt <= Date.now()) { this.recallChatEvents.delete(eventId); return undefined; }
+    return userId === undefined || value.record.userId === userId ? value.record : undefined;
+  }
+  async updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>) {
+    const current = await this.getRecallChatEvent(eventId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
+    const existing = this.recallChatEvents.get(eventId)!;
+    this.recallChatEvents.set(eventId, { record: next, expiresAt: existing.expiresAt });
+    return next;
+  }
 
   async incrRate(userId: number): Promise<number> {
     const now = Date.now();
@@ -1645,6 +1807,57 @@ class MemoryBackend implements Backend {
   async completeDelivery(key: string, ttlSeconds: number): Promise<void> {
     this.deliveryClaims.delete(key);
     this.completedDeliveries.set(key, Date.now() + ttlSeconds * 1000);
+  }
+  async claimDeliveryLease(key: string, token: string, leaseMs: number): Promise<"acquired" | "completed" | "busy"> {
+    const now = Date.now();
+    if ((this.completedDeliveries.get(key) ?? 0) > now) return "completed";
+    const claim = this.deliveryLeaseClaims.get(key);
+    if (claim && claim.expiresAt > now) return "busy";
+    this.deliveryLeaseClaims.set(key, { token, expiresAt: now + leaseMs });
+    return "acquired";
+  }
+  async completeDeliveryLease(key: string, token: string, ttlSeconds: number): Promise<boolean> {
+    const claim = this.deliveryLeaseClaims.get(key);
+    if (claim?.token !== token || claim.expiresAt <= Date.now()) return false;
+    this.deliveryLeaseClaims.delete(key);
+    this.completedDeliveries.set(key, Date.now() + ttlSeconds * 1000);
+    return true;
+  }
+  async releaseDeliveryLease(key: string, token: string): Promise<boolean> {
+    const claim = this.deliveryLeaseClaims.get(key);
+    if (claim?.token !== token || claim.expiresAt <= Date.now()) return false;
+    this.deliveryLeaseClaims.delete(key);
+    return true;
+  }
+  async claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean> {
+    const key = `${userId}:${instanceHash}`;
+    const now = Date.now();
+    const claim = this.recallMeetingCreationClaims.get(key);
+    if (claim && claim.expiresAt > now) return false;
+    this.recallMeetingCreationClaims.set(key, { token, expiresAt: now + leaseMs });
+    return true;
+  }
+  async releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean> {
+    const key = `${userId}:${instanceHash}`;
+    if (this.recallMeetingCreationClaims.get(key)?.token !== token) return false;
+    this.recallMeetingCreationClaims.delete(key);
+    return true;
+  }
+  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, nowMs = Date.now()): Promise<"allowed" | "interval" | "limit"> {
+    const key = `${userId}:${meetingId}`;
+    let state = this.recallCopilotEvaluations.get(key);
+    if (state && state.expiresAt <= nowMs) {
+      this.recallCopilotEvaluations.delete(key);
+      state = undefined;
+    }
+    if (state && state.count >= maxEvaluations) return "limit";
+    if (state && nowMs - state.lastAt < minIntervalSeconds * 1000) return "interval";
+    this.recallCopilotEvaluations.set(key, {
+      count: (state?.count ?? 0) + 1,
+      lastAt: nowMs,
+      expiresAt: nowMs + 24 * 60 * 60 * 1000,
+    });
+    return "allowed";
   }
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
@@ -1878,7 +2091,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], recallMeetings: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -1942,7 +2155,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2003,6 +2216,101 @@ export async function getFaceTimeCall(uid: number, id: string): Promise<FaceTime
   return (await getSession(uid)).faceTimeCalls?.find((item) => item.id === id && item.userId === uid);
 }
 
+const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
+
+export async function getMeetingRepresentativeProfile(uid: number): Promise<MeetingRepresentativeProfile> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Meeting representative owner is invalid");
+  const profile = (await getSession(uid)).meetingRepresentativeProfile;
+  return profile ? normalizeMeetingRepresentativeProfile(profile) : defaultMeetingRepresentativeProfile();
+}
+
+export async function updateMeetingRepresentativeProfile(uid: number, patch: unknown): Promise<MeetingRepresentativeProfile> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Meeting representative owner is invalid");
+  const session = await getSession(uid);
+  const profile = normalizeMeetingRepresentativeProfile(patch, session.meetingRepresentativeProfile ?? defaultMeetingRepresentativeProfile());
+  session.meetingRepresentativeProfile = profile;
+  await saveSession(uid, session);
+  return profile;
+}
+
+export async function addRecallMeeting(uid: number, record: RecallMeetingRecord): Promise<RecallMeetingRecord> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || record.userId !== uid) throw new Error("Meeting owner does not match the authenticated account");
+  const session = await getSession(uid);
+  const meetings = session.recallMeetings ?? [];
+  const duplicate = meetings.find((meeting) => meeting.userId === uid
+    && ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status)
+    && (meeting.meetingInstanceHash && record.meetingInstanceHash
+      ? meeting.meetingInstanceHash === record.meetingInstanceHash
+      : meeting.meetingUrlHash === record.meetingUrlHash && meeting.joinAt === record.joinAt));
+  if (duplicate) return duplicate;
+  const existing = meetings.filter((meeting) => meeting.id !== record.id);
+  const active = existing.filter((meeting) => ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status));
+  if (active.length >= 20) throw new Error("Too many active meeting assistants to safely create another");
+  const finished = existing.filter((meeting) => !ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status));
+  // Never evict an in-flight meeting record just to retain a newer history row:
+  // webhooks and owner-scoped controls still need that record to clean it up.
+  session.recallMeetings = [
+    { ...record, history: (record.history ?? []).slice(-20) },
+    ...active,
+    ...finished.slice(0, Math.max(0, 19 - active.length)),
+  ];
+  await saveSession(uid, session);
+  return record;
+}
+
+export async function getRecallMeeting(uid: number, id: string): Promise<RecallMeetingRecord | undefined> {
+  return (await getSession(uid)).recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
+}
+
+export async function listRecallMeetings(uid: number, limit = 10): Promise<RecallMeetingRecord[]> {
+  return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
+}
+
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt">>): Promise<RecallMeetingRecord | undefined> {
+  const session = await getSession(uid);
+  const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
+  if (!current) return undefined;
+  if (patch.providerStatusAt !== undefined && current.providerStatusAt !== undefined && patch.providerStatusAt < current.providerStatusAt) return current;
+  Object.assign(current, patch, { updatedAt: Date.now() });
+  current.error = current.error?.slice(0, 300);
+  await saveSession(uid, session);
+  return current;
+}
+
+export async function appendRecallMeetingMessages(uid: number, id: string, messages: Message[]): Promise<RecallMeetingRecord | undefined> {
+  const session = await getSession(uid);
+  const meeting = session.recallMeetings?.find((candidate) => candidate.id === id && candidate.userId === uid);
+  if (!meeting) return undefined;
+  const bounded = messages.filter((message) => message.role === "user" || message.role === "assistant").map((message) => ({
+    role: message.role,
+    content: String(message.content ?? "").slice(0, 3000),
+    createdAt: Date.now(),
+  }));
+  meeting.history = [...meeting.history, ...bounded].slice(-20);
+  meeting.updatedAt = Date.now();
+  await saveSession(uid, session);
+  return meeting;
+}
+
+export async function createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord> {
+  if (!/^rch_[a-f0-9]{64}$/.test(record.eventId) || !Number.isSafeInteger(record.userId) || record.userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(record.meetingId) || !/^[A-Za-z0-9_-]{1,128}$/.test(record.providerBotId) || (record.replyToParticipantId !== undefined && !/^\d{1,32}$/.test(record.replyToParticipantId))) {
+    throw new Error("Invalid Recall chat event identity");
+  }
+  if ((record.command?.kind === "message" || record.command?.kind === "ambient") && (!record.command.text.trim() || record.command.text.length > 900)) throw new Error("Invalid Recall chat event text");
+  if (record.reply !== undefined && (typeof record.reply !== "string" || record.reply.length > 4096)) throw new Error("Invalid Recall chat event reply");
+  return backend.createRecallChatEvent(record);
+}
+
+export async function getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined> {
+  if (!/^rch_[a-f0-9]{64}$/.test(eventId)) return undefined;
+  return backend.getRecallChatEvent(eventId, userId);
+}
+
+export async function updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>): Promise<RecallChatEventRecord | undefined> {
+  if (!/^rch_[a-f0-9]{64}$/.test(eventId)) return undefined;
+  return backend.updateRecallChatEvent(eventId, patch);
+}
+
 /** Best-effort provider delivery dedupe. The lease prevents concurrent workflow retries;
  * completion keeps an already-delivered occurrence from being sent twice. */
 export async function claimDelivery(key: string, leaseMs: number): Promise<boolean> {
@@ -2011,6 +2319,54 @@ export async function claimDelivery(key: string, leaseMs: number): Promise<boole
 
 export async function completeDelivery(key: string, ttlSeconds: number): Promise<void> {
   return backend.completeDelivery(key, ttlSeconds);
+}
+
+function validateDeliveryLease(key: string, token: string, duration: number, maximum: number): void {
+  if (typeof key !== "string" || !key.trim() || key.length > 2048) throw new Error("Invalid delivery lease key");
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{16,200}$/.test(token)) throw new Error("Invalid delivery lease token");
+  if (!Number.isSafeInteger(duration) || duration < 1 || duration > maximum) throw new Error("Invalid delivery lease duration");
+}
+
+export async function claimDeliveryLease(key: string, token: string, leaseMs: number): Promise<"acquired" | "completed" | "busy"> {
+  validateDeliveryLease(key, token, leaseMs, 10 * 60_000);
+  return backend.claimDeliveryLease(key, token, leaseMs);
+}
+
+export async function completeDeliveryLease(key: string, token: string, ttlSeconds: number): Promise<boolean> {
+  validateDeliveryLease(key, token, ttlSeconds, 90 * 24 * 60 * 60);
+  return backend.completeDeliveryLease(key, token, ttlSeconds);
+}
+
+export async function releaseDeliveryLease(key: string, token: string): Promise<boolean> {
+  validateDeliveryLease(key, token, 1, 10 * 60_000);
+  return backend.releaseDeliveryLease(key, token);
+}
+
+export async function claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[a-f0-9]{64}$/.test(instanceHash)) throw new Error("Invalid Recall meeting creation identity");
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{16,200}$/.test(token)) throw new Error("Invalid Recall meeting reservation token");
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 20 * 60_000) throw new Error("Invalid Recall meeting reservation lease");
+  return backend.claimRecallMeetingCreation(userId, instanceHash, token, leaseMs);
+}
+
+export async function releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[a-f0-9]{64}$/.test(instanceHash)) return false;
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{16,200}$/.test(token)) return false;
+  return backend.releaseRecallMeetingCreation(userId, instanceHash, token);
+}
+
+/** Atomically enforce the owner-scoped proactive evaluation budget for one meeting. */
+export async function claimRecallCopilotEvaluation(
+  userId: number,
+  meetingId: string,
+  minIntervalSeconds = config.recallCopilotMinIntervalSeconds,
+  maxEvaluations = config.recallCopilotMaxEvaluations,
+  nowMs?: number,
+): Promise<"allowed" | "interval" | "limit"> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) {
+    throw new Error("Invalid meeting copilot budget identity");
+  }
+  return backend.claimRecallCopilotEvaluation(userId, meetingId, minIntervalSeconds, maxEvaluations, nowMs);
 }
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {
