@@ -142,6 +142,7 @@ test("scheduled cancellation deletes before dispatch; live leave uses leave_call
     joinAt: new Date(Date.now() + 12 * 60_000).toISOString(),
   });
   assert.equal(scheduled.status, "scheduled");
+  await updateRecallMeeting(ownerId, scheduled.id, { joinAt: new Date(Date.now() + 2 * 60_000).toISOString() });
   await leaveRecallMeeting(ownerId, scheduled.id);
   assert.deepEqual(methods, ["DELETE"]);
 
@@ -149,6 +150,58 @@ test("scheduled cancellation deletes before dispatch; live leave uses leave_call
   await updateRecallMeeting(ownerId, live.id, { status: "in_call" });
   await leaveRecallMeeting(ownerId, live.id);
   assert.equal(methods[1], "POST");
+});
+
+test("a scheduled bot already dispatched is removed through leave-call", async () => {
+  const methods: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: botId }), { status: 201 });
+    methods.push(`${init?.method}:${url.endsWith("/leave_call/") ? "leave" : "delete"}`);
+    if (init?.method === "DELETE") return new Response(JSON.stringify({ code: "cannot_delete_bot" }), { status: 405 });
+    return new Response(null, { status: 204 });
+  };
+
+  const scheduled = await joinRecallMeeting(ownerId, {
+    meetingUrl: "https://zoom.us/j/45678901234",
+    joinAt: new Date(Date.now() + 12 * 60_000).toISOString(),
+  });
+  await leaveRecallMeeting(ownerId, scheduled.id);
+  assert.deepEqual(methods, ["DELETE:delete", "POST:leave"]);
+  assert.equal((await getRecallMeeting(ownerId, scheduled.id))?.status, "ended");
+});
+
+test("a stale live meeting is reconciled when Recall says the bot already finished", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: botId }), { status: 201 });
+    if (url.endsWith("/leave_call/")) return new Response(JSON.stringify({ code: "cannot_command_completed_bot" }), { status: 400 });
+    return new Response(JSON.stringify({ status: { code: "done" } }), { status: 200 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/stale-status-room" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+
+  const result = await leaveRecallMeeting(ownerId, meeting.id);
+  assert.equal("alreadyFinished" in result && result.alreadyFinished, true);
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "ended");
+});
+
+test("a rejected leave keeps a live bot active and exposes only Recall's safe error code", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: botId }), { status: 201 });
+    if (url.endsWith("/leave_call/")) return new Response(JSON.stringify({ code: "cannot_command_unstarted_bot", detail: "private provider response" }), { status: 400 });
+    return new Response(JSON.stringify({ status: { code: "in_call_recording" } }), { status: 200 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/leave-retry-room" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+
+  await assert.rejects(() => leaveRecallMeeting(ownerId, meeting.id), (error: unknown) => {
+    assert.match(String(error), /Recall API request failed \(400: cannot_command_unstarted_bot\)/);
+    assert.doesNotMatch(String(error), /private provider response/);
+    return true;
+  });
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "in_call");
 });
 
 test("signed provider status updates only the owning meeting and ignores stale lifecycle events", async () => {

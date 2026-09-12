@@ -18,6 +18,7 @@ import {
   createRecallMediaTicket,
   isValidRecallBotId,
   isRecallRegionSupported,
+  RecallApiError,
   mapRecallBotStatus,
   recallApiRequest,
   type ParsedRecallChatWebhook,
@@ -119,6 +120,16 @@ async function cleanupRecallBot(providerBotId: string, joinAt?: string): Promise
     // Best-effort cleanup must not replace the original failure or expose the
     // provider's response, URL, or meeting link to the model/logs.
   }
+}
+
+async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSignal) {
+  const bot = await recallApiRequest(config.recallRegion, config.recallApiKey, `/bot/${providerBotId}/`, {
+    method: "GET", signal, timeoutMs: 8_000,
+  });
+  const providerStatus = bot.status && typeof bot.status === "object" && !Array.isArray(bot.status)
+    ? (bot.status as Record<string, unknown>).code
+    : bot.status;
+  return mapRecallBotStatus(providerStatus);
 }
 
 function assertUserId(userId: number): void {
@@ -287,17 +298,48 @@ export async function leaveRecallMeeting(userId: number, id: string, signal?: Ab
   if (!ACTIVE.has(meeting.status)) return { ...safeMeeting(meeting), alreadyFinished: true };
   if (!meeting.providerBotId) throw new Error("Meeting bot is still being created; try again shortly");
 
-  const scheduledFarEnoughAhead = meeting.status === "scheduled" && meeting.joinAt && Date.parse(meeting.joinAt) - Date.now() >= 10 * 60_000;
+  const scheduled = meeting.status === "scheduled";
   await updateRecallMeeting(userId, id, { status: "leaving" });
   try {
-    await recallApiRequest(config.recallRegion, config.recallApiKey, scheduledFarEnoughAhead
-      ? `/bot/${meeting.providerBotId}/`
-      : `/bot/${meeting.providerBotId}/leave_call/`, {
-      method: scheduledFarEnoughAhead ? "DELETE" : "POST", signal, timeoutMs: 15_000,
-    });
+    if (scheduled) {
+      try {
+        await recallApiRequest(config.recallRegion, config.recallApiKey, `/bot/${meeting.providerBotId}/`, {
+          method: "DELETE", signal, timeoutMs: 15_000,
+        });
+      } catch (error) {
+        // Recall returns 405 when a scheduled bot has already been dispatched.
+        // It can no longer be deleted, but the live leave-call action is valid.
+        if (!(error instanceof RecallApiError) || error.status !== 405) throw error;
+        await recallApiRequest(config.recallRegion, config.recallApiKey, `/bot/${meeting.providerBotId}/leave_call/`, {
+          method: "POST", signal, timeoutMs: 15_000,
+        });
+      }
+    } else {
+      await recallApiRequest(config.recallRegion, config.recallApiKey, `/bot/${meeting.providerBotId}/leave_call/`, {
+        method: "POST", signal, timeoutMs: 15_000,
+      });
+    }
   } catch (error) {
-    // Restore the local state if the provider did not accept the leave request.
-    await updateRecallMeeting(userId, id, { status: meeting.status });
+    // Recall may already have ended the bot while its signed status webhook is
+    // still in flight. Reconcile a rejected leave against the provider state
+    // instead of leaving Chusky's local meeting record stuck as active.
+    if (error instanceof RecallApiError && error.status === 400 && meeting.providerBotId) {
+      let providerStatus: ReturnType<typeof mapRecallBotStatus>;
+      try { providerStatus = await retrieveRecallBotStatus(meeting.providerBotId, signal); }
+      catch { providerStatus = undefined; }
+      if (providerStatus === "ended" || providerStatus === "failed") {
+        const finished = await updateRecallMeeting(userId, id, { status: providerStatus });
+        return { ...safeMeeting(finished ?? meeting), alreadyFinished: true };
+      }
+      const latest = await getRecallMeeting(userId, id);
+      if (latest?.status === "leaving") {
+        await updateRecallMeeting(userId, id, { status: providerStatus ?? meeting.status });
+      }
+    } else {
+      // Don't overwrite a terminal status delivered concurrently by Recall.
+      const latest = await getRecallMeeting(userId, id);
+      if (latest?.status === "leaving") await updateRecallMeeting(userId, id, { status: meeting.status });
+    }
     throw error;
   }
   const updated = await updateRecallMeeting(userId, id, { status: "ended" });

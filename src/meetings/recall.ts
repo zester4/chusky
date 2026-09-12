@@ -170,10 +170,10 @@ export interface RecallApiRequestOptions {
   fetchImpl?: typeof fetch;
 }
 
-/** A sanitized provider error that retains only the HTTP status needed for retry policy. */
+/** A sanitized provider error that retains the HTTP status and a safe machine error code. */
 export class RecallApiError extends Error {
-  constructor(readonly status: number) {
-    super(`Recall API request failed (${status})`);
+  constructor(readonly status: number, readonly code?: string) {
+    super(`Recall API request failed (${status}${code ? `: ${code}` : ""})`);
     this.name = "RecallApiError";
   }
 }
@@ -248,7 +248,17 @@ export async function recallApiRequest(
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       signal: controller.signal,
     });
-    if (!response.ok) throw new RecallApiError(response.status);
+    if (!response.ok) {
+      let code: string | undefined;
+      try {
+        const errorBody: unknown = await response.clone().json();
+        if (errorBody && typeof errorBody === "object" && !Array.isArray(errorBody)) {
+          const candidate = (errorBody as Record<string, unknown>).code;
+          if (typeof candidate === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(candidate)) code = candidate;
+        }
+      } catch { /* Keep the status-only error if Recall did not return JSON. */ }
+      throw new RecallApiError(response.status, code);
+    }
     if (response.status === 204) return {};
     let result: unknown;
     try { result = await response.json(); } catch { throw new Error("Recall API returned an invalid response"); }
