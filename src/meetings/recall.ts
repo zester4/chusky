@@ -25,6 +25,7 @@ export interface RecallCreateBotRequest {
   };
   recording_config: {
     retention: null;
+    include_bot_in_recording: { audio: true };
     video_mixed_mp4: null;
     audio_mixed_raw: null;
     audio_mixed_mp3: null;
@@ -132,6 +133,10 @@ export function buildRecallCreateBotRequest(input: {
     // zero-data-retention meetings.
     recording_config: {
       retention: null,
+      // This does not enable retained recordings or transcripts. It makes
+      // Recall include Output Media speech when a recording is explicitly
+      // produced, and removes its otherwise misleading dashboard warning.
+      include_bot_in_recording: { audio: true },
       video_mixed_mp4: null,
       audio_mixed_raw: null,
       audio_mixed_mp3: null,

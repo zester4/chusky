@@ -55,6 +55,7 @@ test("Recall bot request enables live output media and explicitly opts out of re
     camera: { kind: "webpage", config: { url: "https://voice.example/recall/media#session=signed-ticket" } },
   });
   assert.equal(request.recording_config?.retention, null);
+  assert.deepEqual(request.recording_config?.include_bot_in_recording, { audio: true });
   assert.equal(request.recording_config?.video_mixed_mp4, null);
   assert.equal(request.recording_config?.audio_mixed_raw, null);
   assert.equal(request.recording_config?.transcript, null);
