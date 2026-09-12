@@ -117,12 +117,21 @@ test("meeting records and their conversation history remain owner-scoped and bou
     content: `turn-${index}`,
   }));
   await appendRecallMeetingMessages(userId, meeting.id, messages);
+  await updateRecallMeeting(userId, meeting.id, {
+    outcome: { title: "Onboarding", summary: "Pilot starts next month.", decisions: ["Start the pilot next month."], actionItems: [{ task: "Prepare onboarding", owner: "Chusky" }], openQuestions: [] },
+    outcomeFollowThrough: { notionSaved: true, notionTool: "NOTION_CREATE_PAGE", notionUrl: "https://www.notion.so/acme/onboarding" },
+    outcomeStatus: "completed",
+  });
 
   const restored = await getRecallMeeting(userId, meeting.id);
   assert.equal(restored?.status, "in_call");
   assert.equal(restored?.providerBotId, "bot-test");
   assert.equal(restored?.history.length, 20);
   assert.equal(restored?.history[0]?.content, "turn-10");
+  assert.equal(restored?.outcome?.title, "Onboarding");
+  assert.equal(restored?.outcomeFollowThrough?.notionUrl, "https://www.notion.so/acme/onboarding");
+  assert.equal((await getRecallMeeting(userId + 1, meeting.id))?.outcome, undefined);
+  await assert.rejects(() => updateRecallMeeting(userId, meeting.id, { outcome: { title: "x".repeat(181), summary: "too long", decisions: [], actionItems: [], openQuestions: [] } }), /storage bounds/);
   assert.equal(await getRecallMeeting(userId + 1, meeting.id), undefined);
   assert.equal((await listRecallMeetings(userId))[0]?.id, meeting.id);
 });

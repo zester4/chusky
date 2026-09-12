@@ -116,6 +116,20 @@ test("agent executes a safe tool and feeds its result into the next model round"
     assert.equal(result.text, "tool complete");
     assert.deepEqual(executed, [{ slug: "TEST_SAFE_TOOL", args: { value: 7 } }]);
     assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
+    assert.deepEqual(result.toolsSucceeded, ["TEST_SAFE_TOOL"]);
+  });
+});
+
+test("agent distinguishes a failed tool attempt from a successful side effect", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830021);
+  await withAgentMocks([
+    toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7 })),
+    chatResponse({ role: "assistant", content: "The action failed." }),
+  ], async () => { throw new Error("provider rejected action"); }, async () => {
+    const result = await runAgent(830021, "do it", [], "test/model");
+    assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
+    assert.deepEqual(result.toolsSucceeded, []);
   });
 });
 

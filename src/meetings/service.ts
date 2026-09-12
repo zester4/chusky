@@ -308,6 +308,7 @@ export async function applyRecallStatusWebhook(input: {
   eventId: string;
   body: Record<string, unknown>;
   signal?: AbortSignal;
+  onMeetingEnded?: (userId: number, meetingId: string) => Promise<void>;
 }): Promise<"updated" | "ignored"> {
   requireRecall();
   const data = input.body.data && typeof input.body.data === "object" ? input.body.data as Record<string, unknown> : {};
@@ -344,7 +345,15 @@ export async function applyRecallStatusWebhook(input: {
   const status = mapRecallBotStatus(statusData.code ?? alternateStatus.code ?? eventStatus);
   if (!status) return "ignored";
   const providerStatusAt = recallStatusTime(statusData.updated_at ?? alternateStatus.created_at);
-  if (["ended", "failed"].includes(meeting.status)) return "ignored";
+  if (["ended", "failed"].includes(meeting.status)) {
+    // A previous signed status delivery may have updated Redis but failed to
+    // enqueue the durable outcome. Re-enqueue on Recall retries; the workflow
+    // ID is deterministic and the worker independently deduplicates effects.
+    if (meeting.status === "ended" && status === "ended" && meeting.interactionMode === "representative") {
+      await input.onMeetingEnded?.(userId, meetingId);
+    }
+    return "ignored";
+  }
   const order: Record<RecallMeetingStatus, number> = { creating: 0, scheduled: 0, joining: 1, waiting_room: 2, in_call: 3, leaving: 4, ended: 5, failed: 5 };
   if ((meeting.status === "leaving" && status !== "ended" && status !== "failed") || order[status] < order[meeting.status]) return "ignored";
   if (providerStatusAt !== undefined && meeting.providerStatusAt !== undefined && providerStatusAt < meeting.providerStatusAt) return "ignored";
@@ -354,5 +363,6 @@ export async function applyRecallStatusWebhook(input: {
     : undefined;
   const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error };
   const updated = await updateRecallMeeting(userId, meetingId, patch);
+  if (updated && status === "ended" && meeting.interactionMode === "representative") await input.onMeetingEnded?.(userId, meetingId);
   return updated ? "updated" : "ignored";
 }

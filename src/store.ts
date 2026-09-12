@@ -93,6 +93,21 @@ export interface FaceTimeCallRecord {
 
 export type RecallMeetingStatus = "creating" | "scheduled" | "joining" | "waiting_room" | "in_call" | "leaving" | "ended" | "failed";
 
+export interface RecallMeetingOutcome {
+  title: string;
+  summary: string;
+  decisions: string[];
+  actionItems: { task: string; owner: string; dueDate?: string }[];
+  openQuestions: string[];
+}
+
+export interface RecallMeetingFollowThrough {
+  notionSaved?: boolean;
+  notionTool?: string;
+  notionUrl?: string;
+  completedTools?: string[];
+}
+
 /** Owner-scoped meeting metadata and bounded text context. Never stores a meeting URL or media. */
 export interface RecallMeetingRecord {
   id: string;
@@ -111,6 +126,10 @@ export interface RecallMeetingRecord {
   error?: string;
   providerStatusAt?: number;
   history: Message[];
+  /** Owner-private structured follow-through; never contains the raw provider payload. */
+  outcome?: RecallMeetingOutcome;
+  outcomeFollowThrough?: RecallMeetingFollowThrough;
+  outcomeStatus?: "pending" | "completed";
   createdAt: number;
   updatedAt: number;
 }
@@ -2266,11 +2285,18 @@ export async function listRecallMeetings(uid: number, limit = 10): Promise<Recal
   return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus">>): Promise<RecallMeetingRecord | undefined> {
   const session = await getSession(uid);
   const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
   if (!current) return undefined;
   if (patch.providerStatusAt !== undefined && current.providerStatusAt !== undefined && patch.providerStatusAt < current.providerStatusAt) return current;
+  if (patch.outcome) {
+    if (patch.outcome.title.length > 180 || patch.outcome.summary.length > 2_000 || patch.outcome.decisions.length > 10 || patch.outcome.actionItems.length > 10 || patch.outcome.openQuestions.length > 10) throw new Error("Meeting outcome exceeds storage bounds");
+    if ([...patch.outcome.decisions, ...patch.outcome.openQuestions].some((item) => typeof item !== "string" || item.length > 700)
+      || patch.outcome.actionItems.some((item) => !item || typeof item.task !== "string" || item.task.length > 500 || typeof item.owner !== "string" || item.owner.length > 120 || (item.dueDate !== undefined && item.dueDate.length > 80))) throw new Error("Meeting outcome contains invalid fields");
+  }
+  if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
+  if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
   Object.assign(current, patch, { updatedAt: Date.now() });
   current.error = current.error?.slice(0, 300);
   await saveSession(uid, session);

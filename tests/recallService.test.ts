@@ -1,7 +1,7 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
-import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting } from "../src/store.js";
+import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { applyRecallStatusWebhook, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
@@ -178,6 +178,24 @@ test("signed provider status updates only the owning meeting and ignores stale l
   assert.equal(stale, "ignored");
   assert.equal(providerCalls, 1, "a complete signed Recall status payload needs no serial API lookup");
   assert.equal((await listRecallMeetings(ownerId)).some((item) => item.id === meeting.id), true);
+});
+
+test("an ended representative meeting schedules post-meeting follow-through and retries can re-enqueue it", async () => {
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: true, objective: "Represent the company and progress onboarding" });
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/outcome-test-room", interactionMode: "representative" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+  const body = { event: "bot.done", data: {
+    data: { code: "done", updated_at: new Date().toISOString() },
+    bot: { id: botId, metadata: { chusky_meeting_id: meeting.id, chusky_user_id: String(ownerId) } },
+  } };
+  const queued: string[] = [];
+  assert.equal(await applyRecallStatusWebhook({ eventId: "msg-outcome", body, onMeetingEnded: async (userId, meetingId) => { queued.push(`${userId}:${meetingId}`); } }), "updated");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "ended");
+  assert.deepEqual(queued, [`${ownerId}:${meeting.id}`]);
+  assert.equal(await applyRecallStatusWebhook({ eventId: "msg-outcome-retry", body, onMeetingEnded: async (userId, meetingId) => { queued.push(`${userId}:${meetingId}`); } }), "ignored");
+  assert.deepEqual(queued, [`${ownerId}:${meeting.id}`, `${ownerId}:${meeting.id}`], "the durable workflow ID must deduplicate repeat enqueue requests");
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
 });
 
 test("Recall chat messages require an owned active bot and use the supported chat-send API", async () => {

@@ -535,6 +535,8 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
 export interface AgentResult {
   text: string;
   toolsUsed: string[];
+  /** Exact tool slugs whose execution returned successfully; unlike toolsUsed, excludes failed attempts. */
+  toolsSucceeded: string[];
   cost?: number;
   generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
@@ -805,6 +807,7 @@ export async function runAgent(
   ];
 
   const toolsUsed: string[] = [];
+  const toolsSucceeded: string[] = [];
   let toolCallsExecuted = 0;
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
@@ -913,7 +916,7 @@ export async function runAgent(
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
-      return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: finalText, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -1148,6 +1151,8 @@ export async function runAgent(
         }
       }
 
+      if (!toolFailed && !toolsSucceeded.includes(slug)) toolsSucceeded.push(slug);
+
       messages.push({
         role: "tool",
         tool_call_id: call.id,
@@ -1182,7 +1187,7 @@ export async function runAgent(
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
   const finalText = await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks));
   await persistRun("completed", "run.completed_after_round_limit", finalText);
-  return { text: finalText, toolsUsed, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+  return { text: finalText, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

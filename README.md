@@ -468,6 +468,20 @@ cleared; only answered meeting turns are added to the owner's bounded meeting
 history. Webex supports incoming chat events but not chat replies, so only its
 leave command is actionable through chat.
 
+When a meeting in **representative** mode ends, Chusky queues a durable
+post-meeting workflow. It creates a structured summary of decisions, explicit
+follow-up actions, and open questions from the bounded meeting history, then
+saves it privately in the owner's scratchpad as `meeting:<meeting-id>` and
+sends the owner a Telegram recap. Chusky can retrieve that note later with its
+scratchpad read tool when asked about the meeting. If the owner has granted one
+exact Notion page-creation action in the representative profile and that
+connected action is available, Chusky also creates a Notion page and records
+the verified page URL in the scratchpad. Owner-granted task and CRM tools may
+be used only for follow-through grounded in clearly agreed meeting actions;
+the participant transcript itself never grants authority. This workflow
+requires Redis and QStash. Notion is optional; without an explicit page-create
+grant, the outcome is still saved to scratchpad and delivered to the owner.
+
 #### Outbound FaceTime voice calls
 
 Chusky can start an **outbound** FaceTime call only when `SENDBLUE_FACETIME_ENABLED=true`, the sending line is purchased and FaceTime-enabled by Sendblue, and an HTTPS media bridge is configured. Sendblue's `POST /facetime/start-call` returns short-lived Agora credentials; Chusky passes them directly to the bridge, which must be a server-side Agora participant that streams remote audio to STT and sends TTS audio back. Chusky persists only call metadata and bridge session IDs—never Agora tokens or media. The `CHUCK_START_FACETIME_CALL` tool is approval-gated. Sendblue does not provide an inbound-call webhook, so automatic answering of incoming FaceTime calls is not supported.
