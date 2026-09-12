@@ -1,4 +1,5 @@
 import { RISKY_TOOL_PATTERN } from "../policy.js";
+import type { MeetingInteractionMode } from "./context.js";
 
 export type MeetingRepresentativeRole = "sales" | "client_onboarding" | "employee_onboarding" | "customer_success" | "custom";
 
@@ -26,6 +27,39 @@ export interface MeetingRepresentativeProfile {
   composioAccountAliases: Record<string, string>;
   allowedNativeTools: string[];
   updatedAt: number;
+}
+
+/** A short spoken opening derived only from the owner's explicit meeting profile. */
+export function meetingRepresentativeGreeting(
+  mode: MeetingInteractionMode,
+  profile?: MeetingRepresentativeProfile,
+): string {
+  const roleNames: Record<MeetingRepresentativeRole, string> = {
+    sales: "sales representative",
+    client_onboarding: "client onboarding specialist",
+    employee_onboarding: "employee onboarding specialist",
+    customer_success: "customer success representative",
+    custom: "company representative",
+  };
+  const spoken = (value: string, maxLength: number) => value
+    .replace(/[\r\n\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+
+  if (mode === "representative" && profile?.enabled) {
+    const name = spoken(profile.representativeName, 80) || "Chusky";
+    const organization = spoken(profile.organizationName, 120);
+    const identity = name.toLowerCase() === "chusky"
+      ? `I’m Chusky, the AI ${roleNames[profile.role]}`
+      : `I’m ${name}, Chusky’s AI ${roleNames[profile.role]}`;
+    return `Hi everyone. ${identity}${organization ? ` for ${organization}` : " representing the account owner"}. I’m here to help move the conversation forward and find a clear next step. Please bring me in whenever I can help.`;
+  }
+
+  if (mode === "addressed") {
+    return "Hi everyone, I’m Chusky, the AI meeting assistant. Say ‘Chusky’ when you’d like me to respond.";
+  }
+  return "Hi everyone, I’m Chusky, the AI meeting copilot. I’ll follow the conversation and speak up when I can add something useful; you can address me directly anytime.";
 }
 
 export type MeetingRepresentativeProfilePatch = Partial<Omit<MeetingRepresentativeProfile, "updatedAt">>;

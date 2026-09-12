@@ -4,6 +4,7 @@ import {
   defaultMeetingRepresentativeProfile,
   applyMeetingComposioAccountAlias,
   isMeetingRepresentativeComposioTool,
+  meetingRepresentativeGreeting,
   meetingRepresentativeInstructions,
   meetingRepresentativeToolAllowlist,
   normalizeMeetingRepresentativeProfile,
@@ -49,6 +50,22 @@ test("meeting run receives only configured actions plus the leave control", () =
   assert.match(instructions, /SPEAK/);
   assert.doesNotMatch(instructions, /company-mail|sales-crm/);
   assert.match(instructions, /routing is enforced privately/);
+});
+
+test("meeting greeting briefly discloses Chusky's configured representative role and company", () => {
+  const profile = normalizeMeetingRepresentativeProfile({
+    enabled: true,
+    role: "sales",
+    representativeName: "Chusky",
+    organizationName: "Acme",
+    objective: "Qualify leads and arrange next steps",
+  });
+  const greeting = meetingRepresentativeGreeting("representative", profile);
+  assert.match(greeting, /AI sales representative for Acme/);
+  assert.match(greeting, /clear next step/);
+  assert.doesNotMatch(greeting, /say ‘Chusky’/i);
+  assert.match(meetingRepresentativeGreeting("copilot"), /speak up when I can add something useful/);
+  assert.match(meetingRepresentativeGreeting("addressed"), /Say ‘Chusky’/);
 });
 
 test("meeting account routing is pinned to owner aliases and strips participant-selected accounts", () => {

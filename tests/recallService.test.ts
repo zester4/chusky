@@ -89,6 +89,25 @@ test("creates an owner-scoped immediate meeting with no URL leakage or retained 
   assert.equal((await getRecallMeeting(ownerId + 1, meeting.id)), undefined);
 });
 
+test("meeting joins default to proactive copilot or the enabled representative profile", async () => {
+  let botNumber = 0;
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: `bot_default_${++botNumber}` }), { status: 201 });
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
+
+  const copilot = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/proactive-default-room" });
+  assert.equal(copilot.interactionMode, "copilot");
+
+  await updateMeetingRepresentativeProfile(ownerId, {
+    enabled: true,
+    role: "sales",
+    organizationName: "Acme",
+    objective: "Qualify leads and agree next steps",
+  });
+  const representative = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/representative-default-room" });
+  assert.equal(representative.interactionMode, "representative");
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
+});
+
 test("concurrent requests for one live meeting create only one Recall bot", async () => {
   let created = 0;
   let announceStarted!: () => void;
@@ -231,6 +250,31 @@ test("signed provider status updates only the owning meeting and ignores stale l
   assert.equal(stale, "ignored");
   assert.equal(providerCalls, 1, "a complete signed Recall status payload needs no serial API lookup");
   assert.equal((await listRecallMeetings(ownerId)).some((item) => item.id === meeting.id), true);
+});
+
+test("current Recall fatal status envelope preserves only its safe sub-code", async () => {
+  globalThis.fetch = async (_input, init) => init?.method === "POST"
+    ? new Response(JSON.stringify({ id: botId }), { status: 201 })
+    : new Response(JSON.stringify({ id: botId, metadata: { chusky_meeting_id: currentFailureMeeting.id, chusky_user_id: String(ownerId) } }), { status: 200 });
+  const currentFailureMeeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/current-fatal-status" });
+
+  assert.equal(await applyRecallStatusWebhook({
+    eventId: "msg-current-fatal",
+    body: { event: "bot.status_change", data: {
+      bot_id: botId,
+      status: {
+        code: "fatal",
+        created_at: new Date().toISOString(),
+        sub_code: "zoom_sdk_credentials_missing",
+        message: "private provider diagnostic must not be persisted",
+      },
+    } },
+  }), "updated");
+
+  const failed = await getRecallMeeting(ownerId, currentFailureMeeting.id);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.error, "Recall could not join the meeting (zoom_sdk_credentials_missing)");
+  assert.doesNotMatch(failed?.error ?? "", /private provider diagnostic/);
 });
 
 test("Recall media authorization waits for the owned bot to enter the call and rejects terminal states", async () => {

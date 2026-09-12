@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { config } from "../src/config.js";
 import { initStore } from "../src/store.js";
 import { joinRecallMeeting, leaveRecallMeeting } from "../src/meetings/service.js";
-import { mapRecallBotStatus, verifyRecallWebhookSignature } from "../src/meetings/recall.js";
+import { parseRecallStatusWebhook, verifyRecallWebhookSignature } from "../src/meetings/recall.js";
 
 const fixturePath = process.env.RECALL_STAGING_STATUS_FIXTURE;
 const fixtureEnabled = Boolean(fixturePath && process.env.RECALL_WEBHOOK_SECRET);
@@ -34,13 +34,9 @@ test("actual Recall staging status fixture has a valid signature and documented 
     nowSeconds: signedAt,
   }), true, "exact captured raw bytes must verify against Recall's actual signature");
   const body = JSON.parse(fixture.rawBody as string) as Record<string, any>;
-  assert.equal(typeof body.event, "string");
-  assert.match(body.event, /^bot\./);
-  assert.ok(body.data && typeof body.data === "object", "expected Recall bot status event data");
-  const providerBot = body.data.bot && typeof body.data.bot === "object" ? body.data.bot : {};
-  assert.ok(typeof (body.data.bot_id ?? providerBot.id) === "string", "expected the provider bot identity");
-  const nestedStatus = body.data.data && typeof body.data.data === "object" ? body.data.data : {};
-  assert.ok(mapRecallBotStatus(nestedStatus.code ?? body.event.slice(4)), "expected a supported Recall lifecycle status");
+  const parsed = parseRecallStatusWebhook(body);
+  assert.ok(parsed, "expected a supported current or legacy Recall status envelope");
+  assert.ok(parsed.providerBotId, "expected the provider bot identity");
 });
 
 const stagingCreateEnabled = process.env.RECALL_STAGING_CONFIRM === "I_AUTHORIZE_STAGING_BOT";

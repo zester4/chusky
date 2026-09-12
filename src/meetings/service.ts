@@ -20,6 +20,7 @@ import {
   isRecallRegionSupported,
   RecallApiError,
   mapRecallBotStatus,
+  parseRecallStatusWebhook,
   recallApiRequest,
   type ParsedRecallChatWebhook,
   parseRecallChatWebhook,
@@ -166,9 +167,12 @@ export async function joinRecallMeeting(userId: number, input: {
   assertUserId(userId);
   const meeting = validateMeetingUrl(input.meetingUrl);
   const joinAt = validateRecallJoinAt(input.joinAt);
-  const interactionMode = input.interactionMode === undefined ? "addressed" : input.interactionMode;
+  const representativeProfile = await getMeetingRepresentativeProfile(userId);
+  const interactionMode = input.interactionMode === undefined
+    ? representativeProfile.enabled ? "representative" : "copilot"
+    : input.interactionMode;
   if (interactionMode !== "addressed" && interactionMode !== "copilot" && interactionMode !== "representative") throw new Error("interactionMode must be addressed, copilot, or representative");
-  if (interactionMode === "representative" && !(await getMeetingRepresentativeProfile(userId)).enabled) {
+  if (interactionMode === "representative" && !representativeProfile.enabled) {
     throw new Error("Configure and enable your meeting representative profile before joining in representative mode");
   }
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 120) : "";
@@ -226,6 +230,7 @@ export async function joinRecallMeeting(userId: number, input: {
       mediaPageUrl: mediaBase.toString(),
       meetingId: id,
       userId,
+      interactionMode,
       ...(recallChatConfigurationReady() ? { realtimeWebhookUrl: recallRealtimeWebhookUrl() } : {}),
       ...(joinAt ? { joinAt } : {}),
     });
@@ -362,16 +367,14 @@ export async function applyRecallStatusWebhook(input: {
   onMeetingEnded?: (userId: number, meetingId: string) => Promise<void>;
 }): Promise<"updated" | "ignored"> {
   requireRecall();
-  const data = input.body.data && typeof input.body.data === "object" ? input.body.data as Record<string, unknown> : {};
-  const providerBot = data.bot && typeof data.bot === "object" ? data.bot as Record<string, unknown> : {};
-  const botId = String(data.bot_id ?? providerBot.id ?? "");
-  if (!isValidRecallBotId(botId)) return "ignored";
-  // Recall's documented status-change envelope carries our bot metadata. Use
-  // it directly on the signed event; only use authenticated retrieval for
-  // older/incomplete envelopes. This avoids a serial API round-trip per status.
-  let metadata = providerBot.metadata && typeof providerBot.metadata === "object"
-    ? providerBot.metadata as Record<string, unknown>
-    : {};
+  const statusEvent = parseRecallStatusWebhook(input.body);
+  if (!statusEvent) return "ignored";
+  const botId = statusEvent.providerBotId;
+  // Current bot.status_change events contain the provider bot ID and status,
+  // but no Chusky ownership metadata. Legacy status-specific events may carry
+  // metadata, so use it when present and otherwise resolve ownership through
+  // Recall's authenticated Retrieve Bot API before applying the event.
+  let metadata = statusEvent.metadata;
   if (!metadata.chusky_meeting_id || !metadata.chusky_user_id) {
     let bot: Record<string, unknown>;
     try {
@@ -390,12 +393,8 @@ export async function applyRecallStatusWebhook(input: {
   const meeting = await getRecallMeeting(userId, meetingId);
   if (!meeting || meeting.providerBotId !== botId) return "ignored";
 
-  const statusData = data.data && typeof data.data === "object" ? data.data as Record<string, unknown> : {};
-  const alternateStatus = data.status && typeof data.status === "object" ? data.status as Record<string, unknown> : {};
-  const eventStatus = String(input.body.event ?? "").replace(/^bot\./, "");
-  const status = mapRecallBotStatus(statusData.code ?? alternateStatus.code ?? eventStatus);
-  if (!status) return "ignored";
-  const providerStatusAt = recallStatusTime(statusData.updated_at ?? alternateStatus.created_at);
+  const status = statusEvent.status;
+  const providerStatusAt = recallStatusTime(statusEvent.statusAt);
   if (["ended", "failed"].includes(meeting.status)) {
     // A previous signed status delivery may have updated Redis but failed to
     // enqueue the durable outcome. Re-enqueue on Recall retries; the workflow
@@ -408,7 +407,7 @@ export async function applyRecallStatusWebhook(input: {
   const order: Record<RecallMeetingStatus, number> = { creating: 0, scheduled: 0, joining: 1, waiting_room: 2, in_call: 3, leaving: 4, ended: 5, failed: 5 };
   if ((meeting.status === "leaving" && status !== "ended" && status !== "failed") || order[status] < order[meeting.status]) return "ignored";
   if (providerStatusAt !== undefined && meeting.providerStatusAt !== undefined && providerStatusAt < meeting.providerStatusAt) return "ignored";
-  const errorCode = String(statusData.sub_code ?? (data.data && typeof data.data === "object" ? (data.data as Record<string, unknown>).sub_code : "")).replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+  const errorCode = String(statusEvent.subCode ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
   const error = status === "failed"
     ? `Recall could not join the meeting${errorCode ? ` (${errorCode})` : ""}`
     : undefined;

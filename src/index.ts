@@ -47,7 +47,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook } from "./meetings/webhook.js";
-import { meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
+import { meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
 import { buildMeetingOutcomePrompt, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 
 function xmlEscape(value: string): string {
@@ -683,7 +683,17 @@ async function main(): Promise<void> {
       const state = await getRecallMediaAuthorizationState(userId, meetingId);
       if (state === "denied") return c.text("Not found", 404, { "Cache-Control": "no-store" });
       if (state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
-      return c.body(null, 204, { "Cache-Control": "no-store" });
+      const meeting = await getRecallMeeting(userId, meetingId);
+      if (!meeting || meeting.status !== "in_call") return c.text("Not found", 404, { "Cache-Control": "no-store" });
+      const interactionMode = meeting.interactionMode === "representative" || meeting.interactionMode === "copilot"
+        ? meeting.interactionMode
+        : "addressed";
+      const profile = interactionMode === "representative" ? await getMeetingRepresentativeProfile(userId) : undefined;
+      const effectiveMode = interactionMode === "representative" && !profile?.enabled ? "addressed" : interactionMode;
+      return c.json({
+        interactionMode: effectiveMode,
+        greeting: meetingRepresentativeGreeting(effectiveMode, profile),
+      }, 200, { "Cache-Control": "no-store" });
     });
 
     app.post("/internal/recall/commit-turn", async (c) => {

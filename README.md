@@ -421,8 +421,13 @@ voice until that capability is documented and tested.
 
 The separate [`chusky-voice`](chusky-voice/README.md) service runs Recall
 Output Media and Deepgram Flux; Chusky's configured model remains the agent
-brain. Without a business profile, it behaves as a proactive copilot and speaks
-only when it can add value, within a per-call evaluation cap. An owner can
+brain. When asked to join without an explicit mode, Chusky uses an enabled
+company-representative profile, or proactive copilot mode if none is enabled;
+addressed-only mode is reserved for an explicit wake-word-only request. It
+opens with a short spoken introduction. In representative mode, that greeting
+names its AI role and the configured company. In proactive modes it evaluates
+ordinary conversation and speaks only when it can add value, within a per-call
+evaluation cap. An owner can
 configure a sales, client-onboarding, employee-onboarding, customer-success, or
 custom representative profile with its objective, approved company facts,
 boundaries, exact connected-app action grants, and native reminder/task tools.

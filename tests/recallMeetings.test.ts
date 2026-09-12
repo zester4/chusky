@@ -7,6 +7,7 @@ import {
   createRecallMediaTicket,
   isValidRecallBotId,
   mapRecallBotStatus,
+  parseRecallStatusWebhook,
   parseRecallChatWebhook,
   recallChatCommand,
   recallApiRequest,
@@ -68,6 +69,7 @@ test("Recall bot subscribes to chat without enabling retained participant artifa
     mediaPageUrl: "https://voice.example/recall/media",
     meetingId: "mtg_123",
     userId: 42,
+    interactionMode: "representative",
     realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
   });
 
@@ -79,8 +81,22 @@ test("Recall bot subscribes to chat without enabling retained participant artifa
     events: ["participant_events.chat_message"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
-  assert.match(request.chat?.on_bot_join.message ?? "", /disclosed AI meeting representative/i);
-  assert.match(request.chat?.on_bot_join.message ?? "", /address chusky by name/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /disclosed AI meeting participant/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /may contribute proactively/i);
+  assert.doesNotMatch(request.chat?.on_bot_join.message ?? "", /say ‘Chusky’/i);
+});
+
+test("Recall addressed-mode disclosure clearly explains the wake-word behavior", () => {
+  const request = buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky Meeting Assistant",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_456",
+    userId: 42,
+    interactionMode: "addressed",
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+  });
+  assert.match(request.chat?.on_bot_join.message ?? "", /Say ‘Chusky’ when you’d like a response/i);
 });
 
 test("Recall chat parser recognizes natural Chusky addresses and labels ambient chat for owner-authorized representatives", () => {
@@ -239,6 +255,41 @@ test("Recall lifecycle statuses map to stable Chusky meeting states", () => {
   assert.equal(mapRecallBotStatus("fatal"), "failed");
   assert.equal(mapRecallBotStatus("recording_permission_denied"), "in_call");
   assert.equal(mapRecallBotStatus("ready"), undefined);
+});
+
+test("Recall status webhook parser accepts current and legacy envelopes without retaining provider messages", () => {
+  assert.deepEqual(parseRecallStatusWebhook({
+    event: "bot.status_change",
+    data: {
+      bot_id: "bot-current-123",
+      status: {
+        code: "fatal",
+        created_at: "2026-09-12T10:00:00Z",
+        sub_code: "zoom_sdk_credentials_missing",
+        message: "private provider diagnostic",
+      },
+    },
+  }), {
+    providerBotId: "bot-current-123",
+    metadata: {},
+    status: "failed",
+    statusAt: "2026-09-12T10:00:00Z",
+    subCode: "zoom_sdk_credentials_missing",
+  });
+
+  assert.deepEqual(parseRecallStatusWebhook({
+    event: "bot.in_call_recording",
+    data: {
+      bot: { id: "bot-legacy-123", metadata: { chusky_meeting_id: "mtg_123", chusky_user_id: "42" } },
+      data: { code: "in_call_recording", updated_at: "2026-09-12T10:01:00Z" },
+    },
+  }), {
+    providerBotId: "bot-legacy-123",
+    metadata: { chusky_meeting_id: "mtg_123", chusky_user_id: "42" },
+    status: "in_call",
+    statusAt: "2026-09-12T10:01:00Z",
+  });
+  assert.equal(parseRecallStatusWebhook({ event: "bot.log", data: { bot_id: "bot-current-123", log: {} } }), undefined);
 });
 
 test("Recall webhook signature validates the exact body, freshness, and versioned signatures", () => {

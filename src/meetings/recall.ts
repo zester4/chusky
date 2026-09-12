@@ -106,6 +106,7 @@ export function buildRecallCreateBotRequest(input: {
   mediaPageUrl: string;
   meetingId: string;
   userId: number;
+  interactionMode?: RecallMediaTicket["interactionMode"];
   joinAt?: string;
   realtimeWebhookUrl?: string;
 }): RecallCreateBotRequest {
@@ -123,6 +124,11 @@ export function buildRecallCreateBotRequest(input: {
     realtimeWebhookUrl = endpoint.toString();
   }
   if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.meetingId) || !Number.isSafeInteger(input.userId) || input.userId <= 0) throw new Error("Invalid Chusky meeting identity");
+  const interactionMode = input.interactionMode ?? "addressed";
+  if (!["addressed", "copilot", "representative"].includes(interactionMode)) throw new Error("Invalid meeting interaction mode");
+  const participantDisclosure = interactionMode === "addressed"
+    ? "Say ‘Chusky’ when you’d like a response; you may ask it to leave at any time."
+    : "Chusky may contribute proactively when it can help; you may also address it directly or ask it to leave at any time.";
   const request: RecallCreateBotRequest = {
     meeting_url: meeting.url,
     bot_name: botName,
@@ -153,7 +159,7 @@ export function buildRecallCreateBotRequest(input: {
       chat: {
         on_bot_join: {
           send_to: "everyone",
-        message: "Chusky is a disclosed AI meeting representative. It may listen and contribute to this meeting, and live audio is processed. Recall recording and transcript retention are disabled. Address Chusky by name to ask a question; you may ask it to leave at any time.",
+          message: `Chusky is a disclosed AI meeting participant. Live audio is processed, and Recall recording and transcript retention are disabled. ${participantDisclosure}`,
         },
       },
     } : {}),
@@ -343,6 +349,53 @@ export function mapRecallBotStatus(code: unknown): "joining" | "waiting_room" | 
     case "fatal": return "failed";
     default: return undefined;
   }
+}
+
+export interface ParsedRecallStatusWebhook {
+  providerBotId: string;
+  metadata: Record<string, unknown>;
+  status: "joining" | "waiting_room" | "in_call" | "ended" | "failed";
+  statusAt?: string;
+  subCode?: string;
+}
+
+/** Normalize Recall's current status_change envelope and its legacy status-specific envelope. */
+export function parseRecallStatusWebhook(value: unknown): ParsedRecallStatusWebhook | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  const data = body.data && typeof body.data === "object" && !Array.isArray(body.data)
+    ? body.data as Record<string, unknown>
+    : undefined;
+  if (!data) return undefined;
+  const providerBot = data.bot && typeof data.bot === "object" && !Array.isArray(data.bot)
+    ? data.bot as Record<string, unknown>
+    : undefined;
+  const providerBotId = data.bot_id ?? providerBot?.id;
+  if (!isValidRecallBotId(providerBotId)) return undefined;
+  const currentStatus = data.status && typeof data.status === "object" && !Array.isArray(data.status)
+    ? data.status as Record<string, unknown>
+    : undefined;
+  const legacyStatus = data.data && typeof data.data === "object" && !Array.isArray(data.data)
+    ? data.data as Record<string, unknown>
+    : undefined;
+  const eventName = typeof body.event === "string" ? body.event : "";
+  const eventStatus = eventName.startsWith("bot.") && eventName !== "bot.status_change"
+    ? eventName.slice("bot.".length)
+    : undefined;
+  const status = mapRecallBotStatus(currentStatus?.code ?? legacyStatus?.code ?? eventStatus);
+  if (!status) return undefined;
+  const metadata = providerBot?.metadata && typeof providerBot.metadata === "object" && !Array.isArray(providerBot.metadata)
+    ? providerBot.metadata as Record<string, unknown>
+    : {};
+  const statusAt = currentStatus?.created_at ?? legacyStatus?.updated_at ?? legacyStatus?.created_at;
+  const subCode = currentStatus?.sub_code ?? legacyStatus?.sub_code;
+  return {
+    providerBotId,
+    metadata,
+    status,
+    ...(typeof statusAt === "string" ? { statusAt } : {}),
+    ...(typeof subCode === "string" ? { subCode } : {}),
+  };
 }
 
 export function createRecallMediaTicket(claim: RecallMediaTicket, secret: string): string {
