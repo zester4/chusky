@@ -42,7 +42,7 @@ import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWo
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
-import { normalizeVoiceText } from "./voiceText.js";
+import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
@@ -606,9 +606,11 @@ async function main(): Promise<void> {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
           const speechGate = proactive ? new MeetingSpeechGate() : undefined;
           const streamDelta = (delta: string) => {
-            if (!proactive) { send({ type: "delta", text: normalizeVoiceText(delta) }); return; }
-            for (const event of speechGate!.push(delta)) {
-              send(event.type === "delta" ? { type: event.type, text: normalizeVoiceText(event.text) } : { type: event.type });
+            const fragment = normalizeVoiceDelta(delta);
+            if (!fragment) return;
+            if (!proactive) { send({ type: "delta", text: fragment }); return; }
+            for (const event of speechGate!.push(fragment)) {
+              send(event.type === "delta" ? { type: event.type, text: normalizeVoiceDelta(event.text) } : { type: event.type });
             }
           };
           try {
@@ -636,7 +638,7 @@ async function main(): Promise<void> {
             ));
             if (proactive) {
               for (const event of speechGate!.finish()) {
-                send(event.type === "delta" ? { type: event.type, text: normalizeVoiceText(event.text) } : { type: event.type });
+                send(event.type === "delta" ? { type: event.type, text: normalizeVoiceDelta(event.text) } : { type: event.type });
               }
               const parsed = parseCopilotOutput(result.text);
               send({ type: "done", text: parsed.text, speak: parsed.speak, cost: result.cost ?? 0, speculative });

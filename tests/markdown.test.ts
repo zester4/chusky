@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mdToTelegramHtml, splitHtml } from "../src/markdown.js";
 import { markdownToTelegramRichHtml } from "../src/telegramRich.js";
-import { normalizeVoiceText } from "../src/voiceText.js";
+import { normalizeVoiceDelta, normalizeVoiceText } from "../src/voiceText.js";
 
 test("escapes user-controlled HTML", () => {
   assert.equal(mdToTelegramHtml("<script>alert(1)</script> & ok"), "&lt;script&gt;alert(1)&lt;/script&gt; &amp; ok");
@@ -41,6 +41,11 @@ test("leaves ordinary Markdown on the existing formatter path", () => {
 
 test("voice text removes Markdown syntax before speech", () => {
   const text = normalizeVoiceText("**Chusky** can help.\n\n# Next steps\n* one\n[Open](https://example.com)");
-  assert.equal(text, "Chusky can help.\nNext steps\none\nOpen: https://example.com");
+  assert.equal(text, "Chusky can help.\nNext steps\none\nOpen");
   assert.doesNotMatch(normalizeVoiceText("**Chusky** #ready *now*"), /[*#]/);
+});
+
+test("voice text keeps streamed word boundaries and speaks prices naturally", () => {
+  assert.equal(normalizeVoiceDelta(" clarify"), " clarify");
+  assert.equal(normalizeVoiceText("The price is $4.99. plan1.clarify your idea."), "The price is 4 dollars and 99 cents. plan 1. clarify your idea.");
 });
