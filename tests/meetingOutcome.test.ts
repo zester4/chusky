@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  deliverMeetingOutcomeOnce,
   buildMeetingOutcomePrompt,
   formatMeetingOutcomeScratchpad,
   parseMeetingOutcome,
@@ -32,6 +33,40 @@ const outcomeJson = JSON.stringify({
   decisions: ["Target pilot start is October."],
   actionItems: [{ task: "Coordinate pilot onboarding", owner: "Chusky" }],
   openQuestions: ["Confirm the October start date."],
+});
+
+test("meeting outcome notification is durably claimed before delivery and never retried after an ambiguous send", async () => {
+  let claimed = false;
+  let completed = false;
+  let sends = 0;
+  const order: string[] = [];
+  const deps = {
+    key: `recall-outcome-notification:${meeting.userId}:${meeting.id}`,
+    claim: async () => {
+      order.push("claim");
+      if (completed) return "completed" as const;
+      if (claimed) return "busy" as const;
+      claimed = true;
+      return "acquired" as const;
+    },
+    complete: async () => {
+      order.push("mark-attempted");
+      if (!claimed) return false;
+      claimed = false;
+      completed = true;
+      return true;
+    },
+    send: async () => {
+      order.push("send");
+      sends++;
+      throw new Error("Telegram accepted the message but the connection was lost before acknowledgement");
+    },
+  };
+
+  await assert.rejects(() => deliverMeetingOutcomeOnce(deps), /connection was lost/);
+  assert.deepEqual(order, ["claim", "mark-attempted", "send"]);
+  assert.equal(await deliverMeetingOutcomeOnce(deps), "duplicate");
+  assert.equal(sends, 1);
 });
 
 test("meeting outcome prompt uses only bounded meeting turns and treats them as untrusted", () => {

@@ -363,8 +363,12 @@ async function sendGroupChannelLink(ctx: Context): Promise<void> {
   await replyHtml(ctx, `<b>Link an iMessage group</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link-group ${code}</code> inside the iMessage group from the linked Sendblue number. It expires in 10 minutes.`);
 }
 async function acquireQueuedLock(userId: number, token: string, signal: AbortSignal): Promise<void> {
-  while (!(await acquireUserLock(userId, token))) {
+  const deadline = Date.now() + 120_000;
+  while (true) {
     if (signal.aborted) throw new DOMException("Request cancelled", "AbortError");
+    if (await acquireUserLock(userId, token)) return;
+    if (signal.aborted) throw new DOMException("Request cancelled", "AbortError");
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for another Chusky request to finish");
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
 }
@@ -549,7 +553,12 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   const controller = new AbortController();
   const lockToken = randomUUID();
   activeRequests.set(userId, controller);
-  await acquireQueuedLock(userId, lockToken, controller.signal);
+  try {
+    await acquireQueuedLock(userId, lockToken, controller.signal);
+  } catch (error) {
+    if (activeRequests.get(userId) === controller) activeRequests.delete(userId);
+    throw error;
+  }
   const statusText = historyLabel.startsWith("[Voice message]")
     ? "🎙️ <b>I’m listening to your voice message…</b>"
     : historyLabel.startsWith("[Audio message]")
@@ -1625,7 +1634,12 @@ export function registerHandlers(bot: Bot): void {
     const controller = new AbortController();
     const lockToken = randomUUID();
     activeRequests.set(userId, controller);
-    await acquireQueuedLock(userId, lockToken, controller.signal);
+    try {
+      await acquireQueuedLock(userId, lockToken, controller.signal);
+    } catch (error) {
+      if (activeRequests.get(userId) === controller) activeRequests.delete(userId);
+      throw error;
+    }
 
     // Post the live status message
     const statusMsg = await ctx.reply("🐶 <b>Alright, just a sec…</b>", { parse_mode: "HTML" });

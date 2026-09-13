@@ -26,6 +26,29 @@ export interface MeetingOutcomeFollowThroughResult {
 export type MeetingOutcomeLease = "acquired" | "completed" | "busy";
 export type MeetingOutcomeResult = "completed" | "duplicate" | "busy" | "skipped";
 
+/**
+ * Claim a single notification attempt before sending. Telegram has no sender-side
+ * idempotency key, so a crash after Telegram accepts a message but before an
+ * acknowledgement must not make a workflow retry send the outcome again.
+ */
+export async function deliverMeetingOutcomeOnce(input: {
+  key: string;
+  claim(key: string, token: string, leaseMs: number): Promise<MeetingOutcomeLease>;
+  complete(key: string, token: string, ttlSeconds: number): Promise<boolean>;
+  send(): Promise<void>;
+}): Promise<"sent" | "duplicate"> {
+  const token = randomUUID();
+  const lease = await input.claim(input.key, token, 60_000);
+  if (lease === "completed") return "duplicate";
+  if (lease === "busy") throw new Error("Meeting outcome notification is already being delivered");
+  // Mark the stable delivery key complete before the external send. This is
+  // intentionally at-most-once: losing a notification is preferable to
+  // sending the same meeting outcome twice after an ambiguous network failure.
+  if (!(await input.complete(input.key, token, 90 * 24 * 60 * 60))) throw new Error("Meeting outcome notification lease was lost");
+  await input.send();
+  return "sent";
+}
+
 const MAX_OUTCOME_TEXT = 1_200;
 const MAX_LIST_ITEMS = 10;
 const NOTION_CREATE_PAGE = /^NOTION_[A-Z0-9_]*CREATE[A-Z0-9_]*PAGE(?:_[A-Z0-9_]+)?$/;

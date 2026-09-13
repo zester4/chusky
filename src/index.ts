@@ -48,7 +48,7 @@ import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatC
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook } from "./meetings/webhook.js";
 import { meetingConversationToolAllowlist, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
-import { buildMeetingOutcomePrompt, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
+import { buildMeetingOutcomePrompt, deliverMeetingOutcomeOnce, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -2014,17 +2014,12 @@ async function main(): Promise<void> {
             const chatId = await getTelegramChatId(ownerId);
             if (!chatId) return;
             const key = `recall-outcome-notification:${ownerId}:${meetingId}`;
-            const token = randomUUID();
-            const lease = await claimDeliveryLease(key, token, 60_000);
-            if (lease === "completed") return;
-            if (lease === "busy") throw new Error("Meeting outcome notification is already being delivered");
-            try {
-              await bot.api.sendMessage(chatId, text);
-              if (!(await completeDeliveryLease(key, token, 365 * 24 * 60 * 60))) throw new Error("Meeting outcome notification lease was lost");
-            } catch (error) {
-              await releaseDeliveryLease(key, token).catch(() => false);
-              throw error;
-            }
+            await deliverMeetingOutcomeOnce({
+              key,
+              claim: claimDeliveryLease,
+              complete: completeDeliveryLease,
+              send: () => bot.api.sendMessage(chatId, text).then(() => undefined),
+            });
           },
           claim: claimDeliveryLease,
           complete: completeDeliveryLease,
