@@ -142,7 +142,7 @@ export function formatMeetingOutcomeNotification(outcome: MeetingOutcome, follow
     ...(actions.length ? ["", "Follow-ups", ...actions] : []),
     ...(questions.length ? ["", "Open questions", ...questions] : []),
     "",
-    followThrough.notionSaved ? "Saved to your scratchpad and Notion." : followThrough.notionTool ? "Saved to your scratchpad. Notion page creation was not confirmed." : "Saved to your scratchpad for later.",
+    followThrough.notionSaved ? "Saved to scratchpad and Notion." : followThrough.notionTool ? "Saved to your scratchpad. Notion page creation was not confirmed." : "Saved to scratchpad for later.",
   ].join("\n").slice(0, 3_800);
 }
 
