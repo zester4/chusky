@@ -110,7 +110,9 @@ test("ended representative meeting saves to owner scratchpad, follows only grant
     `save:42:${meeting.id}:Acme pilot onboarding:pending`,
     `scratchpad:42:meeting:${meeting.id}`,
     `save:42:${meeting.id}:Acme pilot onboarding:completed`,
+    `save:42:${meeting.id}:Acme pilot onboarding:completed`,
     "notify:42",
+    `save:42:${meeting.id}:Acme pilot onboarding:completed`,
   ]);
 });
 
@@ -141,6 +143,51 @@ test("a retry resumes from persisted outcome and does not repeat completed exter
   assert.equal(await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, deps), "completed");
   assert.equal(summaries, 1);
   assert.equal(followThroughCalls, 1);
+});
+
+test("a persisted owner-notification claim suppresses a retry after an ambiguous delivery", async () => {
+  const current: RecallMeetingRecord = {
+    ...meeting,
+    outcome: parseMeetingOutcome(outcomeJson),
+    outcomeFollowThrough: {},
+    outcomeStatus: "completed",
+    outcomeNotificationStatus: "claimed",
+  };
+  let notified = 0;
+  const deps = {
+    getMeeting: async () => current,
+    getProfile: async () => ({ ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Progress the approved client meeting" }),
+    summarize: async () => { throw new Error("summary must not repeat"); },
+    writeScratchpad: async () => undefined,
+    saveOutcome: async () => undefined,
+    notifyOwner: async () => { notified++; },
+    claim: async () => "acquired" as const,
+    complete: async () => true,
+    release: async () => true,
+  };
+  assert.equal(await processMeetingOutcome({ userId: meeting.userId, meetingId: meeting.id }, deps), "completed");
+  assert.equal(notified, 0);
+});
+
+test("the notification claim is persisted before the owner delivery", async () => {
+  let current: RecallMeetingRecord = { ...meeting };
+  const statuses: string[] = [];
+  const deps = {
+    getMeeting: async () => current,
+    getProfile: async () => ({ ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Progress the approved client meeting" }),
+    summarize: async () => outcomeJson,
+    writeScratchpad: async () => undefined,
+    saveOutcome: async (_userId: number, _id: string, outcome: ReturnType<typeof parseMeetingOutcome>, followThrough: {}, status: "pending" | "completed", notificationStatus?: "pending" | "claimed" | "delivered") => {
+      current = { ...current, outcome, outcomeFollowThrough: followThrough, outcomeStatus: status, ...(notificationStatus ? { outcomeNotificationStatus: notificationStatus } : {}) };
+      if (notificationStatus) statuses.push(notificationStatus);
+    },
+    notifyOwner: async () => { assert.equal(current.outcomeNotificationStatus, "claimed"); },
+    claim: async () => "acquired" as const,
+    complete: async () => true,
+    release: async () => true,
+  };
+  assert.equal(await processMeetingOutcome({ userId: meeting.userId, meetingId: meeting.id }, deps), "completed");
+  assert.deepEqual(statuses, ["claimed", "delivered"]);
 });
 
 test("outcome workflow skips non-ended or addressed-only meetings", async () => {

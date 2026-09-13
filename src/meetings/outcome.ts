@@ -159,7 +159,7 @@ export interface MeetingOutcomeWorkflowDependencies {
     allowedNativeTools: string[];
   }): Promise<MeetingOutcomeFollowThroughResult>;
   writeScratchpad(userId: number, key: string, content: string): Promise<void>;
-  saveOutcome(userId: number, meetingId: string, outcome: MeetingOutcome, followThrough: MeetingOutcomeFollowThroughResult, status: "pending" | "completed"): Promise<void>;
+  saveOutcome(userId: number, meetingId: string, outcome: MeetingOutcome, followThrough: MeetingOutcomeFollowThroughResult, status: "pending" | "completed", notificationStatus?: "pending" | "claimed" | "delivered"): Promise<void>;
   notifyOwner(userId: number, text: string): Promise<void>;
   claim(key: string, token: string, leaseMs: number): Promise<MeetingOutcomeLease>;
   complete(key: string, token: string, ttlSeconds: number): Promise<boolean>;
@@ -213,7 +213,16 @@ export async function processMeetingOutcome(
     const note = formatMeetingOutcomeScratchpad(meeting, outcome, safeFollowThrough);
     await deps.writeScratchpad(input.userId, `meeting:${meeting.id}`, note);
     await deps.saveOutcome(input.userId, meeting.id, outcome, safeFollowThrough, "completed");
-    await deps.notifyOwner(input.userId, formatMeetingOutcomeNotification(outcome, safeFollowThrough));
+    // Telegram does not offer a sender-side idempotency key. Persist the claim
+    // before attempting delivery so a workflow retry after an ambiguous send
+    // cannot deliver the same meeting outcome twice. This intentionally
+    // favors at-most-once owner notification; a claimed record is visible in
+    // the meeting state instead of silently producing a duplicate.
+    if (meeting.outcomeNotificationStatus !== "claimed" && meeting.outcomeNotificationStatus !== "delivered") {
+      await deps.saveOutcome(input.userId, meeting.id, outcome, safeFollowThrough, "completed", "claimed");
+      await deps.notifyOwner(input.userId, formatMeetingOutcomeNotification(outcome, safeFollowThrough));
+      await deps.saveOutcome(input.userId, meeting.id, outcome, safeFollowThrough, "completed", "delivered");
+    }
     if (!(await deps.complete(key, token, 365 * 24 * 60 * 60))) throw new Error("Meeting outcome processing lease was lost");
     return "completed";
   } catch (error) {

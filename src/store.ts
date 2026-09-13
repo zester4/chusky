@@ -133,6 +133,8 @@ export interface RecallMeetingRecord {
   outcome?: RecallMeetingOutcome;
   outcomeFollowThrough?: RecallMeetingFollowThrough;
   outcomeStatus?: "pending" | "completed";
+  /** At-most-once owner notification ledger; claimed survives a workflow crash. */
+  outcomeNotificationStatus?: "pending" | "claimed" | "delivered";
   createdAt: number;
   updatedAt: number;
 }
@@ -2280,7 +2282,7 @@ export async function listRecallMeetings(uid: number, limit = 10): Promise<Recal
   return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus">>): Promise<RecallMeetingRecord | undefined> {
   const session = await getSession(uid);
   const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
   if (!current) return undefined;

@@ -444,10 +444,10 @@ media page and meeting-chat notice disclose audio processing and retention;
 the spoken intro is deliberately short and conversational. Twilio
 phone calling stays independent and unchanged.
 
-For a client-specific representative meeting, Chusky can first prepare a
+For a client-specific representative meeting, Chusky automatically prepares a
 reviewable client mission from the owner's normal-sensitivity business and
-relationship memories. After the owner confirms the brief, the meeting stores
-only that bounded mission (`clientContextConfirmed=true` is required). During the call, `CHUCK_MEETING_CONTEXT_LOOKUP` can
+relationship memories as part of a private owner-requested join; a separate
+brief approval is not required. During the call, `CHUCK_MEETING_CONTEXT_LOOKUP` can
 search only the memory IDs frozen into the mission—never the general inbox,
 private memories, files, tasks, or another client. The brief never appears in
 Recall metadata, meeting chat, or the media-page URL. If the owner explicitly

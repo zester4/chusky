@@ -2002,11 +2002,12 @@ async function main(): Promise<void> {
             };
           },
           writeScratchpad,
-          saveOutcome: async (ownerId, id, outcome, followThrough, status) => {
+          saveOutcome: async (ownerId, id, outcome, followThrough, status, notificationStatus) => {
             await updateRecallMeeting(ownerId, id, {
               outcome,
               outcomeFollowThrough: followThrough,
               outcomeStatus: status,
+              ...(notificationStatus ? { outcomeNotificationStatus: notificationStatus } : {}),
             });
           },
           notifyOwner: async (ownerId, text) => {

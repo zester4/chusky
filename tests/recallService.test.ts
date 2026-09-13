@@ -120,7 +120,6 @@ test("confirmed client context selects representative mode despite a stale copil
     interactionMode: "copilot",
     clientName: "Acme",
     objective: "Close the onboarding package",
-    clientContextConfirmed: true,
   });
   assert.equal(meeting.interactionMode, "representative");
   assert.equal(meeting.mission?.clientName, "Acme");

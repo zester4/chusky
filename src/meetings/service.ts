@@ -168,8 +168,9 @@ export async function joinRecallMeeting(userId: number, input: {
   clientName?: unknown;
   objective?: unknown;
   clientContext?: unknown;
+  /** Deprecated compatibility field. Client context is prepared automatically for a private owner join. */
   clientContextConfirmed?: unknown;
-  /** Internal-only: carry an existing owner-confirmed mission into a follow-up meeting. */
+  /** Internal-only: carry an existing owner-requested mission into a follow-up meeting. */
   inheritMeetingId?: string;
 }, signal?: AbortSignal) {
   requireRecall();
@@ -178,10 +179,10 @@ export async function joinRecallMeeting(userId: number, input: {
   const joinAt = validateRecallJoinAt(input.joinAt);
   const representativeProfile = await getMeetingRepresentativeProfile(userId);
   const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
-  // A confirmed client brief is an explicit request for the representative
-  // workflow. Models can otherwise carry over a prior copilot selection and
-  // create a contradictory tool call. The profile-enabled check below still
-  // prevents this from granting representative access by itself.
+  // A client brief is an explicit request for the representative workflow.
+  // Models can otherwise carry over a prior copilot selection and create a
+  // contradictory tool call. The profile-enabled check below still prevents
+  // this from granting representative access by itself.
   const interactionMode = hasMissionInput ? "representative" : input.interactionMode === undefined
     ? representativeProfile.enabled ? "representative" : "copilot"
     : input.interactionMode;
@@ -198,7 +199,6 @@ export async function joinRecallMeeting(userId: number, input: {
   if (hasMissionInput && inheritedMission) throw new Error("A follow-up meeting cannot replace its inherited client context");
   if ((hasMissionInput || inheritedMission?.mission) && interactionMode !== "representative") throw new Error("Client meeting context requires representative mode");
   if (hasMissionInput && input.clientName === undefined) throw new Error("clientName is required when adding client meeting context");
-  if (hasMissionInput && input.clientContextConfirmed !== true) throw new Error("Confirm the prepared client context before joining the meeting");
   const mission = inheritedMission?.mission ?? (hasMissionInput
     ? prepareMeetingMission({ clientName: input.clientName, objective: input.objective, clientContext: input.clientContext }, (await getSession(userId)).memories)
     : undefined);
@@ -299,19 +299,19 @@ export async function joinRecallMeeting(userId: number, input: {
   }
 }
 
-/** Preview a client-bound brief before the owner confirms a meeting join. This has no side effects. */
+/** Preview a client-bound brief before joining. This has no side effects. */
 export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown }) {
   assertUserId(userId);
   return prepareMeetingMission(input, (await getSession(userId)).memories);
 }
 
-/** A live meeting can query only the memory IDs frozen into its owner-confirmed mission. */
+/** A live meeting can query only the memory IDs frozen into its owner-requested mission. */
 export async function lookupRecallMeetingContext(userId: number, meetingId: string, query: unknown) {
   assertUserId(userId);
   if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) throw new Error("Invalid meeting ID");
   const session = await getSession(userId);
   const meeting = session.recallMeetings?.find((item) => item.id === meetingId && item.userId === userId);
-  if (!meeting?.mission) throw new Error("This meeting has no owner-confirmed client context");
+  if (!meeting?.mission) throw new Error("This meeting has no client context");
   return lookupMeetingMission(meeting.mission, session.memories, query);
 }
 
