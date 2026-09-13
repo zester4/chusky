@@ -35,7 +35,7 @@ export interface RecallCreateBotRequest {
     realtime_endpoints?: Array<{
       type: "webhook";
       url: string;
-      events: ["participant_events.chat_message"];
+      events: Array<"participant_events.chat_message" | "participant_events.join" | "participant_events.leave" | "participant_events.update">;
     }>;
   };
   chat?: {
@@ -60,6 +60,13 @@ export interface ParsedRecallChatWebhook {
   command: RecallChatCommand;
   /** For Zoom DMs, the participant to reply to instead of exposing it to everyone. */
   replyToParticipantId?: string;
+}
+
+export interface ParsedRecallParticipantWebhook {
+  providerBotId: string;
+  meetingId: string;
+  userId: number;
+  participant: { id: string; name: string; isHost?: boolean; status: "present" | "left" };
 }
 
 const RECALL_REGIONS = new Set(["us-east-1", "us-west-2", "eu-central-1", "ap-northeast-1"]);
@@ -152,7 +159,7 @@ export function buildRecallCreateBotRequest(input: {
       ...(realtimeWebhookUrl ? { realtime_endpoints: [{
         type: "webhook",
         url: realtimeWebhookUrl,
-        events: ["participant_events.chat_message"],
+        events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update"],
       }] } : {}),
     },
     ...(realtimeWebhookUrl && meeting.platform !== "webex" ? {
@@ -324,6 +331,36 @@ export function parseRecallChatWebhook(value: unknown): ParsedRecallChatWebhook 
     replyToParticipantId = String(participantId);
   }
   return { providerBotId, meetingId, userId, command, ...(replyToParticipantId ? { replyToParticipantId } : {}) };
+}
+
+/** Extract a minimum, non-identifying live-roster update from a signed Recall event. */
+export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParticipantWebhook | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  const event = String(body.event ?? "");
+  if (event !== "participant_events.join" && event !== "participant_events.leave" && event !== "participant_events.update") return undefined;
+  const envelope = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data as Record<string, unknown> : {};
+  const eventData = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {};
+  const participant = eventData.participant && typeof eventData.participant === "object" && !Array.isArray(eventData.participant)
+    ? eventData.participant as Record<string, unknown>
+    : envelope.participant && typeof envelope.participant === "object" && !Array.isArray(envelope.participant)
+      ? envelope.participant as Record<string, unknown>
+      : eventData;
+  const bot = envelope.bot && typeof envelope.bot === "object" && !Array.isArray(envelope.bot) ? envelope.bot as Record<string, unknown> : {};
+  const metadata = bot.metadata && typeof bot.metadata === "object" && !Array.isArray(bot.metadata) ? bot.metadata as Record<string, unknown> : {};
+  const providerBotId = String(bot.id ?? "");
+  const meetingId = String(metadata.chusky_meeting_id ?? "");
+  const userId = Number(metadata.chusky_user_id);
+  const rawId = participant.id;
+  const id = typeof rawId === "string" || typeof rawId === "number" ? String(rawId) : "";
+  const name = typeof participant.name === "string" ? participant.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) : "";
+  if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !/^[A-Za-z0-9_-]{1,128}$/.test(id) || !name) return undefined;
+  return {
+    providerBotId,
+    meetingId,
+    userId,
+    participant: { id, name, ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), status: event === "participant_events.leave" ? "left" : "present" },
+  };
 }
 
 export function validateRecallJoinAt(value: unknown, nowMs = Date.now()): string | undefined {

@@ -44,7 +44,7 @@ import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
-import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook } from "./meetings/webhook.js";
 import { meetingConversationToolAllowlist, meetingRepresentativeCopilotInstructions, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
@@ -643,7 +643,7 @@ async function main(): Promise<void> {
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => runAgent(
               userId,
-              buildMeetingInput(context, transcript),
+              buildMeetingInput(context, transcript, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) }))),
               (await getRecallMeeting(userId, meetingId))?.history ?? [],
               config.voiceModel,
               undefined,
@@ -1855,7 +1855,7 @@ async function main(): Promise<void> {
                 role: message.role === "assistant" ? "chusky" as const : "participant" as const,
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
-              const prompt = buildMeetingInput(context, command.text);
+              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })));
               const result = await withCliLock(event.userId, undefined, () => runAgent(
                 event.userId,
                 prompt,
@@ -2109,6 +2109,16 @@ async function main(): Promise<void> {
       if (!recallChatConfigurationReady()) return c.text("Not found", 404);
       const raw = await c.req.text();
       if (Buffer.byteLength(raw, "utf8") > 32_000) return c.text("Payload too large", 413);
+      // Participant lifecycle events are retained only as bounded, active
+      // meeting state. They bypass the chat workflow because they never need
+      // an agent response, but still require Recall's exact-body signature.
+      if (!verifyRecallWebhookSignature({ secret: config.recallRealtimeSecret, body: raw, headers: c.req.raw.headers })) return c.text("Unauthorized", 401);
+      try {
+        const participantResult = await applyRecallParticipantWebhook(JSON.parse(raw));
+        if (participantResult === "updated") return c.body(null, 204);
+      } catch {
+        return c.text("Temporary webhook processing error", 503);
+      }
       const result = await receiveRecallChatWebhook({
         secret: config.recallRealtimeSecret,
         rawBody: raw,

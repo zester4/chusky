@@ -28,7 +28,9 @@ import {
   parseRecallStatusWebhook,
   recallApiRequest,
   type ParsedRecallChatWebhook,
+  type ParsedRecallParticipantWebhook,
   parseRecallChatWebhook,
+  parseRecallParticipantWebhook,
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
@@ -100,6 +102,20 @@ export async function resolveRecallChatWebhook(body: unknown): Promise<ParsedRec
   if (meeting.platform === "webex" && event.command.kind !== "leave") return undefined;
   if (event.replyToParticipantId && meeting.platform !== "zoom" && event.command.kind !== "leave") return undefined;
   return event;
+}
+
+/** Apply a verified live participant update only to its active, owned meeting. */
+export async function applyRecallParticipantWebhook(body: unknown): Promise<"updated" | "ignored"> {
+  const event: ParsedRecallParticipantWebhook | undefined = parseRecallParticipantWebhook(body);
+  if (!event) return "ignored";
+  const meeting = await getRecallMeeting(event.userId, event.meetingId);
+  if (!meeting || meeting.providerBotId !== event.providerBotId || !ACTIVE.has(meeting.status)) return "ignored";
+  const existing = meeting.participantRoster ?? [];
+  const now = Date.now();
+  const participant = { ...event.participant, updatedAt: now };
+  const roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
+  await updateRecallMeeting(event.userId, event.meetingId, { participantRoster: roster });
+  return "updated";
 }
 
 export async function sendRecallMeetingChat(userId: number, meetingId: string, message: string, recipient = "everyone", signal?: AbortSignal): Promise<void> {
@@ -428,7 +444,7 @@ export async function leaveRecallMeeting(userId: number, id: string, signal?: Ab
     }
     throw error;
   }
-  const updated = await updateRecallMeeting(userId, id, { status: "ended" });
+  const updated = await updateRecallMeeting(userId, id, { status: "ended", participantRoster: [] });
   return updated ? safeMeeting(updated) : safeMeeting(meeting);
 }
 
@@ -495,7 +511,7 @@ export async function applyRecallStatusWebhook(input: {
     const error = status === "failed"
       ? `Recall could not join the meeting${errorCode ? ` (${errorCode})` : ""}`
       : undefined;
-    const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error };
+    const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt" | "participantRoster">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error, ...(["ended", "failed"].includes(status) ? { participantRoster: [] } : {}) };
     const updated = await updateRecallMeeting(userId, meetingId, patch);
     if (updated && status === "ended" && current.interactionMode !== "addressed") await input.onMeetingEnded?.(userId, meetingId);
     return updated ? "updated" : "ignored";

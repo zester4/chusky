@@ -62,7 +62,7 @@ test("Recall bot request enables live output media and explicitly opts out of re
   assert.equal(request.recording_config?.transcript, null);
 });
 
-test("Recall bot subscribes to chat without enabling retained participant artifacts and discloses the assistant", () => {
+test("Recall bot subscribes to chat and live roster events without enabling retained participant artifacts", () => {
   const request = buildRecallCreateBotRequest({
     meetingUrl: "https://meet.google.com/abc-defg-hij",
     botName: "Chusky Meeting Assistant",
@@ -78,7 +78,7 @@ test("Recall bot subscribes to chat without enabling retained participant artifa
   assert.deepEqual(request.recording_config.realtime_endpoints, [{
     type: "webhook",
     url: "https://chusky.example/recall/realtime-webhook",
-    events: ["participant_events.chat_message"],
+    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
   assert.match(request.chat?.on_bot_join.message ?? "", /Chusky is a digital assistant/i);
