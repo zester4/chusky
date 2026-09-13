@@ -15,6 +15,7 @@ import {
   updateRecallMeeting,
   updateCalendarMeetingPreparation,
   type RecallMeetingRecord,
+  type RecallMeetingSpeakerEvent,
   type RecallMeetingStatus,
 } from "../store.js";
 import {
@@ -29,8 +30,10 @@ import {
   recallApiRequest,
   type ParsedRecallChatWebhook,
   type ParsedRecallParticipantWebhook,
+  type ParsedRecallSpeakerWebhook,
   parseRecallChatWebhook,
   parseRecallParticipantWebhook,
+  parseRecallSpeakerWebhook,
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
@@ -106,16 +109,42 @@ export async function resolveRecallChatWebhook(body: unknown): Promise<ParsedRec
 
 /** Apply a verified live participant update only to its active, owned meeting. */
 export async function applyRecallParticipantWebhook(body: unknown): Promise<"updated" | "ignored"> {
-  const event: ParsedRecallParticipantWebhook | undefined = parseRecallParticipantWebhook(body);
+  const rosterEvent: ParsedRecallParticipantWebhook | undefined = parseRecallParticipantWebhook(body);
+  const speakerEvent: ParsedRecallSpeakerWebhook | undefined = rosterEvent ? undefined : parseRecallSpeakerWebhook(body);
+  const event = rosterEvent ?? speakerEvent;
   if (!event) return "ignored";
   const meeting = await getRecallMeeting(event.userId, event.meetingId);
   if (!meeting || meeting.providerBotId !== event.providerBotId || !ACTIVE.has(meeting.status)) return "ignored";
-  const existing = meeting.participantRoster ?? [];
-  const now = Date.now();
-  const participant = { ...event.participant, updatedAt: now };
-  const roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
-  await updateRecallMeeting(event.userId, event.meetingId, { participantRoster: roster });
-  return "updated";
+  const lockKey = `recall-participants:${event.userId}:${event.meetingId}`;
+  const lockToken = randomUUID();
+  if ((await claimDeliveryLease(lockKey, lockToken, 10_000)) !== "acquired") throw new Error("Recall participant update is already in progress");
+  try {
+    const current = await getRecallMeeting(event.userId, event.meetingId);
+    if (!current || current.providerBotId !== event.providerBotId || !ACTIVE.has(current.status)) return "ignored";
+    if (rosterEvent) {
+      const existing = current.participantRoster ?? [];
+      const participant = { ...rosterEvent.participant, updatedAt: Date.now() };
+      const roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
+      await updateRecallMeeting(event.userId, event.meetingId, { participantRoster: roster });
+      return "updated";
+    }
+    const now = Date.now();
+    const transition: RecallMeetingSpeakerEvent = speakerEvent!.speakerEvent;
+    // Recall retries in real time. Keep only recent, deduplicated transitions
+    // and never allow future or stale timestamps to poison speaker matching.
+    if (transition.at < now - 15 * 60_000 || transition.at > now + 5_000) return "ignored";
+    const speakerEvents = (current.speakerEvents ?? [])
+      .filter((item) => item.at >= now - 15 * 60_000)
+      .filter((item) => item.at !== transition.at || item.type !== transition.type || item.participantId !== transition.participantId);
+    speakerEvents.push(transition);
+    speakerEvents.sort((a, b) => a.at - b.at
+      || Number(a.type !== "speech_off") - Number(b.type !== "speech_off")
+      || (a.participantId ?? "").localeCompare(b.participantId ?? ""));
+    await updateRecallMeeting(event.userId, event.meetingId, { speakerEvents: speakerEvents.slice(-200) });
+    return "updated";
+  } finally {
+    await releaseDeliveryLease(lockKey, lockToken).catch(() => undefined);
+  }
 }
 
 export async function sendRecallMeetingChat(userId: number, meetingId: string, message: string, recipient = "everyone", signal?: AbortSignal): Promise<void> {

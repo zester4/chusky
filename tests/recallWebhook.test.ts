@@ -36,6 +36,7 @@ function parsed() {
     meetingId: "mtg_123",
     providerBotId: "bot_123",
     command: { kind: "message" as const, text: "what was decided?" },
+    senderName: "Private attendee",
   };
 }
 
@@ -130,6 +131,8 @@ test("Recall realtime webhook validates exact signed bytes and queues only an op
   assert.match(enqueuedId, /^rch_[a-f0-9]{64}$/);
   assert.equal(stored?.workflowRunId, "workflow_opaque");
   assert.equal(JSON.stringify(stored).includes("private@example.com"), false);
+  assert.equal(stored?.senderName, "Private attendee", "the signed sender display name is available only while the reply is processed");
+  stored = { ...stored!, senderName: undefined, command: undefined, reply: undefined, replyCost: undefined };
   assert.equal(JSON.stringify(stored).includes("Private attendee"), false);
 });
 

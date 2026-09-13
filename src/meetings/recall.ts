@@ -35,7 +35,7 @@ export interface RecallCreateBotRequest {
     realtime_endpoints?: Array<{
       type: "webhook";
       url: string;
-      events: Array<"participant_events.chat_message" | "participant_events.join" | "participant_events.leave" | "participant_events.update">;
+      events: Array<"participant_events.chat_message" | "participant_events.join" | "participant_events.leave" | "participant_events.update" | "participant_events.speech_on" | "participant_events.speech_off">;
     }>;
   };
   chat?: {
@@ -58,6 +58,8 @@ export interface ParsedRecallChatWebhook {
   meetingId: string;
   userId: number;
   command: RecallChatCommand;
+  /** Ephemeral signed-provider display name; never interpreted as verified identity. */
+  senderName?: string;
   /** For Zoom DMs, the participant to reply to instead of exposing it to everyone. */
   replyToParticipantId?: string;
 }
@@ -67,6 +69,19 @@ export interface ParsedRecallParticipantWebhook {
   meetingId: string;
   userId: number;
   participant: { id: string; name: string; isHost?: boolean; status: "present" | "left" };
+}
+
+export interface ParsedRecallSpeakerWebhook {
+  providerBotId: string;
+  meetingId: string;
+  userId: number;
+  speakerEvent: { type: "speech_on" | "speech_off"; participantId?: string; at: number };
+}
+
+function safeRecallDisplayName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const name = value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+  return name || undefined;
 }
 
 const RECALL_REGIONS = new Set(["us-east-1", "us-west-2", "eu-central-1", "ap-northeast-1"]);
@@ -159,7 +174,7 @@ export function buildRecallCreateBotRequest(input: {
       ...(realtimeWebhookUrl ? { realtime_endpoints: [{
         type: "webhook",
         url: realtimeWebhookUrl,
-        events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update"],
+        events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off"],
       }] } : {}),
     },
     ...(realtimeWebhookUrl && meeting.platform !== "webex" ? {
@@ -330,7 +345,8 @@ export function parseRecallChatWebhook(value: unknown): ParsedRecallChatWebhook 
     if (!(typeof participantId === "string" || typeof participantId === "number") || !/^\d{1,32}$/.test(String(participantId))) return undefined;
     replyToParticipantId = String(participantId);
   }
-  return { providerBotId, meetingId, userId, command, ...(replyToParticipantId ? { replyToParticipantId } : {}) };
+  const senderName = safeRecallDisplayName(participant.name);
+  return { providerBotId, meetingId, userId, command, ...(senderName ? { senderName } : {}), ...(replyToParticipantId ? { replyToParticipantId } : {}) };
 }
 
 /** Extract a minimum, non-identifying live-roster update from a signed Recall event. */
@@ -360,6 +376,38 @@ export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParti
     meetingId,
     userId,
     participant: { id, name, ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), status: event === "participant_events.leave" ? "left" : "present" },
+  };
+}
+
+/** Extract signed active-speaker transitions with only participant ID and absolute event time. */
+export function parseRecallSpeakerWebhook(value: unknown): ParsedRecallSpeakerWebhook | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  const event = body.event;
+  if (event !== "participant_events.speech_on" && event !== "participant_events.speech_off") return undefined;
+  const envelope = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data as Record<string, unknown> : {};
+  const eventData = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {};
+  const participant = eventData.participant && typeof eventData.participant === "object" && !Array.isArray(eventData.participant) ? eventData.participant as Record<string, unknown> : {};
+  const timestamp = eventData.timestamp && typeof eventData.timestamp === "object" && !Array.isArray(eventData.timestamp) ? eventData.timestamp as Record<string, unknown> : {};
+  const bot = envelope.bot && typeof envelope.bot === "object" && !Array.isArray(envelope.bot) ? envelope.bot as Record<string, unknown> : {};
+  const metadata = bot.metadata && typeof bot.metadata === "object" && !Array.isArray(bot.metadata) ? bot.metadata as Record<string, unknown> : {};
+  const providerBotId = String(bot.id ?? "");
+  const meetingId = String(metadata.chusky_meeting_id ?? "");
+  const userId = Number(metadata.chusky_user_id);
+  const rawId = participant.id;
+  const participantId = typeof rawId === "string" || typeof rawId === "number" ? String(rawId) : undefined;
+  const at = typeof timestamp.absolute === "string" ? Date.parse(timestamp.absolute) : Number.NaN;
+  if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0
+    || !Number.isFinite(at) || at <= 0
+    // Recall's participant-event schema includes a participant for both
+    // speech transitions. An unattributed "off" must not close an arbitrary
+    // speaker interval.
+    || !participantId || !/^[A-Za-z0-9_-]{1,128}$/.test(participantId)) return undefined;
+  return {
+    providerBotId,
+    meetingId,
+    userId,
+    speakerEvent: { type: event === "participant_events.speech_on" ? "speech_on" : "speech_off", ...(participantId ? { participantId } : {}), at },
   };
 }
 

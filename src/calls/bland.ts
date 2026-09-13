@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { addFaceTimeCall, updateFaceTimeCall, type FaceTimeCallRecord } from "../store.js";
+import { addFaceTimeCall, getSession, updateFaceTimeCall, type FaceTimeCallRecord } from "../store.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -32,6 +32,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   voice: config.blandVoice,
 }): Promise<FaceTimeCallRecord> {
   validate(options);
+  const selectedVoice = ((await getSession(userId)).voicePreferences?.bland?.id ?? options.voice) || "maya";
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
@@ -45,7 +46,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
       body: JSON.stringify({
         phone_number: phoneNumber,
         task: `You are calling on behalf of Chusky. Purpose: ${purpose}. Be concise, natural, and professional. Do not claim an action is complete unless it actually is. Context from Chusky: ${(input.context ?? "").slice(0, 6000)}`,
-        voice: options.voice || "maya",
+        voice: selectedVoice,
         webhook: options.webhookUrl,
         webhook_events: ["queue", "call", "latency", "tool"],
         metadata: { chusky_call_id: call.id, chusky_user_id: String(userId) },

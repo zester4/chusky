@@ -2,7 +2,7 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
 const originalConfig = {
@@ -347,6 +347,31 @@ test("an ended default conversational meeting queues its private outcome recap",
     onMeetingEnded: async (userId, meetingId) => { queued.push(`${userId}:${meetingId}`); },
   }), "updated");
   assert.deepEqual(queued, [`${ownerId}:${meeting.id}`]);
+});
+
+test("speaker transitions are owner and bot scoped, idempotent, and cleared when a meeting ends", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/speaker-attribution-test" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+  const at = new Date(Date.now() - 1_000).toISOString();
+  const event = {
+    event: "participant_events.speech_on",
+    data: {
+      data: { participant: { id: 456, name: "Avery Smith", email: "private@example.com" }, timestamp: { absolute: at, relative: 10 } },
+      bot: { id: botId, metadata: { chusky_meeting_id: meeting.id, chusky_user_id: String(ownerId) } },
+    },
+  };
+  assert.equal(await applyRecallParticipantWebhook(event), "updated");
+  assert.equal(await applyRecallParticipantWebhook(event), "updated");
+  assert.deepEqual((await getRecallMeeting(ownerId, meeting.id))?.speakerEvents, [
+    { type: "speech_on", participantId: "456", at: Date.parse(at) },
+  ]);
+  assert.equal(await applyRecallParticipantWebhook({
+    ...event,
+    data: { ...event.data, bot: { id: "other-bot", metadata: { chusky_meeting_id: meeting.id, chusky_user_id: String(ownerId) } } },
+  }), "ignored");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "ended" });
+  assert.deepEqual((await getRecallMeeting(ownerId, meeting.id))?.speakerEvents, []);
 });
 
 test("Recall chat messages require an owned active bot and use the supported chat-send API", async () => {

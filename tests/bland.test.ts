@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initStore, listFaceTimeCalls } from "../src/store.js";
+import { initStore, listFaceTimeCalls, setLiveVoicePreference } from "../src/store.js";
 import { startBlandCallForUser } from "../src/calls/bland.js";
 
 test("Bland queues an owner-scoped call with context and signed-callback URL", async () => {
   await initStore({ memoryOnly: true });
+  await setLiveVoicePreference(808, "bland", { id: "11111111-1111-4111-8111-111111111111", name: "Zoe" });
   let request: { url: string; init?: RequestInit } | undefined;
   const result = await startBlandCallForUser(808, { phoneNumber: "+15550001", purpose: "Confirm the appointment", context: "The customer prefers mornings." }, {
     enabled: true,
@@ -22,6 +23,7 @@ test("Bland queues an owner-scoped call with context and signed-callback URL", a
   const body = JSON.parse(String(request?.init?.body));
   assert.equal(body.phone_number, "+15550001");
   assert.equal(body.webhook, "https://chusky.example/bland/webhook");
+  assert.equal(body.voice, "11111111-1111-4111-8111-111111111111");
   assert.match(body.task, /customer prefers mornings/);
   assert.equal((await listFaceTimeCalls(808))[0]?.providerCallId, "bland-provider-call");
 });

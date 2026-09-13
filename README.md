@@ -476,7 +476,14 @@ shows content-free aggregate counters for ticket checks, audio frames, Flux
 turns, agent requests, and speech output.
 
 Optional in-meeting chat adds a signed per-bot `participant_events.chat_message`
-endpoint without enabling retained recordings/transcripts. Set
+endpoint without enabling retained recordings/transcripts. The same endpoint
+receives Recall participant join/leave/update and `speech_on`/`speech_off`
+events. Chusky aligns the temporary active-speaker timeline with Deepgram Flux
+word timestamps and labels a spoken turn only when exactly one rostered person
+matches; overlapping or uncertain speech stays unattributed. That display name
+follows the turn only in the bridge's short-lived meeting context, then is
+discarded when the meeting ends. Meeting-chat replies can use the signed sender's
+display name directly. Set
 `RECALL_REALTIME_SECRET` to the Recall **workspace verification secret** (this
 may differ from the Svix `RECALL_WEBHOOK_SECRET`), and ensure Chusky has Redis,
 `QSTASH_TOKEN`, and a public HTTPS `WEBHOOK_URL`. Health reports this separately
@@ -538,6 +545,13 @@ and clears Twilio's buffered playback. Configure the same `TWILIO_AUTH_TOKEN`
 and `TWILIO_MEDIA_STREAM_URL` inside
 `chusky-voice/.env`; see [`chusky-voice/README.md`](chusky-voice/README.md)
 for latency tuning and Nginx WebSocket settings.
+
+Per-account live-call voice choices are available in Telegram at `/home` →
+`Voice`. Twilio calls and Recall meetings use the verified Deepgram Flux
+streaming voice catalogue; Bland choices are loaded from its public curated
+BTTS_V3 catalogue (private voice clones are not exposed in the shared menu).
+The chosen voice applies to the next call or meeting. “Use service default”
+clears the account override and returns to `VOICE_TTS_MODEL`/`BLAND_VOICE`.
 
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 

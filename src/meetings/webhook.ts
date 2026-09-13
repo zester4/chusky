@@ -69,6 +69,7 @@ export async function receiveRecallChatWebhook(input: {
     meetingId: addressed.meetingId,
     providerBotId: addressed.providerBotId,
     command: addressed.command,
+    ...(addressed.senderName ? { senderName: addressed.senderName } : {}),
     ...(addressed.replyToParticipantId ? { replyToParticipantId: addressed.replyToParticipantId } : {}),
     status: "queued",
     createdAt: Date.now(),

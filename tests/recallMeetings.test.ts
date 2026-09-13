@@ -78,7 +78,7 @@ test("Recall bot subscribes to chat and live roster events without enabling reta
   assert.deepEqual(request.recording_config.realtime_endpoints, [{
     type: "webhook",
     url: "https://chusky.example/recall/realtime-webhook",
-    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update"],
+    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
   assert.match(request.chat?.on_bot_join.message ?? "", /Chusky is a digital assistant/i);
@@ -130,6 +130,7 @@ test("Recall real-time chat payload parser rejects unrelated and malformed event
     meetingId: "mtg_123",
     userId: 42,
     command: { kind: "message", text: "summarize the decision" },
+    senderName: "Untrusted attendee",
   });
   const privateDm = parseRecallChatWebhook({
     event: "participant_events.chat_message",

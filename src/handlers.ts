@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -34,10 +34,13 @@ import { conversationIdFor } from "./channels/contracts.js";
 import { sharedGroupInstructions } from "./channels/groupInstructions.js";
 import { telegramCardFallbackHtml, telegramCardFallbackKeyboard, telegramCardRichHtml, type TelegramCard } from "./telegramCards.js";
 import { MODEL_PROVIDER_LABELS, isModelProvider, modelsForProvider, type ModelProvider } from "./modelProviders.js";
+import { listBlandCuratedVoices, type BlandSelectableVoice } from "./calls/blandVoices.js";
+import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voiceSettings.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
 const TRIGGER_PAGE_SIZE = 8;
+const VOICE_PAGE_SIZE = 8;
 const TELEGRAM_API_EMBED_SCOPES = ["threads:read", "threads:write", "tasks:read", "tasks:write", "tools:read", "skills:read", "files:read", "files:write", "artifacts:read", "artifacts:write"];
 
 function apiKeyMenuKeyboard(): InlineKeyboard {
@@ -177,6 +180,93 @@ async function editApprovalOutcome(ctx: Context, text: string): Promise<void> {
     if (edited) return;
   }
   await ctx.editMessageText(text);
+}
+
+function voiceFeatureEnabled(provider: LiveVoiceProvider): boolean {
+  if (provider === "twilio") return config.twilioVoiceEnabled;
+  if (provider === "bland") return config.blandVoiceEnabled;
+  return config.recallMeetingsEnabled;
+}
+
+function liveVoiceCurrentLabel(session: Awaited<ReturnType<typeof getSession>>, provider: LiveVoiceProvider): string {
+  if (provider === "bland") return session.voicePreferences?.bland?.name ?? `${config.blandVoice || "Maya"} (service default)`;
+  const model = provider === "twilio" ? session.voicePreferences?.twilio : session.voicePreferences?.meetings;
+  return model ? `${fluxTtsVoiceName(model)} (${model})` : "Service default";
+}
+
+function voiceSettingsCard(session: Awaited<ReturnType<typeof getSession>>): TelegramCard {
+  const providerLine = (provider: LiveVoiceProvider, label: string) =>
+    `${label}: ${liveVoiceCurrentLabel(session, provider)} · ${voiceFeatureEnabled(provider) ? "enabled" : "not enabled"}`;
+  return {
+    title: "🔊 Voice settings",
+    body: [
+      `Telegram audio replies: ${session.voiceReplies === true ? "on" : "off"}`,
+      providerLine("twilio", "Twilio calls"),
+      providerLine("bland", "Bland calls"),
+      providerLine("meetings", "Live meetings"),
+    ],
+    detail: "Choose voices independently for each live-call provider. A new selection applies to the next call or meeting; active sessions are not changed.",
+    buttons: [
+      [{ text: "☎️ Twilio voice", callbackData: "home:voice:provider:twilio" }, { text: "📞 Bland voice", callbackData: "home:voice:provider:bland" }],
+      [{ text: "🗣️ Meeting voice", callbackData: "home:voice:provider:meetings" }],
+      [{ text: session.voiceReplies === true ? "Turn Telegram voice replies off" : "Turn Telegram voice replies on", callbackData: `home:voice:${session.voiceReplies === true ? "off" : "on"}` }],
+      [{ text: "← Workspace", callbackData: "home:refresh" }],
+    ],
+  };
+}
+
+function voicePickerCard(provider: LiveVoiceProvider, voices: BlandSelectableVoice[] | undefined, current: string | undefined, page: number): TelegramCard {
+  const title = provider === "twilio" ? "☎️ Twilio voice" : provider === "bland" ? "📞 Bland voice" : "🗣️ Meeting voice";
+  const options = provider === "bland" ? (voices ?? []) : FLUX_TTS_VOICES.map((voice) => ({ id: voice.id, name: voice.name, description: `${voice.accent} English` }));
+  const pages = Math.max(1, Math.ceil(options.length / VOICE_PAGE_SIZE));
+  const selectedPage = Math.min(Math.max(0, page), pages - 1);
+  const buttons: NonNullable<TelegramCard["buttons"]> = [];
+  const pageOptions = options.slice(selectedPage * VOICE_PAGE_SIZE, (selectedPage + 1) * VOICE_PAGE_SIZE);
+  for (let index = 0; index < pageOptions.length; index += 2) {
+    buttons.push(pageOptions.slice(index, index + 2).map((voice) => ({
+      text: `${voice.id === current ? "✓ " : ""}${voice.name}${voice.description ? ` · ${voice.description}` : ""}`.slice(0, 60),
+      callbackData: `home:voice:set:${provider}:${voice.id}`,
+      ...(voice.id === current ? { style: "primary" as const } : {}),
+    })));
+  }
+  if (pages > 1) buttons.push([
+    ...(selectedPage > 0 ? [{ text: "‹ Previous", callbackData: `home:voice:page:${provider}:${selectedPage - 1}` }] : []),
+    ...(selectedPage < pages - 1 ? [{ text: "Next ›", callbackData: `home:voice:page:${provider}:${selectedPage + 1}` }] : []),
+  ]);
+  buttons.push([{ text: "Use service default", callbackData: `home:voice:reset:${provider}` }]);
+  buttons.push([{ text: "← Voice settings", callbackData: "home:voice" }]);
+  const currentName = provider === "bland"
+    ? voices?.find((voice) => voice.id === current)?.name ?? (current ? "Selected Bland voice" : `${config.blandVoice || "Maya"} (service default)`)
+    : current ? `${fluxTtsVoiceName(current)} (${current})` : "Service default";
+  const body = [`Current: ${currentName}`, `${options.length ? `${options.length} available voices · page ${selectedPage + 1} of ${pages}` : "No selectable voices were returned by Bland."}`];
+  if (!voiceFeatureEnabled(provider)) body.push("This provider is currently disabled in the Chusky deployment. You can still save a preference for when it is enabled.");
+  body.push(provider === "bland" ? "Only public Bland-curated BTTS_V3 voices are shown; private cloned voices are intentionally excluded." : "English Deepgram Flux streaming voices. The same voice catalogue is used by the Twilio and Recall meeting bridges.");
+  return { title, body, buttons };
+}
+
+async function editVoiceSettings(ctx: Context, messageId: number): Promise<void> {
+  await editCard(ctx, messageId, voiceSettingsCard(await getSession(ctx.from!.id)));
+}
+
+async function editVoiceProvider(ctx: Context, messageId: number, provider: LiveVoiceProvider, page = 0): Promise<void> {
+  const session = await getSession(ctx.from!.id);
+  const current = provider === "bland"
+    ? session.voicePreferences?.bland?.id
+    : provider === "twilio" ? session.voicePreferences?.twilio : session.voicePreferences?.meetings;
+  if (provider !== "bland") {
+    await editCard(ctx, messageId, voicePickerCard(provider, undefined, current, page));
+    return;
+  }
+  if (!config.blandApiKey) {
+    await editCard(ctx, messageId, {
+      ...voicePickerCard(provider, [], current, page),
+      body: ["Bland's live voice catalogue is unavailable because BLAND_API_KEY is not configured.", "No placeholder voice list is shown. Configure the Bland API key, then reopen this menu."],
+      buttons: [[{ text: "← Voice settings", callbackData: "home:voice" }]],
+    });
+    return;
+  }
+  const voices = await listBlandCuratedVoices(config.blandApiKey);
+  await editCard(ctx, messageId, voicePickerCard(provider, voices, current, page));
 }
 
 function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; voiceReplies: boolean }): TelegramCard {
@@ -687,7 +777,7 @@ export function registerHandlers(bot: Bot): void {
     if (!(await guard(ctx))) return;
     await replyHtml(ctx,
       `<b>Chusky — Commands</b>\n\n` +
-      `/home — connected apps, tasks, approvals, and triggers\n` +
+      `/home — connected apps, tasks, approvals, triggers, and call voice settings\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -1584,14 +1674,7 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "voice") {
-        const voiceReplies = (await getSession(ctx.from!.id)).voiceReplies === true;
-        const card: TelegramCard = {
-          title: "🔊 Telegram voice replies",
-          body: [voiceReplies ? "Voice replies are on. Chusky sends text plus an audio reply." : "Voice replies are off. Chusky replies in text only."],
-          detail: "This controls audio replies in Telegram. It does not change Chusky’s live meeting voice, which is configured separately.",
-          buttons: [[{ text: voiceReplies ? "Turn off" : "Turn on", callbackData: `home:voice:${voiceReplies ? "off" : "on"}`, style: "primary" }, { text: "← Workspace", callbackData: "home:refresh" }]],
-        };
-        await editCard(ctx, messageId, card);
+        await editVoiceSettings(ctx, messageId);
         return;
       }
       const pending = (await listApprovals(ctx.from!.id, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
@@ -1610,6 +1693,90 @@ export function registerHandlers(bot: Bot): void {
     }
   });
 
+  bot.callbackQuery(/^home:voice:provider:(twilio|bland|meetings)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    const provider = ctx.match[1] as LiveVoiceProvider;
+    try {
+      await editVoiceProvider(ctx, messageId, provider);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, provider }, "Could not load live voice choices");
+      await ctx.editMessageText(error instanceof Error ? `❌ ${error.message}` : "❌ Could not load voice choices. Try again shortly.", {
+        reply_markup: new InlineKeyboard().text("← Voice settings", "home:voice"),
+      });
+    }
+  });
+
+  bot.callbackQuery(/^home:voice:page:(twilio|bland|meetings):(\d{1,2})$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    const provider = ctx.match[1] as LiveVoiceProvider;
+    try {
+      await editVoiceProvider(ctx, messageId, provider, Number(ctx.match[2]));
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, provider }, "Could not page live voice choices");
+      await ctx.editMessageText("❌ Could not load voice choices. Try again shortly.", {
+        reply_markup: new InlineKeyboard().text("← Voice settings", "home:voice"),
+      });
+    }
+  });
+
+  bot.callbackQuery(/^home:voice:set:(twilio|meetings):([a-z0-9-]+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    const provider = ctx.match[1] as "twilio" | "meetings";
+    try {
+      await setLiveVoicePreference(ctx.from!.id, provider, ctx.match[2] as (typeof FLUX_TTS_VOICES)[number]["id"]);
+      await editVoiceSettings(ctx, messageId);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, provider }, "Live voice selection failed");
+      await ctx.editMessageText("❌ That voice is not available. Reopen /home → Voice and choose from the current list.", {
+        reply_markup: new InlineKeyboard().text("← Voice settings", "home:voice"),
+      });
+    }
+  });
+
+  bot.callbackQuery(/^home:voice:set:bland:([0-9a-f-]{36})$/i, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    try {
+      const voices = await listBlandCuratedVoices(config.blandApiKey);
+      const voice = voices.find((item) => item.id.toLowerCase() === ctx.match[1].toLowerCase());
+      if (!voice) throw new Error("That voice is no longer available in Bland's curated catalogue.");
+      await setLiveVoicePreference(ctx.from!.id, "bland", { id: voice.id, name: voice.name });
+      await editVoiceSettings(ctx, messageId);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id }, "Bland voice selection failed");
+      await ctx.editMessageText(error instanceof Error ? `❌ ${error.message}` : "❌ Could not save that Bland voice.", {
+        reply_markup: new InlineKeyboard().text("← Voice settings", "home:voice"),
+      });
+    }
+  });
+
+  bot.callbackQuery(/^home:voice:reset:(twilio|bland|meetings)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    try {
+      await setLiveVoicePreference(ctx.from!.id, ctx.match[1] as LiveVoiceProvider, undefined);
+      await editVoiceSettings(ctx, messageId);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id }, "Live voice preference reset failed");
+      await ctx.editMessageText("❌ Could not reset that voice preference. Try again.", {
+        reply_markup: new InlineKeyboard().text("← Voice settings", "home:voice"),
+      });
+    }
+  });
+
   bot.callbackQuery(/^home:voice:(on|off)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
@@ -1618,9 +1785,7 @@ export function registerHandlers(bot: Bot): void {
     const enabled = ctx.match[1] === "on";
     try {
       await setVoiceReplies(ctx.from!.id, enabled);
-      await ctx.editMessageText(enabled ? "🔊 Voice replies are on. I’ll send text and an audio reply after each response." : "🔇 Voice replies are off. I’ll continue replying with text.", {
-        reply_markup: new InlineKeyboard().text("← Workspace", "home:refresh"),
-      });
+      await editVoiceSettings(ctx, messageId);
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, enabled }, "Telegram voice reply setting failed");
       await ctx.editMessageText("❌ I could not change voice replies. Use /voice on or /voice off to try again.");

@@ -1,6 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { registerHandlers } from "../src/handlers.js";
+import { config } from "../src/config.js";
 import { addJob, addReminder, appendChannelConversationMessages, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
 class FakeBot {
@@ -21,7 +22,7 @@ function context(userId: number, match = "") {
     reply: async (text: string, options?: unknown) => { sent.push({ method: "reply", text, options }); return { message_id: 1 }; },
     editMessageText: async (text: string) => { sent.push({ method: "edit", text }); },
     answerCallbackQuery: async () => undefined,
-    api: { editMessageText: async (_chatId: number, _messageId: number, text: string) => { sent.push({ method: "edit", text }); } },
+    api: { editMessageText: async (_chatId: number, _messageId: number, text: string, options?: unknown) => { sent.push({ method: "edit", text, options }); } },
     sent,
   };
 }
@@ -103,4 +104,60 @@ test("home workspace exposes durable reminders, schedules, tasks, and voice cont
   voiceCtx.match = ["home:voice:on", "on"];
   await voice.handler(voiceCtx);
   assert.equal((await getSession(userId)).voiceReplies, true);
+});
+
+test("home voice menu saves independent live-call voice choices for the owner", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840014;
+  const selectVoice = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:set:(twilio|meetings)"));
+  assert.ok(selectVoice);
+  const ctx = context(userId);
+  ctx.callbackQuery = { message: { message_id: 1 } };
+  ctx.match = ["home:voice:set:twilio:flux-haley-en", "twilio", "flux-haley-en"];
+  await selectVoice.handler(ctx);
+  assert.equal((await getSession(userId)).voicePreferences?.twilio, "flux-haley-en");
+  assert.equal((await getSession(userId + 1)).voicePreferences, undefined);
+
+  const selectMeetingVoice = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:set:(twilio|meetings)"));
+  assert.ok(selectMeetingVoice);
+  const meetingCtx = context(userId);
+  meetingCtx.callbackQuery = { message: { message_id: 2 } };
+  meetingCtx.match = ["home:voice:set:meetings:flux-kit-en", "meetings", "flux-kit-en"];
+  await selectMeetingVoice.handler(meetingCtx);
+  assert.deepEqual((await getSession(userId)).voicePreferences, { twilio: "flux-haley-en", meetings: "flux-kit-en" });
+});
+
+test("home Bland voice choices come from its curated catalogue and are revalidated on selection", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840015;
+  const previousKey = config.blandApiKey;
+  const previousFetch = globalThis.fetch;
+  config.blandApiKey = "test-bland-key";
+  const voiceId = "11111111-1111-4111-8111-111111111111";
+  globalThis.fetch = async (input) => String(input) === "https://api.bland.ai/v1/voices"
+    ? new Response(JSON.stringify({ voices: [{ id: voiceId, name: "Zoe", public: true, tags: ["Bland Curated"], service: "BTTS_V3" }] }), { status: 200 })
+    : new Response(JSON.stringify({ ok: false }), { status: 400 });
+  try {
+    const provider = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:provider:"));
+    assert.ok(provider);
+    const menuCtx = context(userId);
+    menuCtx.callbackQuery = { message: { message_id: 1 } };
+    menuCtx.match = ["home:voice:provider:bland", "bland"];
+    await provider.handler(menuCtx);
+    const voiceButtons = menuCtx.sent.at(-1).options.reply_markup.inline_keyboard.flat();
+    assert.ok(voiceButtons.some((button: { text: string; callback_data: string }) => button.text.includes("Zoe") && button.callback_data === `home:voice:set:bland:${voiceId}`));
+
+    const select = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:set:bland:"));
+    assert.ok(select);
+    const selectCtx = context(userId);
+    selectCtx.callbackQuery = { message: { message_id: 1 } };
+    selectCtx.match = [`home:voice:set:bland:${voiceId}`, voiceId];
+    await select.handler(selectCtx);
+    assert.deepEqual((await getSession(userId)).voicePreferences?.bland, { id: voiceId, name: "Zoe" });
+  } finally {
+    globalThis.fetch = previousFetch;
+    config.blandApiKey = previousKey;
+  }
 });

@@ -16,6 +16,7 @@ import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
 import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProfile, type MeetingRepresentativeProfile } from "./meetings/representative.js";
 import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission.js";
+import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -32,6 +33,8 @@ export interface UserSession {
   daytonaWorkspaceId?: string;
   telegramChatId?: number;
   voiceReplies?: boolean;
+  /** Per-account voices for the three live call transports, independent of Telegram audio replies. */
+  voicePreferences?: LiveVoicePreferences;
   triggerIds: string[];
   reminders: ReminderRecord[];
   jobs: JobRecord[];
@@ -119,6 +122,13 @@ export interface RecallMeetingParticipant {
   updatedAt: number;
 }
 
+/** Short-lived Recall speaker transitions; contains no transcript or email. */
+export interface RecallMeetingSpeakerEvent {
+  type: "speech_on" | "speech_off";
+  participantId?: string;
+  at: number;
+}
+
 /** Owner-scoped meeting metadata and bounded text context. Never stores a meeting URL or media. */
 export interface RecallMeetingRecord {
   id: string;
@@ -140,6 +150,8 @@ export interface RecallMeetingRecord {
   providerStatusAt?: number;
   /** Live roster is available only while this meeting is active and is cleared at completion. */
   participantRoster?: RecallMeetingParticipant[];
+  /** Bounded active-speaker timing for the current live meeting; cleared at completion. */
+  speakerEvents?: RecallMeetingSpeakerEvent[];
   history: Message[];
   /** Owner-private structured follow-through; never contains the raw provider payload. */
   outcome?: RecallMeetingOutcome;
@@ -176,6 +188,8 @@ export interface RecallChatEventRecord {
   meetingId: string;
   providerBotId: string;
   command?: RecallChatCommand;
+  /** Temporary signed-provider display name, cleared when webhook work completes. */
+  senderName?: string;
   replyToParticipantId?: string;
   /** Ephemeral prepared reply; cleared after delivery along with command text. */
   reply?: string;
@@ -2213,9 +2227,23 @@ function normalizeMeetingRoster(value: unknown): RecallMeetingParticipant[] {
     .slice(0, 40);
 }
 
+function normalizeRecallSpeakerEvents(value: unknown): RecallMeetingSpeakerEvent[] {
+  if (!Array.isArray(value)) return [];
+  const recentAfter = Date.now() - 15 * 60_000;
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => item.type === "speech_on" || item.type === "speech_off")
+    .map((item) => ({
+      type: item.type as "speech_on" | "speech_off",
+      ...(typeof item.participantId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(item.participantId) ? { participantId: item.participantId } : {}),
+      at: typeof item.at === "number" && Number.isSafeInteger(item.at) ? item.at : 0,
+    }))
+    .filter((item) => item.at >= recentAfter && Boolean(item.participantId))
+    .slice(-200);
+}
+
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2326,7 +2354,7 @@ export async function listRecallMeetings(uid: number, limit = 10): Promise<Recal
   return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus">>): Promise<RecallMeetingRecord | undefined> {
   const session = await getSession(uid);
   const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
   if (!current) return undefined;
@@ -2339,7 +2367,12 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
   if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
+  if (patch.speakerEvents && (patch.speakerEvents.length > 200 || patch.speakerEvents.some((event) => !event || (event.type !== "speech_on" && event.type !== "speech_off") || typeof event.participantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(event.participantId) || !Number.isSafeInteger(event.at) || event.at <= 0))) throw new Error("Meeting speaker timeline is invalid");
   Object.assign(current, patch, { updatedAt: Date.now() });
+  if (current.status === "ended" || current.status === "failed") {
+    current.participantRoster = [];
+    current.speakerEvents = [];
+  }
   current.error = current.error?.slice(0, 300);
   await saveSession(uid, session);
   return current;
@@ -2417,7 +2450,7 @@ export async function updateCalendarMeetingPreparation(uid: number, id: string, 
 }
 
 export async function createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord> {
-  if (!/^rch_[a-f0-9]{64}$/.test(record.eventId) || !Number.isSafeInteger(record.userId) || record.userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(record.meetingId) || !/^[A-Za-z0-9_-]{1,128}$/.test(record.providerBotId) || (record.replyToParticipantId !== undefined && !/^\d{1,32}$/.test(record.replyToParticipantId))) {
+  if (!/^rch_[a-f0-9]{64}$/.test(record.eventId) || !Number.isSafeInteger(record.userId) || record.userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(record.meetingId) || !/^[A-Za-z0-9_-]{1,128}$/.test(record.providerBotId) || (record.replyToParticipantId !== undefined && !/^\d{1,32}$/.test(record.replyToParticipantId)) || (record.senderName !== undefined && (record.senderName.length > 160 || /[\u0000-\u001F\u007F]/.test(record.senderName)))) {
     throw new Error("Invalid Recall chat event identity");
   }
   if ((record.command?.kind === "message" || record.command?.kind === "ambient") && (!record.command.text.trim() || record.command.text.length > 900)) throw new Error("Invalid Recall chat event text");
@@ -2578,6 +2611,28 @@ export async function setVoiceReplies(uid: number, enabled: boolean): Promise<vo
   const s = await getSession(uid);
   s.voiceReplies = enabled;
   await saveSession(uid, s);
+}
+
+export async function setLiveVoicePreference(
+  uid: number,
+  provider: LiveVoiceProvider,
+  voice?: FluxTtsVoiceId | { id: string; name: string },
+): Promise<void> {
+  const session = await getSession(uid);
+  const preferences = normalizeLiveVoicePreferences(session.voicePreferences) ?? {};
+  if (voice === undefined) {
+    delete preferences[provider];
+  } else if (provider === "bland") {
+    if (typeof voice === "string" || !isBlandVoiceId(voice.id)) throw new Error("Invalid Bland voice selection");
+    const name = voice.name.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+    if (!name) throw new Error("Invalid Bland voice selection");
+    preferences.bland = { id: voice.id, name };
+  } else {
+    if (typeof voice !== "string" || !isFluxTtsVoice(voice)) throw new Error("Invalid live voice selection");
+    preferences[provider] = voice;
+  }
+  session.voicePreferences = Object.keys(preferences).length ? preferences : undefined;
+  await saveSession(uid, session);
 }
 
 export async function setComposioSessionId(uid: number, id: string): Promise<void> {

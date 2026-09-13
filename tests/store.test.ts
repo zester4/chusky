@@ -16,6 +16,7 @@ import {
   claimRecallMeetingCreation, releaseRecallMeetingCreation,
   createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent,
   getAgentRun, saveAgentRun, type AgentRunRecord,
+  setLiveVoicePreference,
 } from "../src/store.js";
 import { nativeTool } from "../src/nativeTools.js";
 
@@ -143,6 +144,7 @@ test("Recall chat events are deduplicated, owner-scoped, and discard message tex
     meetingId: "mtg_chat_store",
     providerBotId: "bot-chat-store",
     command: { kind: "message" as const, text: "What did we decide?" },
+    senderName: "Avery Smith",
     reply: "We decided to ship Friday.",
     replyCost: 0.02,
     status: "queued" as const,
@@ -154,10 +156,11 @@ test("Recall chat events are deduplicated, owner-scoped, and discard message tex
   assert.deepEqual(duplicate.command, record.command, "duplicate provider events must not replace the first accepted payload");
   assert.equal((await getRecallChatEvent(record.eventId))?.userId, record.userId);
   assert.equal(await getRecallChatEvent(record.eventId, record.userId + 1), undefined);
-  await updateRecallChatEvent(created.eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+  await updateRecallChatEvent(created.eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
   const completed = await getRecallChatEvent(record.eventId);
   assert.equal(completed?.status, "completed");
   assert.equal(completed?.command, undefined, "processed chat text is erased while the short-lived dedup record remains");
+  assert.equal(completed?.senderName, undefined, "participant display name is erased after processing");
   assert.equal(completed?.reply, undefined);
 });
 
@@ -234,6 +237,34 @@ test("normalizes old sessions while preserving new durable defaults", async () =
   assert.deepEqual(restored.approvals, []);
   assert.equal(restored.meetingRepresentativeProfile?.enabled, false);
   assert.equal(restored.history[0].content, "hello");
+  assert.equal(restored.voicePreferences, undefined);
+});
+
+test("live voice preferences are owner-scoped, provider-specific, and preserve session history", async () => {
+  const userId = 810002;
+  const session = await getSession(userId);
+  session.history = [{ role: "user", content: "keep this" }];
+  session.composioSessionId = "composio-session-kept";
+  await saveSession(userId, session);
+
+  await setLiveVoicePreference(userId, "twilio", "flux-haley-en");
+  await setLiveVoicePreference(userId, "meetings", "flux-kit-en");
+  await setLiveVoicePreference(userId, "bland", { id: "11111111-1111-4111-8111-111111111111", name: "Zoe" });
+
+  const restored = await getSession(userId);
+  assert.deepEqual(restored.voicePreferences, {
+    twilio: "flux-haley-en",
+    meetings: "flux-kit-en",
+    bland: { id: "11111111-1111-4111-8111-111111111111", name: "Zoe" },
+  });
+  assert.equal(restored.history[0]?.content, "keep this");
+  assert.equal(restored.composioSessionId, "composio-session-kept");
+
+  await setLiveVoicePreference(userId, "twilio", undefined);
+  assert.equal((await getSession(userId)).voicePreferences?.twilio, undefined);
+  assert.equal((await getSession(userId + 1)).voicePreferences, undefined);
+  await assert.rejects(() => setLiveVoicePreference(userId, "meetings", "flux-not-a-real-voice-en" as any), /Invalid live voice/);
+  await assert.rejects(() => setLiveVoicePreference(userId, "bland", { id: "bad-id", name: "Zoe" }), /Invalid Bland voice/);
 });
 
 test("meeting representative profile persists per owner and enforces owner-scoped values", async () => {

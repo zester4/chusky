@@ -31,6 +31,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
+import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
@@ -363,11 +364,13 @@ async function main(): Promise<void> {
     const trustedTwilioRequest = (signature: string | undefined, url: string, body: Record<string, unknown>) => Boolean(
       config.twilioAuthToken && signature && twilio.validateRequest(config.twilioAuthToken, signature, url, twilioForm(body)),
     );
-    const twilioStreamTwiML = (callId: string, userId: number) => {
-      const ticket = createVoiceBridgeTicket(callId, userId, config.twilioMediaBridgeSecret);
+    const twilioStreamTwiML = async (callId: string, userId: number) => {
+      const ttsModel = (await getSession(userId)).voicePreferences?.twilio;
+      const ticket = createVoiceBridgeTicket(callId, userId, config.twilioMediaBridgeSecret, Date.now(), ttsModel);
       const streamUrl = config.twilioMediaStreamUrl.replace(/\/+$/, "");
       const statusCallback = twilioCallbackUrl("/twilio/stream-status", callId, userId);
-      return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/></Stream></Connect></Response>`;
+      const voiceParameter = ttsModel ? `<Parameter name="ttsModel" value="${ttsModel}"/>` : "";
+      return `<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="${xmlEscape(streamUrl)}" statusCallback="${xmlEscape(statusCallback)}" statusCallbackMethod="POST"><Parameter name="callId" value="${xmlEscape(callId)}"/><Parameter name="userId" value="${userId}"/><Parameter name="ticket" value="${ticket}"/>${voiceParameter}</Stream></Connect></Response>`;
     };
 
     // Twilio signs the initial TwiML request. Do not derive the signed URL
@@ -382,7 +385,7 @@ async function main(): Promise<void> {
       const call = await getFaceTimeCall(userId, callId);
       if (!call || call.provider !== "twilio") return c.text("Not found", 404);
       await updateFaceTimeCall(userId, callId, { status: "bridging", providerCallId: callSid || call.providerCallId });
-      return c.body(twilioStreamTwiML(callId, userId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+      return c.body(await twilioStreamTwiML(callId, userId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
     });
 
     // Configure this URL as the incoming Voice webhook on the Twilio number.
@@ -402,7 +405,7 @@ async function main(): Promise<void> {
         const callSid = String(form.CallSid ?? "").trim();
         if (!allowedCallers.includes(from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
         const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid });
-        return c.body(twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
+        return c.body(await twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
         return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
@@ -590,7 +593,7 @@ async function main(): Promise<void> {
     // per-meeting; the owner's ordinary chat transcript is never passed here.
     app.post("/internal/recall/turn-stream", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; context?: unknown; interactionMode?: string; speculative?: boolean; turnStartedAtMs?: number; turnEndedAtMs?: number };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -600,6 +603,15 @@ async function main(): Promise<void> {
       try { context = validateMeetingContext(body.context); } catch { return c.json({ ok: false, error: "invalid meeting context" }, 400); }
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
+      const now = Date.now();
+      const turnStartedAtMs = body.turnStartedAtMs;
+      const turnEndedAtMs = body.turnEndedAtMs;
+      const validTurnWindow = Number.isSafeInteger(turnStartedAtMs) && Number.isSafeInteger(turnEndedAtMs)
+        && turnStartedAtMs! > now - 5 * 60_000 && turnEndedAtMs! <= now + 5_000
+        && turnEndedAtMs! > turnStartedAtMs! && turnEndedAtMs! - turnStartedAtMs! <= 120_000;
+      const currentSpeaker = validTurnWindow
+        ? resolveRecallMeetingSpeaker(meeting.speakerEvents ?? [], meeting.participantRoster ?? [], turnStartedAtMs!, turnEndedAtMs!)
+        : undefined;
       const interactionMode = meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed";
       const requestedMode = body.interactionMode;
       const proactiveMode = interactionMode === "copilot" || interactionMode === "representative";
@@ -611,7 +623,7 @@ async function main(): Promise<void> {
       const representativeActive = interactionMode === "representative" && profile?.enabled === true;
       const proactive = requestedMode === "copilot" || requestedMode === "representative";
       if (interactionMode === "representative" && !representativeActive && !isDirectMeetingAddress(transcript)) {
-        const events = [{ type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
+        const events = [{ type: "speaker", name: currentSpeaker?.name ?? null }, { type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
         return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
           headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff" },
         });
@@ -619,7 +631,7 @@ async function main(): Promise<void> {
       if (proactive && !isDirectMeetingAddress(transcript)) {
         const gate = await claimRecallCopilotEvaluation(userId, meetingId);
         if (gate !== "allowed") {
-          const events = [{ type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
+          const events = [{ type: "speaker", name: currentSpeaker?.name ?? null }, { type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
           return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
             headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff" },
           });
@@ -631,6 +643,9 @@ async function main(): Promise<void> {
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+          // Send the server-resolved speaker cue before text deltas so the
+          // bridge can tag this turn in its short-lived context window.
+          send({ type: "speaker", name: currentSpeaker?.name ?? null });
           const speechGate = proactive ? new MeetingSpeechGate() : undefined;
           const streamDelta = (delta: string) => {
             const fragment = normalizeVoiceDelta(delta);
@@ -643,7 +658,7 @@ async function main(): Promise<void> {
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => runAgent(
               userId,
-              buildMeetingInput(context, transcript, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) }))),
+              buildMeetingInput(context, transcript, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })), currentSpeaker?.name),
               (await getRecallMeeting(userId, meetingId))?.history ?? [],
               config.voiceModel,
               undefined,
@@ -699,9 +714,11 @@ async function main(): Promise<void> {
         : "addressed";
       const profile = interactionMode === "representative" ? await getMeetingRepresentativeProfile(userId) : undefined;
       const effectiveMode = interactionMode === "representative" && !profile?.enabled ? "addressed" : interactionMode;
+      const ttsModel = (await getSession(userId)).voicePreferences?.meetings;
       return c.json({
         interactionMode: effectiveMode,
         greeting: meetingRepresentativeGreeting(effectiveMode, profile),
+        ...(ttsModel ? { ttsModel } : {}),
       }, 200, { "Cache-Control": "no-store" });
     });
 
@@ -1823,7 +1840,7 @@ async function main(): Promise<void> {
             if (!event || !command) throw new WorkflowNonRetryableError("Recall chat command is missing");
             const meeting = await getRecallMeeting(event.userId, event.meetingId);
             if (!meeting || meeting.providerBotId !== event.providerBotId || meeting.status !== "in_call") {
-              await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+              await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
               return { skipped: true };
             }
             let representativeProfile = meeting.interactionMode === "representative"
@@ -1832,7 +1849,7 @@ async function main(): Promise<void> {
             const representativeActive = representativeProfile?.enabled === true;
             if (command.kind === "ambient") {
               if (!representativeActive || (await claimRecallCopilotEvaluation(event.userId, event.meetingId)) !== "allowed") {
-                await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+                await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
                 return { ignored: true };
               }
             }
@@ -1846,7 +1863,7 @@ async function main(): Promise<void> {
               reply = "I’m leaving the meeting now, as requested.";
             } else if (!(await checkRateLimit(event.userId)) || !(await canSpend(event.userId))) {
               if (command.kind === "ambient") {
-                await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+                await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
                 return { ignored: true };
               }
               reply = "I can’t answer another meeting question right now. Please ask the meeting owner to follow up with me privately.";
@@ -1855,7 +1872,7 @@ async function main(): Promise<void> {
                 role: message.role === "assistant" ? "chusky" as const : "participant" as const,
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
-              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })));
+              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })), event.senderName);
               const result = await withCliLock(event.userId, undefined, () => runAgent(
                 event.userId,
                 prompt,
@@ -1884,7 +1901,7 @@ async function main(): Promise<void> {
               if (command.kind === "ambient") {
                 const decision = parseCopilotOutput(result.text);
                 if (!decision.speak) {
-                  await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+                  await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
                   return { ignored: true };
                 }
                 reply = decision.text;
@@ -1903,7 +1920,7 @@ async function main(): Promise<void> {
           if (!afterPrepare.reply || !afterPrepare.command) throw new Error("Recall chat reply preparation did not complete");
           const meeting = await getRecallMeeting(afterPrepare.userId, afterPrepare.meetingId);
           if (!meeting || meeting.providerBotId !== afterPrepare.providerBotId || meeting.status !== "in_call") {
-            await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+            await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
             return;
           }
           const recipient = afterPrepare.replyToParticipantId ?? "everyone";
@@ -1934,7 +1951,7 @@ async function main(): Promise<void> {
               ]);
               if (afterPrepare.replyCost) await addUsage(afterPrepare.userId, afterPrepare.replyCost);
             }
-            await updateRecallChatEvent(eventId, { status: "completed", command: undefined, reply: undefined, replyCost: undefined });
+            await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
             return { committed: true };
           });
         } catch (error) {
