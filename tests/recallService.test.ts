@@ -108,6 +108,25 @@ test("meeting joins default to proactive copilot or the enabled representative p
   await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
 });
 
+test("confirmed client context selects representative mode despite a stale copilot selection", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_client_context" }), { status: 201 });
+  await updateMeetingRepresentativeProfile(ownerId, {
+    enabled: true,
+    role: "sales",
+    objective: "Qualify leads and agree next steps",
+  });
+  const meeting = await joinRecallMeeting(ownerId, {
+    meetingUrl: "https://meet.google.com/client-context-mode-room",
+    interactionMode: "copilot",
+    clientName: "Acme",
+    objective: "Close the onboarding package",
+    clientContextConfirmed: true,
+  });
+  assert.equal(meeting.interactionMode, "representative");
+  assert.equal(meeting.mission?.clientName, "Acme");
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
+});
+
 test("concurrent requests for one live meeting create only one Recall bot", async () => {
   let created = 0;
   let announceStarted!: () => void;

@@ -447,7 +447,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw new Error("Client-bound meetings must be prepared from a private owner conversation");
       }
       const profile = await getMeetingRepresentativeProfile(userId);
-      const interactionMode = args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
+      const hasClientMission = args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined;
+      const interactionMode = hasClientMission ? "representative" : args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
       return joinRecallMeeting(userId, {
         meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode,
         clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, clientContextConfirmed: args.clientContextConfirmed,

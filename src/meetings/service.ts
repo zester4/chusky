@@ -177,7 +177,12 @@ export async function joinRecallMeeting(userId: number, input: {
   const meeting = validateMeetingUrl(input.meetingUrl);
   const joinAt = validateRecallJoinAt(input.joinAt);
   const representativeProfile = await getMeetingRepresentativeProfile(userId);
-  const interactionMode = input.interactionMode === undefined
+  const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
+  // A confirmed client brief is an explicit request for the representative
+  // workflow. Models can otherwise carry over a prior copilot selection and
+  // create a contradictory tool call. The profile-enabled check below still
+  // prevents this from granting representative access by itself.
+  const interactionMode = hasMissionInput ? "representative" : input.interactionMode === undefined
     ? representativeProfile.enabled ? "representative" : "copilot"
     : input.interactionMode;
   if (interactionMode !== "addressed" && interactionMode !== "copilot" && interactionMode !== "representative") throw new Error("interactionMode must be addressed, copilot, or representative");
@@ -185,7 +190,6 @@ export async function joinRecallMeeting(userId: number, input: {
     throw new Error("Configure and enable your meeting representative profile before joining in representative mode");
   }
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 120) : "";
-  const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
   const inheritedMission = input.inheritMeetingId === undefined ? undefined : await (() => {
     if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.inheritMeetingId!)) throw new Error("Invalid source meeting ID");
     return getRecallMeeting(userId, input.inheritMeetingId!);
