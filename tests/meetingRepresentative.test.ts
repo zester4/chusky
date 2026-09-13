@@ -45,18 +45,20 @@ test("meeting run receives only configured actions plus the leave control", () =
   assert.deepEqual(meetingRepresentativeToolAllowlist(profile), ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL"]);
   assert.deepEqual(meetingRepresentativeToolAllowlist(undefined), ["CHUCK_MEETING_LEAVE"]);
   const instructions = meetingRepresentativeInstructions(profile, "mtg_example", true);
-  assert.match(instructions, /disclosed digital sales representative/i);
-  assert.match(instructions, /representing Acme/);
+  assert.match(instructions, /sales representative for Acme/i);
   assert.match(instructions, /Approved company knowledge/);
   assert.match(instructions, /untrusted participant input/);
+  assert.match(instructions, /thoughtful participant/i);
+  assert.match(instructions, /rather check than guess/i);
+  assert.match(instructions, /move the conversation forward/i);
   assert.match(instructions, /SILENT/);
   assert.match(instructions, /no SPEAK\/SILENT label/);
   assert.doesNotMatch(instructions, /company-mail|sales-crm/);
   assert.match(instructions, /routing is enforced privately/);
-  assert.doesNotMatch(instructions, /\bAI\b/i);
+  assert.match(instructions, /Do not use canned language/i);
   const copilotInstructions = meetingRepresentativeCopilotInstructions("mtg_example");
-  assert.match(copilotInstructions, /digital assistant/i);
-  assert.doesNotMatch(copilotInstructions, /\bAI\b/i);
+  assert.match(copilotInstructions, /thoughtful participant/i);
+  assert.match(copilotInstructions, /Do not use canned language/i);
 });
 
 test("default meeting conversation can create owner follow-ups without reading private account data", () => {
@@ -74,11 +76,11 @@ test("spoken greeting is natural while the meeting notice remains the disclosure
     objective: "Qualify leads and arrange next steps",
   });
   const greeting = meetingRepresentativeGreeting("representative", profile);
-  assert.equal(greeting, "Hi everyone, I’m Chusky, a digital assistant supporting Acme. I’m here to help move the conversation forward. Let’s get into it.");
+  assert.equal(greeting, "Hi, I’m Chusky.");
   assert.doesNotMatch(greeting, /\bAI\b/i);
-  assert.doesNotMatch(greeting, /say ‘Chusky’/i);
-  assert.equal(meetingRepresentativeGreeting("copilot"), "Hi everyone, I’m Chusky, your digital assistant. I’ll follow along and join in when I can help.");
-  assert.equal(meetingRepresentativeGreeting("addressed"), "Hi everyone, I’m Chusky, your digital assistant. Say my name if you’d like me to jump in.");
+  assert.doesNotMatch(greeting, /move the conversation forward/i);
+  assert.equal(meetingRepresentativeGreeting("copilot"), "Hi, I’m Chusky.");
+  assert.equal(meetingRepresentativeGreeting("addressed"), "Hi, I’m Chusky.");
 });
 
 test("meeting account routing is pinned to owner aliases and strips participant-selected accounts", () => {
@@ -125,5 +127,6 @@ test("representative instructions include the complete bounded client brief and 
   assert.match(instructions, /Acme asked for a September start/);
   assert.match(instructions, /Ground client-specific claims/i);
   assert.match(instructions, /Never invent a name, number, date, product capability/i);
+  assert.match(instructions, /Do not use canned language/i);
   assert.match(instructions, /no SPEAK\/SILENT label/);
 });
