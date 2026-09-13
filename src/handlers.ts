@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals,
+  claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -179,7 +179,7 @@ async function editApprovalOutcome(ctx: Context, text: string): Promise<void> {
   await ctx.editMessageText(text);
 }
 
-function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number }): TelegramCard {
+function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; voiceReplies: boolean }): TelegramCard {
   const connectionLine = input.connectedApps
     ? `🟢 ${input.connectedApps} app${input.connectedApps === 1 ? "" : "s"} connected across ${input.connectedAccounts} account${input.connectedAccounts === 1 ? "" : "s"}`
     : "⚪ No connected apps yet";
@@ -190,11 +190,15 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       `🧠 Model: ${input.model}`,
       `📌 ${input.pendingApprovals} pending approval${input.pendingApprovals === 1 ? "" : "s"} · ${input.activeWorkers} active task${input.activeWorkers === 1 ? "" : "s"}`,
       `⚡ ${input.triggerCount} active trigger${input.triggerCount === 1 ? "" : "s"}`,
+      `⏰ ${input.activeReminders} reminder${input.activeReminders === 1 ? "" : "s"} · 🗓️ ${input.activeJobs} recurring schedule${input.activeJobs === 1 ? "" : "s"}`,
+      `📋 ${input.activeTasks} task${input.activeTasks === 1 ? "" : "s"} in progress · ${input.voiceReplies ? "🔊 voice replies on" : "🔇 voice replies off"}`,
     ],
     detail: "Connected accounts, tasks, and approvals remain private to your Chusky account.",
     buttons: [
       [{ text: "🧩 Apps", callbackData: "home:apps", style: "primary" }, { text: "⚡ Triggers", callbackData: "home:triggers" }],
-      [{ text: "✅ Approvals", callbackData: "home:approvals" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
+      [{ text: "⏰ Reminders", callbackData: "home:reminders" }, { text: "🗓️ Schedules", callbackData: "home:schedules" }],
+      [{ text: "📋 Tasks", callbackData: "home:tasks" }, { text: "✅ Approvals", callbackData: "home:approvals" }],
+      [{ text: "🔊 Voice", callbackData: "home:voice" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
     ],
   };
 }
@@ -209,12 +213,15 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
     return;
   }
-  const [session, states, approvals, handoffs, triggers] = await Promise.all([
+  const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks] = await Promise.all([
     getSession(ctx.from!.id),
     getToolkitStates(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace app summary"); return []; }),
     listApprovals(ctx.from!.id, 50),
     listHandoffRecords(ctx.from!.id),
     listTriggers(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace trigger summary"); return []; }),
+    listReminders(ctx.from!.id),
+    listJobs(ctx.from!.id),
+    listTasks(ctx.from!.id),
   ]);
   const connected = states.filter((state) => state.connected);
   const activeWorkerStatuses = new Set(["queued", "cancel_requested", "interrupted", "requires_approval", "requires_tool_request"]);
@@ -225,6 +232,10 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     pendingApprovals: approvals.filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).length,
     activeWorkers: handoffs.filter((handoff) => activeWorkerStatuses.has(handoff.status)).length,
     triggerCount: triggers.length,
+    activeReminders: reminders.filter((reminder) => reminder.status === "scheduled").length,
+    activeJobs: jobs.filter((job) => job.status === "active").length,
+    activeTasks: tasks.filter((task) => !["completed", "cancelled", "failed"].includes(task.status)).length,
+    voiceReplies: session.voiceReplies === true,
   });
   if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
 }
@@ -1504,7 +1515,7 @@ export function registerHandlers(bot: Bot): void {
 
   // Workspace card actions. They deliberately reuse the existing command
   // handlers' data sources instead of creating a second session model.
-  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals)$/, async (ctx) => {
+  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals|reminders|schedules|tasks|voice)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     const action = ctx.match[1];
@@ -1533,6 +1544,56 @@ export function registerHandlers(bot: Bot): void {
         await editCard(ctx, messageId, card);
         return;
       }
+      if (action === "reminders") {
+        const reminders = (await listReminders(ctx.from!.id)).filter((reminder) => reminder.status === "scheduled").sort((a, b) => a.runAt - b.runAt);
+        const card: TelegramCard = {
+          title: "⏰ Upcoming reminders",
+          body: reminders.length
+            ? reminders.slice(0, 8).map((reminder) => `${new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} · ${reminder.text}`)
+            : ["No reminders are scheduled."],
+          detail: reminders.length ? "Ask Chusky to change or cancel a reminder, for example: “remind me tomorrow at 9am to follow up with Sam.”" : "Ask Chusky to set one, for example: “remind me tomorrow at 9am to follow up with Sam.”",
+          buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
+        };
+        await editCard(ctx, messageId, card);
+        return;
+      }
+      if (action === "schedules") {
+        const jobs = (await listJobs(ctx.from!.id)).filter((job) => job.status === "active");
+        const card: TelegramCard = {
+          title: "🗓️ Recurring schedules",
+          body: jobs.length
+            ? jobs.slice(0, 8).map((job) => `${job.text} · ${job.cron}`)
+            : ["No recurring schedules are active."],
+          detail: jobs.length ? "Ask Chusky to adjust or cancel a schedule. Recurring work is stored durably and delivered to your private Chusky account." : "Ask Chusky to create one, for example: “every weekday at 8am, summarize my priorities.”",
+          buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
+        };
+        await editCard(ctx, messageId, card);
+        return;
+      }
+      if (action === "tasks") {
+        const tasks = (await listTasks(ctx.from!.id)).filter((task) => !["completed", "cancelled"].includes(task.status));
+        const card: TelegramCard = {
+          title: "📋 Active tasks",
+          body: tasks.length
+            ? tasks.slice(0, 8).map((task) => `${task.status.replaceAll("_", " ")} · ${task.title}`)
+            : ["No active tasks."],
+          detail: tasks.length ? "Ask Chusky for progress, a retry, a new schedule, or cancellation for a task." : "When work needs to continue beyond this chat, ask Chusky to create a task and it will track the progress here.",
+          buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
+        };
+        await editCard(ctx, messageId, card);
+        return;
+      }
+      if (action === "voice") {
+        const voiceReplies = (await getSession(ctx.from!.id)).voiceReplies === true;
+        const card: TelegramCard = {
+          title: "🔊 Telegram voice replies",
+          body: [voiceReplies ? "Voice replies are on. Chusky sends text plus an audio reply." : "Voice replies are off. Chusky replies in text only."],
+          detail: "This controls audio replies in Telegram. It does not change Chusky’s live meeting voice, which is configured separately.",
+          buttons: [[{ text: voiceReplies ? "Turn off" : "Turn on", callbackData: `home:voice:${voiceReplies ? "off" : "on"}`, style: "primary" }, { text: "← Workspace", callbackData: "home:refresh" }]],
+        };
+        await editCard(ctx, messageId, card);
+        return;
+      }
       const pending = (await listApprovals(ctx.from!.id, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
       const card: TelegramCard = {
         title: "✅ Pending approvals",
@@ -1546,6 +1607,23 @@ export function registerHandlers(bot: Bot): void {
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, action }, "Telegram workspace action failed");
       await ctx.editMessageText("❌ I could not load that workspace view. Use /home to try again.");
+    }
+  });
+
+  bot.callbackQuery(/^home:voice:(on|off)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    const enabled = ctx.match[1] === "on";
+    try {
+      await setVoiceReplies(ctx.from!.id, enabled);
+      await ctx.editMessageText(enabled ? "🔊 Voice replies are on. I’ll send text and an audio reply after each response." : "🔇 Voice replies are off. I’ll continue replying with text.", {
+        reply_markup: new InlineKeyboard().text("← Workspace", "home:refresh"),
+      });
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, enabled }, "Telegram voice reply setting failed");
+      await ctx.editMessageText("❌ I could not change voice replies. Use /voice on or /voice off to try again.");
     }
   });
 

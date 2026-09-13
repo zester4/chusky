@@ -1,7 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { registerHandlers } from "../src/handlers.js";
-import { appendChannelConversationMessages, createApproval, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
+import { addJob, addReminder, appendChannelConversationMessages, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
 class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
@@ -77,4 +77,30 @@ test("approval callback is scoped to the requesting user and deny never executes
   await callback.handler(owner);
   assert.equal((await getApproval(840002, approval.id))?.status, "denied");
   assert.match(owner.sent.at(-1).text, /Action denied/);
+});
+
+test("home workspace exposes durable reminders, schedules, tasks, and voice controls", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840004;
+  const now = Date.now();
+  await addReminder(userId, { id: "reminder_home", userId, text: "Follow up with Ada", runAt: now + 60_000, status: "scheduled", createdAt: now });
+  await addJob(userId, { id: "job_home", userId, text: "Send a weekly digest", cron: "0 9 * * 1", scheduleId: "schedule_home", status: "active", createdAt: now });
+  await createTask(userId, { title: "Prepare proposal", objective: "Draft the client proposal" });
+  const workspace = bot.callbacks.find((item) => item.pattern.source.includes("reminders|schedules|tasks|voice"));
+  assert.ok(workspace);
+  for (const [action, expected] of [["reminders", /Follow up with Ada/], ["schedules", /Send a weekly digest/], ["tasks", /Prepare proposal/]] as const) {
+    const ctx = context(userId);
+    ctx.callbackQuery = { message: { message_id: 1 } };
+    ctx.match = [`home:${action}`, action];
+    await workspace.handler(ctx);
+    assert.match(ctx.sent.at(-1).text, expected);
+  }
+  const voice = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:(on|off)"));
+  assert.ok(voice);
+  const voiceCtx = context(userId);
+  voiceCtx.callbackQuery = { message: { message_id: 1 } };
+  voiceCtx.match = ["home:voice:on", "on"];
+  await voice.handler(voiceCtx);
+  assert.equal((await getSession(userId)).voiceReplies, true);
 });
