@@ -28,7 +28,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
-import { getRecallMeetingForUser, joinRecallMeeting, leaveRecallMeeting, listRecallMeetingsForUser } from "./meetings/service.js";
+import { getRecallMeetingForUser, joinRecallMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -47,6 +47,10 @@ export interface NativeToolRuntime {
   /** Present only when a specialist is executing its own native tool call. */
   worker?: Exclude<import("./memory/types.js").CapabilityWorkerName, "chusky">;
   workerBinding?: Omit<ScheduledWorkerBinding, "worker" | "objective">;
+  /** Present only for an authenticated Recall meeting run. */
+  meetingId?: string;
+  /** Private relationship preparation must never run from a shared channel. */
+  sharedConversation?: boolean;
 }
 
 function text(value: unknown): string {
@@ -430,10 +434,25 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), context: (await getSession(userId)).history.slice(-8).map((message) => `${message.role}: ${String(message.content)}`).join("\n") })
       : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
     case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
+    case "CHUCK_MEETING_CONTEXT_PREPARE": {
+      if (runtime.sharedConversation) throw new Error("Client meeting preparation is available only in a private owner conversation");
+      return prepareRecallMeetingMission(userId, { clientName: args.clientName, objective: args.objective, clientContext: args.clientContext });
+    }
+    case "CHUCK_MEETING_CONTEXT_LOOKUP": {
+      if (!runtime.meetingId) throw new Error("CHUCK_MEETING_CONTEXT_LOOKUP is available only inside an active meeting");
+      return lookupRecallMeetingContext(userId, runtime.meetingId, text(args.query));
+    }
     case "CHUCK_MEETING_JOIN": {
+      if (runtime.sharedConversation && (args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined)) {
+        throw new Error("Client-bound meetings must be prepared from a private owner conversation");
+      }
       const profile = await getMeetingRepresentativeProfile(userId);
       const interactionMode = args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
-      return joinRecallMeeting(userId, { meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode }, runtime.signal);
+      return joinRecallMeeting(userId, {
+        meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode,
+        clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, clientContextConfirmed: args.clientContextConfirmed,
+        ...(runtime.meetingId && args.clientName === undefined ? { inheritMeetingId: runtime.meetingId } : {}),
+      }, runtime.signal);
     }
     case "CHUCK_MEETING_PROFILE_GET": return getMeetingRepresentativeProfile(userId);
     case "CHUCK_MEETING_PROFILE_UPDATE": return updateMeetingRepresentativeProfile(userId, args);

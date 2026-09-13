@@ -4,6 +4,7 @@ import {
   addRecallMeeting,
   claimRecallMeetingCreation,
   getRecallMeeting,
+  getSession,
   getMeetingRepresentativeProfile,
   isDurableStore,
   listRecallMeetings,
@@ -27,6 +28,7 @@ import {
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
+import { lookupMeetingMission, prepareMeetingMission } from "./mission.js";
 
 const ACTIVE = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
 
@@ -146,6 +148,7 @@ function safeMeeting(record: RecallMeetingRecord) {
     title: record.title,
     joinAt: record.joinAt,
     error: record.error,
+    ...(record.mission ? { mission: { clientName: record.mission.clientName, objective: record.mission.objective, preparedAt: new Date(record.mission.preparedAt).toISOString() } } : {}),
     createdAt: new Date(record.createdAt).toISOString(),
     updatedAt: new Date(record.updatedAt).toISOString(),
   };
@@ -162,6 +165,12 @@ export async function joinRecallMeeting(userId: number, input: {
   title?: unknown;
   joinAt?: unknown;
   interactionMode?: unknown;
+  clientName?: unknown;
+  objective?: unknown;
+  clientContext?: unknown;
+  clientContextConfirmed?: unknown;
+  /** Internal-only: carry an existing owner-confirmed mission into a follow-up meeting. */
+  inheritMeetingId?: string;
 }, signal?: AbortSignal) {
   requireRecall();
   assertUserId(userId);
@@ -176,6 +185,19 @@ export async function joinRecallMeeting(userId: number, input: {
     throw new Error("Configure and enable your meeting representative profile before joining in representative mode");
   }
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 120) : "";
+  const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
+  const inheritedMission = input.inheritMeetingId === undefined ? undefined : await (() => {
+    if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.inheritMeetingId!)) throw new Error("Invalid source meeting ID");
+    return getRecallMeeting(userId, input.inheritMeetingId!);
+  })();
+  if (inheritedMission && !inheritedMission.mission) throw new Error("The source meeting has no client context to carry forward");
+  if (hasMissionInput && inheritedMission) throw new Error("A follow-up meeting cannot replace its inherited client context");
+  if ((hasMissionInput || inheritedMission?.mission) && interactionMode !== "representative") throw new Error("Client meeting context requires representative mode");
+  if (hasMissionInput && input.clientName === undefined) throw new Error("clientName is required when adding client meeting context");
+  if (hasMissionInput && input.clientContextConfirmed !== true) throw new Error("Confirm the prepared client context before joining the meeting");
+  const mission = inheritedMission?.mission ?? (hasMissionInput
+    ? prepareMeetingMission({ clientName: input.clientName, objective: input.objective, clientContext: input.clientContext }, (await getSession(userId)).memories)
+    : undefined);
   const meetingUrlHash = createHash("sha256").update(meeting.url).digest("hex");
   // Immediate joins dedupe by URL; scheduled joins dedupe by URL + exact
   // occurrence, so a recurring meeting link can have future instances.
@@ -203,6 +225,7 @@ export async function joinRecallMeeting(userId: number, input: {
     meetingUrlHash,
     meetingInstanceHash,
     ...(title ? { title } : {}),
+    ...(mission ? { mission } : {}),
     ...(joinAt ? { joinAt } : {}),
     history: [],
     createdAt: now,
@@ -270,6 +293,22 @@ export async function joinRecallMeeting(userId: number, input: {
     try { await releaseRecallMeetingCreation(userId, meetingInstanceHash, reservationToken); }
     catch { /* Expiring Redis lease is the crash-safe fallback. */ }
   }
+}
+
+/** Preview a client-bound brief before the owner confirms a meeting join. This has no side effects. */
+export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown }) {
+  assertUserId(userId);
+  return prepareMeetingMission(input, (await getSession(userId)).memories);
+}
+
+/** A live meeting can query only the memory IDs frozen into its owner-confirmed mission. */
+export async function lookupRecallMeetingContext(userId: number, meetingId: string, query: unknown) {
+  assertUserId(userId);
+  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) throw new Error("Invalid meeting ID");
+  const session = await getSession(userId);
+  const meeting = session.recallMeetings?.find((item) => item.id === meetingId && item.userId === userId);
+  if (!meeting?.mission) throw new Error("This meeting has no owner-confirmed client context");
+  return lookupMeetingMission(meeting.mission, session.memories, query);
 }
 
 export async function listRecallMeetingsForUser(userId: number, limit = 10) {

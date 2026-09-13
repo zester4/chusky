@@ -426,8 +426,8 @@ company-representative profile, or proactive copilot mode if none is enabled;
 addressed-only mode is reserved for an explicit wake-word-only request. It
 opens with a short spoken introduction. In representative mode, that greeting
 names its AI role and the configured company. In proactive modes it evaluates
-ordinary conversation and speaks only when it can add value, within a per-call
-evaluation cap. An owner can
+ordinary conversation and speaks only when it can add value, with burst
+smoothing rather than a per-call evaluation cap. An owner can
 configure a sales, client-onboarding, employee-onboarding, customer-success, or
 custom representative profile with its objective, approved company facts,
 boundaries, exact connected-app action grants, and native reminder/task tools.
@@ -443,6 +443,17 @@ Chusky answers and its replies may be kept as bounded meeting history. The
 media page and meeting-chat notice disclose audio processing and retention;
 the spoken intro is deliberately short and conversational. Twilio
 phone calling stays independent and unchanged.
+
+For a client-specific representative meeting, Chusky can first prepare a
+reviewable client mission from the owner's normal-sensitivity business and
+relationship memories. After the owner confirms the brief, the meeting stores
+only that bounded mission (`clientContextConfirmed=true` is required). During the call, `CHUCK_MEETING_CONTEXT_LOOKUP` can
+search only the memory IDs frozen into the mission—never the general inbox,
+private memories, files, tasks, or another client. The brief never appears in
+Recall metadata, meeting chat, or the media-page URL. If the owner explicitly
+enables meeting scheduling and grants exact calendar actions, Chusky can book
+an allowed follow-up and schedule a new Recall bot that inherits the same
+client mission.
 
 Copilot's burst-smoothing interval is enforced atomically in the root service's
 Redis store across voice-bridge reconnects and replicas. It does not impose a

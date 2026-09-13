@@ -91,3 +91,13 @@ test("meeting account routing is pinned to owner aliases and strips participant-
   const saved = normalizeMeetingRepresentativeProfile({ updatedAt: 1_700_000_000_000 }, profile);
   assert.equal(saved.updatedAt, 1_700_000_000_000);
 });
+
+test("meeting scheduling is an explicit representative capability and context lookup requires a mission", () => {
+  const profile = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Progress approved client meetings", allowMeetingScheduling: true });
+  assert.equal(profile.allowMeetingScheduling, true);
+  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_CONTEXT_LOOKUP"), false);
+  const mission = { clientName: "Acme", objective: "Close", brief: "Client: Acme", sourceMemoryIds: [], preparedAt: 1 };
+  const tools = meetingRepresentativeToolAllowlist(profile, mission);
+  assert.equal(tools.includes("CHUCK_MEETING_CONTEXT_LOOKUP"), true);
+  assert.equal(tools.includes("CHUCK_MEETING_JOIN"), true);
+});
