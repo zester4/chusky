@@ -143,10 +143,10 @@ test("a retry resumes from persisted outcome and does not repeat completed exter
   assert.equal(followThroughCalls, 1);
 });
 
-test("outcome workflow skips non-ended, non-representative, or disabled meetings", async () => {
+test("outcome workflow skips non-ended or addressed-only meetings", async () => {
   let sideEffects = 0;
   const deps = {
-    getMeeting: async () => ({ ...meeting, interactionMode: "copilot" as const }),
+    getMeeting: async () => ({ ...meeting, interactionMode: "addressed" as const }),
     getProfile: async () => ({ ...defaultMeetingRepresentativeProfile(), enabled: true }),
     summarize: async () => { sideEffects++; return outcomeJson; },
     followThrough: async () => { sideEffects++; return {}; },
@@ -159,4 +159,28 @@ test("outcome workflow skips non-ended, non-representative, or disabled meetings
   };
   assert.equal(await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, deps), "skipped");
   assert.equal(sideEffects, 0);
+});
+
+test("default conversational meetings produce a private recap without exercising representative tools", async () => {
+  let summarized = 0;
+  let followThrough = 0;
+  let scratchpad = "";
+  let notification = "";
+  const result = await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, {
+    getMeeting: async () => ({ ...meeting, interactionMode: "copilot" as const }),
+    getProfile: async () => defaultMeetingRepresentativeProfile(),
+    summarize: async () => { summarized++; return outcomeJson; },
+    followThrough: async () => { followThrough++; return {}; },
+    writeScratchpad: async (_userId, _key, content) => { scratchpad = content; },
+    saveOutcome: async () => {},
+    notifyOwner: async (_userId, text) => { notification = text; },
+    claim: async () => "acquired",
+    complete: async () => true,
+    release: async () => true,
+  });
+  assert.equal(result, "completed");
+  assert.equal(summarized, 1);
+  assert.equal(followThrough, 0, "conversation-only mode has no connected-app action authority");
+  assert.match(scratchpad, /## Decisions/);
+  assert.match(notification, /Meeting outcome:/);
 });

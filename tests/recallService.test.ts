@@ -309,6 +309,24 @@ test("an ended representative meeting schedules post-meeting follow-through and 
   await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
 });
 
+test("an ended default conversational meeting queues its private outcome recap", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/default-conversation-outcome" });
+  assert.equal(meeting.interactionMode, "copilot");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
+  const body = { event: "bot.done", data: {
+    data: { code: "done", updated_at: new Date().toISOString() },
+    bot: { id: botId, metadata: { chusky_meeting_id: meeting.id, chusky_user_id: String(ownerId) } },
+  } };
+  const queued: string[] = [];
+  assert.equal(await applyRecallStatusWebhook({
+    eventId: "msg-copilot-outcome",
+    body,
+    onMeetingEnded: async (userId, meetingId) => { queued.push(`${userId}:${meetingId}`); },
+  }), "updated");
+  assert.deepEqual(queued, [`${ownerId}:${meeting.id}`]);
+});
+
 test("Recall chat messages require an owned active bot and use the supported chat-send API", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
   const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://zoom.us/j/98765432101" });

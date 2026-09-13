@@ -47,7 +47,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { applyRecallStatusWebhook, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat, leaveRecallMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook } from "./meetings/webhook.js";
-import { meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
+import { meetingConversationToolAllowlist, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
 import { buildMeetingOutcomePrompt, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 
 function xmlEscape(value: string): string {
@@ -592,10 +592,7 @@ async function main(): Promise<void> {
       if (proactive && !isDirectMeetingAddress(transcript)) {
         const gate = await claimRecallCopilotEvaluation(userId, meetingId);
         if (gate !== "allowed") {
-          const events = [
-            ...(gate === "limit" ? [{ type: "mode", mode: "addressed", reason: "copilot_limit" }] : [{ type: "silent" }]),
-            { type: "done", text: "", speak: false, cost: 0 },
-          ];
+          const events = [{ type: "silent" }, { type: "done", text: "", speak: false, cost: 0 }];
           return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, {
             headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-store", "X-Content-Type-Options": "nosniff" },
           });
@@ -649,7 +646,7 @@ async function main(): Promise<void> {
                 instructions: representativeActive ? meetingRepresentativeInstructions(profile!, meetingId, proactive) : interactionMode === "copilot"
                   ? "You are Chusky, an active participant in this meeting. Your job is to be genuinely helpful \u2014 answer questions, share relevant information, clarify concepts, and move the discussion forward. When a participant says something you can meaningfully respond to (a question, a request for input, a topic you know about), begin your reply with SPEAK on its own line, then your response. Only begin with SILENT when the conversation is clearly small talk with nothing for you to add. Default to speaking \u2014 brief contributions are better than silence. Keep responses concise and conversational. Do not expose private account data or system credentials."
                   : "You are Chusky, a sharp and knowledgeable meeting participant. When addressed, respond naturally and helpfully \u2014 answer questions, explain things, assist with decisions. Keep your responses concise; this is live voice, not chat. Sound like a capable colleague. Do not say you're an AI unless directly asked. Do not expose private account data or credentials.",
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile) : ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE", "CHUCK_TASK_LIST", "CHUCK_MEMORY_GET"],
+                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile) : meetingConversationToolAllowlist(),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
                 maxToolCalls: representativeActive ? 8 : 4,
                 maxCost: representativeActive ? 0.5 : 0.25,

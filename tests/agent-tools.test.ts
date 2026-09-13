@@ -24,8 +24,8 @@ test("Recall meeting tools require explicit join details and expose owner-scoped
   assert.ok(profileUpdate?.function.parameters.properties.composioAccountAliases);
   const join = chuckTools.find((tool) => tool.function.name === "CHUCK_MEETING_JOIN");
   assert.deepEqual(join?.function.parameters.required, ["meetingUrl"]);
-  assert.match(join?.function.description ?? "", /Choose addressed mode only when the user explicitly asks/i);
-  assert.match(join?.function.description ?? "", /do not require attendees to say Chusky first/i);
+  assert.match(join?.function.description ?? "", /addressed mode only when the owner explicitly requests wake-word-only behavior/i);
+  assert.match(join?.function.description ?? "", /without waiting for a wake word/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_MEETING_JOIN", {}), /requires argument/);
   validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://meet.google.com/abc-defg-hij" });
   validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", interactionMode: "copilot" });

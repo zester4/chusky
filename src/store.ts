@@ -704,7 +704,7 @@ interface Backend {
   releaseDeliveryLease(key: string, token: string): Promise<boolean>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
-  claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, nowMs?: number): Promise<"allowed" | "interval" | "limit">;
+  claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, nowMs?: number): Promise<"allowed" | "interval">;
   createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord>;
   getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined>;
   updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>): Promise<RecallChatEventRecord | undefined>;
@@ -1132,28 +1132,22 @@ class RedisBackend implements Backend {
     );
     return Number(result) === 1;
   }
-  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, _nowMs?: number): Promise<"allowed" | "interval" | "limit"> {
+  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, _nowMs?: number): Promise<"allowed" | "interval"> {
     const digest = createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
     const ttlSeconds = 24 * 60 * 60;
     const result = Number(await this.r.eval(
-      "local count = tonumber(redis.call('GET', KEYS[1]) or '0'); " +
-      "if count >= tonumber(ARGV[3]) then return 2 end; " +
-      "local last = tonumber(redis.call('GET', KEYS[2]) or '0'); " +
+      "local last = tonumber(redis.call('GET', KEYS[1]) or '0'); " +
       "local t = redis.call('TIME'); " +
       "local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000); " +
       "if last > 0 and now - last < tonumber(ARGV[1]) then return 0 end; " +
-      "redis.call('INCR', KEYS[1]); " +
-      "redis.call('EXPIRE', KEYS[1], ARGV[3]); " +
-      "redis.call('SET', KEYS[2], tostring(now), 'EX', ARGV[3]); " +
+      "redis.call('SET', KEYS[1], tostring(now), 'EX', ARGV[2]); " +
       "return 1",
-      2,
-      `chuck:meeting:copilot:${digest}:count`,
+      1,
       `chuck:meeting:copilot:${digest}:last`,
       String(minIntervalSeconds * 1000),
-      String(maxEvaluations),
       String(ttlSeconds),
     ));
-    return result === 1 ? "allowed" : result === 2 ? "limit" : "interval";
+    return result === 1 ? "allowed" : "interval";
   }
   async getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined> {
     const raw = await this.r.get(this.dk(userId));
@@ -1687,7 +1681,7 @@ class MemoryBackend implements Backend {
   private completedDeliveries = new Map<string, number>();
   private deliveryLeaseClaims = new Map<string, { token: string; expiresAt: number }>();
   private recallMeetingCreationClaims = new Map<string, { token: string; expiresAt: number }>();
-  private recallCopilotEvaluations = new Map<string, { count: number; lastAt: number; expiresAt: number }>();
+  private recallCopilotEvaluations = new Map<string, { lastAt: number; expiresAt: number }>();
   private recallChatEvents = new Map<string, { record: RecallChatEventRecord; expiresAt: number }>();
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
@@ -1862,17 +1856,15 @@ class MemoryBackend implements Backend {
     this.recallMeetingCreationClaims.delete(key);
     return true;
   }
-  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, maxEvaluations: number, nowMs = Date.now()): Promise<"allowed" | "interval" | "limit"> {
+  async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, nowMs = Date.now()): Promise<"allowed" | "interval"> {
     const key = `${userId}:${meetingId}`;
     let state = this.recallCopilotEvaluations.get(key);
     if (state && state.expiresAt <= nowMs) {
       this.recallCopilotEvaluations.delete(key);
       state = undefined;
     }
-    if (state && state.count >= maxEvaluations) return "limit";
     if (state && nowMs - state.lastAt < minIntervalSeconds * 1000) return "interval";
     this.recallCopilotEvaluations.set(key, {
-      count: (state?.count ?? 0) + 1,
       lastAt: nowMs,
       expiresAt: nowMs + 24 * 60 * 60 * 1000,
     });
@@ -2381,18 +2373,17 @@ export async function releaseRecallMeetingCreation(userId: number, instanceHash:
   return backend.releaseRecallMeetingCreation(userId, instanceHash, token);
 }
 
-/** Atomically enforce the owner-scoped proactive evaluation budget for one meeting. */
+/** Atomically smooth bursty proactive evaluation for one owner-scoped meeting. */
 export async function claimRecallCopilotEvaluation(
   userId: number,
   meetingId: string,
   minIntervalSeconds = config.recallCopilotMinIntervalSeconds,
-  maxEvaluations = config.recallCopilotMaxEvaluations,
   nowMs?: number,
-): Promise<"allowed" | "interval" | "limit"> {
+): Promise<"allowed" | "interval"> {
   if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) {
     throw new Error("Invalid meeting copilot budget identity");
   }
-  return backend.claimRecallCopilotEvaluation(userId, meetingId, minIntervalSeconds, maxEvaluations, nowMs);
+  return backend.claimRecallCopilotEvaluation(userId, meetingId, minIntervalSeconds, nowMs);
 }
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {

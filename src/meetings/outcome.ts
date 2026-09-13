@@ -172,9 +172,10 @@ export async function processMeetingOutcome(
 ): Promise<MeetingOutcomeResult> {
   if (!Number.isSafeInteger(input.userId) || input.userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.meetingId)) throw new Error("Invalid meeting outcome identity");
   const meeting = await deps.getMeeting(input.userId, input.meetingId);
-  if (!meeting || meeting.userId !== input.userId || meeting.status !== "ended" || meeting.interactionMode !== "representative") return "skipped";
+  if (!meeting || meeting.userId !== input.userId || meeting.status !== "ended" || (meeting.interactionMode !== "copilot" && meeting.interactionMode !== "representative")) return "skipped";
   const profile = await deps.getProfile(input.userId);
-  if (!profile.enabled) return "skipped";
+  const representativeAuthorized = meeting.interactionMode === "representative" && profile.enabled;
+  if (meeting.interactionMode === "representative" && !profile.enabled) return "skipped";
   const key = `recall-outcome:${input.userId}:${input.meetingId}`;
   const token = randomUUID();
   const claim = await deps.claim(key, token, 10 * 60_000);
@@ -188,22 +189,24 @@ export async function processMeetingOutcome(
     }
     let safeFollowThrough: MeetingOutcomeFollowThroughResult = meeting.outcomeFollowThrough ?? {};
     if (!meeting.outcomeFollowThrough) {
-      const notionTool = selectMeetingNotionCreateTool(profile.allowedComposioTools);
-      const followThrough = notionTool || profile.allowedNativeTools.length || profile.allowedComposioTools.length
+      const allowedComposioTools = representativeAuthorized ? profile.allowedComposioTools : [];
+      const allowedNativeTools = representativeAuthorized ? profile.allowedNativeTools : [];
+      const notionTool = selectMeetingNotionCreateTool(allowedComposioTools);
+      const followThrough = notionTool || allowedNativeTools.length || allowedComposioTools.length
         ? await deps.followThrough?.({
           userId: input.userId,
           meeting,
           outcome,
           notionTool,
-          allowedComposioTools: [...profile.allowedComposioTools],
-          allowedNativeTools: [...profile.allowedNativeTools],
+          allowedComposioTools: [...allowedComposioTools],
+          allowedNativeTools: [...allowedNativeTools],
         }) ?? {}
         : {};
       safeFollowThrough = {
         notionSaved: followThrough.notionSaved === true,
         notionTool,
         notionUrl: safeNotionUrl(followThrough.notionUrl),
-        completedTools: [...new Set((followThrough.completedTools ?? []).filter((tool) => profile.allowedComposioTools.includes(tool) || profile.allowedNativeTools.includes(tool)))].slice(0, 20),
+        completedTools: [...new Set((followThrough.completedTools ?? []).filter((tool) => allowedComposioTools.includes(tool) || allowedNativeTools.includes(tool)))].slice(0, 20),
       };
       await deps.saveOutcome(input.userId, meeting.id, outcome, safeFollowThrough, "pending");
     }

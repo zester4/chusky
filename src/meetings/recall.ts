@@ -159,7 +159,7 @@ export function buildRecallCreateBotRequest(input: {
       chat: {
         on_bot_join: {
           send_to: "everyone",
-          message: `Chusky is a disclosed AI meeting participant. Live audio is processed, and Recall recording and transcript retention are disabled. ${participantDisclosure}`,
+          message: `Chusky is an AI participant. Live audio is processed to enable conversation; Recall recording and transcript retention are off. ${participantDisclosure}`,
         },
       },
     } : {}),

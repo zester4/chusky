@@ -399,7 +399,7 @@ export async function applyRecallStatusWebhook(input: {
     // A previous signed status delivery may have updated Redis but failed to
     // enqueue the durable outcome. Re-enqueue on Recall retries; the workflow
     // ID is deterministic and the worker independently deduplicates effects.
-    if (meeting.status === "ended" && status === "ended" && meeting.interactionMode === "representative") {
+    if (meeting.status === "ended" && status === "ended" && meeting.interactionMode !== "addressed") {
       await input.onMeetingEnded?.(userId, meetingId);
     }
     return "ignored";
@@ -413,6 +413,6 @@ export async function applyRecallStatusWebhook(input: {
     : undefined;
   const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error };
   const updated = await updateRecallMeeting(userId, meetingId, patch);
-  if (updated && status === "ended" && meeting.interactionMode === "representative") await input.onMeetingEnded?.(userId, meetingId);
+  if (updated && status === "ended" && meeting.interactionMode !== "addressed") await input.onMeetingEnded?.(userId, meetingId);
   return updated ? "updated" : "ignored";
 }

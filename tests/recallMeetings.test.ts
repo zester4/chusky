@@ -81,7 +81,7 @@ test("Recall bot subscribes to chat without enabling retained participant artifa
     events: ["participant_events.chat_message"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
-  assert.match(request.chat?.on_bot_join.message ?? "", /disclosed AI meeting participant/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /Chusky is an AI participant/i);
   assert.match(request.chat?.on_bot_join.message ?? "", /may contribute proactively/i);
   assert.doesNotMatch(request.chat?.on_bot_join.message ?? "", /say ‘Chusky’/i);
 });

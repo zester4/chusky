@@ -5,6 +5,7 @@ import {
   applyMeetingComposioAccountAlias,
   isMeetingRepresentativeComposioTool,
   meetingRepresentativeGreeting,
+  meetingConversationToolAllowlist,
   meetingRepresentativeInstructions,
   meetingRepresentativeToolAllowlist,
   normalizeMeetingRepresentativeProfile,
@@ -52,7 +53,13 @@ test("meeting run receives only configured actions plus the leave control", () =
   assert.match(instructions, /routing is enforced privately/);
 });
 
-test("meeting greeting briefly discloses Chusky's configured representative role and company", () => {
+test("default meeting conversation can create owner follow-ups without reading private account data", () => {
+  assert.deepEqual(meetingConversationToolAllowlist(), ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"]);
+  assert.equal(meetingConversationToolAllowlist().includes("CHUCK_MEMORY_GET"), false);
+  assert.equal(meetingConversationToolAllowlist().includes("CHUCK_TASK_LIST"), false);
+});
+
+test("spoken greeting is natural while the meeting notice remains the disclosure surface", () => {
   const profile = normalizeMeetingRepresentativeProfile({
     enabled: true,
     role: "sales",
@@ -61,11 +68,11 @@ test("meeting greeting briefly discloses Chusky's configured representative role
     objective: "Qualify leads and arrange next steps",
   });
   const greeting = meetingRepresentativeGreeting("representative", profile);
-  assert.match(greeting, /AI sales representative for Acme/);
-  assert.match(greeting, /clear next step/);
+  assert.equal(greeting, "Hi everyone, I’m Chusky. I’m here with Acme to help move the conversation forward. Let’s get into it.");
+  assert.doesNotMatch(greeting, /\bAI\b/i);
   assert.doesNotMatch(greeting, /say ‘Chusky’/i);
-  assert.match(meetingRepresentativeGreeting("copilot"), /speak up when I can add something useful/);
-  assert.match(meetingRepresentativeGreeting("addressed"), /Say ‘Chusky’/);
+  assert.equal(meetingRepresentativeGreeting("copilot"), "Hi everyone, I’m Chusky. I’ll follow along and join in when I can help.");
+  assert.equal(meetingRepresentativeGreeting("addressed"), "Hi everyone, I’m Chusky. Say my name if you’d like me to jump in.");
 });
 
 test("meeting account routing is pinned to owner aliases and strips participant-selected accounts", () => {

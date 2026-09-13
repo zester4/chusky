@@ -29,18 +29,11 @@ export interface MeetingRepresentativeProfile {
   updatedAt: number;
 }
 
-/** A short spoken opening derived only from the owner's explicit meeting profile. */
+/** One brief spoken opening; the accompanying meeting notice carries the AI disclosure. */
 export function meetingRepresentativeGreeting(
   mode: MeetingInteractionMode,
   profile?: MeetingRepresentativeProfile,
 ): string {
-  const roleNames: Record<MeetingRepresentativeRole, string> = {
-    sales: "sales representative",
-    client_onboarding: "client onboarding specialist",
-    employee_onboarding: "employee onboarding specialist",
-    customer_success: "customer success representative",
-    custom: "company representative",
-  };
   const spoken = (value: string, maxLength: number) => value
     .replace(/[\r\n\u0000-\u001F\u007F]+/g, " ")
     .replace(/\s+/g, " ")
@@ -48,18 +41,14 @@ export function meetingRepresentativeGreeting(
     .slice(0, maxLength);
 
   if (mode === "representative" && profile?.enabled) {
-    const name = spoken(profile.representativeName, 80) || "Chusky";
     const organization = spoken(profile.organizationName, 120);
-    const identity = name.toLowerCase() === "chusky"
-      ? `I’m Chusky, the AI ${roleNames[profile.role]}`
-      : `I’m ${name}, Chusky’s AI ${roleNames[profile.role]}`;
-    return `Hi everyone. ${identity}${organization ? ` for ${organization}` : " representing the account owner"}. I’m here to help move the conversation forward and find a clear next step. Please bring me in whenever I can help.`;
+    return `Hi everyone, I’m Chusky.${organization ? ` I’m here with ${organization}` : " I’m here"} to help move the conversation forward. Let’s get into it.`;
   }
 
   if (mode === "addressed") {
-    return "Hi everyone, I’m Chusky, the AI meeting assistant. Say ‘Chusky’ when you’d like me to respond.";
+    return "Hi everyone, I’m Chusky. Say my name if you’d like me to jump in.";
   }
-  return "Hi everyone, I’m Chusky, the AI meeting copilot. I’ll follow the conversation and speak up when I can add something useful; you can address me directly anytime.";
+  return "Hi everyone, I’m Chusky. I’ll follow along and join in when I can help.";
 }
 
 export type MeetingRepresentativeProfilePatch = Partial<Omit<MeetingRepresentativeProfile, "updatedAt">>;
@@ -193,6 +182,11 @@ export function meetingRepresentativeToolAllowlist(profile: MeetingRepresentativ
   return [...new Set(["CHUCK_MEETING_LEAVE", ...native, ...(profile?.enabled ? profile.allowedComposioTools : [])])];
 }
 
+/** Owner-scoped follow-up actions for ordinary conversation, without private-data reads. */
+export function meetingConversationToolAllowlist(): string[] {
+  return ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"];
+}
+
 export function meetingRepresentativeInstructions(profile: MeetingRepresentativeProfile, meetingId: string, useSpeakProtocol = false): string {
   const roleNames: Record<MeetingRepresentativeRole, string> = {
     sales: "sales representative",
@@ -202,7 +196,7 @@ export function meetingRepresentativeInstructions(profile: MeetingRepresentative
     custom: "company representative",
   };
   return [
-    `You are Chusky, a visibly disclosed AI ${roleNames[profile.role]}${profile.organizationName ? ` representing ${profile.organizationName}` : " representing the account owner"}. Use the owner-approved representative name “${profile.representativeName}” when introducing yourself. Never claim to be the human owner.`,
+    `You are Chusky, a disclosed AI ${roleNames[profile.role]}${profile.organizationName ? ` representing ${profile.organizationName}` : " representing the account owner"}. Introduce yourself briefly as Chusky; the meeting notice already explains your AI role. Never claim to be the human owner.`,
     `Your meeting objective: ${profile.objective}`,
     `Communication style: ${profile.communicationStyle || "Be natural, concise, attentive, and helpful."}`,
     `Owner-approved authority and escalation boundaries: ${profile.authorityBoundaries || "Do not invent company facts or commitments. Capture out-of-scope requests for the owner."}`,

@@ -209,15 +209,17 @@ test("meeting history retention never evicts an active bot needed for webhook cl
   assert.equal(retained.some((meeting) => meeting.id === active.id), true);
 });
 
-test("copilot evaluation budget is owner-scoped, rate-limited, and durable for a meeting", async () => {
+test("proactive meeting evaluation smoothing is owner-scoped and never expires after a turn count", async () => {
   const userId = 810113;
-  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 100_000), "allowed");
-  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 105_000), "interval");
-  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 108_000), "allowed");
-  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 8, 2, 116_000), "limit");
-  assert.equal(await claimRecallCopilotEvaluation(userId + 1, "mtg_budget", 8, 2, 116_000), "allowed");
-  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_other", 8, 2, 116_000), "allowed");
-  await assert.rejects(() => claimRecallCopilotEvaluation(userId, "not-a-meeting", 8, 2, 116_000), /identity/);
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 4, 100_000), "allowed");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 4, 102_000), "interval");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 4, 104_000), "allowed");
+  for (let turn = 1; turn <= 400; turn++) {
+    assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_budget", 4, 104_000 + turn * 4_000), "allowed");
+  }
+  assert.equal(await claimRecallCopilotEvaluation(userId + 1, "mtg_budget", 4, 1_800_000), "allowed");
+  assert.equal(await claimRecallCopilotEvaluation(userId, "mtg_other", 4, 1_800_000), "allowed");
+  await assert.rejects(() => claimRecallCopilotEvaluation(userId, "not-a-meeting", 4, 1_800_000), /identity/);
 });
 
 test("normalizes old sessions while preserving new durable defaults", async () => {

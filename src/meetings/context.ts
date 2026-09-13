@@ -15,7 +15,7 @@ export interface MeetingContextTurn {
 
 export function validateMeetingContext(value: unknown): MeetingContextTurn[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 12) throw new Error("meeting context must contain at most 12 turns");
+  if (!Array.isArray(value) || value.length > 32) throw new Error("meeting context must contain at most 32 turns");
   let total = 0;
   return value.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("meeting context turn is invalid");
@@ -24,7 +24,7 @@ export function validateMeetingContext(value: unknown): MeetingContextTurn[] {
     const text = turn.text.trim();
     if (!text || text.length > 1_000) throw new Error("meeting context text must be 1-1000 characters");
     total += text.length;
-    if (total > 6_000) throw new Error("meeting context exceeds 6000 characters");
+    if (total > 12_000) throw new Error("meeting context exceeds 12000 characters");
     return { role: turn.role, text };
   });
 }

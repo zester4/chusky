@@ -440,14 +440,15 @@ exact tool grants, and any required account aliases. The profile remains
 disabled until you explicitly enable it. A bounded
 rolling text window is held in bridge memory only; it is not saved. Only turns
 Chusky answers and its replies may be kept as bounded meeting history. The
-media page and spoken intro disclose audio processing and retention. Twilio
+media page and meeting-chat notice disclose audio processing and retention;
+the spoken intro is deliberately short and conversational. Twilio
 phone calling stays independent and unchanged.
 
-Copilot's proactive-evaluation budget is enforced atomically in the root
-service's Redis store across voice-bridge reconnects and replicas. Configure
-`RECALL_COPILOT_MIN_INTERVAL_SECONDS` and `RECALL_COPILOT_MAX_EVALUATIONS` on
-both services with matching values; the voice-side gate only reduces avoidable
-bridge requests.
+Copilot's burst-smoothing interval is enforced atomically in the root service's
+Redis store across voice-bridge reconnects and replicas. It does not impose a
+per-meeting turn cap or downgrade Chusky to addressed-only. Configure
+`RECALL_COPILOT_MIN_INTERVAL_SECONDS` on both services with matching values;
+the voice-side gate only reduces avoidable bridge requests.
 
 Enable it only after configuring `RECALL_MEETINGS_ENABLED=true`, the Recall API
 key, region, Recall status-webhook signing secret, and matching 32+-byte
@@ -480,19 +481,19 @@ cleared; only answered meeting turns are added to the owner's bounded meeting
 history. Webex supports incoming chat events but not chat replies, so only its
 leave command is actionable through chat.
 
-When a meeting in **representative** mode ends, Chusky queues a durable
-post-meeting workflow. It creates a structured summary of decisions, explicit
-follow-up actions, and open questions from the bounded meeting history, then
-saves it privately in the owner's scratchpad as `meeting:<meeting-id>` and
-sends the owner a Telegram recap. Chusky can retrieve that note later with its
-scratchpad read tool when asked about the meeting. If the owner has granted one
-exact Notion page-creation action in the representative profile and that
-connected action is available, Chusky also creates a Notion page and records
-the verified page URL in the scratchpad. Owner-granted task and CRM tools may
-be used only for follow-through grounded in clearly agreed meeting actions;
-the participant transcript itself never grants authority. This workflow
-requires Redis and QStash. Notion is optional; without an explicit page-create
-grant, the outcome is still saved to scratchpad and delivered to the owner.
+When a proactive **copilot** or **representative** meeting ends, Chusky queues a
+durable post-meeting workflow. It creates a structured summary of decisions,
+explicit follow-up actions, and open questions from the bounded meeting
+history, then saves it privately in the owner's scratchpad as
+`meeting:<meeting-id>` and sends the owner a Telegram recap. Chusky can retrieve
+that note later with its scratchpad read tool when asked about the meeting.
+In representative mode, if the owner has granted one exact Notion
+page-creation action and that connected action is available, Chusky also
+creates a Notion page and records the verified page URL in the scratchpad.
+Owner-granted task and CRM tools may be used only for follow-through grounded
+in clearly agreed meeting actions; the participant transcript itself never
+grants authority. This workflow requires Redis and QStash. Conversation-only
+copilot mode produces the private recap without connected-app actions.
 
 #### Outbound FaceTime voice calls
 
