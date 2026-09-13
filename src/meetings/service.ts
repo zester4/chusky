@@ -6,12 +6,14 @@ import {
   getRecallMeeting,
   getSession,
   getMeetingRepresentativeProfile,
+  getCalendarMeetingPreparation,
   isDurableStore,
   listRecallMeetings,
   claimDeliveryLease,
   releaseDeliveryLease,
   releaseRecallMeetingCreation,
   updateRecallMeeting,
+  updateCalendarMeetingPreparation,
   type RecallMeetingRecord,
   type RecallMeetingStatus,
 } from "../store.js";
@@ -31,6 +33,7 @@ import {
   validateRecallJoinAt,
 } from "./recall.js";
 import { lookupMeetingMission, prepareMeetingMission } from "./mission.js";
+import { openCalendarMeetingUrl } from "./calendar.js";
 
 const ACTIVE = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
 
@@ -305,6 +308,24 @@ export async function joinRecallMeeting(userId: number, input: {
 export async function prepareRecallMeetingMission(userId: number, input: { clientName: unknown; objective?: unknown; clientContext?: unknown }) {
   assertUserId(userId);
   return prepareMeetingMission(input, (await getSession(userId)).memories);
+}
+
+/** Join an owner-reviewed calendar preparation without ever returning its meeting link to the model. */
+export async function joinPreparedCalendarMeeting(userId: number, preparationId: unknown, signal?: AbortSignal) {
+  if (typeof preparationId !== "string" || !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(preparationId)) throw new Error("Invalid calendar meeting preparation ID");
+  const preparation = await getCalendarMeetingPreparation(userId, preparationId);
+  if (!preparation || preparation.status === "cancelled" || preparation.status === "expired") throw new Error("That calendar meeting is no longer available to join");
+  if (!preparation.sealedMeetingUrl) throw new Error("That calendar event does not contain a supported meeting link");
+  const meetingUrl = openCalendarMeetingUrl(preparation.sealedMeetingUrl);
+  const startMs = preparation.startAt ? Date.parse(preparation.startAt) : NaN;
+  const joinAt = Number.isFinite(startMs) && startMs - Date.now() >= 10 * 60_000 ? new Date(startMs).toISOString() : undefined;
+  const result = await joinRecallMeeting(userId, {
+    meetingUrl,
+    title: preparation.title,
+    ...(joinAt ? { joinAt } : {}),
+  }, signal);
+  await updateCalendarMeetingPreparation(userId, preparation.id, { status: "joined" });
+  return { ...result, preparation: { id: preparation.id, title: preparation.title, startAt: preparation.startAt } };
 }
 
 /** A live meeting can query only the memory IDs frozen into its owner-requested mission. */

@@ -85,6 +85,8 @@ const STATUSES: Record<string, string> = {
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking my phone-call history…",
   CHUCK_MEETING_JOIN: "🎥 I’m joining the meeting...",
+  CHUCK_MEETING_PREPARATION_LIST: "🗓️ I’m checking the prepared calendar meetings…",
+  CHUCK_MEETING_PREPARATION_JOIN: "🎥 I’m preparing to join that calendar meeting…",
   CHUCK_MEETING_LIST: "🎥 I’m checking my meeting...",
   CHUCK_MEETING_STATUS: "🎥 I’m checking that meeting’s status…",
   CHUCK_MEETING_LEAVE: "🎥 I’m leaving the meeting...",

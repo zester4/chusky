@@ -49,6 +49,7 @@ export interface UserSession {
   sdkProjects?: SdkProjectRecord[];
   faceTimeCalls?: FaceTimeCallRecord[];
   recallMeetings?: RecallMeetingRecord[];
+  calendarMeetingPreparations?: CalendarMeetingPreparation[];
   meetingRepresentativeProfile?: MeetingRepresentativeProfile;
   videoJobs?: VideoJobRecord[];
   shoppingRuns?: ShoppingRun[];
@@ -135,6 +136,24 @@ export interface RecallMeetingRecord {
   outcomeStatus?: "pending" | "completed";
   /** At-most-once owner notification ledger; claimed survives a workflow crash. */
   outcomeNotificationStatus?: "pending" | "claimed" | "delivered";
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Owner-private calendar meeting dossier. The meeting URL is AES-GCM sealed at rest. */
+export interface CalendarMeetingPreparation {
+  id: string;
+  userId: number;
+  sourceTriggerEventId: string;
+  calendarEventId?: string;
+  lifecycle: "created" | "updated" | "sync" | "starting_soon" | "attendee_response" | "cancelled";
+  status: "prepared" | "cancelled" | "joined" | "expired";
+  title?: string;
+  startAt?: string;
+  endAt?: string;
+  participants: string[];
+  /** Never return this field through a user-facing tool. */
+  sealedMeetingUrl?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -2107,7 +2126,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], recallMeetings: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -2171,7 +2190,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 
 export async function getSession(uid: number): Promise<UserSession> {
   const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2313,6 +2332,62 @@ export async function appendRecallMeetingMessages(uid: number, id: string, messa
   meeting.updatedAt = Date.now();
   await saveSession(uid, session);
   return meeting;
+}
+
+function calendarMeetingPreparationView(record: CalendarMeetingPreparation) {
+  const { sealedMeetingUrl: _sealedMeetingUrl, ...safe } = record;
+  return safe;
+}
+
+export async function saveCalendarMeetingPreparation(uid: number, record: CalendarMeetingPreparation): Promise<CalendarMeetingPreparation> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || record.userId !== uid || !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(record.id) || !record.sourceTriggerEventId.trim()) throw new Error("Invalid calendar meeting preparation identity");
+  if (record.title !== undefined && record.title.length > 180) throw new Error("Calendar meeting title is too long");
+  if (record.participants.length > 30 || record.participants.some((name) => typeof name !== "string" || name.length > 160)) throw new Error("Calendar meeting participants are invalid");
+  if (record.sealedMeetingUrl !== undefined && (typeof record.sealedMeetingUrl !== "string" || record.sealedMeetingUrl.length > 4096)) throw new Error("Calendar meeting link is invalid");
+  const session = await getSession(uid);
+  const existing = session.calendarMeetingPreparations ?? [];
+  const match = existing.find((item) => item.id === record.id || (record.calendarEventId && item.calendarEventId === record.calendarEventId));
+  const now = Date.now();
+  const next: CalendarMeetingPreparation = {
+    ...record,
+    id: match?.id ?? record.id,
+    ...(record.sealedMeetingUrl === undefined && match?.sealedMeetingUrl ? { sealedMeetingUrl: match.sealedMeetingUrl } : {}),
+    createdAt: match?.createdAt ?? record.createdAt ?? now,
+    updatedAt: now,
+  };
+  session.calendarMeetingPreparations = [next, ...existing.filter((item) => item.id !== next.id)].slice(0, 30);
+  await saveSession(uid, session);
+  return next;
+}
+
+export async function getCalendarMeetingPreparation(uid: number, id: string): Promise<CalendarMeetingPreparation | undefined> {
+  if (!/^cmp_[A-Za-z0-9_-]{1,96}$/.test(id)) return undefined;
+  return (await getSession(uid)).calendarMeetingPreparations?.find((item) => item.id === id && item.userId === uid);
+}
+
+export async function getCalendarMeetingPreparationForTrigger(uid: number, triggerEventId: string): Promise<CalendarMeetingPreparation | undefined> {
+  return (await getSession(uid)).calendarMeetingPreparations?.find((item) => item.userId === uid && item.sourceTriggerEventId === triggerEventId);
+}
+
+export async function listCalendarMeetingPreparations(uid: number, limit = 10): Promise<Array<ReturnType<typeof calendarMeetingPreparationView>>> {
+  const now = Date.now();
+  const session = await getSession(uid);
+  const preparations = session.calendarMeetingPreparations ?? [];
+  let changed = false;
+  for (const item of preparations) {
+    if (item.status === "prepared" && item.startAt && Date.parse(item.startAt) + 24 * 60 * 60_000 < now) { item.status = "expired"; item.updatedAt = now; changed = true; }
+  }
+  if (changed) await saveSession(uid, session);
+  return preparations.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))).map(calendarMeetingPreparationView);
+}
+
+export async function updateCalendarMeetingPreparation(uid: number, id: string, patch: Partial<Pick<CalendarMeetingPreparation, "status" | "lifecycle" | "title" | "startAt" | "endAt" | "participants" | "sealedMeetingUrl" | "sourceTriggerEventId">>): Promise<CalendarMeetingPreparation | undefined> {
+  const session = await getSession(uid);
+  const current = session.calendarMeetingPreparations?.find((item) => item.id === id && item.userId === uid);
+  if (!current) return undefined;
+  Object.assign(current, patch, { updatedAt: Date.now() });
+  await saveSession(uid, session);
+  return current;
 }
 
 export async function createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord> {

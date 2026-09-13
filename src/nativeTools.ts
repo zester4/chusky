@@ -15,7 +15,7 @@ import {
   type TaskStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
-  listVideoJobs, listHandoffRecords, saveHandoffRecord,
+  listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
@@ -28,7 +28,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
-import { getRecallMeetingForUser, joinRecallMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -441,6 +441,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_MEETING_CONTEXT_LOOKUP": {
       if (!runtime.meetingId) throw new Error("CHUCK_MEETING_CONTEXT_LOOKUP is available only inside an active meeting");
       return lookupRecallMeetingContext(userId, runtime.meetingId, text(args.query));
+    }
+    case "CHUCK_MEETING_PREPARATION_LIST": {
+      if (runtime.sharedConversation) throw new Error("Calendar meeting preparations are available only in a private owner conversation");
+      return listCalendarMeetingPreparations(userId, args.limit === undefined ? 10 : Number(args.limit));
+    }
+    case "CHUCK_MEETING_PREPARATION_JOIN": {
+      if (runtime.sharedConversation) throw new Error("Calendar meetings can be joined only from a private owner conversation");
+      return joinPreparedCalendarMeeting(userId, text(args.id), runtime.signal);
     }
     case "CHUCK_MEETING_JOIN": {
       if (runtime.sharedConversation && (args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined)) {
