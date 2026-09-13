@@ -101,3 +101,23 @@ test("meeting scheduling is an explicit representative capability and context lo
   assert.equal(tools.includes("CHUCK_MEETING_CONTEXT_LOOKUP"), true);
   assert.equal(tools.includes("CHUCK_MEETING_JOIN"), true);
 });
+
+test("representative instructions include the complete bounded client brief and prohibit fabrication", () => {
+  const profile = normalizeMeetingRepresentativeProfile({
+    enabled: true,
+    role: "sales",
+    objective: "Progress the approved client conversation",
+  });
+  const mission = {
+    clientName: "Acme",
+    objective: "Close the onboarding package",
+    brief: "Client: Acme\nObjective: Close the onboarding package\nRelevant owner-approved relationship facts:\n- Acme asked for a September start.",
+    sourceMemoryIds: ["mem_acme"],
+    preparedAt: 1,
+  };
+  const instructions = meetingRepresentativeInstructions(profile, "mtg_example", true, mission);
+  assert.match(instructions, /Acme asked for a September start/);
+  assert.match(instructions, /Ground client-specific claims/i);
+  assert.match(instructions, /Never invent a name, number, date, product capability/i);
+  assert.match(instructions, /SPEAK/);
+});
