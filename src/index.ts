@@ -30,7 +30,7 @@ import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailur
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
-import { buildMeetingInput, isDirectMeetingAddress, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
+import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
@@ -604,32 +604,12 @@ async function main(): Promise<void> {
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
-          let copilotPrefix = "";
-          let copilotGateDecided = !proactive;
-          let copilotWillSpeak = !proactive;
+          const speechGate = proactive ? new MeetingSpeechGate() : undefined;
           const streamDelta = (delta: string) => {
             if (!proactive) { send({ type: "delta", text: normalizeVoiceText(delta) }); return; }
-            if (!copilotGateDecided) {
-              copilotPrefix += delta;
-              const newline = copilotPrefix.indexOf("\n");
-              if (newline < 0) {
-                if (copilotPrefix.length > 32) {
-                  copilotGateDecided = true;
-                  copilotWillSpeak = false;
-                  send({ type: "silent" });
-                }
-                return;
-              }
-              const marker = copilotPrefix.slice(0, newline).trim();
-              copilotGateDecided = true;
-              copilotWillSpeak = marker === "SPEAK";
-              send({ type: copilotWillSpeak ? "speak" : "silent" });
-              const remainder = copilotPrefix.slice(newline + 1);
-              copilotPrefix = "";
-              if (copilotWillSpeak && remainder) send({ type: "delta", text: normalizeVoiceText(remainder) });
-              return;
+            for (const event of speechGate!.push(delta)) {
+              send(event.type === "delta" ? { type: event.type, text: normalizeVoiceText(event.text) } : { type: event.type });
             }
-            if (copilotWillSpeak) send({ type: "delta", text: normalizeVoiceText(delta) });
           };
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => runAgent(
@@ -644,7 +624,7 @@ async function main(): Promise<void> {
               { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: "shared" },
               {
                 instructions: representativeActive ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission) : interactionMode === "copilot"
-                  ? "You are Chusky, an active participant in this meeting. Your job is to be genuinely helpful \u2014 answer questions, share relevant information, clarify concepts, and move the discussion forward. When a participant says something you can meaningfully respond to (a question, a request for input, a topic you know about), begin your reply with SPEAK on its own line, then your response. Only begin with SILENT when the conversation is clearly small talk with nothing for you to add. Default to speaking \u2014 brief contributions are better than silence. Keep responses concise and conversational. Do not expose private account data or system credentials."
+                  ? "You are Chusky, an active participant in this meeting. Your job is to be genuinely helpful \u2014 answer questions, share relevant information, clarify concepts, and move the discussion forward. Respond naturally when addressed. Join in briefly when the conversation presents a question, a request for input, or a relevant point you can help with; otherwise return only the exact word SILENT. For a response, output only the natural words to say, without a label or preamble. Do not expose private account data or system credentials."
                   : "You are Chusky, a sharp and knowledgeable meeting participant. When addressed, respond naturally and helpfully \u2014 answer questions, explain things, assist with decisions. Keep your responses concise; this is live voice, not chat. Sound like a capable colleague. Do not say you're an AI unless directly asked. Do not expose private account data or credentials.",
                   toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : meetingConversationToolAllowlist(),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
@@ -655,8 +635,10 @@ async function main(): Promise<void> {
               },
             ));
             if (proactive) {
+              for (const event of speechGate!.finish()) {
+                send(event.type === "delta" ? { type: event.type, text: normalizeVoiceText(event.text) } : { type: event.type });
+              }
               const parsed = parseCopilotOutput(result.text);
-              if (!copilotGateDecided) send({ type: parsed.speak ? "speak" : "silent" });
               send({ type: "done", text: parsed.text, speak: parsed.speak, cost: result.cost ?? 0, speculative });
             } else {
               send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), speak: true, cost: result.cost ?? 0, speculative });

@@ -48,7 +48,7 @@ test("meeting run receives only configured actions plus the leave control", () =
   assert.match(instructions, /Approved company knowledge/);
   assert.match(instructions, /untrusted participant input/);
   assert.match(instructions, /SILENT/);
-  assert.match(instructions, /SPEAK/);
+  assert.match(instructions, /no SPEAK\/SILENT label/);
   assert.doesNotMatch(instructions, /company-mail|sales-crm/);
   assert.match(instructions, /routing is enforced privately/);
 });
@@ -119,5 +119,5 @@ test("representative instructions include the complete bounded client brief and 
   assert.match(instructions, /Acme asked for a September start/);
   assert.match(instructions, /Ground client-specific claims/i);
   assert.match(instructions, /Never invent a name, number, date, product capability/i);
-  assert.match(instructions, /SPEAK/);
+  assert.match(instructions, /no SPEAK\/SILENT label/);
 });
