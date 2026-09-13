@@ -8,6 +8,8 @@ import {
   getMeetingRepresentativeProfile,
   isDurableStore,
   listRecallMeetings,
+  claimDeliveryLease,
+  releaseDeliveryLease,
   releaseRecallMeetingCreation,
   updateRecallMeeting,
   type RecallMeetingRecord,
@@ -337,8 +339,14 @@ export async function getRecallMediaAuthorizationState(userId: number, id: strin
   if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return "denied";
   const meeting = await getRecallMeeting(userId, id);
   if (!meeting) return "denied";
-  if (meeting.status === "in_call") return "authorized";
-  if (["creating", "scheduled", "joining", "waiting_room"].includes(meeting.status)) return "pending";
+  // Recall starts the Output Media page while the bot is joining (and, on
+  // some platforms, while it is in a waiting room).  The signed ticket and
+  // owner-scoped record still protect this bridge; waiting for in_call here
+  // creates a startup loop where the page cannot be ready when Recall admits
+  // the bot.  No meeting audio is available to the page before Recall has
+  // actually connected it to the call.
+  if (["joining", "waiting_room", "in_call"].includes(meeting.status)) return "authorized";
+  if (["creating", "scheduled"].includes(meeting.status)) return "pending";
   return "denied";
 }
 
@@ -436,26 +444,41 @@ export async function applyRecallStatusWebhook(input: {
   const meeting = await getRecallMeeting(userId, meetingId);
   if (!meeting || meeting.providerBotId !== botId) return "ignored";
 
-  const status = statusEvent.status;
-  const providerStatusAt = recallStatusTime(statusEvent.statusAt);
-  if (["ended", "failed"].includes(meeting.status)) {
-    // A previous signed status delivery may have updated Redis but failed to
-    // enqueue the durable outcome. Re-enqueue on Recall retries; the workflow
-    // ID is deterministic and the worker independently deduplicates effects.
-    if (meeting.status === "ended" && status === "ended" && meeting.interactionMode !== "addressed") {
-      await input.onMeetingEnded?.(userId, meetingId);
-    }
-    return "ignored";
+  // Recall can fan out lifecycle events concurrently. Serialize updates for
+  // one meeting so a delayed `joining_call` save cannot overwrite the newer
+  // `in_call_*` transition that authorizes Output Media.
+  const lockKey = `recall-status:${userId}:${meetingId}`;
+  const lockToken = randomUUID();
+  if ((await claimDeliveryLease(lockKey, lockToken, 10_000)) !== "acquired") {
+    throw new Error("Recall meeting status update is already in progress");
   }
-  const order: Record<RecallMeetingStatus, number> = { creating: 0, scheduled: 0, joining: 1, waiting_room: 2, in_call: 3, leaving: 4, ended: 5, failed: 5 };
-  if ((meeting.status === "leaving" && status !== "ended" && status !== "failed") || order[status] < order[meeting.status]) return "ignored";
-  if (providerStatusAt !== undefined && meeting.providerStatusAt !== undefined && providerStatusAt < meeting.providerStatusAt) return "ignored";
-  const errorCode = String(statusEvent.subCode ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
-  const error = status === "failed"
-    ? `Recall could not join the meeting${errorCode ? ` (${errorCode})` : ""}`
-    : undefined;
-  const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error };
-  const updated = await updateRecallMeeting(userId, meetingId, patch);
-  if (updated && status === "ended" && meeting.interactionMode !== "addressed") await input.onMeetingEnded?.(userId, meetingId);
-  return updated ? "updated" : "ignored";
+  try {
+    const current = await getRecallMeeting(userId, meetingId);
+    if (!current || current.providerBotId !== botId) return "ignored";
+
+    const status = statusEvent.status;
+    const providerStatusAt = recallStatusTime(statusEvent.statusAt);
+    if (["ended", "failed"].includes(current.status)) {
+      // A previous signed status delivery may have updated Redis but failed to
+      // enqueue the durable outcome. Re-enqueue on Recall retries; the workflow
+      // ID is deterministic and the worker independently deduplicates effects.
+      if (current.status === "ended" && status === "ended" && current.interactionMode !== "addressed") {
+        await input.onMeetingEnded?.(userId, meetingId);
+      }
+      return "ignored";
+    }
+    const order: Record<RecallMeetingStatus, number> = { creating: 0, scheduled: 0, joining: 1, waiting_room: 2, in_call: 3, leaving: 4, ended: 5, failed: 5 };
+    if ((current.status === "leaving" && status !== "ended" && status !== "failed") || order[status] < order[current.status]) return "ignored";
+    if (providerStatusAt !== undefined && current.providerStatusAt !== undefined && providerStatusAt < current.providerStatusAt) return "ignored";
+    const errorCode = String(statusEvent.subCode ?? "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 80);
+    const error = status === "failed"
+      ? `Recall could not join the meeting${errorCode ? ` (${errorCode})` : ""}`
+      : undefined;
+    const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error };
+    const updated = await updateRecallMeeting(userId, meetingId, patch);
+    if (updated && status === "ended" && current.interactionMode !== "addressed") await input.onMeetingEnded?.(userId, meetingId);
+    return updated ? "updated" : "ignored";
+  } finally {
+    await releaseDeliveryLease(lockKey, lockToken).catch(() => undefined);
+  }
 }

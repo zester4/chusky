@@ -120,6 +120,7 @@ test("ended representative meeting saves to owner scratchpad, follows only grant
   const calls: string[] = [];
   let claimed = false;
   let completed = false;
+  let completionTtl: number | undefined;
   const deps = {
     getMeeting: async (userId: number, id: string) => userId === meeting.userId && id === meeting.id ? meeting : undefined,
     getProfile: async () => profile,
@@ -132,13 +133,14 @@ test("ended representative meeting saves to owner scratchpad, follows only grant
     saveOutcome: async (userId: number, id: string, value: ReturnType<typeof parseMeetingOutcome>, _followThrough: unknown, status: string) => { calls.push(`save:${userId}:${id}:${value.title}:${status}`); },
     notifyOwner: async (userId: number, text: string) => { calls.push(`notify:${userId}`); assert.match(text, /Acme pilot onboarding/); },
     claim: async (_key: string, _token: string) => { if (claimed) return "completed" as const; claimed = true; return "acquired" as const; },
-    complete: async () => { completed = true; return true; },
+    complete: async (_key: string, _token: string, ttlSeconds: number) => { completionTtl = ttlSeconds; completed = true; return true; },
     release: async () => { claimed = false; return true; },
   };
 
   assert.equal(await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, deps), "completed");
   assert.equal(await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, deps), "duplicate");
   assert.equal(completed, true);
+  assert.equal(completionTtl, 90 * 24 * 60 * 60, "outcome dedupe TTL must remain within the store limit");
   assert.deepEqual(calls, [
     `save:42:${meeting.id}:Acme pilot onboarding:pending`,
     "follow:NOTION_CREATE_PAGE:NOTION_CREATE_PAGE,HUBSPOT_UPDATE_DEAL:CHUCK_TASK_CREATE",

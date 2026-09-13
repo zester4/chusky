@@ -246,7 +246,10 @@ export async function processMeetingOutcome(
       await deps.notifyOwner(input.userId, formatMeetingOutcomeNotification(outcome, safeFollowThrough));
       await deps.saveOutcome(input.userId, meeting.id, outcome, safeFollowThrough, "completed", "delivered");
     }
-    if (!(await deps.complete(key, token, 365 * 24 * 60 * 60))) throw new Error("Meeting outcome processing lease was lost");
+    // Store-backed delivery markers are intentionally bounded to 90 days.
+    // This is long enough to deduplicate workflow retries without asking the
+    // persistence layer for an invalid year-long TTL.
+    if (!(await deps.complete(key, token, 90 * 24 * 60 * 60))) throw new Error("Meeting outcome processing lease was lost");
     return "completed";
   } catch (error) {
     try { await deps.release(key, token); } catch { /* Lease TTL is the fallback. */ }

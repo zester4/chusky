@@ -295,13 +295,17 @@ test("current Recall fatal status envelope preserves only its safe sub-code", as
   assert.doesNotMatch(failed?.error ?? "", /private provider diagnostic/);
 });
 
-test("Recall media authorization waits for the owned bot to enter the call and rejects terminal states", async () => {
+test("Recall media authorization starts once the owned bot is joining and rejects terminal states", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
   const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/media-auth-race" });
 
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "creating" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
+  await updateRecallMeeting(ownerId, meeting.id, { status: "joining" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   await updateRecallMeeting(ownerId, meeting.id, { status: "waiting_room" });
-  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   await updateRecallMeeting(ownerId, meeting.id, { status: "ended" });

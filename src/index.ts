@@ -664,7 +664,7 @@ async function main(): Promise<void> {
       if (state === "denied") return c.text("Not found", 404, { "Cache-Control": "no-store" });
       if (state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
       const meeting = await getRecallMeeting(userId, meetingId);
-      if (!meeting || meeting.status !== "in_call") return c.text("Not found", 404, { "Cache-Control": "no-store" });
+      if (!meeting || !["joining", "waiting_room", "in_call"].includes(meeting.status)) return c.text("Not found", 404, { "Cache-Control": "no-store" });
       const interactionMode = meeting.interactionMode === "representative" || meeting.interactionMode === "copilot"
         ? meeting.interactionMode
         : "addressed";
