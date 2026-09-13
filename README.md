@@ -420,7 +420,8 @@ support matrix does not list GoTo, so Chusky does not enable GoTo for interactiv
 voice until that capability is documented and tested.
 
 The separate [`chusky-voice`](chusky-voice/README.md) service runs Recall
-Output Media and Deepgram Flux; Chusky's configured model remains the agent
+Output Media, Deepgram Nova-3 transcription, and streaming Flux speech;
+Chusky's configured model remains the agent
 brain. When asked to join without an explicit mode, Chusky uses an enabled
 company-representative profile, or proactive copilot mode if none is enabled;
 addressed-only mode is reserved for an explicit wake-word-only request. It
