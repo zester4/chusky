@@ -15,6 +15,8 @@ import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import type { ContentPart } from "./types.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { isBlandVoiceConfigured } from "./calls/bland.js";
+import { isTwilioVoiceConfigured } from "./calls/twilio.js";
 import { cancelJob, cancelReminder, nativeTool, scheduleJob, setReminder } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
@@ -126,14 +128,15 @@ async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefine
   return userId ? { userId } : undefined;
 }
 
-function phoneCallingAvailable(): boolean {
-  return Boolean(config.twilioVoiceEnabled && config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl);
+function phoneCallingProvider(): "bland" | "twilio" | undefined {
+  if (config.blandVoiceEnabled) return isBlandVoiceConfigured() ? "bland" : undefined;
+  return isTwilioVoiceConfigured() ? "twilio" : undefined;
 }
 
-function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; error?: string; createdAt: number; updatedAt: number }) {
+function callView(call: { id: string; provider?: string; direction?: string; phoneNumber: string; purpose: string; status: string; error?: string; summary?: string; createdAt: number; updatedAt: number }) {
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
-  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+  return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, summary: call.summary, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
 }
 function approvalView(approval: { id: string; status: string; toolSlug: string; args: Record<string, unknown>; request?: string; channelProvider?: string; handoffId?: string; createdAt: number; expiresAt: number }) {
   return { id: approval.id, status: approval.status, toolSlug: approval.toolSlug, args: approval.args, request: approval.request, channelProvider: approval.channelProvider, handoffId: approval.handoffId, createdAt: new Date(approval.createdAt).toISOString(), expiresAt: new Date(approval.expiresAt).toISOString() };
@@ -406,13 +409,14 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/calls", async (c) => {
     const owner = await linkedWebCallOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
-    return c.json({ available: phoneCallingAvailable(), data: (await listPhoneCalls(owner.userId)).map(callView) });
+    const provider = phoneCallingProvider();
+    return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
   app.post("/v1/account/calls", async (c) => {
     const owner = await linkedWebCallOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
-    if (!phoneCallingAvailable()) return apiError(c, 503, "phone_calling_unavailable", "Phone calling is not configured on this Chusky deployment.");
+    if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
     if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
     const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown };
     try {

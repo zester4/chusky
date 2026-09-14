@@ -564,6 +564,24 @@ BTTS_V3 catalogue (private voice clones are not exposed in the shared menu).
 The chosen voice applies to the next call or meeting. “Use service default”
 clears the account override and returns to `VOICE_TTS_MODEL`/`BLAND_VOICE`.
 
+Bland outbound calls also require a one-time Bland v1 Custom Tool resource so
+the live call can consult Chusky without receiving a snapshot of unrelated chat
+history. Set `BLAND_WEBHOOK_SECRET` and a separate high-entropy
+`BLAND_CONSULT_TOOL_SECRET` (32-256 URL-safe characters; generate one with
+`node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`), then run
+`npm run setup:bland-tool` with `BLAND_API_KEY` and the public HTTPS
+`BLAND_WEBHOOK_URL` configured. The command provisions the `/v1/tools` resource
+and prints its `TL-*` ID; set that as `BLAND_CONSULT_TOOL_ID` in the Chusky
+service. Keep the same `BLAND_CONSULT_TOOL_SECRET` in the Chusky service and
+the Bland custom tool. Chusky validates the tool bearer secret, resolves Bland's
+provider call ID through a short-lived Redis owner index, and answers through
+the owner's selected OpenRouter model using only the stated call purpose and
+the current question in a read-only, ephemeral run. It receives no previous
+chat history and cannot execute Composio or native actions. Bland call creation
+attaches the provisioned tool ID (the documented `/v1/calls` contract), and
+status callbacks use a separate signed, per-call opaque URL. Health reports
+Bland as misconfigured until all five settings are valid.
+
 Sendblue `content` is plain text, not rendered Markdown. Chusky converts common Markdown at the provider boundary: emphasis markers are removed, bullets become `•`, headings become uppercase, and links become `label: URL`. Typing indicators are sent through `POST /api/send-typing-indicator` before linked one-to-one agent work and stopped after delivery. Verified one-to-one inbound messages are marked read through `POST /api/mark-read`; this is best-effort and never blocks the reply. Generated images and supported audio/video artifacts are stored in R2 and sent using short-lived HTTPS URLs when R2 is configured. A linked user can reply to an iMessage and send `/react love`, `/react like`, `/react dislike`, `/react laugh`, `/react emphasize`, or `/react question` to send a tapback to the replied message. Reactions are private-chat only. Sendblue status callbacks are sent to `/sendblue/status` and update the durable outbox receipt. The Sendblue dashboard's “Typing Indicators” webhook section is only needed if Chusky later needs to receive user-typing events.
 
 ### Channel support and operating model

@@ -2,7 +2,7 @@ import { Bot, InputFile, InlineKeyboard } from "grammy";
 import { Receiver } from "@upstash/qstash";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { serve, type ServerType } from "@hono/node-server";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
@@ -36,6 +36,9 @@ import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { answerBlandQuestion } from "./calls/blandBrain.js";
+import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
+import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
@@ -481,33 +484,48 @@ async function main(): Promise<void> {
       }
     });
 
-    // Bland post-call callbacks are signed over the exact raw JSON body.
-    // They update the same owner-scoped call history used by Twilio.
-    app.post("/bland/webhook", async (c) => {
-      if (!config.blandVoiceEnabled || !config.blandWebhookSecret) return c.text("Not found", 404);
-      const raw = await c.req.text();
-      const signature = c.req.header("X-Webhook-Signature") ?? "";
-      const expected = createHmac("sha256", config.blandWebhookSecret).update(raw).digest("hex");
-      const actual = Buffer.from(signature, "utf8");
-      const wanted = Buffer.from(expected, "utf8");
-      if (!signature || actual.length !== wanted.length || !timingSafeEqual(actual, wanted)) return c.json({ ok: false, error: "invalid Bland webhook signature" }, 401);
-      let body: Record<string, unknown>;
-      try { body = JSON.parse(raw) as Record<string, unknown>; } catch { return c.json({ ok: false, error: "invalid Bland webhook JSON" }, 400); }
-      const metadata = (body.metadata && typeof body.metadata === "object" ? body.metadata : {}) as Record<string, unknown>;
-      const callId = String(metadata.chusky_call_id ?? "").trim();
-      const userId = Number(metadata.chusky_user_id);
-      if (!/^blc_[0-9a-f-]{36}$/i.test(callId) || !Number.isSafeInteger(userId) || userId <= 0) return c.json({ ok: false, error: "invalid Bland callback identity" }, 400);
-      const call = await getPhoneCall(userId, callId);
-      if (!call || call.provider !== "bland") return c.json({ ok: false, error: "unknown Bland call" }, 404);
-      const deliveryKey = `bland-postcall:${callId}`;
-      if (!(await claimDelivery(deliveryKey, 7 * 24 * 60 * 60 * 1000))) return c.json({ ok: true, duplicate: true });
-      const completed = body.completed === true || String(body.queue_status ?? "").toLowerCase() === "complete";
-      const errorMessage = String(body.error_message ?? "").trim();
-      const transcript = String(body.concatenated_transcript ?? body.transcript ?? "").trim().slice(0, 12000);
-      await updatePhoneCall(userId, callId, { status: errorMessage ? "failed" : completed ? "ended" : "active", providerCallId: String(body.call_id ?? call.providerCallId ?? "").slice(0, 100), ...(errorMessage ? { error: errorMessage.slice(0, 500) } : {}) });
-      if (transcript) await appendMessages(userId, [{ role: "assistant", content: `[Bland call ${callId} transcript]\n${transcript}` }]);
-      await completeDelivery(deliveryKey, 30 * 24 * 60 * 60 * 1000);
-      return c.json({ ok: true });
+    // Live event callbacks have only Bland's provider call_id; the per-call
+    // opaque token resolves the owner without trusting undocumented metadata.
+    const blandWebhook = async (c: Context) => {
+      if (!config.blandVoiceEnabled || config.blandWebhookSecret.trim().length < 32) return c.text("Not found", 404);
+      const contentLength = Number(c.req.header("content-length") ?? 0);
+      if (contentLength > 2 * 1024 * 1024) return c.json({ ok: false, error: "payload too large" }, 413);
+      try {
+        const result = await processBlandWebhook({
+          rawBody: await c.req.text(),
+          signature: c.req.header("X-Webhook-Signature") ?? "",
+          callbackToken: c.req.param("callbackToken"),
+          secret: config.blandWebhookSecret,
+        });
+        return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
+      } catch (error) {
+        logger.warn({ err: error }, "Bland callback processing failed; allowing provider retry");
+        return c.json({ ok: false, error: "Bland callback could not be processed" }, 503);
+      }
+    };
+    // Keep the root route temporarily for in-flight calls created by older releases.
+    app.post("/bland/webhook", blandWebhook);
+    app.post("/bland/webhook/:callbackToken", blandWebhook);
+
+    app.post("/bland/tool", async (c) => {
+      if (!config.blandVoiceEnabled || config.blandConsultToolSecret.trim().length < 32) return c.text("Not found", 404);
+      const contentLength = Number(c.req.header("content-length") ?? 0);
+      if (contentLength > 16 * 1024) return c.json({ ok: false, error: "request too large" }, 413);
+      try {
+        const result = await processBlandConsult({
+          authorization: c.req.header("Authorization") ?? "",
+          rawBody: await c.req.text(),
+          secret: config.blandConsultToolSecret,
+          authorizeQuestion: async (userId) => !(await checkRateLimit(userId))
+            ? "rate_limited"
+            : !(await canSpend(userId)) ? "usage_limit" : "allowed",
+          answerQuestion: ({ userId, callId, purpose, question }) => answerBlandQuestion({ userId, callId, purpose, question }, c.req.raw.signal),
+        });
+        return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
+      } catch (error) {
+        logger.warn({ err: error }, "Bland live Chusky consultation failed");
+        return c.json({ ok: false, error: "Chusky could not answer right now" }, 503);
+      }
     });
 
     // Streaming voice turn endpoint. It deliberately does not write history:
@@ -1852,7 +1870,7 @@ async function main(): Promise<void> {
         const production = process.env.NODE_ENV === "production";
         const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
         const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (config.blandApiKey && config.blandWebhookSecret && config.blandWebhookUrl ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
         const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.bland !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, composioTriggers: composioTriggerSetup, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {

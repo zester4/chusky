@@ -204,7 +204,35 @@ test("linked verified dashboard users can request and list phone calls without e
   assert.equal((await getApproval(810099, approval.id))?.toolSlug, "CHUCK_START_PHONE_CALL");
   const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
   assert.equal(listed.status, 200);
-  const body = await listed.json() as { available: boolean; data: unknown[] };
+  const body = await listed.json() as { available: boolean; provider: string | null; data: unknown[] };
   assert.equal(body.available, true);
+  assert.equal(body.provider, "twilio");
   assert.deepEqual(body.data, []);
+});
+
+test("Bland readiness controls dashboard call availability and the selected provider", async () => {
+  const keys = ["betterAuthEnabled", "blandVoiceEnabled", "blandApiKey", "blandWebhookSecret", "blandWebhookUrl", "blandConsultToolId", "blandConsultToolSecret", "twilioVoiceEnabled"] as const;
+  const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
+  try {
+    Object.assign(config, {
+      betterAuthEnabled: true, blandVoiceEnabled: true, blandApiKey: "bland-key",
+      blandWebhookSecret: "a-distinct-webhook-signing-secret-with-entropy",
+      blandWebhookUrl: "https://chusky.example/bland/webhook",
+      blandConsultToolId: "TL-1234567890", blandConsultToolSecret: "a-distinct-url-safe-tool-secret-with-entropy",
+      twilioVoiceEnabled: false,
+    });
+    setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+    const link = await createWebTelegramLinkCode("bland-user");
+    assert.equal(await redeemWebTelegramLinkCode(link.code, 810100), "linked");
+    const api = app();
+    const headers = { "X-Test-Web-User": "bland-user", "Content-Type": "application/json" };
+    const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
+    assert.equal(listed.status, 200);
+    assert.deepEqual(await listed.json(), { available: true, provider: "bland", data: [] });
+    const requested = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Follow up on the demo" }) }));
+    assert.equal(requested.status, 201);
+  } finally {
+    Object.assign(config, original);
+    setWebAuthSessionResolverForTests();
+  }
 });

@@ -1,15 +1,31 @@
 import { config } from "../config.js";
 import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
+import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface BlandCallInput { phoneNumber: string; purpose: string; context?: string; }
+export interface BlandCallInput { phoneNumber: string; purpose: string; }
 export interface BlandCallDependencies {
   enabled: boolean;
   apiKey: string;
   webhookUrl: string;
+  webhookSecret: string;
+  consultToolId: string;
+  consultToolSecret: string;
   voice: string;
   fetchImpl?: FetchLike;
+}
+
+export function isBlandVoiceConfigured(options: Pick<BlandCallDependencies, "enabled" | "apiKey" | "webhookUrl" | "webhookSecret" | "consultToolId" | "consultToolSecret"> = {
+  enabled: config.blandVoiceEnabled, apiKey: config.blandApiKey, webhookUrl: config.blandWebhookUrl, webhookSecret: config.blandWebhookSecret,
+  consultToolId: config.blandConsultToolId, consultToolSecret: config.blandConsultToolSecret,
+}): boolean {
+  if (!options.enabled || !options.apiKey.trim() || options.webhookSecret.trim().length < 32) return false;
+  if (!/^TL-[A-Za-z0-9_-]{6,128}$/.test(options.consultToolId) || !isValidBlandToolSecret(options.consultToolSecret) || options.consultToolSecret === options.webhookSecret) return false;
+  try {
+    const callback = new URL(options.webhookUrl);
+    return callback.protocol === "https:" && !callback.username && !callback.password && !callback.hash && !callback.search;
+  } catch { return false; }
 }
 
 function text(value: unknown, label: string, max: number): string {
@@ -21,7 +37,13 @@ function text(value: unknown, label: string, max: number): string {
 function validate(options: BlandCallDependencies): void {
   if (!options.enabled) throw new Error("Bland voice is disabled. Set BLAND_VOICE_ENABLED=true to use Bland.");
   if (!options.apiKey) throw new Error("BLAND_API_KEY is required when Bland voice is enabled");
-  if (!/^https:\/\//i.test(options.webhookUrl)) throw new Error("BLAND_WEBHOOK_URL must be an HTTPS URL");
+  if (options.webhookSecret.trim().length < 32) throw new Error("BLAND_WEBHOOK_SECRET must contain at least 32 characters");
+  if (!/^TL-[A-Za-z0-9_-]{6,128}$/.test(options.consultToolId)) throw new Error("BLAND_CONSULT_TOOL_ID must be the ID returned when provisioning Chusky's Bland custom tool");
+  if (!isValidBlandToolSecret(options.consultToolSecret)) throw new Error("BLAND_CONSULT_TOOL_SECRET must be 32-256 URL-safe random characters");
+  if (options.consultToolSecret === options.webhookSecret) throw new Error("BLAND_CONSULT_TOOL_SECRET must be distinct from BLAND_WEBHOOK_SECRET");
+  let callback: URL;
+  try { callback = new URL(options.webhookUrl); } catch { throw new Error("BLAND_WEBHOOK_URL must be an absolute HTTPS URL"); }
+  if (callback.protocol !== "https:" || callback.username || callback.password || callback.hash || callback.search) throw new Error("BLAND_WEBHOOK_URL must be an absolute HTTPS URL without credentials, query parameters, or fragments");
 }
 
 /** Queue a Bland call while keeping Chusky as the owner of call metadata. */
@@ -29,6 +51,9 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   enabled: config.blandVoiceEnabled,
   apiKey: config.blandApiKey,
   webhookUrl: config.blandWebhookUrl,
+  webhookSecret: config.blandWebhookSecret,
+  consultToolId: config.blandConsultToolId,
+  consultToolSecret: config.blandConsultToolSecret,
   voice: config.blandVoice,
 }): Promise<PhoneCallRecord> {
   validate(options);
@@ -39,17 +64,21 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   try {
+    const callbackToken = createBlandCallToken({ userId, callId: call.id }, options.webhookSecret);
+    const callbackUrl = new URL(options.webhookUrl);
+    callbackUrl.pathname = `${callbackUrl.pathname.replace(/\/+$/, "")}/${callbackToken}`;
     const response = await (options.fetchImpl ?? fetch)("https://api.bland.ai/v1/calls", {
       method: "POST",
       headers: { Authorization: options.apiKey, "Content-Type": "application/json" },
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
         phone_number: phoneNumber,
-        task: `You are calling on behalf of Chusky. Purpose: ${purpose}. Be concise, natural, and professional. Do not claim an action is complete unless it actually is. Context from Chusky: ${(input.context ?? "").slice(0, 6000)}`,
+        task: `You are Chusky, speaking naturally on behalf of the owner or their company. Open with a brief, friendly introduction and state the reason for the call: ${purpose.slice(0, 1400)}. Listen and respond conversationally. Use the Consult Chusky tool when a relevant factual question is not answered by this call's stated purpose; do not use it for ordinary pleasantries. Do not invent facts, promise an action you cannot take, or say an action is complete unless it is verified. If you cannot verify an answer, say so naturally and offer a follow-up.`,
         voice: selectedVoice,
-        webhook: options.webhookUrl,
+        webhook: callbackUrl.toString(),
         webhook_events: ["queue", "call", "latency", "tool"],
         metadata: { chusky_call_id: call.id, chusky_user_id: String(userId) },
+        tools: [options.consultToolId],
       }),
     });
     const payload = await response.json().catch(() => ({})) as { call_id?: string; message?: string; error?: string };

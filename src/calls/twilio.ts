@@ -27,6 +27,13 @@ function validate(options: TwilioCallDependencies): void {
   if (!/^wss:\/\//i.test(options.mediaStreamUrl)) throw new Error("TWILIO_MEDIA_STREAM_URL must be a WSS URL");
 }
 
+export function isTwilioVoiceConfigured(options: Omit<TwilioCallDependencies, "createCall"> = {
+  enabled: config.twilioVoiceEnabled, accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken,
+  callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
+}): boolean {
+  try { validate(options); return true; } catch { return false; }
+}
+
 /** Validates the exact user-reviewed arguments before an approval is created. */
 export function validateTwilioCallInput(input: TwilioCallInput): TwilioCallInput {
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);

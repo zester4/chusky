@@ -131,6 +131,8 @@ export const config = {
   blandApiKey: optional("BLAND_API_KEY", ""),
   blandWebhookSecret: optional("BLAND_WEBHOOK_SECRET", ""),
   blandWebhookUrl: optional("BLAND_WEBHOOK_URL", ""),
+  blandConsultToolId: optional("BLAND_CONSULT_TOOL_ID", ""),
+  blandConsultToolSecret: optional("BLAND_CONSULT_TOOL_SECRET", ""),
   blandVoice: optional("BLAND_VOICE", "maya"),
 
   // ── Daytona computer ───────────────────────────────────────────────

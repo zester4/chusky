@@ -108,6 +108,10 @@ export interface PhoneCallRecord {
   status: "starting" | "bridging" | "active" | "ended" | "failed";
   providerCallId?: string;
   error?: string;
+  /** Bland's post-call analysis, safely bounded and scoped to this owner. */
+  summary?: string;
+  callLengthSeconds?: number;
+  postCallProcessedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -774,6 +778,8 @@ interface Backend {
   claimDeliveryLease(key: string, token: string, leaseMs: number): Promise<"acquired" | "completed" | "busy">;
   completeDeliveryLease(key: string, token: string, ttlSeconds: number): Promise<boolean>;
   releaseDeliveryLease(key: string, token: string): Promise<boolean>;
+  linkBlandProviderCall(providerCallId: string, userId: number, callId: string): Promise<boolean>;
+  getBlandProviderCall(providerCallId: string): Promise<{ userId: number; callId: string } | undefined>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
   claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, nowMs?: number): Promise<"allowed" | "interval">;
@@ -1021,6 +1027,25 @@ class RedisBackend implements Backend {
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+  }
+  async linkBlandProviderCall(providerCallId: string, userId: number, callId: string): Promise<boolean> {
+    const key = `chuck:bland:provider:${createHash("sha256").update(providerCallId).digest("hex")}`;
+    const value = JSON.stringify({ userId, callId });
+    const result = await this.r.eval(
+      "local prior=redis.call('GET',KEYS[1]); if not prior then redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]); return 1 end; if prior==ARGV[1] then redis.call('EXPIRE',KEYS[1],ARGV[2]); return 1 end; return 0",
+      1, key, value, String(30 * 24 * 60 * 60),
+    );
+    return Number(result) === 1;
+  }
+  async getBlandProviderCall(providerCallId: string): Promise<{ userId: number; callId: string } | undefined> {
+    const key = `chuck:bland:provider:${createHash("sha256").update(providerCallId).digest("hex")}`;
+    const raw = await this.r.get(key);
+    if (!raw) return undefined;
+    try {
+      const value = JSON.parse(raw) as { userId?: unknown; callId?: unknown };
+      return Number.isSafeInteger(value.userId) && Number(value.userId) > 0 && typeof value.callId === "string"
+        ? { userId: Number(value.userId), callId: value.callId } : undefined;
+    } catch { return undefined; }
   }
   async getApproval(userId: number, id: string): Promise<ApprovalRecord | undefined> {
     const raw = await this.r.get(this.approvalKey(id));
@@ -1797,9 +1822,21 @@ class MemoryBackend implements Backend {
   private reminders = new Map<number, ReminderRecord[]>();
   private jobs = new Map<number, JobRecord[]>();
   private approvals = new Map<string, ApprovalRecord>();
+  private blandProviderCalls = new Map<string, { userId: number; callId: string; expiresAt: number }>();
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async linkBlandProviderCall(providerCallId: string, userId: number, callId: string) {
+    const prior = this.blandProviderCalls.get(providerCallId);
+    if (prior && prior.expiresAt > Date.now()) return prior.userId === userId && prior.callId === callId;
+    this.blandProviderCalls.set(providerCallId, { userId, callId, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 });
+    return true;
+  }
+  async getBlandProviderCall(providerCallId: string) {
+    const value = this.blandProviderCalls.get(providerCallId);
+    if (!value || value.expiresAt <= Date.now()) { this.blandProviderCalls.delete(providerCallId); return undefined; }
+    return { userId: value.userId, callId: value.callId };
+  }
   async getApproval(userId: number, id: string) { const approval = this.approvals.get(id); return approval?.userId === userId ? approval : undefined; }
   async saveApproval(record: ApprovalRecord) { this.approvals.set(record.id, record); const session = this.sessions.get(record.userId) ?? fresh(); session.approvals = [...session.approvals.filter((item) => item.id !== record.id), record].slice(-20); this.sessions.set(record.userId, session); return record; }
   async listApprovals(userId: number, limit = 50) { return [...this.approvals.values()].filter((item) => item.userId === userId).sort((a, b) => b.createdAt - a.createdAt).slice(0, limit); }
@@ -2341,6 +2378,9 @@ export async function getSession(uid: number): Promise<UserSession> {
       phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
+      ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),
+      ...(typeof item.callLengthSeconds === "number" && Number.isFinite(item.callLengthSeconds) && item.callLengthSeconds >= 0 ? { callLengthSeconds: Math.min(item.callLengthSeconds, 86_400) } : {}),
+      ...(typeof item.postCallProcessedAt === "number" && Number.isFinite(item.postCallProcessedAt) ? { postCallProcessedAt: item.postCallProcessedAt } : {}),
       createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
       updatedAt: typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
     }];
@@ -2378,13 +2418,75 @@ export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promis
   return record;
 }
 
-export async function updatePhoneCall(uid: number, id: string, patch: Partial<Pick<PhoneCallRecord, "status" | "providerCallId" | "error">>): Promise<PhoneCallRecord | undefined> {
+type PhoneCallPatch = Partial<Pick<PhoneCallRecord, "status" | "providerCallId" | "error" | "summary" | "callLengthSeconds">>;
+
+function nextPhoneCallStatus(current: PhoneCallRecord["status"], next: PhoneCallRecord["status"], provider?: PhoneCallRecord["provider"]): PhoneCallRecord["status"] {
+  if (provider !== "bland") return next;
+  if (current === "failed") return current;
+  if (current === "ended") return next === "failed" ? next : current;
+  const rank: Record<PhoneCallRecord["status"], number> = { starting: 0, bridging: 1, active: 2, ended: 3, failed: 3 };
+  return rank[next] >= rank[current] ? next : current;
+}
+
+function applyPhoneCallPatch(current: PhoneCallRecord, patch: PhoneCallPatch): void {
+  if (patch.providerCallId && current.providerCallId && patch.providerCallId !== current.providerCallId) {
+    throw new Error("Bland provider call ID does not match the saved call");
+  }
+  Object.assign(current, patch, {
+    ...(patch.status ? { status: nextPhoneCallStatus(current.status, patch.status, current.provider) } : {}),
+    updatedAt: Date.now(),
+  });
+}
+
+function appendSessionHistory(session: UserSession, messages: Message[]): void {
+  const stamped = messages.map((message) => ({
+    ...message,
+    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
+  }));
+  session.history.push(...stamped);
+  session.totalMessages += stamped.filter((message) => message.role === "user").length;
+  const cap = config.maxHistory * 2;
+  if (session.history.length > cap) {
+    const overflow = session.history.slice(0, session.history.length - cap);
+    const compact = overflow.map((message) => `${message.role}: ${message.content}`).join(" ").slice(0, 1800);
+    session.summaries = [...session.summaries, compact].slice(-10);
+    session.history = session.history.slice(session.history.length - cap);
+  }
+}
+
+export async function updatePhoneCall(uid: number, id: string, patch: PhoneCallPatch): Promise<PhoneCallRecord | undefined> {
   const s = await getSession(uid);
   const current = (s.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
   if (!current) return undefined;
-  Object.assign(current, patch, { updatedAt: Date.now() });
+  applyPhoneCallPatch(current, patch);
+  if (current.provider === "bland" && current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
+    throw new Error("Bland provider call ID is already linked to another Chusky call");
+  }
   await saveSession(uid, s);
   return current;
+}
+
+/** Atomically commit Bland's final result, transcript roles, and replay marker in the owner session. */
+export async function finalizeBlandPhoneCall(
+  uid: number,
+  id: string,
+  patch: PhoneCallPatch,
+  transcriptMessages: Message[],
+): Promise<"processed" | "already_processed" | "not_found"> {
+  const session = await getSession(uid);
+  const current = (session.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid && item.provider === "bland");
+  if (!current) return "not_found";
+  const alreadyProcessed = typeof current.postCallProcessedAt === "number";
+  applyPhoneCallPatch(current, patch);
+  if (current.providerCallId && !(await backend.linkBlandProviderCall(current.providerCallId, uid, id))) {
+    throw new Error("Bland provider call ID is already linked to another Chusky call");
+  }
+  if (!alreadyProcessed) {
+    current.postCallProcessedAt = Date.now();
+    if (transcriptMessages.length) appendSessionHistory(session, transcriptMessages);
+  }
+  await saveSession(uid, session);
+  return alreadyProcessed ? "already_processed" : "processed";
 }
 
 export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {
@@ -2408,6 +2510,15 @@ export async function getHandoffRecord(uid: number, id: string): Promise<Handoff
 
 export async function getPhoneCall(uid: number, id: string): Promise<PhoneCallRecord | undefined> {
   return (await getSession(uid)).phoneCalls?.find((item) => item.id === id && item.userId === uid);
+}
+
+/** Resolve Bland's provider call ID through a short-lived, owner-checked index. */
+export async function getBlandPhoneCallByProviderId(providerCallId: string): Promise<PhoneCallRecord | undefined> {
+  if (!/^[A-Za-z0-9_-]{6,160}$/.test(providerCallId)) return undefined;
+  const identity = await backend.getBlandProviderCall(providerCallId);
+  if (!identity) return undefined;
+  const call = await getPhoneCall(identity.userId, identity.callId);
+  return call?.provider === "bland" && call.providerCallId === providerCallId ? call : undefined;
 }
 
 const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
@@ -2706,19 +2817,7 @@ export async function claimRecallCopilotEvaluation(
 
 export async function appendMessages(uid: number, msgs: Message[]): Promise<void> {
   const s = await getSession(uid);
-  const stamped = msgs.map((message) => ({
-    ...message,
-    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
-  }));
-  s.history.push(...stamped);
-  s.totalMessages += stamped.filter((m) => m.role === "user").length;
-  const cap = config.maxHistory * 2;
-  if (s.history.length > cap) {
-    const overflow = s.history.slice(0, s.history.length - cap);
-    const compact = overflow.map((m) => `${m.role}: ${m.content}`).join(" ").slice(0, 1800);
-    s.summaries = [...s.summaries, compact].slice(-10);
-    s.history = s.history.slice(s.history.length - cap);
-  }
+  appendSessionHistory(s, msgs);
   await saveSession(uid, s);
 }
 

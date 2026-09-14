@@ -21,6 +21,7 @@
     "setup": "tsx src/cli.ts setup",
     "auth:migrate": "tsx src/migrate-auth.ts",
     "doctor": "tsx src/cli.ts doctor",
+    "setup:bland-tool": "tsx scripts/setup-bland-consult-tool.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts"
