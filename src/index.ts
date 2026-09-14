@@ -8,7 +8,7 @@ import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, getMeetingContact, type ReminderDeliveryTarget } from "./store.js";
-import { parseTriggerWebhook, runAgent, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
+import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -464,7 +464,8 @@ async function main(): Promise<void> {
           const session = await getSession(userId);
           return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
             instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
-            toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_PHONE_CALLS"],
+            toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
+            voiceTurn: true,
           });
         });
         // Flux can signal an eager end-of-turn before the caller is fully
@@ -553,7 +554,8 @@ async function main(): Promise<void> {
               send({ type: "start", model: config.voiceModel, speculative });
               return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
                 instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform an external action during this call; ask the caller to continue in Telegram for approvals or actions.",
-                toolAllow: ["CHUCK_SEARCH_MEMORY", "CHUCK_SCRATCHPAD_READ", "CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_LIST_PHONE_CALLS"],
+                toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
+                voiceTurn: true,
               });
             });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });

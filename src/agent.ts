@@ -62,6 +62,16 @@ const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
+export const VOICE_TURN_NATIVE_TOOLS = [
+  "CHUCK_SEARCH_MEMORY",
+  "CHUCK_SCRATCHPAD_READ",
+  "CHUCK_LIST_REMINDERS",
+  "CHUCK_LIST_JOBS",
+  "CHUCK_TASK_LIST",
+  "CHUCK_TASK_GET",
+  "CHUCK_LIST_PHONE_CALLS",
+] as const;
+const VOICE_TURN_TOOL_NAMES = new Set<string>(VOICE_TURN_NATIVE_TOOLS);
 const GROUP_ARTIFACT_TOOLS = new Set([
   "CHUCK_ARTIFACT",
   "CHUCK_CREATE_PDF",
@@ -269,7 +279,8 @@ export async function orChat(
   tools: unknown[],
   signal?: AbortSignal,
   onDelta?: (text: string) => void | Promise<void>,
-  approvedApprovalId?: string
+  approvedApprovalId?: string,
+  preferredMaxLatencySeconds?: number
 ): Promise<ChatResponse> {
   const body: Record<string, unknown> = {
     model,
@@ -281,8 +292,8 @@ export async function orChat(
     // providers legitimately expose different parameter sets.
     provider: {
       allow_fallbacks: true,
-      ...(config.openRouterPreferredMaxLatencySeconds > 0
-        ? { preferred_max_latency: { p90: config.openRouterPreferredMaxLatencySeconds } }
+      ...((preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds) > 0
+        ? { preferred_max_latency: { p90: preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds } }
         : {}),
     },
     ...(config.openRouterFallbackModels.length
@@ -580,6 +591,8 @@ export interface AgentRunOptions {
   toolDeny?: string[];
   /** Run on volatile shared context: omit private context and durable run traces. */
   ephemeral?: boolean;
+  /** Low-latency private telephone turn: keep owner context, but skip Composio and durable run-trace setup. */
+  voiceTurn?: boolean;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
   maxToolCalls?: number;
@@ -673,7 +686,8 @@ export async function runAgent(
   if (onStatus) await onStatus("📜 I’m reading your message……");
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
-  const existingRun = options?.ephemeral ? undefined : await getAgentRun(userId, durableRunId);
+  const voiceTurn = options?.voiceTurn === true;
+  const existingRun = options?.ephemeral || voiceTurn ? undefined : await getAgentRun(userId, durableRunId);
   let durableRunRecord = existingRun;
   let durableRunVersion = existingRun?.version;
 
@@ -681,10 +695,16 @@ export async function runAgent(
 
   const allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
   const toolsDisabled = allow?.size === 0;
+  const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
+  if (voiceTurn && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
+    throw new Error("Voice turns require an explicit allowlist of read-only Chusky tools");
+  }
 
   // Meeting/shared volatile turns with no tool grants must not create or
   // hydrate a user's Composio session merely to answer a spoken question.
-  const sessionObj = toolsDisabled ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
+  // Private phone turns use an explicit native-only allowlist and should not
+  // pay the Composio session/tools round trips before beginning speech.
+  const sessionObj = toolsDisabled || voiceTurn ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
 
   if (onStatus) await onStatus("🧭 I’m getting the right tools for you…");
 
@@ -695,7 +715,6 @@ export async function runAgent(
   // through COMPOSIO_SEARCH_TOOL and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
-  const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
   const composioTools = (fullComposioTools.length > 80
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
     : fullComposioTools).map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
@@ -705,7 +724,7 @@ export async function runAgent(
     return (!allow || allow.has(name)) && !deny.has(name);
   });
 
-  if (!options?.ephemeral) {
+  if (!options?.ephemeral && !voiceTurn) {
     const capabilityModel = model.replace(/^~/, "");
     try {
       const modelRes = await fetch(`https://openrouter.ai/api/v1/models/${encodeURIComponent(capabilityModel)}`, {
@@ -741,7 +760,7 @@ export async function runAgent(
   // Build message array for OpenRouter
   const durable = options?.ephemeral ? { summaries: [], imageAssets: [] } : await getSession(userId);
   let pendingUpgrade: AgentUpgradeNotice | undefined;
-  if (!options?.ephemeral) {
+  if (!options?.ephemeral && !voiceTurn) {
     try {
       const upgrade = await loadAgentUpgrade();
       if (upgrade) pendingUpgrade = upgrade;
@@ -787,7 +806,7 @@ export async function runAgent(
   let accountContext = "";
   // Connected-account metadata is private context. Never expose a user's
   // account aliases or tool access to a shared channel conversation.
-  if (channelContext?.scope !== "shared") {
+  if (!voiceTurn && channelContext?.scope !== "shared") {
     try {
       const accounts = await listConnectedAccounts(userId);
       if (accounts.length) {
@@ -802,7 +821,7 @@ export async function runAgent(
   // remember to search for a workflow when creating a deliverable or changing
   // code. Supporting files remain on-demand through CHUCK_READ_SKILL_FILE.
   let skillContext = "";
-  if (!options?.ephemeral) {
+  if (!options?.ephemeral && !voiceTurn) {
     try {
       const skillQuery = typeof userMessage === "string"
         ? userMessage
@@ -816,7 +835,7 @@ export async function runAgent(
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}${channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
+    { role: "system", content: `${config.chuckSystemPrompt}${!voiceTurn && channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
     ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
@@ -851,7 +870,7 @@ export async function runAgent(
   };
 
   const persistRun = async (status: AgentRunRecord["status"], eventType: string, output?: string, eventData?: Record<string, unknown>): Promise<void> => {
-    if (options?.ephemeral) return;
+    if (options?.ephemeral || voiceTurn) return;
     const record: AgentRunRecord = {
       ...(durableRunRecord ?? {
         id: durableRunId,
@@ -889,7 +908,7 @@ export async function runAgent(
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, messages, availableTools, signal, onDelta);
+      response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? 3 : undefined);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const modality = requiredModality(userMessage);
@@ -897,7 +916,7 @@ export async function runAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, messages, availableTools, signal, onDelta);
+        response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? 3 : undefined);
       } else {
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;

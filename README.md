@@ -549,11 +549,15 @@ The private bridge routes are `/internal/twilio/turn`,
 `/internal/twilio/status`. The voice bridge validates Twilio's WebSocket
 signature and a short-lived server-issued stream ticket. It uses Deepgram Flux
 conversational STT turn events plus streaming Flux TTS in Twilio-compatible
-8 kHz μ-law. An
-`EagerEndOfTurn` begins a cancellable read-only draft, `TurnResumed` cancels
-it, and only `EndOfTurn` is committed to history. Caller speech interrupts TTS
-and clears Twilio's buffered playback. Configure the same `TWILIO_AUTH_TOKEN`
-and `TWILIO_MEDIA_STREAM_URL` inside
+8 kHz μ-law. `EagerEndOfTurn` starts the actual streamed reply early;
+`TurnResumed` cancels it, and a matching `EndOfTurn` reuses that same generation
+and commits it exactly once. Caller speech interrupts TTS and clears Twilio's
+buffered playback. Telephone turns retain the selected `VOICE_MODEL`, account
+history, and relevant private memories while skipping Composio setup and
+unneeded per-turn enrichment; only an explicit read-only native tool allowlist
+is available. OpenRouter gets a three-second p90 provider-latency preference
+for voice calls, but provider/model latency is not a hard real-time guarantee.
+Configure the same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
 `chusky-voice/.env`; see [`chusky-voice/README.md`](chusky-voice/README.md)
 for latency tuning and Nginx WebSocket settings.
 

@@ -105,6 +105,50 @@ test("ephemeral shared turns expose no tools, skip Composio, and do not persist 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("private voice turns keep the Chusky context but skip Composio setup and durable agent-run overhead", async () => {
+  const userId = 830052;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let composioCreated = 0;
+  let modelMetadataLookups = 0;
+  let requestBody: Record<string, any> | undefined;
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => { composioCreated++; throw new Error("voice turn must not initialize Composio"); } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) modelMetadataLookups++;
+    else requestBody = JSON.parse(String(init?.body));
+    return chatResponse({ role: "assistant", content: "I can help with that." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Can you remind me what we discussed?",
+      [{ role: "user", content: "We discussed the launch plan." }],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { voiceTurn: true, toolAllow: ["CHUCK_LIST_REMINDERS"] },
+    );
+    assert.equal(result.text, "I can help with that.");
+    assert.equal(composioCreated, 0);
+    assert.equal(modelMetadataLookups, 0);
+    assert.equal(requestBody?.messages.at(-2)?.content, "We discussed the launch plan.");
+    assert.deepEqual(requestBody?.tools.map((tool: any) => tool.function.name), ["CHUCK_LIST_REMINDERS"]);
+    assert.deepEqual(requestBody?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 3 } });
+    assert.equal((await listAgentRuns(userId)).length, 0);
+    await assert.rejects(
+      () => runAgent(userId, "place the call", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+        voiceTurn: true,
+        toolAllow: ["CHUCK_START_PHONE_CALL"],
+      }),
+      /explicit allowlist of read-only Chusky tools/,
+    );
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("owner-scoped meeting contact capture executes without a spurious approval failure", async () => {
   const userId = 830051;
   const meetingId = "mtg_agent_contact_policy";
