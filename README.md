@@ -552,11 +552,13 @@ conversational STT turn events plus streaming Flux TTS in Twilio-compatible
 8 kHz μ-law. `EagerEndOfTurn` starts the actual streamed reply early;
 `TurnResumed` cancels it, and a matching `EndOfTurn` reuses that same generation
 and commits it exactly once. Caller speech interrupts TTS and clears Twilio's
-buffered playback. Telephone turns retain the selected `VOICE_MODEL`, account
-history, and relevant private memories while skipping Composio setup and
-unneeded per-turn enrichment; only an explicit read-only native tool allowlist
-is available. OpenRouter gets a three-second p90 provider-latency preference
-for voice calls, but provider/model latency is not a hard real-time guarantee.
+buffered playback. Telephone turns use the dedicated `VOICE_MODEL`, retain
+durable account history and relevant private memories, and skip Composio setup
+and unneeded per-turn enrichment; only an explicit read-only native tool
+allowlist is available. The live prompt has a bounded recent window, while
+summaries and memory retain longer context. OpenRouter receives a two-second
+latency preference, a throughput preference, a per-call affinity key, and
+optional `VOICE_FALLBACK_MODELS`; this is not a hard real-time guarantee.
 Configure the same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
 `chusky-voice/.env`; see [`chusky-voice/README.md`](chusky-voice/README.md)
 for latency tuning and Nginx WebSocket settings.
@@ -633,7 +635,9 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `WEBHOOK_SECRET` | — | — | Secures Telegram webhook |
 | `DEFAULT_MODEL` | — | `minimax/minimax-m3:free` | Any OpenRouter model ID |
 | `GROUP_DEFAULT_MODEL` | — | same as `DEFAULT_MODEL` | Model for shared group conversations; `/group-model default` restores this value |
-| `VOICE_MODEL` | — | `openai/gpt-5.6-luna` | Low-latency model used for live voice turns |
+| `VOICE_MODEL` | — | `google/gemini-3.5-flash` | Dedicated low-latency model used for live voice turns |
+| `VOICE_FALLBACK_MODELS` | — | `google/gemini-2.5-flash` | Comma-separated tool-capable fallback candidates for live calls |
+| `VOICE_MAX_TOKENS` | — | `192` | Maximum model output tokens for one live voice turn |
 | `TRANSCRIPTION_MODEL` | — | `openai/gpt-transcribe` | OpenRouter speech-to-text model |
 | `TTS_MODEL` | voice replies | `deepgram/flux-tts:free` | OpenRouter text-to-speech model |
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |

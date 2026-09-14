@@ -50,7 +50,13 @@ export const config = {
   groupDefaultModel: optional("GROUP_DEFAULT_MODEL", defaultModel),
   // Live calls use a latency-oriented model instead of inheriting a possibly
   // slower general-purpose/reasoning model from the user's chat session.
-  voiceModel: optional("VOICE_MODEL", "openai/gpt-5.6-luna"),
+  // Calls need first-token speed, but retain the same Chusky context and
+  // owner-scoped tool boundary. Gemini Flash is a tool-capable, latency-first
+  // route; applications may override it without changing the chat model.
+  voiceModel: optional("VOICE_MODEL", "google/gemini-3.5-flash"),
+  voiceFallbackModels: optional("VOICE_FALLBACK_MODELS", "google/gemini-2.5-flash")
+    .split(",").map((model) => model.trim()).filter(Boolean),
+  voiceMaxTokens: positiveInt("VOICE_MAX_TOKENS", 192),
   visionModel: optional("VISION_MODEL", "openai/gpt-5.6-luna"),
   transcriptionModel: optional("TRANSCRIPTION_MODEL", "openai/gpt-transcribe"),
   ttsModel: optional("TTS_MODEL", "deepgram/flux-tts:free"),

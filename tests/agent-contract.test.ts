@@ -137,7 +137,14 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
     assert.equal(modelMetadataLookups, 0);
     assert.equal(requestBody?.messages.at(-2)?.content, "We discussed the launch plan.");
     assert.deepEqual(requestBody?.tools.map((tool: any) => tool.function.name), ["CHUCK_LIST_REMINDERS"]);
-    assert.deepEqual(requestBody?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 3 } });
+    assert.deepEqual(requestBody?.provider, {
+      allow_fallbacks: true,
+      preferred_max_latency: { p90: 2 },
+      preferred_min_throughput: { p50: 50 },
+      sort: { by: "latency", partition: "none" },
+    });
+    assert.equal(requestBody?.max_tokens, 192);
+    assert.deepEqual(requestBody?.models, ["test/model", "google/gemini-2.5-flash"]);
     assert.equal((await listAgentRuns(userId)).length, 0);
     await assert.rejects(
       () => runAgent(userId, "place the call", [], "test/model", undefined, undefined, undefined, undefined, undefined, {

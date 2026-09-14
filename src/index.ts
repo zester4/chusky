@@ -466,6 +466,7 @@ async function main(): Promise<void> {
             instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
             toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
             voiceTurn: true,
+            voiceSessionId: `twilio:${callId}`,
           });
         });
         // Flux can signal an eager end-of-turn before the caller is fully
@@ -556,6 +557,7 @@ async function main(): Promise<void> {
                 instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform an external action during this call; ask the caller to continue in Telegram for approvals or actions.",
                 toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
                 voiceTurn: true,
+                voiceSessionId: `twilio:${callId}`,
               });
             });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });

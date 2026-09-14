@@ -273,6 +273,17 @@ async function readStreamingChat(res: Response, onDelta?: (text: string) => void
   return { choices: [{ finish_reason: calls.size ? "tool_calls" : "stop", message: { role: "assistant", content, ...(calls.size ? { tool_calls: [...calls.values()] } : {}) } }], usage };
 }
 
+export interface OrChatOptions {
+  preferredMaxLatencySeconds?: number;
+  preferredMinThroughput?: number;
+  fallbackModels?: string[];
+  maxTokens?: number;
+  /** Provider affinity for prompt-cache reuse. Must contain no user content. */
+  sessionId?: string;
+  /** Ask OpenRouter to route across the selected model set by recent latency. */
+  latencyOptimized?: boolean;
+}
+
 export async function orChat(
   model: string,
   messages: ApiMessage[],
@@ -280,25 +291,34 @@ export async function orChat(
   signal?: AbortSignal,
   onDelta?: (text: string) => void | Promise<void>,
   approvedApprovalId?: string,
-  preferredMaxLatencySeconds?: number
+  options?: number | OrChatOptions
 ): Promise<ChatResponse> {
+  // Keep the numeric form temporarily compatible with older internal callers.
+  const routing = typeof options === "number" ? { preferredMaxLatencySeconds: options } : (options ?? {});
+  const preferredMaxLatencySeconds = routing.preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds;
+  const fallbackModels = routing.fallbackModels ?? config.openRouterFallbackModels;
   const body: Record<string, unknown> = {
     model,
     messages,
-    max_tokens: 4096,
+    max_tokens: routing.maxTokens ?? 4096,
     // OpenRouter keeps provider fallback enabled by default. Declaring it here
     // makes the production intent explicit. Do not require every provider to
     // support every optional request parameter: multimodal and reasoning
     // providers legitimately expose different parameter sets.
     provider: {
       allow_fallbacks: true,
-      ...((preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds) > 0
-        ? { preferred_max_latency: { p90: preferredMaxLatencySeconds ?? config.openRouterPreferredMaxLatencySeconds } }
+      ...(preferredMaxLatencySeconds > 0
+        ? { preferred_max_latency: { p90: preferredMaxLatencySeconds } }
         : {}),
+      ...(routing.preferredMinThroughput && routing.preferredMinThroughput > 0
+        ? { preferred_min_throughput: { p50: routing.preferredMinThroughput } }
+        : {}),
+      ...(routing.latencyOptimized ? { sort: { by: "latency", partition: "none" } } : {}),
     },
-    ...(config.openRouterFallbackModels.length
-      ? { models: [model, ...config.openRouterFallbackModels.filter((fallback) => fallback !== model)] }
+    ...(fallbackModels.length
+      ? { models: [model, ...fallbackModels.filter((fallback) => fallback !== model)] }
       : {}),
+    ...(routing.sessionId ? { session_id: routing.sessionId } : {}),
   };
   if (tools.length > 0) {
     body.tools = tools;
@@ -593,6 +613,8 @@ export interface AgentRunOptions {
   ephemeral?: boolean;
   /** Low-latency private telephone turn: keep owner context, but skip Composio and durable run-trace setup. */
   voiceTurn?: boolean;
+  /** Opaque provider affinity for one live voice call; never stored in prompt content. */
+  voiceSessionId?: string;
   /** Tools in this list always create an approval request, even if normally low-risk. */
   toolRequireApproval?: string[];
   maxToolCalls?: number;
@@ -601,6 +623,22 @@ export interface AgentRunOptions {
   /** Reuse a durable run when a queued workflow resumes. */
   runId?: string;
   parentRunId?: string;
+}
+
+const VOICE_HISTORY_MAX_MESSAGES = 12;
+const VOICE_HISTORY_MAX_CHARS = 6_000;
+
+/** Keep durable call history intact while bounding only the live-model window. */
+export function boundedVoiceHistory(history: Message[]): Message[] {
+  const selected: Message[] = [];
+  let characters = 0;
+  for (const message of [...history].reverse()) {
+    const content = typeof message.content === "string" ? message.content : "";
+    if (selected.length >= VOICE_HISTORY_MAX_MESSAGES || characters + content.length > VOICE_HISTORY_MAX_CHARS) break;
+    selected.push(message);
+    characters += content.length;
+  }
+  return selected.reverse();
 }
 
 export function appendPreviewLinks(text: string, links: string[]): string {
@@ -834,9 +872,14 @@ export async function runAgent(
   const upgradeContext = announceUpgrade && pendingUpgrade
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
+  const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
+  const staticSystemPrompt = `${config.chuckSystemPrompt}${!voiceTurn && channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}`;
+  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}`;
+  const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
   const messages: ApiMessage[] = [
-    { role: "system", content: `${config.chuckSystemPrompt}${!voiceTurn && channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}\n\n${buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone })}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}` },
-    ...history.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+    { role: "system", content: staticSystemPrompt },
+    { role: "system", content: dynamicSystemContext },
+    ...promptHistory.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
     { role: "user", content: userMessage },
   ];
 
@@ -908,7 +951,14 @@ export async function runAgent(
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? 3 : undefined);
+      response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? {
+        preferredMaxLatencySeconds: 2,
+        preferredMinThroughput: 50,
+        fallbackModels: config.voiceFallbackModels,
+        maxTokens: config.voiceMaxTokens,
+        sessionId: options?.voiceSessionId,
+        latencyOptimized: true,
+      } : undefined);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const modality = requiredModality(userMessage);
@@ -916,7 +966,14 @@ export async function runAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? 3 : undefined);
+        response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? {
+          preferredMaxLatencySeconds: 2,
+          preferredMinThroughput: 50,
+          fallbackModels: config.voiceFallbackModels,
+          maxTokens: config.voiceMaxTokens,
+          sessionId: options?.voiceSessionId,
+          latencyOptimized: true,
+        } : undefined);
       } else {
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;
