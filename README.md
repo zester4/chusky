@@ -368,10 +368,6 @@ SENDBLUE_API_KEY=<Sendblue API key ID>
 SENDBLUE_API_SECRET=<Sendblue API secret>
 SENDBLUE_NUMBER=<your Sendblue iMessage number in E.164 format>
 SENDBLUE_WEBHOOK_SECRET=<random webhook secret>
-SENDBLUE_FACETIME_ENABLED=false
-SENDBLUE_FACETIME_NUMBER=<Sendblue-purchased FaceTime-enabled line>
-FACETIME_MEDIA_BRIDGE_URL=<HTTPS URL of your server-side Agora media bridge>
-FACETIME_MEDIA_BRIDGE_SECRET=<shared bridge bearer secret>
 WEBHOOK_URL=https://your-domain.example
 REDIS_URL=<durable Redis URL>
 QSTASH_TOKEN=<Upstash QStash token>
@@ -529,20 +525,17 @@ The task is marked before sending so an ambiguous provider result is not
 automatically retried and duplicated. Redis and QStash are required for delayed
 follow-ups.
 
-#### Outbound FaceTime voice calls
+#### Twilio voice calls
 
-Chusky can start an **outbound** FaceTime call only when `SENDBLUE_FACETIME_ENABLED=true`, the sending line is purchased and FaceTime-enabled by Sendblue, and an HTTPS media bridge is configured. Sendblue's `POST /facetime/start-call` returns short-lived Agora credentials; Chusky passes them directly to the bridge, which must be a server-side Agora participant that streams remote audio to STT and sends TTS audio back. Chusky persists only call metadata and bridge session IDs—never Agora tokens or media. The `CHUCK_START_FACETIME_CALL` tool is approval-gated. Sendblue does not provide an inbound-call webhook, so automatic answering of incoming FaceTime calls is not supported.
-
-The bridge implementation lives in [`chusky-voice/`](chusky-voice/README.md). It uses Agora's Python Server SDK to receive and publish 16 kHz PCM, Deepgram for live transcription and synthesis, and the private `/internal/facetime/turn` route to reuse the caller's Chusky memory. Configure `DEEPGRAM_API_KEY` and `CHUSKY_VOICE_TURN_URL=http://127.0.0.1:3003/internal/facetime/turn` in the bridge process, then proxy `voice.selithub.shop` to its loopback port `3004`. Voice turns allow only read-only tools; external actions remain in Telegram where approvals are visible.
-
-#### Outbound Twilio phone calls
-
-Twilio phone calls are a separate approval-gated transport; they do not replace
-Sendblue FaceTime. Verify `TWILIO_CALLER_ID` in Twilio, then configure
+Twilio handles inbound calls and default outbound calls; Bland can be enabled
+as an optional outbound alternative. Outbound calls are approval-gated. Verify
+`TWILIO_CALLER_ID` in Twilio, then configure
 `TWILIO_VOICE_ENABLED=true`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
 `TWILIO_WEBHOOK_BASE_URL=https://chusky.selithub.shop`, and
-`TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream`. Chusky
-validates signed TwiML and status callbacks; the bridge uses Twilio's
+`TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream`, plus the
+same high-entropy `TWILIO_MEDIA_BRIDGE_SECRET` in Chusky and `chusky-voice`.
+The bridge implementation lives in [`chusky-voice/`](chusky-voice/README.md).
+Chusky validates signed TwiML and status callbacks; the bridge uses Twilio's
 bidirectional Media Streams with Deepgram and stores only safe call metadata.
 For inbound calls, purchase a Twilio voice number and configure its incoming
 Voice URL as `https://chusky.selithub.shop/twilio/inbound` (POST). Set
@@ -551,9 +544,12 @@ Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
 E.164 allowlist. Unknown callers are rejected before they can access private
 memory or the agent.
 
-The voice bridge validates Twilio's WebSocket signature and a short-lived
-server-issued stream ticket. It uses Deepgram Flux conversational STT turn
-events plus streaming Flux TTS in Twilio-compatible 8 kHz μ-law. An
+The private bridge routes are `/internal/twilio/turn`,
+`/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`, and
+`/internal/twilio/status`. The voice bridge validates Twilio's WebSocket
+signature and a short-lived server-issued stream ticket. It uses Deepgram Flux
+conversational STT turn events plus streaming Flux TTS in Twilio-compatible
+8 kHz μ-law. An
 `EagerEndOfTurn` begins a cancellable read-only draft, `TurnResumed` cancels
 it, and only `EndOfTurn` is committed to history. Caller speech interrupts TTS
 and clears Twilio's buffered playback. Configure the same `TWILIO_AUTH_TOKEN`

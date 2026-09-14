@@ -73,7 +73,6 @@ account's workspace. A group conversation has its own history and permissions.
 | Twilio SMS/MMS | Signed inbound SMS/MMS, outbound messages, media hydration, delivery callbacks, and Messaging Service/number configuration | Provide sender status, inbound readiness, delivery state, and safe media errors. |
 | XChat | Encrypted DMs/groups, verified webhook, bot identity checks, `chat.received` and `chat.conversation.join` subscriptions, mentions, media, typing, reactions, and durable delivery | Provide webhook/setup readiness, bot identity, subscription state, encryption state, and trust/link instructions. |
 | Twilio voice | Approval-gated outbound calls, allowlisted inbound calls, signed callbacks, live transcription/voice bridge, and safe call history | Provide destination validation, purpose, pending approval, call status, masked history, and failure state. |
-| Sendblue FaceTime | Optional outbound-only transport through the private bridge | Label it optional and outbound-only; never imply inbound FaceTime answering. |
 
 Channel pages must use verified identities and show whether a conversation is
 private or shared. They must never use a provider display name as ownership.

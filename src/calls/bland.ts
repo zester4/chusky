@@ -1,5 +1,5 @@
 import { config } from "../config.js";
-import { addFaceTimeCall, getSession, updateFaceTimeCall, type FaceTimeCallRecord } from "../store.js";
+import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -30,14 +30,14 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   apiKey: config.blandApiKey,
   webhookUrl: config.blandWebhookUrl,
   voice: config.blandVoice,
-}): Promise<FaceTimeCallRecord> {
+}): Promise<PhoneCallRecord> {
   validate(options);
   const selectedVoice = ((await getSession(userId)).voicePreferences?.bland?.id ?? options.voice) || "maya";
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
-  const call: FaceTimeCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
-  await addFaceTimeCall(userId, call);
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  await addPhoneCall(userId, call);
   try {
     const response = await (options.fetchImpl ?? fetch)("https://api.bland.ai/v1/calls", {
       method: "POST",
@@ -54,10 +54,10 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
     });
     const payload = await response.json().catch(() => ({})) as { call_id?: string; message?: string; error?: string };
     if (!response.ok || !payload.call_id) throw new Error(`Bland call failed: ${String(payload.message ?? payload.error ?? response.statusText).slice(0, 300)}`);
-    return (await updateFaceTimeCall(userId, call.id, { status: "bridging", providerCallId: payload.call_id.slice(0, 100) }))!;
+    return (await updatePhoneCall(userId, call.id, { status: "bridging", providerCallId: payload.call_id.slice(0, 100) }))!;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Bland call setup failed";
-    await updateFaceTimeCall(userId, call.id, { status: "failed", error: message });
+    await updatePhoneCall(userId, call.id, { status: "failed", error: message });
     throw new Error(`Bland call could not be started: ${message}`);
   }
 }

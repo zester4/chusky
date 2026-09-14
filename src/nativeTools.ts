@@ -15,7 +15,7 @@ import {
   type AttentionEntityKind,
   type TaskStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
-  listFaceTimeCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
+  listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
@@ -428,14 +428,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_FORGET_IMAGE_ASSET": return { forgotten: await forgetImageAsset(userId, text(args.id)) };
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
-    // Compatibility for durable approvals created before Twilio-only calls.
-    // Never send a legacy call through Sendblue/FaceTime.
-    case "CHUCK_START_FACETIME_CALL": return startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
-    case "CHUCK_LIST_FACETIME_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
     case "CHUCK_START_PHONE_CALL": return config.blandVoiceEnabled
       ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), context: (await getSession(userId)).history.slice(-8).map((message) => `${message.role}: ${String(message.content)}`).join("\n") })
       : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
-    case "CHUCK_LIST_PHONE_CALLS": return (await listFaceTimeCalls(userId)).filter((call) => call.provider === "twilio");
+    case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_MEETING_CONTEXT_PREPARE": {
       if (runtime.sharedConversation) throw new Error("Client meeting preparation is available only in a private owner conversation");
       return prepareRecallMeetingMission(userId, { clientName: args.clientName, objective: args.objective, clientContext: args.clientContext });

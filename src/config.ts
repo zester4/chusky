@@ -99,14 +99,7 @@ export const config = {
   sendblueNumber: optional("SENDBLUE_NUMBER", ""),
   sendblueWebhookSecret: optional("SENDBLUE_WEBHOOK_SECRET", ""),
   sendblueWorkflowUrl: optional("SENDBLUE_WORKFLOW_URL", ""),
-  // FaceTime calls are deliberately opt-in. A FaceTime-enabled Sendblue line
-  // and a separately deployed server-side Agora media bridge are both required.
-  sendblueFaceTimeEnabled: optional("SENDBLUE_FACETIME_ENABLED", "false") === "true",
-  sendblueFaceTimeNumber: optional("SENDBLUE_FACETIME_NUMBER", ""),
-  faceTimeMediaBridgeUrl: optional("FACETIME_MEDIA_BRIDGE_URL", ""),
-  faceTimeMediaBridgeSecret: optional("FACETIME_MEDIA_BRIDGE_SECRET", ""),
-  // Twilio is Chusky's only agent-call transport for incoming and outgoing
-  // telephone calls. Legacy FaceTime values above are not exposed to agents.
+  // Twilio is Chusky's telephone transport for incoming and outgoing calls.
   twilioVoiceEnabled: optional("TWILIO_VOICE_ENABLED", "false") === "true",
   twilioSmsEnabled: optional("TWILIO_SMS_ENABLED", "false") === "true",
   twilioAccountSid: optional("TWILIO_ACCOUNT_SID", ""),
@@ -126,9 +119,7 @@ export const config = {
   twilioCallerId: optional("TWILIO_CALLER_ID", ""),
   twilioWebhookBaseUrl: optional("TWILIO_WEBHOOK_BASE_URL", ""),
   twilioMediaStreamUrl: optional("TWILIO_MEDIA_STREAM_URL", ""),
-  // Falls back to the legacy value so the deployed bridge remains connected
-  // during the variable-name migration.
-  twilioMediaBridgeSecret: optional("TWILIO_MEDIA_BRIDGE_SECRET", optional("FACETIME_MEDIA_BRIDGE_SECRET", "")),
+  twilioMediaBridgeSecret: optional("TWILIO_MEDIA_BRIDGE_SECRET", ""),
   // Inbound calls stay fail-closed until an owner and caller allowlist are
   // explicitly configured. This protects private memory from random callers.
   twilioInboundEnabled: optional("TWILIO_INBOUND_ENABLED", "false") === "true",

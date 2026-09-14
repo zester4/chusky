@@ -22,8 +22,8 @@ test("does not gate read-only tools", () => {
 
 test("uses explicit native policies and gates only side-effecting Composio batches", () => {
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "private");
-  assert.equal(toolApprovalPolicy("CHUCK_START_FACETIME_CALL"), "approval_required");
-  assert.equal(toolApprovalPolicy("CHUCK_LIST_FACETIME_CALLS"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_START_PHONE_CALL"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_LIST_PHONE_CALLS"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PRESENTATION"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PDF"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_DOCUMENT"), "private");

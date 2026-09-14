@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { initStore, listFaceTimeCalls } from "../src/store.js";
+import { initStore, listPhoneCalls } from "../src/store.js";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "../src/calls/twilioInbound.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -19,6 +19,6 @@ test("Twilio inbound records are owner-scoped and idempotent by provider Call SI
   assert.equal(first.id, replay.id);
   assert.equal(first.direction, "inbound");
   assert.equal(first.status, "bridging");
-  assert.equal((await listFaceTimeCalls(71)).length, 1);
+  assert.equal((await listPhoneCalls(71)).length, 1);
   await assert.rejects(() => registerTwilioInboundCall({ ...input, from: "not-a-number" }), /Invalid/);
 });

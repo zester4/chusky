@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { initStore, listFaceTimeCalls } from "../src/store.js";
+import { initStore, listPhoneCalls } from "../src/store.js";
 import { startTwilioCallForUser } from "../src/calls/twilio.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -28,7 +28,7 @@ test("Twilio call uses signed-callback URLs and retains no credentials", async (
   assert.match(request?.url ?? "", /^https:\/\/chusky\.example\/twilio\/twiml\?callId=twc_/);
   assert.match(request?.url ?? "", /&userId=61$/);
   assert.match(request?.statusCallback ?? "", /^https:\/\/chusky\.example\/twilio\/status\?callId=twc_/);
-  const stored = await listFaceTimeCalls(61);
+  const stored = await listPhoneCalls(61);
   assert.equal(JSON.stringify(stored).includes("auth-token"), false);
   assert.equal(JSON.stringify(stored).includes("AC123"), false);
 });

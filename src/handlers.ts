@@ -1835,7 +1835,7 @@ export function registerHandlers(bot: Bot): void {
       // after approval can produce semantically similar but JSON-different
       // arguments, causing an unnecessary second approval. Execute precisely
       // the reviewed native request instead.
-      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL" || approval.toolSlug === "CHUCK_START_PHONE_CALL") {
+      if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         validateNativeToolArguments(approval.toolSlug, approval.args);
         await nativeTool(ctx.from.id, approval.toolSlug, approval.args);
         await setApprovalStatus(ctx.from.id, approval.id, "consumed");

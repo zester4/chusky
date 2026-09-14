@@ -66,7 +66,7 @@ Chusky's own implementation and must not be described as the `chat` package.
 | WhatsApp | Implemented | Signed Cloud API webhook, text/media normalization, media hydration, debounce, receipts, and opt-in proactive notifications. |
 | Sendblue | Implemented | Signed iMessage webhook, durable workflow dispatch, direct/group delivery, media hydration, typing indicators, Markdown-to-plain-text formatting, and durable receipts. |
 | SMS | Boundary only | A provider-neutral adapter and normalizer exist; no live sender/webhook is registered. |
-| Voice | Implemented | Twilio telephone calls use a private Deepgram voice bridge; Sendblue FaceTime remains an optional separate outbound transport. |
+| Voice | Implemented | Twilio inbound/outbound telephone calls use a private Deepgram voice bridge; Bland is an optional outbound provider. |
 
 The normalized contracts are in `src/channels/contracts.ts`. Adapters verify raw
 requests, normalize provider events, render outbound messages, and expose capability
@@ -130,23 +130,19 @@ Sendblue-specific rules:
 
 ## Telephone calls and live voice
 
-Chusky has two deliberately separate call transports. Do not merge their
-credentials, webhook contracts, or provider assumptions.
+Keep telephone providers and their credentials/webhook contracts separate.
 
-- **Twilio telephone calls** are the active inbound/outbound calling path.
-  `CHUCK_START_PHONE_CALL` is always approval-gated. Outbound calls use the
-  Twilio REST API and signed `/twilio/twiml` and `/twilio/status` callbacks.
+- **Twilio telephone calls** handle inbound calls and default outbound calls.
+  `CHUCK_START_PHONE_CALL` is always approval-gated. Twilio outbound calls use
+  the REST API and signed `/twilio/twiml` and `/twilio/status` callbacks.
   Incoming calls enter only through `POST /twilio/inbound`; reject unknown
   callers before any history, memory, agent, or tool access.
-- **Sendblue FaceTime** is optional and outbound-only. It requires a
-  Sendblue-purchased FaceTime-enabled line and hands short-lived Agora
-  credentials to the bridge. Sendblue does not provide an inbound FaceTime
-  webhook, so never claim Chusky can automatically answer FaceTime calls.
-- The private Python bridge lives in `voice-bridge/`, binds only to loopback
+- **Bland** is an optional outbound phone provider selected by its feature
+  flag; inbound calls remain on Twilio.
+- The private Python bridge lives in `chusky-voice/`, binds only to loopback
   port `3004`, and is exposed through `https://voice.<domain>` via Nginx with
   WebSocket upgrade headers and buffering disabled. Never expose port 3004
-  directly or log audio, provider credentials, Agora tokens, or raw phone
-  numbers.
+  directly or log audio, provider credentials, or raw phone numbers.
 
 ### Twilio trust boundary
 
@@ -193,9 +189,9 @@ credentials, webhook contracts, or provider assumptions.
    committing them.
 2. Configure the same Twilio auth token plus `DEEPGRAM_API_KEY`, bridge secret,
    Flux STT thresholds, Flux TTS model, and greeting in `voice-bridge/.env`.
-3. Build Chusky before restarting the bridge so `/internal/facetime/turn` and
-   `/internal/facetime/commit-turn` are available; restart Chusky first, then
-   `chusky-voice-bridge` with `--update-env`.
+3. Build Chusky before restarting the bridge so `/internal/twilio/turn-stream`
+   and `/internal/twilio/commit-turn` are available; restart Chusky first, then
+   `chusky-voice` with `--update-env`.
 4. Confirm `https://voice.<domain>/health` reports `twilioWebSocket`,
    `fluxStt`, and `fluxTts` as configured. Use its aggregate latency,
    interruption, queue-drop, and failure counters; never add transcript/audio

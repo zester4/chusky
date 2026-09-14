@@ -240,6 +240,29 @@ test("normalizes old sessions while preserving new durable defaults", async () =
   assert.equal(restored.voicePreferences, undefined);
 });
 
+test("migrates retired call metadata and pending approvals to phone-call records", async () => {
+  const userId = 810003;
+  const legacySession = { ...await getSession(userId) } as any;
+  delete legacySession.phoneCalls;
+  legacySession.faceTimeCalls = [
+    { id: "twc_legacy", userId, provider: "twilio", direction: "outbound", phoneNumber: "+15550001", purpose: "Legacy Twilio record", status: "ended", bridgeSessionId: "must-not-survive", createdAt: 1, updatedAt: 2 },
+    { id: "ftc_legacy", userId, provider: "facetime", direction: "outbound", phoneNumber: "+15550002", purpose: "Historical record", status: "ended", createdAt: 3, updatedAt: 4 },
+  ];
+  legacySession.approvals = [{ id: "legacy-approval", userId, toolSlug: "CHUCK_START_FACETIME_CALL", args: { phoneNumber: "+15550001", purpose: "Call" }, request: "Call", history: [], model: "test", status: "pending", createdAt: 1, expiresAt: Date.now() + 60_000 }];
+  await saveSession(userId, legacySession);
+
+  const migrated = await getSession(userId);
+  assert.deepEqual(migrated.phoneCalls?.map((call) => [call.id, call.provider]), [["twc_legacy", "twilio"], ["ftc_legacy", "legacy"]]);
+  assert.equal("faceTimeCalls" in migrated, false);
+  assert.equal("bridgeSessionId" in (migrated.phoneCalls?.[0] ?? {}), false);
+  assert.equal(migrated.approvals[0]?.toolSlug, "CHUCK_START_PHONE_CALL");
+
+  await saveSession(userId, migrated);
+  const saved = await getSession(userId);
+  assert.equal("faceTimeCalls" in saved, false);
+  assert.equal(saved.phoneCalls?.length, 2);
+});
+
 test("live voice preferences are owner-scoped, provider-specific, and preserve session history", async () => {
   const userId = 810002;
   const session = await getSession(userId);

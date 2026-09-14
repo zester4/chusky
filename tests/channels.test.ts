@@ -84,20 +84,6 @@ test("Sendblue verifies its webhook secret and normalizes direct and group iMess
   assert.equal(group?.scope, "shared");
 });
 
-test("Sendblue starts FaceTime with its documented endpoint and never accepts malformed credentials", async () => {
-  let request: { url?: string; init?: RequestInit } = {};
-  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
-    request = { url: String(url), init };
-    return new Response(JSON.stringify({ status: "OK", message: "Call started", agora: { appId: "app", channelName: "channel", token: "short-lived-token", uid: 42 } }), { status: 200 });
-  }) as typeof fetch);
-  const result = await adapter.startFaceTimeCall("+15550001");
-  assert.equal(request.url, "https://api.sendblue.com/facetime/start-call");
-  assert.deepEqual(JSON.parse(String(request.init?.body)), { phoneNumber: "+15550001", fromNumber: "+15550002" });
-  assert.equal((request.init?.headers as Record<string, string>)["sb-api-key-id"], "key");
-  assert.equal(result.agora.channelName, "channel");
-  await assert.rejects(() => adapter.startFaceTimeCall("5550001"), /E.164/);
-});
-
 test("Sendblue hydrates bounded media for the shared agent handler", async () => {
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/png", "content-length": "3" } })) as typeof fetch);
   const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-media", providerUserId: "+15550001", providerConversationId: "+15550001", text: "edit this", attachments: [{ id: "m1", kind: "image", url: "https://cdn.example/image.png" }], receivedAt: Date.now(), scope: "private" });

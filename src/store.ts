@@ -50,7 +50,7 @@ export interface UserSession {
   sdkAudit?: Array<{ id: string; action: string; requestId: string; status: number; at: number }>;
   sdkWebhooks?: Array<{ id: string; url: string; secretCiphertext: string; createdAt: number; disabledAt?: number }>;
   sdkProjects?: SdkProjectRecord[];
-  faceTimeCalls?: FaceTimeCallRecord[];
+  phoneCalls?: PhoneCallRecord[];
   recallMeetings?: RecallMeetingRecord[];
   calendarMeetingPreparations?: CalendarMeetingPreparation[];
   meetingRepresentativeProfile?: MeetingRepresentativeProfile;
@@ -96,17 +96,16 @@ export interface VideoJobRecord {
   updatedAt: number;
   completedAt?: number;
 }
-/** Safe control-plane record. It deliberately excludes Agora credentials and media. */
-export interface FaceTimeCallRecord {
+/** Safe call metadata. Provider credentials and media are never persisted here. */
+export interface PhoneCallRecord {
   id: string;
   userId: number;
   /** Explicit provider keeps shared safe call storage transport-aware. */
-  provider?: "facetime" | "twilio" | "bland";
+  provider?: "legacy" | "twilio" | "bland";
   direction?: "inbound" | "outbound";
   phoneNumber: string;
   purpose: string;
   status: "starting" | "bridging" | "active" | "ended" | "failed";
-  bridgeSessionId?: string;
   providerCallId?: string;
   error?: string;
   createdAt: number;
@@ -2234,7 +2233,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -2325,8 +2324,32 @@ function normalizeRecallSpeakerEvents(value: unknown): RecallMeetingSpeakerEvent
 }
 
 export async function getSession(uid: number): Promise<UserSession> {
-  const s = await backend.getSession(uid);
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals: s.approvals ?? [], handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], faceTimeCalls: s.faceTimeCalls ?? [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  const raw = await backend.getSession(uid) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
+  // Read and migrate the old persisted field once, without carrying the obsolete
+  // key or provider secrets/bridge session identifiers into the current model.
+  const { faceTimeCalls: legacyCalls, ...s } = raw;
+  const savedCalls = Array.isArray(s.phoneCalls) ? s.phoneCalls as unknown[] : Array.isArray(legacyCalls) ? legacyCalls : [];
+  const phoneCalls = savedCalls.flatMap((value): PhoneCallRecord[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const item = value as Record<string, unknown>;
+    if (typeof item.id !== "string" || !item.id || item.userId !== uid || typeof item.phoneNumber !== "string" || typeof item.purpose !== "string") return [];
+    const status = ["starting", "bridging", "active", "ended", "failed"].includes(String(item.status)) ? item.status as PhoneCallRecord["status"] : "failed";
+    return [{
+      id: item.id.slice(0, 128), userId: uid,
+      provider: item.provider === "twilio" || item.provider === "bland" ? item.provider : "legacy",
+      direction: item.direction === "inbound" ? "inbound" : "outbound",
+      phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
+      ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
+      ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
+      createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
+      updatedAt: typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
+    }];
+  }).slice(0, 50);
+  const approvals = (Array.isArray(s.approvals) ? s.approvals : []).map((approval) => ({
+    ...approval,
+    toolSlug: approval.toolSlug === "CHUCK_START_FACETIME_CALL" ? "CHUCK_START_PHONE_CALL" : approval.toolSlug === "CHUCK_LIST_FACETIME_CALLS" ? "CHUCK_LIST_PHONE_CALLS" : approval.toolSlug,
+  }));
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2348,24 +2371,24 @@ export async function listAgentRuns(userId: number, limit = 50): Promise<AgentRu
   return backend.listAgentRuns(userId, Math.max(1, Math.min(100, limit)));
 }
 
-export async function addFaceTimeCall(uid: number, record: FaceTimeCallRecord): Promise<FaceTimeCallRecord> {
+export async function addPhoneCall(uid: number, record: PhoneCallRecord): Promise<PhoneCallRecord> {
   const s = await getSession(uid);
-  s.faceTimeCalls = [record, ...(s.faceTimeCalls ?? [])].slice(0, 50);
+  s.phoneCalls = [record, ...(s.phoneCalls ?? [])].slice(0, 50);
   await saveSession(uid, s);
   return record;
 }
 
-export async function updateFaceTimeCall(uid: number, id: string, patch: Partial<Pick<FaceTimeCallRecord, "status" | "bridgeSessionId" | "providerCallId" | "error">>): Promise<FaceTimeCallRecord | undefined> {
+export async function updatePhoneCall(uid: number, id: string, patch: Partial<Pick<PhoneCallRecord, "status" | "providerCallId" | "error">>): Promise<PhoneCallRecord | undefined> {
   const s = await getSession(uid);
-  const current = (s.faceTimeCalls ?? []).find((item) => item.id === id && item.userId === uid);
+  const current = (s.phoneCalls ?? []).find((item) => item.id === id && item.userId === uid);
   if (!current) return undefined;
   Object.assign(current, patch, { updatedAt: Date.now() });
   await saveSession(uid, s);
   return current;
 }
 
-export async function listFaceTimeCalls(uid: number): Promise<FaceTimeCallRecord[]> {
-  return (await getSession(uid)).faceTimeCalls ?? [];
+export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {
+  return (await getSession(uid)).phoneCalls ?? [];
 }
 
 export async function saveHandoffRecord(uid: number, record: HandoffRecord): Promise<HandoffRecord> {
@@ -2383,8 +2406,8 @@ export async function getHandoffRecord(uid: number, id: string): Promise<Handoff
   return (await backend.getHandoffRecord(uid, id)) ?? (await getSession(uid)).handoffRecords?.find((record) => record.id === id);
 }
 
-export async function getFaceTimeCall(uid: number, id: string): Promise<FaceTimeCallRecord | undefined> {
-  return (await getSession(uid)).faceTimeCalls?.find((item) => item.id === id && item.userId === uid);
+export async function getPhoneCall(uid: number, id: string): Promise<PhoneCallRecord | undefined> {
+  return (await getSession(uid)).phoneCalls?.find((item) => item.id === id && item.userId === uid);
 }
 
 const ACTIVE_RECALL_MEETING_STATUSES = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);

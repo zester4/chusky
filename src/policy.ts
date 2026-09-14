@@ -9,9 +9,6 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
-  // Read-only compatibility for old conversation history. It returns only
-  // Twilio records now; FaceTime is not an available call transport.
-  "CHUCK_LIST_FACETIME_CALLS",
   "CHUCK_LIST_PHONE_CALLS",
   // Meeting participation is available only after the user's explicit join
   // request and uses a visible bot identity; leave/status/list are owner-scoped.

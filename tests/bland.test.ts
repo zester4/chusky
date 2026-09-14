@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initStore, listFaceTimeCalls, setLiveVoicePreference } from "../src/store.js";
+import { initStore, listPhoneCalls, setLiveVoicePreference } from "../src/store.js";
 import { startBlandCallForUser } from "../src/calls/bland.js";
 
 test("Bland queues an owner-scoped call with context and signed-callback URL", async () => {
@@ -25,7 +25,7 @@ test("Bland queues an owner-scoped call with context and signed-callback URL", a
   assert.equal(body.webhook, "https://chusky.example/bland/webhook");
   assert.equal(body.voice, "11111111-1111-4111-8111-111111111111");
   assert.match(body.task, /customer prefers mornings/);
-  assert.equal((await listFaceTimeCalls(808))[0]?.providerCallId, "bland-provider-call");
+  assert.equal((await listPhoneCalls(808))[0]?.providerCallId, "bland-provider-call");
 });
 
 test("Bland refuses to call when disabled", async () => {

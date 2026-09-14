@@ -1,8 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
-import { nativeTool } from "../src/nativeTools.js";
-import { config } from "../src/config.js";
 
 test("native tool catalog has unique names", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -41,21 +39,6 @@ test("exposes Twilio as the only agent-call transport", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   assert.equal(names.has("CHUCK_START_PHONE_CALL"), true);
   assert.equal(names.has("CHUCK_LIST_PHONE_CALLS"), true);
-  assert.equal(names.has("CHUCK_START_FACETIME_CALL"), false);
-  assert.equal(names.has("CHUCK_LIST_FACETIME_CALLS"), false);
-});
-
-test("routes a legacy FaceTime approval through Twilio rather than Sendblue", async () => {
-  const enabled = config.twilioVoiceEnabled;
-  config.twilioVoiceEnabled = false;
-  try {
-    await assert.rejects(
-      () => nativeTool(990021, "CHUCK_START_FACETIME_CALL", { phoneNumber: "+15550001", purpose: "Compatibility check" }),
-      /Phone calling is disabled/,
-    );
-  } finally {
-    config.twilioVoiceEnabled = enabled;
-  }
 });
 
 test("presentation generator requires a title and structured slides", () => {

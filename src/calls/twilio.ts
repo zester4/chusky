@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { addFaceTimeCall, updateFaceTimeCall, type FaceTimeCallRecord } from "../store.js";
+import { addPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 
 export interface TwilioCallInput { phoneNumber: string; purpose: string; }
 export interface TwilioCallDependencies {
@@ -39,11 +39,11 @@ export function validateTwilioCallInput(input: TwilioCallInput): TwilioCallInput
 export async function startTwilioCallForUser(userId: number, input: TwilioCallInput, options: TwilioCallDependencies = {
   enabled: config.twilioVoiceEnabled, accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken,
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
-}): Promise<FaceTimeCallRecord> {
+}): Promise<PhoneCallRecord> {
   validate(options);
   const { phoneNumber, purpose } = validateTwilioCallInput(input);
-  const call: FaceTimeCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
-  await addFaceTimeCall(userId, call);
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  await addPhoneCall(userId, call);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   const query = `callId=${encodeURIComponent(call.id)}&userId=${encodeURIComponent(String(userId))}`;
   const url = `${base}/twilio/twiml?${query}`;
@@ -59,10 +59,10 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
       return { sid: result.sid };
     });
     const provider = await create({ to: phoneNumber, from: options.callerId, url, statusCallback });
-    return (await updateFaceTimeCall(userId, call.id, { status: "bridging", providerCallId: String(provider.sid).slice(0, 100) }))!;
+    return (await updatePhoneCall(userId, call.id, { status: "bridging", providerCallId: String(provider.sid).slice(0, 100) }))!;
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 500) : "Twilio call setup failed";
-    await updateFaceTimeCall(userId, call.id, { status: "failed", error: message });
+    await updatePhoneCall(userId, call.id, { status: "failed", error: message });
     throw new Error(`Phone call could not be started: ${message}`);
   }
 }

@@ -9,7 +9,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, appendMessages, canSpend, cancelTask, checkRateLimit, claimApproval, createTask, createWebTelegramLinkCode, getApproval, getAgentRun, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listApprovals, listAgentRuns, listChannelIdentities, listCliDevices, listFaceTimeCalls, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveHandoffRecord, saveSession, setApprovalStatus, setModel, setTaskWorkflowRunId, setVoiceReplies, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, appendMessages, canSpend, cancelTask, checkRateLimit, claimApproval, createTask, createWebTelegramLinkCode, getApproval, getAgentRun, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listApprovals, listAgentRuns, listChannelIdentities, listCliDevices, listPhoneCalls, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveHandoffRecord, saveSession, setApprovalStatus, setModel, setTaskWorkflowRunId, setVoiceReplies, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -257,7 +257,6 @@ export function registerSdkApi(app: Hono): void {
       qstash: config.qstashToken ? "configured" : "disabled",
       composioTriggers: config.composioWebhookSecret && (config.composioWebhookUrl || config.webhookUrl) ? "configured" : "disabled",
       sendblue: config.sendblueEnabled ? (sendblueConfigured ? "configured" : "misconfigured") : "disabled",
-      facetime: "disabled",
       twilio: config.twilioVoiceEnabled ? (twilioConfigured ? "configured" : "misconfigured") : "disabled",
       twilioSms: config.twilioSmsEnabled ? (twilioSmsConfigured ? "configured" : "misconfigured") : "disabled",
       twilioInbound: config.twilioInboundEnabled ? (twilioInboundConfigured ? "configured" : "misconfigured") : "disabled",
@@ -407,7 +406,7 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/calls", async (c) => {
     const owner = await linkedWebCallOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
-    return c.json({ available: phoneCallingAvailable(), data: (await listFaceTimeCalls(owner.userId)).map(callView) });
+    return c.json({ available: phoneCallingAvailable(), data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
   app.post("/v1/account/calls", async (c) => {
@@ -657,7 +656,7 @@ export function registerSdkApi(app: Hono): void {
       return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     }
     try {
-      if (approval.toolSlug === "CHUCK_START_FACETIME_CALL" || approval.toolSlug === "CHUCK_START_PHONE_CALL") {
+      if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         try {
           validateNativeToolArguments(approval.toolSlug, approval.args);
           await nativeTool(owner.userId, approval.toolSlug, approval.args);

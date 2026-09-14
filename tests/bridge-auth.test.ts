@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { createVoiceBridgeTicket, hasBridgeAuthorization } from "../src/calls/bridgeAuth.js";
 
-test("FaceTime bridge authentication is strict", () => {
+test("voice bridge authentication is strict", () => {
   assert.equal(hasBridgeAuthorization("Bearer bridge-secret", "bridge-secret"), true);
   assert.equal(hasBridgeAuthorization("Bearer wrong", "bridge-secret"), false);
   assert.equal(hasBridgeAuthorization("Basic bridge-secret", "bridge-secret"), false);
