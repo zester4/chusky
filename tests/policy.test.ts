@@ -30,6 +30,10 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_SPREADSHEET"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_UPDATE_MEMORY"), "private");
   for (const name of ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(toolApprovalPolicy(name), "private", name);
+  for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {
+    assert.equal(toolApprovalPolicy(name), "private", name);
+  }
+  assert.equal(toolApprovalPolicy("CHUCK_MEETING_CONTACT_DELETE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);

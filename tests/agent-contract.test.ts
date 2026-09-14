@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getSession, initStore, listAgentRuns } from "../src/store.js";
+import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
+import { nativeTool } from "../src/nativeTools.js";
 
 // Agent contract tests mock provider HTTP calls; never send their fetch stubs
 // to a developer's configured Upstash Vector instance.
@@ -101,6 +102,57 @@ test("ephemeral shared turns expose no tools, skip Composio, and do not persist 
     assert.equal(composioCreated, 0);
     assert.equal(requests[0]?.tools, undefined);
     assert.equal((await listAgentRuns(userId)).length, 0, "volatile meeting speech is not written to durable agent-run records");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("owner-scoped meeting contact capture executes without a spurious approval failure", async () => {
+  const userId = 830051;
+  const meetingId = "mtg_agent_contact_policy";
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  await updateMeetingRepresentativeProfile(userId, { enabled: true, objective: "Capture requested client follow-up details" });
+  await addRecallMeeting(userId, {
+    id: meetingId,
+    userId,
+    platform: "google_meet",
+    interactionMode: "representative",
+    status: "in_call",
+    meetingUrlHash: "b".repeat(64),
+    history: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  const originalFetch = globalThis.fetch;
+  let requestIndex = 0;
+  const responses = [
+    toolResponse("CHUCK_MEETING_CONTACT_CAPTURE", JSON.stringify({
+      participantName: "Riley Park",
+      email: "riley@example.com",
+      contactPreference: "email",
+      interest: "Asked for a test-drive follow-up",
+      nextStep: "Send available test-drive times",
+    })),
+    chatResponse({ role: "assistant", content: "I’ve saved Riley’s agreed follow-up details." }),
+  ];
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "meeting-contact-session", tools: async () => [], execute: async () => ({}) }) } });
+  globalThis.fetch = (async () => responses[requestIndex++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" })) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Live context window. Current utterance: Please save my email for the test drive follow-up.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: "shared" },
+      { ephemeral: true, toolAllow: ["CHUCK_MEETING_CONTACT_CAPTURE"], meetingId, maxToolCalls: 1 },
+    );
+    assert.equal(result.text, "I’ve saved Riley’s agreed follow-up details.");
+    assert.deepEqual(result.toolsSucceeded, ["CHUCK_MEETING_CONTACT_CAPTURE"]);
+    const contacts = await nativeTool(userId, "CHUCK_MEETING_CONTACTS_LIST", {}) as Array<{ participantName: string; email?: string }>;
+    assert.deepEqual(contacts.map(({ participantName, email }) => ({ participantName, email })), [{ participantName: "Riley Park", email: "riley@example.com" }]);
   } finally { globalThis.fetch = originalFetch; }
 });
 

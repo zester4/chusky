@@ -13,6 +13,11 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   // Meeting participation is available only after the user's explicit join
   // request and uses a visible bot identity; leave/status/list are owner-scoped.
   "CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE", "CHUCK_MEETING_PROFILE_GET", "CHUCK_MEETING_PROFILE_UPDATE",
+  // These meeting tools are narrowly scoped by the active owned meeting and
+  // its enabled representative profile. Contact capture stores only details
+  // shared for an agreed next step; follow-up scheduling binds one contact to
+  // the exact email action already granted by the owner.
+  "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE",
   "CHUCK_ATTENTION_STATE",
   "CHUCK_FORGET_MEMORY", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
