@@ -428,9 +428,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_FORGET_IMAGE_ASSET": return { forgotten: await forgetImageAsset(userId, text(args.id)) };
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
-    case "CHUCK_START_PHONE_CALL": return config.blandVoiceEnabled
-      ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) })
-      : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose) });
+    case "CHUCK_START_PHONE_CALL": {
+      const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      return config.blandVoiceEnabled
+        ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile })
+        : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile });
+    }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_MEETING_CONTEXT_PREPARE": {
       if (runtime.sharedConversation) throw new Error("Client meeting preparation is available only in a private owner conversation");

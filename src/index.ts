@@ -31,6 +31,7 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
+import { voiceProfileNativeTools } from "./calls/voiceProfile.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
@@ -465,7 +466,7 @@ async function main(): Promise<void> {
           const session = await getSession(userId);
           return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
             instructions: twilioVoiceInstructions(call),
-            toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
+            toolAllow: voiceProfileNativeTools(call.voiceProfile),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
           });
@@ -556,7 +557,7 @@ async function main(): Promise<void> {
               send({ type: "start", model: config.voiceModel, speculative });
               return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
                 instructions: twilioVoiceInstructions(call),
-                toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
+                toolAllow: voiceProfileNativeTools(call.voiceProfile),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
               });

@@ -1,10 +1,11 @@
 import { config } from "../config.js";
 import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
+import { normalizeVoiceCallProfile, voiceProfileInstructions, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface BlandCallInput { phoneNumber: string; purpose: string; }
+export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; }
 export interface BlandCallDependencies {
   enabled: boolean;
   apiKey: string;
@@ -61,7 +62,8 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const profile = normalizeVoiceCallProfile(input.profile);
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   try {
     const callbackToken = createBlandCallToken({ userId, callId: call.id }, options.webhookSecret);
@@ -73,7 +75,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
         phone_number: phoneNumber,
-        task: `You are Chusky, speaking naturally on behalf of the owner or their company. Open with a brief, friendly introduction and state the reason for the call: ${purpose.slice(0, 1400)}. Listen and respond conversationally. Use the Consult Chusky tool when a relevant factual question is not answered by this call's stated purpose; do not use it for ordinary pleasantries. Do not invent facts, promise an action you cannot take, or say an action is complete unless it is verified. If you cannot verify an answer, say so naturally and offer a follow-up.`,
+        task: `${voiceProfileInstructions(profile, "outbound", purpose)} Use the Consult Chusky tool only when a relevant factual question is not answered by this approved call context; do not use it for ordinary pleasantries.`,
         voice: selectedVoice,
         webhook: callbackUrl.toString(),
         webhook_events: ["queue", "call", "latency", "tool"],

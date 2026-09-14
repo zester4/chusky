@@ -5,6 +5,7 @@
 import Redis from "ioredis";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { recordFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
@@ -105,6 +106,8 @@ export interface PhoneCallRecord {
   direction?: "inbound" | "outbound";
   phoneNumber: string;
   purpose: string;
+  /** Approved representation details and read-only capability scope. */
+  voiceProfile?: VoiceCallProfile;
   status: "starting" | "bridging" | "active" | "ended" | "failed";
   providerCallId?: string;
   error?: string;
@@ -2376,6 +2379,7 @@ export async function getSession(uid: number): Promise<UserSession> {
       provider: item.provider === "twilio" || item.provider === "bland" ? item.provider : "legacy",
       direction: item.direction === "inbound" ? "inbound" : "outbound",
       phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
+      ...(item.voiceProfile && typeof item.voiceProfile === "object" && !Array.isArray(item.voiceProfile) ? { voiceProfile: normalizeVoiceCallProfile(item.voiceProfile) } : {}),
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),
       ...(typeof item.error === "string" ? { error: item.error.slice(0, 500) } : {}),
       ...(typeof item.summary === "string" ? { summary: item.summary.slice(0, 2000) } : {}),

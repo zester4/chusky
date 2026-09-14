@@ -8,7 +8,18 @@ beforeEach(async () => { await initStore({ memoryOnly: true }); });
 test("direct phone-call requests persist exact validated arguments for one approval", async () => {
   const approval = await requestPhoneCallApproval(71, { phoneNumber: "+15550001", purpose: "Confirm tomorrow's appointment" });
   assert.equal(approval.toolSlug, "CHUCK_START_PHONE_CALL");
-  assert.deepEqual(approval.args, { phoneNumber: "+15550001", purpose: "Confirm tomorrow's appointment" });
+  assert.deepEqual(approval.args, {
+    phoneNumber: "+15550001",
+    purpose: "Confirm tomorrow's appointment",
+    profile: {
+      identity: "Chusky",
+      mode: "general",
+      tone: "professional",
+      facts: [],
+      guardrails: [],
+      capabilities: ["memory_lookup", "scratchpad_lookup", "schedule_lookup", "task_lookup", "call_history"],
+    },
+  });
   assert.equal(approval.status, "pending");
   assert.deepEqual(await getApproval(71, approval.id), approval);
 });
