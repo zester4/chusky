@@ -30,6 +30,7 @@ import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailur
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
+import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
@@ -463,7 +464,7 @@ async function main(): Promise<void> {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
           return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
-            instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform any external action during this call; ask the caller to continue in Telegram for approvals or actions.",
+            instructions: twilioVoiceInstructions(call),
             toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
@@ -554,7 +555,7 @@ async function main(): Promise<void> {
             const result = await withCliLock(userId, c.req.raw.signal, async () => {
               send({ type: "start", model: config.voiceModel, speculative });
               return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
-                instructions: "You are speaking live in a voice call. Be concise, conversational, and easy to hear. Do not claim to perform an external action during this call; ask the caller to continue in Telegram for approvals or actions.",
+                instructions: twilioVoiceInstructions(call),
                 toolAllow: [...VOICE_TURN_NATIVE_TOOLS],
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
@@ -587,13 +588,20 @@ async function main(): Promise<void> {
       const call = await getPhoneCall(userId, callId);
       if (!call || !["bridging", "active"].includes(call.status)) return c.json({ ok: false, error: "unknown or inactive call" }, 404);
       const key = `voice-turn:${callId}:${turnId}`;
-      if (!(await claimDelivery(key, 60_000))) return c.json({ ok: true, duplicate: true });
+      const leaseToken = randomUUID();
+      const lease = await claimDeliveryLease(key, leaseToken, 60_000);
+      if (lease === "completed") return c.json({ ok: true, duplicate: true });
+      // Do not pretend a concurrent, still-running commit succeeded. The
+      // bridge retries this exact payload, which prevents lost history during
+      // a short Redis or replica delay without generating another answer.
+      if (lease === "busy") return c.json({ ok: false, error: "voice turn commit is in progress", retryable: true }, 409);
       try {
         await appendMessages(userId, [{ role: "user", content: `[Voice call ${callId}] ${transcript}` }, { role: "assistant", content: normalizeVoiceText(text) }]);
         if (cost) await addUsage(userId, cost);
-        await completeDelivery(key, 7 * 24 * 60 * 60);
+        if (!(await completeDeliveryLease(key, leaseToken, 7 * 24 * 60 * 60))) throw new Error("voice turn commit lease expired");
         return c.json({ ok: true });
       } catch (error) {
+        await releaseDeliveryLease(key, leaseToken).catch(() => false);
         logger.warn({ err: error, callId, userId }, "Voice turn commit failed");
         return c.json({ ok: false, error: "voice turn commit failed" }, 502);
       }
