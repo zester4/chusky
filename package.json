@@ -1,5 +1,5 @@
 {
-  "name": "tg-agent",
+  "name": "chusky",
   "version": "3.0.0",
   "description": "Chusky AI Agent powered by Composio + OpenRouter",
   "main": "dist/index.js",
