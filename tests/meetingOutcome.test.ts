@@ -2,13 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   deliverMeetingOutcomeOnce,
+  buildMeetingFollowThroughPrompt,
   buildMeetingOutcomePrompt,
+  buildScheduledMeetingFollowUpPrompt,
+  executeScheduledMeetingFollowUp,
   formatMeetingOutcomeScratchpad,
   parseMeetingOutcome,
   processMeetingOutcome,
   selectMeetingNotionCreateTool,
 } from "../src/meetings/outcome.js";
-import type { RecallMeetingRecord } from "../src/store.js";
+import type { MeetingContactRecord, RecallMeetingRecord } from "../src/store.js";
 import { defaultMeetingRepresentativeProfile } from "../src/meetings/representative.js";
 
 const meeting: RecallMeetingRecord = {
@@ -77,6 +80,128 @@ test("meeting outcome prompt uses only bounded meeting turns and treats them as 
   assert.ok(prompt.length < 20_000);
 });
 
+test("post-meeting actions receive only captured contacts from this meeting and coach tailored follow-up", () => {
+  const profile = { ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Arrange useful next steps" };
+  const prompt = buildMeetingFollowThroughPrompt({
+    meeting,
+    outcome: parseMeetingOutcome(outcomeJson),
+    profile,
+    notionTool: "NOTION_CREATE_PAGE",
+    contacts: [
+      { id: "mct_1234567890abcdef1234567890abcdef", userId: meeting.userId, meetingId: meeting.id, participantName: "Avery Chen", email: "avery@example.com", contactPreference: "email", interest: "Vehicle test drive", nextStep: "Arrange a test drive next week", followUpAt: Date.now() + 60_000, followUpTaskId: "task_existing_followup", createdAt: 1, updatedAt: 2 },
+      { id: "mct_abcdef1234567890abcdef1234567890", userId: meeting.userId, meetingId: "mtg_other", participantName: "Other Person", email: "other@example.com", contactPreference: "email", interest: "Unrelated", createdAt: 1, updatedAt: 2 },
+    ],
+  });
+  assert.match(prompt, /avery@example\.com/);
+  assert.match(prompt, /individualized email/i);
+  assert.match(prompt, /NOTION_CREATE_PAGE/);
+  assert.match(prompt, /No second owner approval/i);
+  assert.match(prompt, /followUpTaskId means that follow-up is already scheduled/i);
+  assert.doesNotMatch(prompt, /other@example\.com|Unrelated/);
+});
+
+test("scheduled follow-up prompt carries the agreed timing and only one contact/action", () => {
+  const profile = {
+    ...defaultMeetingRepresentativeProfile(),
+    enabled: true,
+    objective: "Coordinate the requested vehicle test drive",
+    approvedKnowledge: "Test drives are available at the downtown showroom.",
+  };
+  const followUpAt = Date.now() + 24 * 60 * 60 * 1000;
+  const contact: MeetingContactRecord = {
+    id: "mct_1234567890abcdef1234567890abcdef",
+    userId: meeting.userId,
+    meetingId: meeting.id,
+    participantName: "Avery Chen",
+    email: "avery@example.com",
+    contactPreference: "email",
+    interest: "Electric SUV test drive",
+    nextStep: "Send available test-drive times",
+    followUpAt,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const prompt = buildScheduledMeetingFollowUpPrompt({ meeting, contact, profile, emailTool: "GMAIL_SEND_EMAIL", outcome: parseMeetingOutcome(outcomeJson) });
+  assert.match(prompt, /GMAIL_SEND_EMAIL/);
+  assert.match(prompt, /avery@example\.com/);
+  assert.match(prompt, /agreedFollowUpAt/);
+  assert.match(prompt, /available test-drive times/);
+  assert.match(prompt, /Do not read or infer from owner history, general memory/i);
+  assert.doesNotMatch(prompt, /Private Road|other@example\.com|another customer's offer/i);
+  assert.doesNotMatch(prompt, /other@example\.com|Unrelated/);
+  assert.ok(prompt.length < 12_000);
+});
+
+test("scheduled meeting follow-up revalidates grants, scopes the single send, and suppresses duplicates", async () => {
+  const profile = { ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Coordinate the requested vehicle test drive", allowedComposioTools: ["GMAIL_SEND_EMAIL"] };
+  const contact: MeetingContactRecord = {
+    id: "mct_1234567890abcdef1234567890abcdef", userId: meeting.userId, meetingId: meeting.id,
+    participantName: "Avery Chen", email: "avery@example.com", contactPreference: "email",
+    interest: "Electric SUV", nextStep: "Send test-drive times", createdAt: 1, updatedAt: 2,
+  };
+  let state: "scheduled" | "claimed" | "completed" | "ambiguous" = "scheduled";
+  let sends = 0;
+  const execute = (emailResult: { toolsUsed: string[]; toolsSucceeded: string[] }) => executeScheduledMeetingFollowUp({
+    userId: meeting.userId,
+    taskId: "task_meeting_followup",
+    binding: { meetingId: meeting.id, contactId: contact.id, emailTool: "GMAIL_SEND_EMAIL", state },
+  }, {
+    getMeeting: async (userId, id) => userId === meeting.userId && id === meeting.id ? meeting : undefined,
+    getProfile: async () => profile,
+    getContact: async (userId, id, meetingId) => userId === contact.userId && id === contact.id && meetingId === contact.meetingId ? contact : undefined,
+    canSend: async () => true,
+    updateState: async (_userId, _taskId, next) => { state = next; return true; },
+    send: async ({ emailTool, prompt }) => {
+      sends++;
+      assert.equal(emailTool, "GMAIL_SEND_EMAIL");
+      assert.match(prompt, /avery@example\.com/);
+      return emailResult;
+    },
+  });
+
+  const sent = await execute({ toolsUsed: ["GMAIL_SEND_EMAIL"], toolsSucceeded: ["GMAIL_SEND_EMAIL"] });
+  assert.equal(sent.status, "completed");
+  assert.equal(state, "completed");
+  assert.equal(sends, 1);
+  const duplicate = await execute({ toolsUsed: ["GMAIL_SEND_EMAIL"], toolsSucceeded: ["GMAIL_SEND_EMAIL"] });
+  assert.equal(duplicate.status, "blocked");
+  assert.match(duplicate.message, /already completed/i);
+  assert.equal(sends, 1);
+});
+
+test("ambiguous email execution is never automatically repeated and revoked grants block before claiming", async () => {
+  const baseProfile = { ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Coordinate the requested vehicle test drive", allowedComposioTools: ["GMAIL_SEND_EMAIL"] };
+  const contact: MeetingContactRecord = {
+    id: "mct_1234567890abcdef1234567890abcdef", userId: meeting.userId, meetingId: meeting.id,
+    participantName: "Avery Chen", email: "avery@example.com", contactPreference: "email", interest: "Electric SUV", createdAt: 1, updatedAt: 2,
+  };
+  let state: "scheduled" | "claimed" | "completed" | "ambiguous" = "scheduled";
+  let sends = 0;
+  const run = (profile = baseProfile) => executeScheduledMeetingFollowUp({
+    userId: meeting.userId,
+    taskId: "task_meeting_followup",
+    binding: { meetingId: meeting.id, contactId: contact.id, emailTool: "GMAIL_SEND_EMAIL", state },
+  }, {
+    getMeeting: async () => meeting,
+    getProfile: async () => profile,
+    getContact: async () => contact,
+    updateState: async (_userId, _taskId, next) => { state = next; return true; },
+    send: async () => { sends++; return { toolsUsed: ["GMAIL_SEND_EMAIL"], toolsSucceeded: [] }; },
+  });
+  const ambiguous = await run();
+  assert.equal(ambiguous.status, "blocked");
+  assert.equal(state, "ambiguous");
+  const retry = await run();
+  assert.match(retry.message, /not automatically repeated/i);
+  assert.equal(sends, 1);
+
+  state = "scheduled";
+  const revoked = await run({ ...baseProfile, allowedComposioTools: [] });
+  assert.match(revoked.message, /exact email action is no longer enabled/i);
+  assert.equal(state, "scheduled");
+  assert.equal(sends, 1);
+});
+
 test("structured meeting outcome parser validates and bounds model output", () => {
   assert.deepEqual(parseMeetingOutcome(outcomeJson), {
     title: "Acme pilot onboarding",
@@ -114,19 +239,26 @@ test("ended representative meeting saves to owner scratchpad, follows only grant
     ...defaultMeetingRepresentativeProfile(),
     enabled: true,
     objective: "Represent Acme and progress onboarding",
-    allowedComposioTools: ["NOTION_CREATE_PAGE", "HUBSPOT_UPDATE_DEAL"],
+    allowedComposioTools: ["NOTION_CREATE_PAGE", "HUBSPOT_UPDATE_DEAL", "GMAIL_SEND_EMAIL"],
     allowedNativeTools: ["CHUCK_TASK_CREATE"],
   };
   const calls: string[] = [];
+  const contacts: MeetingContactRecord[] = [{
+    id: "mct_1234567890abcdef1234567890abcdef", userId: meeting.userId, meetingId: meeting.id,
+    participantName: "Avery Chen", email: "avery@example.com", contactPreference: "email",
+    interest: "Vehicle test drive", nextStep: "Arrange a test drive next week", createdAt: 1, updatedAt: 2,
+  }];
   let claimed = false;
   let completed = false;
   let completionTtl: number | undefined;
   const deps = {
     getMeeting: async (userId: number, id: string) => userId === meeting.userId && id === meeting.id ? meeting : undefined,
     getProfile: async () => profile,
+    getContacts: async () => contacts,
     summarize: async () => outcomeJson,
-    followThrough: async (input: { userId: number; meeting: RecallMeetingRecord; outcome: ReturnType<typeof parseMeetingOutcome>; notionTool?: string; allowedComposioTools: string[]; allowedNativeTools: string[] }) => {
+    followThrough: async (input: { userId: number; meeting: RecallMeetingRecord; outcome: ReturnType<typeof parseMeetingOutcome>; notionTool?: string; allowedComposioTools: string[]; allowedNativeTools: string[]; contacts: MeetingContactRecord[] }) => {
       calls.push(`follow:${input.notionTool}:${input.allowedComposioTools.join(",")}:${input.allowedNativeTools.join(",")}`);
+      assert.deepEqual(input.contacts, contacts);
       return { notionSaved: true, notionUrl: "https://www.notion.so/acme/pilot-123" };
     },
     writeScratchpad: async (userId: number, key: string, content: string) => { calls.push(`scratchpad:${userId}:${key}`); assert.match(content, /notion\.so/); },
@@ -143,7 +275,7 @@ test("ended representative meeting saves to owner scratchpad, follows only grant
   assert.equal(completionTtl, 90 * 24 * 60 * 60, "outcome dedupe TTL must remain within the store limit");
   assert.deepEqual(calls, [
     `save:42:${meeting.id}:Acme pilot onboarding:pending`,
-    "follow:NOTION_CREATE_PAGE:NOTION_CREATE_PAGE,HUBSPOT_UPDATE_DEAL:CHUCK_TASK_CREATE",
+    "follow:NOTION_CREATE_PAGE:NOTION_CREATE_PAGE,HUBSPOT_UPDATE_DEAL,GMAIL_SEND_EMAIL:CHUCK_TASK_CREATE",
     `save:42:${meeting.id}:Acme pilot onboarding:pending`,
     `scratchpad:42:meeting:${meeting.id}`,
     `save:42:${meeting.id}:Acme pilot onboarding:completed`,

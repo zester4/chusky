@@ -42,7 +42,10 @@ export function prepareMeetingMission(input: {
   const query = `${clientName} ${objective}`.trim();
   const clientQuery = clientName.toLowerCase();
   const selected = memories
-    .filter((memory) => memory.status !== "deleted" && memory.sensitivity === "normal" && SAFE_CATEGORIES.has(memory.category))
+    .filter((memory) => (memory.status === undefined || memory.status === "active")
+      && memory.sensitivity === "normal"
+      && SAFE_CATEGORIES.has(memory.category)
+      && (!memory.expiresAt || memory.expiresAt > now))
     .map((memory) => ({ memory, score: tokenScore(memory, query), clientScore: tokenScore(memory, clientQuery) }))
     // A meeting never inherits a fact merely because its generic objective
     // happens to overlap. The selected client must match the memory itself.
@@ -87,11 +90,37 @@ export function lookupMeetingMission(mission: MeetingMission, memories: MemoryFa
   const question = clean(query, 500, "query", true);
   const permitted = new Set(mission.sourceMemoryIds);
   const facts = memories
-    .filter((memory) => permitted.has(memory.id) && memory.status !== "deleted" && memory.sensitivity === "normal" && SAFE_CATEGORIES.has(memory.category))
+    .filter((memory) => permitted.has(memory.id)
+      && (memory.status === undefined || memory.status === "active")
+      && memory.sensitivity === "normal"
+      && SAFE_CATEGORIES.has(memory.category)
+      && (!memory.expiresAt || memory.expiresAt > Date.now()))
     .map((memory) => ({ memory, score: tokenScore(memory, question) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
     .slice(0, 6)
     .map(({ memory }) => `${memory.key}: ${memory.value.replace(/\s+/g, " ").trim().slice(0, 700)}`);
   return { clientName: mission.clientName, objective: mission.objective, facts: facts.length ? facts : ["No approved meeting-context fact matched that question."] };
+}
+
+/**
+ * Meeting-safe company lookup. Unlike client relationship history, ordinary
+ * business facts are available to an enabled representative without requiring
+ * a client mission. Personal and sensitive categories never enter this path.
+ */
+export function lookupMeetingBusinessKnowledge(memories: MemoryFact[], query: unknown, now = Date.now()): { facts: string[] } {
+  const question = clean(query, 500, "query", true);
+  const facts = memories
+    .filter((memory) => memory.category === "business"
+      && memory.sensitivity === "normal"
+      && (memory.status === undefined || memory.status === "active")
+      && !memory.personKey
+      && !memory.projectId
+      && (!memory.expiresAt || memory.expiresAt > now))
+    .map((memory) => ({ memory, score: tokenScore(memory, question) }))
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
+    .slice(0, 6)
+    .map(({ memory }) => `${memory.key}: ${memory.value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 700)}`);
+  return { facts: facts.length ? facts : ["No normal-sensitivity company fact matched that question."] };
 }

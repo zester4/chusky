@@ -62,6 +62,23 @@ export interface UserSession {
   updatedAt: number;
 }
 
+/** Contact information a participant shared for an agreed meeting follow-up. Kept outside general memory. */
+export interface MeetingContactRecord {
+  id: string;
+  userId: number;
+  meetingId: string;
+  participantName: string;
+  email?: string;
+  phone?: string;
+  contactPreference: "email" | "phone" | "unspecified";
+  interest: string;
+  nextStep?: string;
+  followUpAt?: number;
+  followUpTaskId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type VideoJobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface VideoJobRecord {
@@ -386,6 +403,13 @@ export interface TaskRecord {
   sdkBudget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
   sdkStartedAt?: number;
   sdkSkills?: string[];
+  /** Narrow delayed meeting follow-up context; deliberately excludes general chat history and arbitrary tools. */
+  meetingFollowUp?: {
+    meetingId: string;
+    contactId: string;
+    emailTool: string;
+    state: "scheduled" | "claimed" | "completed" | "ambiguous";
+  };
 }
 
 export interface ReminderRecord {
@@ -757,6 +781,9 @@ interface Backend {
   createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord>;
   getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined>;
   updateRecallChatEvent(eventId: string, patch: Partial<RecallChatEventRecord>): Promise<RecallChatEventRecord | undefined>;
+  upsertMeetingContact(record: MeetingContactRecord): Promise<MeetingContactRecord>;
+  listMeetingContacts(userId: number, limit: number): Promise<MeetingContactRecord[]>;
+  deleteMeetingContact(userId: number, id: string): Promise<boolean>;
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
@@ -953,6 +980,8 @@ class RedisBackend implements Backend {
   private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
+  private meetingContactsKey = (id: number) => `chuck:meeting-contacts:${id}`;
+  private meetingContactsIndexKey = (id: number) => `chuck:meeting-contacts:${id}:index`;
   private recallMeetingCreationKey = (userId: number, instanceHash: string) => `chuck:recall:meeting:create:${createHash("sha256").update(`${userId}:${instanceHash}`).digest("hex")}`;
   private channelIdentityKey = (provider: ChannelProvider, externalUserId: string, workspaceId?: string) => `chuck:channel:identity:${provider}:${createHash("sha256").update(`${workspaceId ?? "-"}:${externalUserId}`).digest("hex")}`;
   private channelIdentityUserKey = (userId: number) => `chuck:user:${userId}:channel-identities`;
@@ -1108,6 +1137,38 @@ class RedisBackend implements Backend {
     if (ttl <= 0) return undefined;
     await this.r.setex(key, ttl, JSON.stringify(next));
     return next;
+  }
+
+  async upsertMeetingContact(record: MeetingContactRecord): Promise<MeetingContactRecord> {
+    const script = [
+      "local prior = redis.call('HGET', KEYS[1], ARGV[1])",
+      "local next = cjson.decode(ARGV[2])",
+      "if prior then local ok, old = pcall(cjson.decode, prior); if ok and old.createdAt then next.createdAt = old.createdAt end end",
+      "local encoded = cjson.encode(next)",
+      "redis.call('HSET', KEYS[1], ARGV[1], encoded)",
+      "redis.call('ZADD', KEYS[2], ARGV[3], ARGV[1])",
+      "local excess = redis.call('ZCARD', KEYS[2]) - tonumber(ARGV[4])",
+      "if excess > 0 then local expired = redis.call('ZRANGE', KEYS[2], 0, excess - 1); for _, id in ipairs(expired) do redis.call('HDEL', KEYS[1], id) end; redis.call('ZREMRANGEBYRANK', KEYS[2], 0, excess - 1) end",
+      "return encoded",
+    ].join("\n");
+    const raw = await this.r.eval(script, 2, this.meetingContactsKey(record.userId), this.meetingContactsIndexKey(record.userId), record.id, JSON.stringify(record), record.updatedAt, 200) as string;
+    return JSON.parse(raw) as MeetingContactRecord;
+  }
+  async listMeetingContacts(userId: number, limit: number): Promise<MeetingContactRecord[]> {
+    const ids = await this.r.zrevrange(this.meetingContactsIndexKey(userId), 0, Math.max(0, limit - 1));
+    const values = await Promise.all(ids.map((id) => this.r.hget(this.meetingContactsKey(userId), id)));
+    return values.flatMap((raw) => {
+      if (!raw) return [];
+      try { const record = JSON.parse(raw) as MeetingContactRecord; return record.userId === userId ? [record] : []; }
+      catch { return []; }
+    });
+  }
+  async deleteMeetingContact(userId: number, id: string): Promise<boolean> {
+    const removed = await this.r.eval(
+      "local n = redis.call('HDEL', KEYS[1], ARGV[1]); redis.call('ZREM', KEYS[2], ARGV[1]); return n",
+      2, this.meetingContactsKey(userId), this.meetingContactsIndexKey(userId), id,
+    );
+    return Number(removed) === 1;
   }
 
   async incrRate(userId: number): Promise<number> {
@@ -1732,6 +1793,7 @@ class MemoryBackend implements Backend {
   private recallMeetingCreationClaims = new Map<string, { token: string; expiresAt: number }>();
   private recallCopilotEvaluations = new Map<string, { lastAt: number; expiresAt: number }>();
   private recallChatEvents = new Map<string, { record: RecallChatEventRecord; expiresAt: number }>();
+  private meetingContacts = new Map<number, Map<string, MeetingContactRecord>>();
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
   private jobs = new Map<number, JobRecord[]>();
@@ -1814,6 +1876,27 @@ class MemoryBackend implements Backend {
     const existing = this.recallChatEvents.get(eventId)!;
     this.recallChatEvents.set(eventId, { record: next, expiresAt: existing.expiresAt });
     return next;
+  }
+  async upsertMeetingContact(record: MeetingContactRecord): Promise<MeetingContactRecord> {
+    const contacts = this.meetingContacts.get(record.userId) ?? new Map<string, MeetingContactRecord>();
+    const prior = contacts.get(record.id);
+    const next = { ...record, createdAt: prior?.createdAt ?? record.createdAt };
+    contacts.set(record.id, next);
+    while (contacts.size > 200) {
+      const oldest = [...contacts.values()].sort((a, b) => a.updatedAt - b.updatedAt)[0];
+      if (!oldest) break;
+      contacts.delete(oldest.id);
+    }
+    this.meetingContacts.set(record.userId, contacts);
+    return next;
+  }
+  async listMeetingContacts(userId: number, limit: number): Promise<MeetingContactRecord[]> {
+    return [...(this.meetingContacts.get(userId)?.values() ?? [])]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, limit);
+  }
+  async deleteMeetingContact(userId: number, id: string): Promise<boolean> {
+    return this.meetingContacts.get(userId)?.delete(id) ?? false;
   }
 
   async incrRate(userId: number): Promise<number> {
@@ -2321,6 +2404,79 @@ export async function updateMeetingRepresentativeProfile(uid: number, patch: unk
   return profile;
 }
 
+function meetingContactText(value: unknown, field: string, maximum: number, required = false): string | undefined {
+  if (value === undefined || value === null) {
+    if (required) throw new Error(`${field} is required`);
+    return undefined;
+  }
+  if (typeof value !== "string") throw new Error(`${field} must be text`);
+  const normalized = value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized && required) throw new Error(`${field} is required`);
+  if (normalized.length > maximum) throw new Error(`${field} must be at most ${maximum} characters`);
+  return normalized || undefined;
+}
+
+/** Persist only the small contact card explicitly captured in an owned representative meeting. */
+export async function upsertMeetingContact(userId: number, meetingId: string, input: {
+  participantName: unknown; email?: unknown; phone?: unknown; contactPreference?: unknown; interest: unknown; nextStep?: unknown; followUpAt?: unknown;
+}): Promise<MeetingContactRecord> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) throw new Error("Meeting contact owner or meeting is invalid");
+  const participantName = meetingContactText(input.participantName, "participantName", 160, true)!;
+  const rawEmail = meetingContactText(input.email, "email", 254);
+  const email = rawEmail?.toLowerCase();
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("email must be a valid email address");
+  const rawPhone = meetingContactText(input.phone, "phone", 40);
+  const phone = rawPhone?.replace(/[\s().-]/g, "");
+  if (phone && !/^\+?[1-9]\d{6,14}$/.test(phone)) throw new Error("phone must be a valid international phone number");
+  if (!email && !phone) throw new Error("Provide an email or phone number the participant shared for follow-up");
+  const contactPreference = input.contactPreference === undefined ? "unspecified" : input.contactPreference;
+  if (contactPreference !== "email" && contactPreference !== "phone" && contactPreference !== "unspecified") throw new Error("contactPreference must be email, phone, or unspecified");
+  if (contactPreference === "email" && !email) throw new Error("An email address is required for email contact preference");
+  if (contactPreference === "phone" && !phone) throw new Error("A phone number is required for phone contact preference");
+  const interest = meetingContactText(input.interest, "interest", 1_000, true)!;
+  const nextStep = meetingContactText(input.nextStep, "nextStep", 500);
+  let followUpAt: number | undefined;
+  if (input.followUpAt !== undefined && input.followUpAt !== null && input.followUpAt !== "") {
+    const parsed = typeof input.followUpAt === "number" ? input.followUpAt : typeof input.followUpAt === "string" ? Date.parse(input.followUpAt) : NaN;
+    if (!Number.isSafeInteger(parsed) || parsed <= Date.now() || parsed > Date.now() + 365 * 24 * 60 * 60 * 1000) throw new Error("followUpAt must be a future ISO-8601 timestamp within one year");
+    followUpAt = parsed;
+  }
+  const identity = contactPreference === "phone" && phone ? `phone:${phone}` : email ? `email:${email}` : `phone:${phone}`;
+  const id = `mct_${createHash("sha256").update(`${userId}:${meetingId}:${identity}`).digest("hex").slice(0, 32)}`;
+  const now = Date.now();
+  return backend.upsertMeetingContact({
+    id, userId, meetingId, participantName,
+    ...(email ? { email } : {}), ...(phone ? { phone } : {}),
+    contactPreference, interest, ...(nextStep ? { nextStep } : {}), ...(followUpAt ? { followUpAt } : {}), createdAt: now, updatedAt: now,
+  });
+}
+
+export async function listMeetingContacts(userId: number, limit = 20, meetingId?: string): Promise<MeetingContactRecord[]> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error("Meeting contact owner is invalid");
+  if (meetingId !== undefined && !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) throw new Error("Meeting ID is invalid");
+  const requested = Math.max(1, Math.min(meetingId ? 200 : 50, Math.floor(limit)));
+  const records = await backend.listMeetingContacts(userId, meetingId ? 200 : requested);
+  return (meetingId ? records.filter((record) => record.meetingId === meetingId).slice(0, requested) : records);
+}
+
+export async function deleteMeetingContact(userId: number, id: string): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mct_[a-f0-9]{32}$/.test(id)) throw new Error("Meeting contact ID is invalid");
+  return backend.deleteMeetingContact(userId, id);
+}
+
+export async function getMeetingContact(userId: number, id: string, meetingId?: string): Promise<MeetingContactRecord | undefined> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mct_[a-f0-9]{32}$/.test(id)) return undefined;
+  const contacts = await backend.listMeetingContacts(userId, 200);
+  return contacts.find((contact) => contact.id === id && contact.userId === userId && (!meetingId || contact.meetingId === meetingId));
+}
+
+export async function updateMeetingContact(userId: number, id: string, patch: Partial<Pick<MeetingContactRecord, "followUpTaskId" | "followUpAt">>): Promise<MeetingContactRecord | undefined> {
+  const existing = await getMeetingContact(userId, id);
+  if (!existing) return undefined;
+  const next = { ...existing, ...patch, updatedAt: Date.now() };
+  return backend.upsertMeetingContact(next);
+}
+
 export async function addRecallMeeting(uid: number, record: RecallMeetingRecord): Promise<RecallMeetingRecord> {
   if (!Number.isSafeInteger(uid) || uid <= 0 || record.userId !== uid) throw new Error("Meeting owner does not match the authenticated account");
   const session = await getSession(uid);
@@ -2673,12 +2829,22 @@ export async function clearDaytonaWorkspace(uid: number): Promise<void> {
 }
 
 function normalizeTask(task: TaskRecord): TaskRecord {
+  const followUp = task.meetingFollowUp;
+  const meetingFollowUp = followUp
+    && /^mtg_[A-Za-z0-9_-]{1,80}$/.test(followUp.meetingId)
+    && /^mct_[a-f0-9]{32}$/.test(followUp.contactId)
+    && /^[A-Z][A-Z0-9_]{2,127}$/.test(followUp.emailTool)
+    && /(?:^|_)(?:SEND_EMAIL|EMAIL_SEND)(?:_|$)/.test(followUp.emailTool)
+    && ["scheduled", "claimed", "completed", "ambiguous"].includes(followUp.state)
+    ? { meetingId: followUp.meetingId, contactId: followUp.contactId, emailTool: followUp.emailTool, state: followUp.state }
+    : undefined;
   return {
     ...task,
     steps: (task.steps ?? []).slice(0, 20).map((step) => ({ ...step, updatedAt: step.updatedAt ?? task.updatedAt })),
     attempt: task.attempt ?? 0,
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
     events: (task.events ?? []).slice(-100),
+    ...(meetingFollowUp ? { meetingFollowUp } : { meetingFollowUp: undefined }),
   };
 }
 
@@ -2686,10 +2852,15 @@ function taskEvent(type: TaskEvent["type"], message: string, attempt: number, at
   return { id: `taskevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, attempt };
 }
 
-export async function createTask(userId: number, input: Pick<TaskRecord, "title" | "objective"> & Partial<Omit<TaskRecord, "id" | "userId" | "title" | "objective" | "createdAt" | "updatedAt" | "status" | "attempt" | "events" | "lease">>): Promise<TaskRecord> {
+export async function createTask(userId: number, input: Pick<TaskRecord, "title" | "objective"> & { id?: string } & Partial<Omit<TaskRecord, "id" | "userId" | "title" | "objective" | "createdAt" | "updatedAt" | "status" | "attempt" | "events" | "lease">>): Promise<TaskRecord> {
+  if (input.id !== undefined && !/^task_[A-Za-z0-9_-]{1,160}$/.test(input.id)) throw new Error("Task ID is invalid");
+  if (input.id) {
+    const existing = await getTask(userId, input.id);
+    if (existing) return existing;
+  }
   const now = Date.now();
   const task: TaskRecord = normalizeTask({
-    id: `task_${randomUUID()}`,
+    id: input.id ?? `task_${randomUUID()}`,
     userId,
     title: input.title,
     objective: input.objective,
@@ -2708,6 +2879,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkBudget: input.sdkBudget,
     sdkStartedAt: input.sdkStartedAt,
     sdkSkills: input.sdkSkills,
+    meetingFollowUp: input.meetingFollowUp,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,

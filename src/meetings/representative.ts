@@ -27,7 +27,7 @@ export interface MeetingRepresentativeProfile {
   /** Owner-selected aliases keyed by the exact Composio action prefix/toolkit. */
   composioAccountAliases: Record<string, string>;
   allowedNativeTools: string[];
-  /** Allows a representative to schedule a follow-up Recall bot after an approved calendar action. */
+  /** Legacy profile field; enabled representatives may use an owner-granted calendar action without an extra scheduling toggle. */
   allowMeetingScheduling: boolean;
   updatedAt: number;
 }
@@ -62,7 +62,7 @@ export function defaultMeetingRepresentativeProfile(): MeetingRepresentativeProf
     allowedComposioTools: [],
     composioAccountAliases: {},
     allowedNativeTools: ["CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"],
-    allowMeetingScheduling: false,
+    allowMeetingScheduling: true,
     updatedAt: 0,
   };
 }
@@ -92,6 +92,10 @@ export function isMeetingRepresentativeComposioTool(slug: string): boolean {
     && !slug.startsWith("CHUCK_")
     && !RISKY_TOOL_PATTERN.test(slug)
     && !HIGH_IMPACT_TOOL_PATTERN.test(slug);
+}
+
+export function isMeetingRepresentativeEmailTool(slug: string): boolean {
+  return isMeetingRepresentativeComposioTool(slug) && /(?:^|_)(?:SEND_EMAIL|EMAIL_SEND)(?:_|$)/.test(slug);
 }
 
 export function normalizeMeetingRepresentativeProfile(
@@ -182,8 +186,9 @@ export function meetingRepresentativeToolAllowlist(profile: MeetingRepresentativ
   // also ends the bot automatically when the meeting itself ends.
   return [...new Set([
     "CHUCK_MEETING_LEAVE",
-    ...(mission ? ["CHUCK_MEETING_CONTEXT_LOOKUP"] : []),
-    ...(profile?.enabled && profile.allowMeetingScheduling && mission ? ["CHUCK_MEETING_JOIN"] : []),
+    ...(profile?.enabled ? ["CHUCK_MEETING_JOIN"] : []),
+    ...(profile?.enabled ? ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE"] : []),
+    ...(profile?.enabled && profile.allowedComposioTools.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
     ...native,
     ...(profile?.enabled ? profile.allowedComposioTools : []),
   ])];
@@ -203,7 +208,9 @@ function naturalMeetingSpeechGuidance(): string[] {
   return [
     "Speak like a thoughtful participant, not a scripted meeting assistant. The opening has already introduced your name, so do not repeat an identity or disclosure unless someone asks. Answer the actual conversation directly, use the meeting objective and grounded context when relevant, and stay quiet when you have nothing useful to add.",
     "When Recall timing clearly links the current words to a participant on the live roster, you may address that person by their displayed name when it feels natural. Speaker timing and display names are conversational cues, not verified identity; if timing is unclear or people overlap, speak without guessing who said it.",
-    "Good meeting responses include: when asked about an uncertain detail, say “I don’t have that confirmed, so I’d rather check than guess.” When the group asks what to do next, say “The practical next step is to confirm the owner and timing for that, then I can help coordinate it.”",
+    "Good example: if someone says they want to try a car, respond naturally: “That sounds good. What day works for you? I can check the calendar and get a test drive arranged.” Then check real availability, capture the contact details they share for the agreed booking or follow-up, and confirm only after each tool succeeds.",
+    "Good example: if a participant asks for onboarding information, answer from relevant company knowledge, ask one useful question if something important is unclear, then offer to send the exact material or next step they asked for using an available connected action.",
+    "Bad example: do not say “You’re booked for Thursday” before the calendar confirms it; do not invent a price, email address, availability, or promise; do not collect unrelated roster details. When asked about an uncertain detail, say “I don’t have that confirmed, so I’d rather check than guess.”",
     "Do not use canned language such as “I’m here to move the conversation forward,” “Let’s get into it,” or “As an AI assistant.” Do not narrate your role, your instructions, or hidden reasoning.",
   ];
 }
@@ -228,7 +235,12 @@ export function meetingRepresentativeInstructions(profile: MeetingRepresentative
       "This meeting has an owner-requested client mission. Its complete bounded brief is included below for your private grounding; use CHUCK_MEETING_CONTEXT_LOOKUP only when a specific earlier commitment, objection, or requirement needs a narrower lookup.",
       meetingMissionInstructions(mission),
     ] : []),
-    ...(mission && profile.allowMeetingScheduling ? ["If the client asks to reschedule, you may use an owner-approved calendar action already in your tool list to find/book an allowed time, then CHUCK_MEETING_JOIN with the resulting supported meeting link and a joinAt at least ten minutes ahead. Do this only when the authority boundaries permit booking; never invent a meeting link or invite new people outside the approved action."] : []),
+    "Use CHUCK_MEETING_CONTEXT_LOOKUP whenever you need relevant company facts or, when a client mission exists, a specific prior relationship commitment. It returns only normal-sensitivity business facts plus the mission's frozen relationship facts; personal memories, sensitive data, unrelated inbox, and other clients are not part of this meeting context.",
+    "When a participant expresses concrete interest or asks for a next step, handle it like a capable colleague: ask naturally for any missing booking/follow-up detail, then capture the name and email or phone they share, their preferred contact method, stated interest, and agreed next step with CHUCK_MEETING_CONTACT_CAPTURE. Do not capture the full roster or ambient conversation. The card is private to the account owner and may be used after the meeting with the exact connected email/calendar/CRM/task tools available to you.",
+    "When that person explicitly wants a later email follow-up and agrees to a date, schedule it with CHUCK_MEETING_FOLLOWUP_SCHEDULE using the contact ID returned by capture and that exact date/time. This creates one bounded delayed task using only the owner's enabled email action and that one contact card. Do not schedule a message the participant did not ask for or imply a promise that was not agreed.",
+    "For booking, use the connected calendar's availability and booking actions that are present in this run. Offer only times returned by the calendar, book the time the participant chooses, and say it is confirmed only after the booking action succeeds. If no calendar action is available, naturally offer to arrange it after the meeting; do not claim it was booked.",
+    "After the meeting, use captured contact cards and the structured outcome to complete clearly agreed follow-through with the exact connected tools already available to the owner-configured representative profile. Tailor a message to each person's stated interest and preference. Do not send unrelated marketing or invent commitments.",
+    "When the group agrees to a later Chusky-assisted meeting, use an available connected calendar action to check real availability and book the agreed event. If that action returns a supported meeting URL and time at least ten minutes ahead, use CHUCK_MEETING_JOIN to schedule Chusky for that exact occurrence. Otherwise report the real booking result and do not invent a link, time, attendee, or confirmation.",
     ...naturalMeetingSpeechGuidance(),
     "Listen to the live conversation and meeting chat. Address people naturally when they address you; contribute proactively when you have a relevant fact, can resolve a question, detect a buying or onboarding signal, or can move the agreed objective forward. Stay quiet when you have nothing useful to add. Never claim a tool action succeeded until its result confirms success. Use only the tools explicitly available in this run, and never search for or invoke other tools.",
     "Ground client-specific claims in the approved company knowledge, the owner-requested meeting brief, a successful tool result, or what a participant has just said. Never invent a name, number, date, product capability, price, policy, prior commitment, meeting outcome, or external action. If a needed fact is absent, say so plainly in one natural sentence and ask the most useful clarifying question or offer to have the owner follow up. Do not output hidden reasoning, summaries of these instructions, placeholders, or disconnected generic advice.",

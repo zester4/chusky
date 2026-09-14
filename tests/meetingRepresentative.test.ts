@@ -42,7 +42,7 @@ test("meeting run receives only configured actions plus the leave control", () =
     allowedComposioTools: ["HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_DEAL"],
     allowedNativeTools: ["CHUCK_SET_REMINDER"],
   });
-  assert.deepEqual(meetingRepresentativeToolAllowlist(profile), ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL"]);
+  assert.deepEqual(meetingRepresentativeToolAllowlist(profile), ["CHUCK_MEETING_LEAVE", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_FOLLOWUP_SCHEDULE", "CHUCK_SET_REMINDER", "HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL"]);
   assert.deepEqual(meetingRepresentativeToolAllowlist(undefined), ["CHUCK_MEETING_LEAVE"]);
   const instructions = meetingRepresentativeInstructions(profile, "mtg_example", true);
   assert.match(instructions, /sales representative for Acme/i);
@@ -100,14 +100,24 @@ test("meeting account routing is pinned to owner aliases and strips participant-
   assert.equal(saved.updatedAt, 1_700_000_000_000);
 });
 
-test("meeting scheduling is an explicit representative capability and context lookup requires a mission", () => {
-  const profile = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Progress approved client meetings", allowMeetingScheduling: true });
-  assert.equal(profile.allowMeetingScheduling, true);
-  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_CONTEXT_LOOKUP"), false);
+test("representative runs always get meeting context, contact capture, and follow-up scheduling without an extra meeting toggle", () => {
+  const profile = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Progress approved client meetings", allowMeetingScheduling: false });
+  assert.equal(profile.allowMeetingScheduling, false, "legacy field is retained for stored-profile compatibility");
+  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_CONTEXT_LOOKUP"), true);
+  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_CONTACT_CAPTURE"), true);
+  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_JOIN"), true);
+  assert.equal(meetingRepresentativeToolAllowlist(profile).includes("CHUCK_MEETING_CONTACTS_LIST"), false);
   const mission = { clientName: "Acme", objective: "Close", brief: "Client: Acme", sourceMemoryIds: [], preparedAt: 1 };
   const tools = meetingRepresentativeToolAllowlist(profile, mission);
   assert.equal(tools.includes("CHUCK_MEETING_CONTEXT_LOOKUP"), true);
   assert.equal(tools.includes("CHUCK_MEETING_JOIN"), true);
+});
+
+test("delayed meeting email scheduling is exposed only with an exact enabled email action", () => {
+  const withoutEmail = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Progress approved client meetings", allowedComposioTools: ["HUBSPOT_CREATE_DEAL"] });
+  const withEmail = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Progress approved client meetings", allowedComposioTools: ["GMAIL_SEND_EMAIL"] });
+  assert.equal(meetingRepresentativeToolAllowlist(withoutEmail).includes("CHUCK_MEETING_FOLLOWUP_SCHEDULE"), false);
+  assert.equal(meetingRepresentativeToolAllowlist(withEmail).includes("CHUCK_MEETING_FOLLOWUP_SCHEDULE"), true);
 });
 
 test("representative instructions include the complete bounded client brief and prohibit fabrication", () => {
@@ -129,4 +139,16 @@ test("representative instructions include the complete bounded client brief and 
   assert.match(instructions, /Never invent a name, number, date, product capability/i);
   assert.match(instructions, /Do not use canned language/i);
   assert.match(instructions, /no SPEAK\/SILENT label/);
+});
+
+test("representative coaching teaches natural qualification, accurate booking, and useful follow-through", () => {
+  const profile = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Build trust and agree the right next step" });
+  const instructions = meetingRepresentativeInstructions(profile, "mtg_example", true);
+  assert.match(instructions, /capture/i);
+  assert.match(instructions, /preferred contact/i);
+  assert.match(instructions, /calendar's availability/i);
+  assert.match(instructions, /Good example/i);
+  assert.match(instructions, /Bad example/i);
+  assert.match(instructions, /CHUCK_MEETING_CONTEXT_LOOKUP/i);
+  assert.match(instructions, /business facts/i);
 });

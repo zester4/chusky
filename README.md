@@ -425,8 +425,8 @@ Chusky's configured model remains the agent
 brain. When asked to join without an explicit mode, Chusky uses an enabled
 company-representative profile, or proactive copilot mode if none is enabled;
 addressed-only mode is reserved for an explicit wake-word-only request. It
-opens with a short spoken introduction. In representative mode, that greeting
-names its AI role and the configured company. In proactive modes it evaluates
+opens with a short self-introduction using its configured name, without a canned
+mission statement. In proactive modes it evaluates
 ordinary conversation and speaks only when it can add value, with burst
 smoothing rather than a per-call evaluation cap. An owner can
 configure a sales, client-onboarding, employee-onboarding, customer-success, or
@@ -448,13 +448,16 @@ phone calling stays independent and unchanged.
 For a client-specific representative meeting, Chusky automatically prepares a
 reviewable client mission from the owner's normal-sensitivity business and
 relationship memories as part of a private owner-requested join; a separate
-brief approval is not required. During the call, `CHUCK_MEETING_CONTEXT_LOOKUP` can
-search only the memory IDs frozen into the mission—never the general inbox,
-private memories, files, tasks, or another client. The brief never appears in
-Recall metadata, meeting chat, or the media-page URL. If the owner explicitly
-enables meeting scheduling and grants exact calendar actions, Chusky can book
-an allowed follow-up and schedule a new Recall bot that inherits the same
-client mission.
+brief approval is not required. During an active representative meeting,
+`CHUCK_MEETING_CONTEXT_LOOKUP` can retrieve relevant, current company/business
+facts and the relationship facts frozen into that meeting's mission. It
+excludes sensitive or personal memories and unrelated person/project records;
+it does not search the general inbox, files, or task history. The brief never
+appears in Recall metadata, meeting chat, or the media-page URL. An enabled
+representative can use exact owner-granted calendar actions to check
+availability, book an agreed follow-up, and schedule a new Recall bot that
+inherits the same client mission; there is no separate meeting-scheduling
+toggle.
 
 Copilot's burst-smoothing interval is enforced atomically in the root service's
 Redis store across voice-bridge reconnects and replicas. It does not impose a
@@ -513,6 +516,18 @@ Owner-granted task and CRM tools may be used only for follow-through grounded
 in clearly agreed meeting actions; the participant transcript itself never
 grants authority. This workflow requires Redis and QStash. Conversation-only
 copilot mode produces the private recap without connected-app actions.
+
+During a representative meeting, Chusky can save a compact private contact card
+when a participant shares their contact details and the discussed interest or
+next step. The card is scoped to the owner and meeting, and is not general
+memory. The post-meeting workflow can use an explicitly owner-granted email
+action for an agreed immediate follow-up. For a later agreed email, it creates
+an idempotent durable task tied to that one contact and one exact send action;
+at execution it reloads the meeting, contact, and current representative
+configuration, then runs without general conversation history or other tools.
+The task is marked before sending so an ambiguous provider result is not
+automatically retried and duplicated. Redis and QStash are required for delayed
+follow-ups.
 
 #### Outbound FaceTime voice calls
 

@@ -2,11 +2,12 @@ import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, listJobs, listReminders,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
+  upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
@@ -29,6 +30,7 @@ import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/va
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -441,6 +443,65 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_MEETING_CONTEXT_LOOKUP": {
       if (!runtime.meetingId) throw new Error("CHUCK_MEETING_CONTEXT_LOOKUP is available only inside an active meeting");
       return lookupRecallMeetingContext(userId, runtime.meetingId, text(args.query));
+    }
+    case "CHUCK_MEETING_CONTACT_CAPTURE": {
+      if (!runtime.meetingId || runtime.sharedConversation) throw new Error("Meeting contact capture is available only inside an active representative meeting");
+      const meeting = await getRecallMeeting(userId, runtime.meetingId);
+      if (!meeting || meeting.interactionMode !== "representative" || !["joining", "waiting_room", "in_call"].includes(meeting.status)) {
+        throw new Error("Meeting not found or is not an active representative meeting owned by this account");
+      }
+      const profile = await getMeetingRepresentativeProfile(userId);
+      if (!profile.enabled) throw new Error("The meeting representative profile is not enabled");
+      return upsertMeetingContact(userId, meeting.id, {
+        participantName: args.participantName,
+        email: args.email,
+        phone: args.phone,
+        contactPreference: args.contactPreference,
+        interest: args.interest,
+        nextStep: args.nextStep,
+        followUpAt: args.followUpAt,
+      });
+    }
+    case "CHUCK_MEETING_CONTACTS_LIST": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting contacts are available only in a private owner conversation");
+      return listMeetingContacts(userId, args.limit === undefined ? 20 : Number(args.limit));
+    }
+    case "CHUCK_MEETING_CONTACT_DELETE": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting contacts are available only in a private owner conversation");
+      const id = text(args.id);
+      const existing = await getMeetingContact(userId, id);
+      if (existing?.followUpTaskId) await cancelTask(userId, existing.followUpTaskId);
+      return { deleted: await deleteMeetingContact(userId, id), id };
+    }
+    case "CHUCK_MEETING_FOLLOWUP_SCHEDULE": {
+      if (!runtime.meetingId || runtime.sharedConversation) throw new Error("Delayed meeting follow-up is available only from its owned representative meeting workflow");
+      const meeting = await getRecallMeeting(userId, runtime.meetingId);
+      if (!meeting || meeting.interactionMode !== "representative" || !["joining", "waiting_room", "in_call", "leaving", "ended"].includes(meeting.status)) {
+        throw new Error("Meeting not found or is not an owned representative meeting");
+      }
+      const profile = await getMeetingRepresentativeProfile(userId);
+      if (!profile.enabled) throw new Error("Delayed meeting follow-up is not enabled for this representative");
+      const contact = await getMeetingContact(userId, text(args.contactId), meeting.id);
+      if (!contact) throw new Error("Contact was not captured in this meeting");
+      if (!contact.email || contact.contactPreference === "phone") throw new Error("This contact prefers phone or has no email, so Chusky cannot schedule an email follow-up");
+      const emailTool = profile.allowedComposioTools.find(isMeetingRepresentativeEmailTool);
+      if (!emailTool) throw new Error("Add an exact connected email-send action to the representative profile before scheduling an email follow-up");
+      const runAt = futureTimestamp(args);
+      const taskId = `task_mf_${createHash("sha256").update(`${userId}:${meeting.id}:${contact.id}:${runAt}`).digest("hex").slice(0, 32)}`;
+      const task = await createTask(userId, {
+        id: taskId,
+        title: `Follow up with ${contact.participantName}`.slice(0, 120),
+        objective: `Send the agreed follow-up email to captured meeting contact ${contact.id}. Use only that person's recorded interest and next step.`,
+        runAt,
+        meetingFollowUp: { meetingId: meeting.id, contactId: contact.id, emailTool, state: "scheduled" },
+      });
+      if (task.status === "completed" || task.status === "cancelled") throw new Error("This delayed follow-up task is already closed");
+      if (!task.workflowRunId) {
+        await scheduleTask(userId, task.id, runAt);
+        await setTaskWorkflowRunId(userId, task.id, await enqueueTaskWorkflow(userId, task.id, runAt));
+      }
+      await updateMeetingContact(userId, contact.id, { followUpTaskId: task.id, followUpAt: runAt });
+      return { scheduled: true, taskId: task.id, participantName: contact.participantName, runAt: new Date(runAt).toISOString(), emailTool };
     }
     case "CHUCK_MEETING_PREPARATION_LIST": {
       if (runtime.sharedConversation) throw new Error("Calendar meeting preparations are available only in a private owner conversation");
