@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { processRecallStatusWebhook, receiveRecallChatWebhook } from "../src/meetings/webhook.js";
+import { processRecallStatusWebhook, receiveRecallChatWebhook, receiveRecallTranscriptWebhook } from "../src/meetings/webhook.js";
+import { parseRecallTranscriptWebhook } from "../src/meetings/recall.js";
 import type { RecallChatEventRecord } from "../src/store.js";
 
 const secret = `whsec_${Buffer.from("test Recall realtime workspace key").toString("base64")}`;
@@ -219,4 +220,49 @@ test("Recall event-ID collisions across owners fail closed", async () => {
     enqueue: async () => "must-not-run",
   });
   assert.deepEqual(result, { status: 409 });
+});
+
+function transcriptBody(text = "We agreed to send the proposal Friday.") {
+  return JSON.stringify({
+    event: "transcript.data",
+    data: {
+      data: {
+        words: [{ text, start_timestamp: { relative: 1 }, end_timestamp: { relative: 3 } }],
+        participant: { id: 456, name: "Avery Chen", email: "must-not-persist@example.com" },
+      },
+      bot: { id: "bot_123", metadata: { chusky_meeting_id: "mtg_123", chusky_user_id: "42" } },
+    },
+  });
+}
+
+test("Recall transcript webhook verifies exact bytes, owner resolution, and durable idempotent append without leaking text", async () => {
+  const rawBody = transcriptBody();
+  let stored: unknown;
+  let appends = 0;
+  const common = {
+    secret,
+    rawBody,
+    headers: signed(rawBody),
+    resolve: async (body: unknown) => parseRecallTranscriptWebhook(body),
+    append: async (_owner: number, _meeting: string, segment: unknown) => { appends++; stored = segment; return "stored" as const; },
+  };
+  assert.deepEqual(await receiveRecallTranscriptWebhook(common), { status: 204 });
+  assert.deepEqual(await receiveRecallTranscriptWebhook(common), { status: 204 });
+  assert.equal(appends, 2, "provider retries reach the idempotent store layer");
+  assert.equal(JSON.stringify(stored).includes("must-not-persist@example.com"), false);
+
+  const invalid = signed(rawBody);
+  invalid.set("webhook-signature", "v1,invalid");
+  let touched = false;
+  assert.deepEqual(await receiveRecallTranscriptWebhook({ ...common, headers: invalid, resolve: async () => { touched = true; return undefined; } }), { status: 401 });
+  assert.equal(touched, false);
+});
+
+test("Recall transcript webhook retries storage failures but acknowledges expired, full, and unrelated events", async () => {
+  const rawBody = transcriptBody();
+  const common = { secret, rawBody, headers: signed(rawBody), resolve: async (body: unknown) => parseRecallTranscriptWebhook(body) };
+  assert.deepEqual(await receiveRecallTranscriptWebhook({ ...common, append: async () => { throw new Error("private storage failure"); } }), { status: 503 });
+  assert.deepEqual(await receiveRecallTranscriptWebhook({ ...common, append: async () => "full" }), { status: 204 });
+  const unrelated = JSON.stringify({ event: "participant_events.speech_on" });
+  assert.deepEqual(await receiveRecallTranscriptWebhook({ ...common, rawBody: unrelated, headers: signed(unrelated), append: async () => "stored" }), { status: 204 });
 });

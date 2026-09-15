@@ -40,6 +40,58 @@ Production deployments should use Redis and QStash. In-memory persistence is int
 
 ---
 
+## Company workspaces and remote MCP
+
+Chusky uses Better Auth for company organizations, members, and invitations.
+Workspace owners/admins can create company API projects, select one of the
+built-in specialist templates, and manage per-project run policy from
+/app/organizations. Developer project keys remain hashed at rest and are
+shown only once. Company project defaults grant a bounded set of API scopes,
+cap runs at 30 minutes / 40 tool calls / $5, and require approval before
+Composio execution tools can perform external actions. A run may narrow those
+grants, never widen them.
+
+Composio remains the OAuth, connected-account, token refresh, tool discovery,
+and execution system. Chusky does not copy provider tokens. Today each run uses
+the Composio subject associated with its stable Chusky user identity; pass a
+stable, authenticated customer user ID in X-Chusky-User-Id from your trusted
+server. Do not let a browser or untrusted caller choose that value. Runs and
+private history remain separated by project and external user identity.
+
+The API exposes GET /v1/agents/templates and project-scoped agent profiles
+under /v1/agents. The SDK supports `chusky.agents.*` and a durable
+`chusky.runs.create()` convenience API. Select a configured profile (or a
+template slug) on a run:
+
+    const { thread, run } = await chusky.runs.create({
+      input: "Research fintech leads that match our 50+ employee requirement.",
+      agentId: "lead-research",
+    }, { idempotencyKey: "lead-research-2026-09-14" });
+
+For background work, use wait: false with Redis and QStash configured, then
+poll the run/task status or receive signed webhook events. Run budgets,
+tool scopes, approvals, audit events, and existing durable task controls apply
+through the same /v1 API used by the dashboard and SDK.
+
+### Cloudflare MCP adapter
+
+cloudflare/chusky-mcp is a stateless Streamable HTTP MCP server for clients
+that need Chusky tools. It proxies a small, explicit set of operations (list
+templates/profiles, start and inspect runs, check approval status,
+inspect/cancel/retry tasks, and read usage) to the authenticated Chusky /v1
+API. It does not store project keys or provider credentials, and it cannot
+approve external actions.
+Configure the Cloudflare Worker with CHUSKY_API_ORIGIN; MCP clients send a
+Chusky project key as Authorization: Bearer … and a trusted stable identity as
+X-Chusky-User-Id.
+
+The separate MCP Worker can be deployed independently with its own npm install
+and Wrangler configuration. See its README for local development, deployment,
+and client configuration. Production Chusky API durability still depends on
+the backend's Redis and QStash configuration.
+
+---
+
 ## Quickstart (local dev)
 
 ```bash
@@ -434,12 +486,26 @@ or invoke arbitrary tools, access private memories, or let participants choose
 which connected account to use; account aliases are pinned by the owner. Ask
 Chusky to configure the role, objective, approved company facts/boundaries,
 exact tool grants, and any required account aliases. The profile remains
-disabled until you explicitly enable it. A bounded
-rolling text window is held in bridge memory only; it is not saved. Only turns
-Chusky answers and its replies may be kept as bounded meeting history. The
-media page and meeting-chat notice disclose audio processing and retention;
-the spoken intro is deliberately short and conversational. Twilio
-phone calling stays independent and unchanged.
+disabled until you explicitly enable it. The live voice bridge keeps a bounded
+rolling context window in memory. Separately, proactive meetings can use
+Recall's signed, low-latency, participant-attributed transcript stream to build
+the post-meeting outcome from the full captured conversation, including things
+said while Chusky was listening. Chusky encrypts these temporary segments in
+Redis and deletes them after the outcome is durably saved; Recall recording and
+media retention stay disabled. This is processing-only by default, not a
+searchable transcript. Only if the owner explicitly asks to keep a transcript
+does Chusky retain it encrypted and searchable for exactly 1, 7, or 30 days.
+That opt-in requires a separate 32+-byte `RECALL_TRANSCRIPT_ENCRYPTION_KEY`
+on the main Chusky service; keep it stable until the longest retained
+transcript expires. Working transcript segments use an application-derived key
+(the dedicated transcript key when configured, otherwise the media-bridge
+secret) and are deleted after the recap is durably saved.
+Use `CHUCK_MEETING_TRANSCRIPT_SEARCH` in a private owner chat for short matching
+excerpts, or `CHUCK_MEETING_TRANSCRIPT_DELETE` to remove it early. Speaker
+names are provider display labels, not verified identities. The media page and
+meeting-chat notice disclose live processing and any selected retention; the
+spoken intro stays short and conversational. Twilio phone calling stays
+independent and unchanged.
 
 For a client-specific representative meeting, Chusky automatically prepares a
 reviewable client mission from the owner's normal-sensitivity business and
@@ -464,8 +530,15 @@ the voice-side gate only reduces avoidable bridge requests.
 Enable it only after configuring `RECALL_MEETINGS_ENABLED=true`, the Recall API
 key, region, Recall status-webhook signing secret, and matching 32+-byte
 `RECALL_MEDIA_BRIDGE_SECRET` on Chusky and `chusky-voice`. Register Recall's
-**Bot Status Change** webhook to `/recall/webhook`; see the bridge README for
-the full settings and test procedure.
+**Bot Status Change** webhook to `/recall/webhook`. In Recall's workspace
+webhook event subscriptions, include `transcript.done` and `transcript.failed`
+as well as the bot lifecycle events; `transcript.processing` is optional. These
+events provide sanitized transcript-artifact status diagnostics. They do not
+deliver transcript content. The signed per-bot `transcript.data` stream is
+sent separately to `/recall/realtime-webhook` and powers the post-meeting
+analysis. Keep `RECALL_WEBHOOK_SECRET` (workspace dashboard endpoint signing
+secret) separate from `RECALL_REALTIME_SECRET` (real-time endpoint verification
+secret). See the bridge README for the full settings and test procedure.
 
 The voice bridge briefly retries an authenticated `425` while the signed bot
 status webhook is still progressing through joining/waiting-room states. This
@@ -498,6 +571,28 @@ text is held briefly in Redis only while a durable reply is processed, then
 cleared; only answered meeting turns are added to the owner's bounded meeting
 history. Webex supports incoming chat events but not chat replies, so only its
 leave command is actionable through chat.
+
+### Optional shared-screen understanding
+
+The owner can explicitly ask Chusky to inspect slides, a shared screen, or a
+visual demo while joining. Chusky enables `analyzeScreenShare` only for that
+requested meeting; normal and calendar-triggered joins remain audio-only.
+Recall's separate PNG stream is supported here for Zoom, Google Meet, and
+Microsoft Teams, not Webex. The join fails closed unless the signed meeting
+webhook, public disclosure/chat path, QStash, Redis, and voice bridge are
+configured, so participants receive notice that screen frames may be briefly
+analyzed.
+
+The Recall video endpoint is created per bot, so no additional static video
+webhook needs to be registered in the Recall dashboard. Set the same
+`RECALL_REALTIME_SECRET` workspace verification secret on root and
+`chusky-voice`, plus `CHUSKY_RECALL_VISUAL_FRAME_URL` on the voice service.
+Changed frames are rate-limited; a static screen is refreshed every eight
+seconds into an AES-GCM encrypted Redis cache that expires after twelve seconds.
+Frames are passed as temporary multimodal context to live meeting turns, never
+written into durable meeting history or a transcript. Visible screen content is
+treated as untrusted input, not as instructions. See the bridge README for the
+configuration and staging smoke test.
 
 When a proactive **copilot** or **representative** meeting ends, Chusky queues a
 durable post-meeting workflow. It creates a structured summary of decisions,

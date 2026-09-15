@@ -1,4 +1,5 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import type { RecallTranscriptSegment } from "../store.js";
 
 export type RecallMeetingPlatform = "zoom" | "google_meet" | "microsoft_teams" | "webex";
 
@@ -19,6 +20,7 @@ export interface RecallCreateBotRequest {
   meeting_url: string;
   bot_name: string;
   join_at?: string;
+  variant?: { zoom: "web_4_core"; google_meet: "web_4_core"; microsoft_teams: "web_4_core" };
   metadata: Record<string, string>;
   output_media: {
     camera: { kind: "webpage"; config: { url: string } };
@@ -27,15 +29,20 @@ export interface RecallCreateBotRequest {
     retention: null;
     include_bot_in_recording: { audio: true };
     video_mixed_mp4: null;
+    video_mixed_layout?: "gallery_view_v2";
+    video_separate_png?: Record<string, never>;
     audio_mixed_raw: null;
     audio_mixed_mp3: null;
     participant_events: null | Record<string, never>;
     meeting_metadata: null;
-    transcript: null;
+    transcript: null | {
+      provider: { recallai_streaming: { mode: "prioritize_low_latency"; language_code: "en" } };
+      diarization: { use_separate_streams_when_available: true };
+    };
     realtime_endpoints?: Array<{
-      type: "webhook";
+      type: "webhook" | "websocket";
       url: string;
-      events: Array<"participant_events.chat_message" | "participant_events.join" | "participant_events.leave" | "participant_events.update" | "participant_events.speech_on" | "participant_events.speech_off">;
+      events: Array<"participant_events.chat_message" | "participant_events.join" | "participant_events.leave" | "participant_events.update" | "participant_events.speech_on" | "participant_events.speech_off" | "transcript.data" | "video_separate_png.data">;
     }>;
   };
   chat?: {
@@ -76,6 +83,13 @@ export interface ParsedRecallSpeakerWebhook {
   meetingId: string;
   userId: number;
   speakerEvent: { type: "speech_on" | "speech_off"; participantId?: string; at: number };
+}
+
+export interface ParsedRecallTranscriptWebhook {
+  providerBotId: string;
+  meetingId: string;
+  userId: number;
+  segment: RecallTranscriptSegment;
 }
 
 function safeRecallDisplayName(value: unknown): string | undefined {
@@ -131,6 +145,9 @@ export function buildRecallCreateBotRequest(input: {
   interactionMode?: RecallMediaTicket["interactionMode"];
   joinAt?: string;
   realtimeWebhookUrl?: string;
+  transcriptRetentionDays?: 1 | 7 | 30;
+  screenShareContextEnabled?: boolean;
+  visualWebsocketUrl?: string;
 }): RecallCreateBotRequest {
   const meeting = validateMeetingUrl(input.meetingUrl);
   const botName = String(input.botName ?? "").trim();
@@ -145,12 +162,40 @@ export function buildRecallCreateBotRequest(input: {
     if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Recall real-time webhook URL must be HTTPS and cannot contain credentials, query parameters, or a fragment");
     realtimeWebhookUrl = endpoint.toString();
   }
+  const screenShareContextEnabled = input.screenShareContextEnabled === true;
+  if (input.screenShareContextEnabled !== undefined && typeof input.screenShareContextEnabled !== "boolean") throw new Error("screenShareContextEnabled must be true or false");
+  const transcriptRetentionDays = input.transcriptRetentionDays;
+  if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) throw new Error("Meeting transcript retention must be 1, 7, or 30 days");
+  if (transcriptRetentionDays !== undefined && !realtimeWebhookUrl) throw new Error("Retained meeting transcripts require the configured signed Recall real-time endpoint");
+  let visualWebsocketUrl: string | undefined;
+  if (screenShareContextEnabled) {
+    if (meeting.platform === "webex") throw new Error("Recall real-time screen understanding supports Zoom, Google Meet, and Microsoft Teams, not Webex");
+    if (!realtimeWebhookUrl) throw new Error("Shared-screen understanding requires the configured participant-disclosure webhook");
+    let endpoint: URL;
+    try { endpoint = new URL(input.visualWebsocketUrl ?? ""); } catch { throw new Error("Recall visual websocket URL must be WSS"); }
+    if (endpoint.protocol !== "wss:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error("Recall visual websocket URL must use WSS and cannot contain credentials, query parameters, or a fragment");
+    visualWebsocketUrl = endpoint.toString();
+  }
   if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.meetingId) || !Number.isSafeInteger(input.userId) || input.userId <= 0) throw new Error("Invalid Chusky meeting identity");
   const interactionMode = input.interactionMode ?? "addressed";
   if (!["addressed", "copilot", "representative"].includes(interactionMode)) throw new Error("Invalid meeting interaction mode");
+  const transcriptCaptureEnabled = Boolean(realtimeWebhookUrl)
+    && (interactionMode !== "addressed" || transcriptRetentionDays !== undefined);
+  const realtimeEndpoints: NonNullable<RecallCreateBotRequest["recording_config"]["realtime_endpoints"]> = [];
+  if (realtimeWebhookUrl) realtimeEndpoints.push({
+    type: "webhook",
+    url: realtimeWebhookUrl,
+    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off", ...(transcriptCaptureEnabled ? ["transcript.data" as const] : [])],
+  });
+  if (visualWebsocketUrl) realtimeEndpoints.push({ type: "websocket", url: visualWebsocketUrl, events: ["video_separate_png.data"] });
   const participantDisclosure = interactionMode === "addressed"
     ? "Say ‘Chusky’ when you’d like a response; you may ask it to leave at any time."
     : "Chusky may contribute proactively when it can help; you may also address it directly or ask it to leave at any time.";
+  const transcriptDisclosure = transcriptRetentionDays !== undefined
+    ? ` At the owner’s request, Chusky will retain a searchable transcript for ${transcriptRetentionDays} day${transcriptRetentionDays === 1 ? "" : "s"} after the meeting, then delete it.`
+    : transcriptCaptureEnabled
+      ? " A live transcript is processed for conversation and the private meeting outcome, then deleted; it is not retained as a searchable record."
+      : "";
   const request: RecallCreateBotRequest = {
     meeting_url: meeting.url,
     bot_name: botName,
@@ -170,18 +215,19 @@ export function buildRecallCreateBotRequest(input: {
       audio_mixed_mp3: null,
       participant_events: realtimeWebhookUrl ? {} : null,
       meeting_metadata: null,
-      transcript: null,
-      ...(realtimeWebhookUrl ? { realtime_endpoints: [{
-        type: "webhook",
-        url: realtimeWebhookUrl,
-        events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off"],
-      }] } : {}),
+      transcript: transcriptCaptureEnabled ? {
+        provider: { recallai_streaming: { mode: "prioritize_low_latency", language_code: "en" } },
+        diarization: { use_separate_streams_when_available: true },
+      } : null,
+      ...(realtimeEndpoints.length ? { realtime_endpoints: realtimeEndpoints } : {}),
+      ...(visualWebsocketUrl ? { video_mixed_layout: "gallery_view_v2", video_separate_png: {} } : {}),
     },
+    ...(screenShareContextEnabled ? { variant: { zoom: "web_4_core", google_meet: "web_4_core", microsoft_teams: "web_4_core" } } : {}),
     ...(realtimeWebhookUrl && meeting.platform !== "webex" ? {
       chat: {
         on_bot_join: {
           send_to: "everyone",
-          message: `Chusky is a digital assistant joining this meeting. Live audio is processed to enable conversation; Recall recording and transcript retention are off. ${participantDisclosure}`,
+          message: `Chusky is a digital assistant joining this meeting. Live audio is processed to enable conversation; Recall recording and media retention are off.${transcriptDisclosure}${screenShareContextEnabled ? " Shared-screen frames may also be briefly analyzed to answer questions about what is shown; images are not added to meeting history." : ""} ${participantDisclosure}`,
         },
       },
     } : {}),
@@ -411,6 +457,62 @@ export function parseRecallSpeakerWebhook(value: unknown): ParsedRecallSpeakerWe
   };
 }
 
+/** Normalize only finalized, bounded transcript words; provider payloads never escape this boundary. */
+export function parseRecallTranscriptWebhook(value: unknown): ParsedRecallTranscriptWebhook | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  if (body.event !== "transcript.data") return undefined;
+  const envelope = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data as Record<string, unknown> : {};
+  const transcriptData = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {};
+  const bot = envelope.bot && typeof envelope.bot === "object" && !Array.isArray(envelope.bot) ? envelope.bot as Record<string, unknown> : {};
+  const metadata = bot.metadata && typeof bot.metadata === "object" && !Array.isArray(bot.metadata) ? bot.metadata as Record<string, unknown> : {};
+  const providerBotId = String(bot.id ?? "");
+  const meetingId = String(metadata.chusky_meeting_id ?? "");
+  const userId = Number(metadata.chusky_user_id);
+  const participant = transcriptData.participant && typeof transcriptData.participant === "object" && !Array.isArray(transcriptData.participant)
+    ? transcriptData.participant as Record<string, unknown>
+    : {};
+  const rawWords = transcriptData.words;
+  if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0
+    || !Array.isArray(rawWords) || rawWords.length < 1 || rawWords.length > 500) return undefined;
+  const words: Array<{ text: string; start: number; end: number }> = [];
+  for (const raw of rawWords) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const word = raw as Record<string, unknown>;
+    const startTimestamp = word.start_timestamp && typeof word.start_timestamp === "object" && !Array.isArray(word.start_timestamp) ? word.start_timestamp as Record<string, unknown> : {};
+    const endTimestamp = word.end_timestamp && typeof word.end_timestamp === "object" && !Array.isArray(word.end_timestamp) ? word.end_timestamp as Record<string, unknown> : {};
+    const start = startTimestamp.relative;
+    const rawEnd = endTimestamp.relative;
+    if (typeof word.text !== "string" || !word.text.trim()
+      || typeof start !== "number" || !Number.isFinite(start) || start < 0 || start > 7_200
+      || (rawEnd !== undefined && rawEnd !== null && (typeof rawEnd !== "number" || !Number.isFinite(rawEnd) || rawEnd < start || rawEnd > 7_200))) return undefined;
+    const clean = word.text.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+    if (!clean || clean.length > 200) return undefined;
+    words.push({ text: clean, start, end: typeof rawEnd === "number" ? rawEnd : start });
+  }
+  words.sort((a, b) => a.start - b.start || a.end - b.end);
+  const text = words.map((word) => word.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").replace(/\s+/g, " ").trim();
+  if (!text || text.length > 2_000) return undefined;
+  const startMs = Math.floor(words[0]!.start * 1_000);
+  const endMs = Math.floor(words.at(-1)!.end * 1_000);
+  if (endMs < startMs || endMs - startMs > 120_000) return undefined;
+  const rawParticipantId = participant.id;
+  const speakerId = typeof rawParticipantId === "number" && Number.isSafeInteger(rawParticipantId) && rawParticipantId >= 0
+    || typeof rawParticipantId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(rawParticipantId)
+    ? String(rawParticipantId)
+    : undefined;
+  const speakerName = typeof participant.name === "string"
+    ? participant.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) || undefined
+    : undefined;
+  const id = createHash("sha256").update(`${providerBotId}\0${meetingId}\0${speakerId ?? "?"}\0${startMs}\0${endMs}\0${text}`).digest("hex");
+  return {
+    providerBotId,
+    meetingId,
+    userId,
+    segment: { id, startMs, endMs, text, ...(speakerId ? { speakerId } : {}), ...(speakerId && speakerName ? { speakerName } : {}) },
+  };
+}
+
 export function validateRecallJoinAt(value: unknown, nowMs = Date.now()): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new Error("joinAt must be a future ISO-8601 timestamp");
@@ -442,6 +544,41 @@ export interface ParsedRecallStatusWebhook {
   status: "joining" | "waiting_room" | "in_call" | "ended" | "failed";
   statusAt?: string;
   subCode?: string;
+}
+
+export interface ParsedRecallTranscriptArtifactWebhook {
+  providerBotId: string;
+  meetingId: string;
+  userId: number;
+  status: "processing" | "ready" | "failed";
+  subCode?: string;
+}
+
+/** Parse dashboard artifact-status webhooks separately from per-bot transcript.data events. */
+export function parseRecallTranscriptArtifactWebhook(value: unknown): ParsedRecallTranscriptArtifactWebhook | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const body = value as Record<string, unknown>;
+  const status = body.event === "transcript.processing" ? "processing"
+    : body.event === "transcript.done" ? "ready"
+      : body.event === "transcript.failed" ? "failed" : undefined;
+  if (!status) return undefined;
+  const envelope = body.data && typeof body.data === "object" && !Array.isArray(body.data) ? body.data as Record<string, unknown> : {};
+  const artifact = envelope.data && typeof envelope.data === "object" && !Array.isArray(envelope.data) ? envelope.data as Record<string, unknown> : {};
+  const statusData = envelope.status && typeof envelope.status === "object" && !Array.isArray(envelope.status)
+    ? envelope.status as Record<string, unknown>
+    : artifact.status && typeof artifact.status === "object" && !Array.isArray(artifact.status)
+      ? artifact.status as Record<string, unknown>
+      : artifact;
+  const bot = envelope.bot && typeof envelope.bot === "object" && !Array.isArray(envelope.bot) ? envelope.bot as Record<string, unknown> : {};
+  const metadata = bot.metadata && typeof bot.metadata === "object" && !Array.isArray(bot.metadata) ? bot.metadata as Record<string, unknown> : {};
+  const providerBotId = bot.id;
+  const meetingId = metadata.chusky_meeting_id;
+  const userId = Number(metadata.chusky_user_id);
+  if (!isValidRecallBotId(providerBotId) || typeof meetingId !== "string" || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)
+    || !Number.isSafeInteger(userId) || userId <= 0) return undefined;
+  const rawSubCode = statusData.sub_code ?? artifact.sub_code;
+  const subCode = typeof rawSubCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(rawSubCode) ? rawSubCode : undefined;
+  return { providerBotId, meetingId, userId, status, ...(status === "failed" && subCode ? { subCode } : {}) };
 }
 
 /** Normalize Recall's current status_change envelope and its legacy status-specific envelope. */

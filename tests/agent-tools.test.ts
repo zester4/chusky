@@ -16,7 +16,7 @@ test("native catalog includes core agent capabilities", () => {
 
 test("Recall meeting tools require explicit join details and expose owner-scoped controls", () => {
   const tools = new Set(chuckTools.map((tool) => tool.function.name));
-  for (const name of ["CHUCK_MEETING_CONTEXT_PREPARE", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(tools.has(name), true, name);
+  for (const name of ["CHUCK_MEETING_CONTEXT_PREPARE", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE", "CHUCK_MEETING_TRANSCRIPT_SEARCH", "CHUCK_MEETING_TRANSCRIPT_DELETE"]) assert.equal(tools.has(name), true, name);
   for (const name of ["CHUCK_MEETING_PROFILE_GET", "CHUCK_MEETING_PROFILE_UPDATE"]) assert.equal(tools.has(name), true, name);
   const profileUpdate = chuckTools.find((tool) => tool.function.name === "CHUCK_MEETING_PROFILE_UPDATE");
   assert.ok(profileUpdate?.function.parameters.properties.composioAccountAliases);
@@ -28,6 +28,10 @@ test("Recall meeting tools require explicit join details and expose owner-scoped
   validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://meet.google.com/abc-defg-hij" });
   validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", interactionMode: "copilot" });
   validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", interactionMode: "representative" });
+  validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", transcriptRetentionDays: 7 });
+  assert.throws(() => validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", transcriptRetentionDays: 2 }), /unsupported value/);
+  validateNativeToolArguments("CHUCK_MEETING_TRANSCRIPT_SEARCH", { query: "pilot approval" });
+  validateNativeToolArguments("CHUCK_MEETING_TRANSCRIPT_DELETE", { meetingId: "mtg_123" });
   validateNativeToolArguments("CHUCK_MEETING_CONTEXT_PREPARE", { clientName: "Acme", objective: "Close onboarding" });
   assert.throws(() => validateNativeToolArguments("CHUCK_MEETING_CONTEXT_LOOKUP", {}), /requires argument/);
   assert.throws(() => validateNativeToolArguments("CHUCK_MEETING_JOIN", { meetingUrl: "https://zoom.us/j/1234567890", interactionMode: "autonomous-unbounded" }), /unsupported value/);

@@ -2,7 +2,7 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { applyRecallParticipantWebhook, applyRecallStatusWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
 const originalConfig = {
@@ -372,6 +372,28 @@ test("speaker transitions are owner and bot scoped, idempotent, and cleared when
   }), "ignored");
   await updateRecallMeeting(ownerId, meeting.id, { status: "ended" });
   assert.deepEqual((await getRecallMeeting(ownerId, meeting.id))?.speakerEvents, []);
+});
+
+test("transcript artifact lifecycle is owner/bot scoped and a late processing event cannot regress ready", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/transcript-status-test" });
+  const artifact = (event: string, providerBotId = botId) => ({
+    event,
+    data: {
+      bot: { id: providerBotId, metadata: { chusky_meeting_id: meeting.id, chusky_user_id: String(ownerId) } },
+      data: { sub_code: "transcript_provider_error", message: "Do not retain raw provider error" },
+    },
+  });
+  assert.equal(await applyRecallTranscriptArtifactWebhook(artifact("transcript.processing")), "updated");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.transcriptStatus, "processing");
+  assert.equal(await applyRecallTranscriptArtifactWebhook(artifact("transcript.done")), "updated");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.transcriptStatus, "ready");
+  assert.equal(await applyRecallTranscriptArtifactWebhook(artifact("transcript.processing")), "ignored");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.transcriptStatus, "ready");
+  assert.equal(await applyRecallTranscriptArtifactWebhook(artifact("transcript.failed", "other_bot")), "ignored");
+  const stored = await getRecallMeeting(ownerId, meeting.id);
+  assert.equal(stored?.transcriptErrorCode, undefined);
+  assert.equal(JSON.stringify(stored).includes("Do not retain raw provider error"), false);
 });
 
 test("Recall chat messages require an owned active bot and use the supported chat-send API", async () => {

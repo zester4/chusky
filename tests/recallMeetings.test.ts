@@ -8,6 +8,7 @@ import {
   isValidRecallBotId,
   mapRecallBotStatus,
   parseRecallStatusWebhook,
+  parseRecallTranscriptArtifactWebhook,
   parseRecallChatWebhook,
   recallChatCommand,
   recallApiRequest,
@@ -78,12 +79,78 @@ test("Recall bot subscribes to chat and live roster events without enabling reta
   assert.deepEqual(request.recording_config.realtime_endpoints, [{
     type: "webhook",
     url: "https://chusky.example/recall/realtime-webhook",
-    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off"],
+    events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off", "transcript.data"],
   }]);
   assert.equal(request.chat?.on_bot_join.send_to, "everyone");
   assert.match(request.chat?.on_bot_join.message ?? "", /Chusky is a digital assistant/i);
   assert.match(request.chat?.on_bot_join.message ?? "", /may contribute proactively/i);
   assert.doesNotMatch(request.chat?.on_bot_join.message ?? "", /say ‘Chusky’/i);
+});
+
+test("proactive meeting transcript capture uses low-latency Recall transcription and keeps provider retention disabled", () => {
+  const request = buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky Meeting Assistant",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_transcript_123",
+    userId: 42,
+    interactionMode: "copilot",
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+  });
+
+  assert.equal(request.recording_config.retention, null);
+  assert.deepEqual(request.recording_config.transcript, {
+    provider: { recallai_streaming: { mode: "prioritize_low_latency", language_code: "en" } },
+    diarization: { use_separate_streams_when_available: true },
+  });
+  assert.ok(request.recording_config.realtime_endpoints?.[0]?.events.includes("transcript.data"));
+  assert.match(request.chat?.on_bot_join.message ?? "", /live transcript/i);
+  assert.match(request.chat?.on_bot_join.message ?? "", /not retained as a searchable record/i);
+});
+
+test("Recall dashboard transcript artifact events map only sanitized bot and lifecycle state", () => {
+  const base = {
+    data: {
+      bot: { id: "bot_123", metadata: { chusky_meeting_id: "mtg_transcript_123", chusky_user_id: "42" } },
+      data: { code: "failed", sub_code: "provider_failed_1", updated_at: new Date().toISOString(), private_error: "do not persist me" },
+    },
+  };
+  assert.deepEqual(parseRecallTranscriptArtifactWebhook({ ...base, event: "transcript.processing" }), {
+    providerBotId: "bot_123", meetingId: "mtg_transcript_123", userId: 42, status: "processing",
+  });
+  assert.deepEqual(parseRecallTranscriptArtifactWebhook({ ...base, event: "transcript.done" }), {
+    providerBotId: "bot_123", meetingId: "mtg_transcript_123", userId: 42, status: "ready",
+  });
+  assert.deepEqual(parseRecallTranscriptArtifactWebhook({ ...base, event: "transcript.failed" }), {
+    providerBotId: "bot_123", meetingId: "mtg_transcript_123", userId: 42, status: "failed",
+    subCode: "provider_failed_1",
+  });
+  assert.equal(parseRecallTranscriptArtifactWebhook({ ...base, event: "bot.done" }), undefined);
+  assert.equal(parseRecallTranscriptArtifactWebhook({
+    event: "transcript.done",
+    data: { ...base.data, bot: { id: "bot_123", metadata: { ...base.data.bot.metadata, chusky_user_id: "0" } } },
+  }), undefined);
+});
+
+test("transcript retention is disabled by default and requires a supported explicit retention window", () => {
+  const base = {
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_transcript_456",
+    userId: 42,
+    interactionMode: "addressed" as const,
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+  };
+  const defaultRequest = buildRecallCreateBotRequest(base);
+  assert.equal(defaultRequest.recording_config.retention, null);
+  assert.equal(defaultRequest.recording_config.transcript, null);
+
+  const retained = buildRecallCreateBotRequest({ ...base, transcriptRetentionDays: 7 });
+  assert.equal(retained.recording_config.retention, null);
+  assert.deepEqual(retained.recording_config.transcript?.diarization, { use_separate_streams_when_available: true });
+  assert.match(retained.chat?.on_bot_join.message ?? "", /retain a searchable transcript for 7 days/i);
+  assert.throws(() => buildRecallCreateBotRequest({ ...base, transcriptRetentionDays: 2 }), /1, 7, or 30 days/);
 });
 
 test("Recall addressed-mode disclosure clearly explains the wake-word behavior", () => {
@@ -97,6 +164,61 @@ test("Recall addressed-mode disclosure clearly explains the wake-word behavior",
     realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
   });
   assert.match(request.chat?.on_bot_join.message ?? "", /Say ‘Chusky’ when you’d like a response/i);
+});
+
+test("Recall visual context is an explicit, platform-limited Create Bot opt-in", () => {
+  const request = buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky Meeting Assistant",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_visual_123",
+    userId: 42,
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+    screenShareContextEnabled: true,
+    visualWebsocketUrl: "wss://voice.example/recall/video",
+  });
+  assert.deepEqual(request.variant, { zoom: "web_4_core", google_meet: "web_4_core", microsoft_teams: "web_4_core" });
+  assert.equal(request.recording_config.video_mixed_layout, "gallery_view_v2");
+  assert.deepEqual(request.recording_config.video_separate_png, {});
+  assert.deepEqual(request.recording_config.realtime_endpoints, [
+    {
+      type: "webhook",
+      url: "https://chusky.example/recall/realtime-webhook",
+      events: ["participant_events.chat_message", "participant_events.join", "participant_events.leave", "participant_events.update", "participant_events.speech_on", "participant_events.speech_off"],
+    },
+    { type: "websocket", url: "wss://voice.example/recall/video", events: ["video_separate_png.data"] },
+  ]);
+  assert.equal(request.recording_config.retention, null);
+  assert.equal(request.recording_config.video_mixed_mp4, null);
+  assert.match(request.chat?.on_bot_join.message ?? "", /Shared-screen frames may also be briefly analyzed/i);
+  assert.throws(() => buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_visual_no_disclosure",
+    userId: 42,
+    screenShareContextEnabled: true,
+    visualWebsocketUrl: "wss://voice.example/recall/video",
+  }), /participant-disclosure webhook/);
+  assert.throws(() => buildRecallCreateBotRequest({
+    meetingUrl: "https://acme.webex.com/meet/alex",
+    botName: "Chusky",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_visual_456",
+    userId: 42,
+    screenShareContextEnabled: true,
+    visualWebsocketUrl: "wss://voice.example/recall/video",
+  }), /not Webex/);
+  assert.throws(() => buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_visual_456",
+    userId: 42,
+    realtimeWebhookUrl: "https://chusky.example/recall/realtime-webhook",
+    screenShareContextEnabled: true,
+    visualWebsocketUrl: "https://voice.example/recall/video",
+  }), /WSS/);
 });
 
 test("Recall chat parser recognizes natural Chusky addresses and labels ambient chat for owner-authorized representatives", () => {

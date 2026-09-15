@@ -17,6 +17,7 @@ import {
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
+  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
@@ -29,7 +30,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
-import { getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 
 const MAX_TEXT = 1000;
@@ -514,21 +515,45 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (runtime.sharedConversation && (args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined)) {
         throw new Error("Client-bound meetings must be prepared from a private owner conversation");
       }
+      if (runtime.sharedConversation && args.transcriptRetentionDays !== undefined) {
+        throw new Error("Searchable meeting transcript retention can be enabled only from a private owner conversation");
+      }
       const profile = await getMeetingRepresentativeProfile(userId);
       const hasClientMission = args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined;
       const interactionMode = hasClientMission ? "representative" : args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
-      return joinRecallMeeting(userId, {
-        meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode,
+        return joinRecallMeeting(userId, {
+          meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, analyzeScreenShare: args.analyzeScreenShare,
+          transcriptRetentionDays: args.transcriptRetentionDays,
         clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, clientContextConfirmed: args.clientContextConfirmed,
         ...(runtime.meetingId && args.clientName === undefined ? { inheritMeetingId: runtime.meetingId } : {}),
       }, runtime.signal);
     }
     case "CHUCK_MEETING_PROFILE_GET": return getMeetingRepresentativeProfile(userId);
-    case "CHUCK_MEETING_PROFILE_UPDATE": return updateMeetingRepresentativeProfile(userId, args);
+    case "CHUCK_MEETING_PROFILE_UPDATE": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting representative settings can be changed only in a private owner conversation");
+      const previous = await getMeetingRepresentativeProfile(userId);
+      const updated = await updateMeetingRepresentativeProfile(userId, args);
+      if (!updated.autoJoinCalendar && (previous.autoJoinCalendar || args.autoJoinCalendar === false || args.enabled === false)) {
+        const cleanup = await cancelAutomaticCalendarMeetingJoins(userId);
+        return { ...updated, automaticJoinCleanup: cleanup };
+      }
+      return updated;
+    }
     case "CHUCK_MEETING_LIST": return listRecallMeetingsForUser(userId, args.limit === undefined ? 10 : Number(args.limit));
     case "CHUCK_MEETING_STATUS": {
       const meeting = await getRecallMeetingForUser(userId, text(args.id));
       return meeting ?? { found: false, reason: "Meeting not found or not owned by you" };
+    }
+    case "CHUCK_MEETING_TRANSCRIPT_SEARCH": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting transcripts can be searched only in a private owner conversation");
+      const results = await searchRecallMeetingTranscripts(userId, text(args.query), args.meetingId === undefined ? undefined : text(args.meetingId), args.limit === undefined ? 5 : Number(args.limit));
+      return { results, count: results.length, ...(results.length ? {} : { message: "No matching unexpired, owner-retained meeting transcript was found." }) };
+    }
+    case "CHUCK_MEETING_TRANSCRIPT_DELETE": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Meeting transcripts can be deleted only in a private owner conversation");
+      const deleted = await deleteRecallMeetingTranscript(userId, text(args.meetingId));
+      if (!deleted) throw new Error("No retained transcript was found for that ended meeting");
+      return { deleted: true, meetingId: text(args.meetingId) };
     }
     case "CHUCK_MEETING_LEAVE": return leaveRecallMeeting(userId, text(args.id), runtime.signal);
     case "CHUCK_VIDEO_STATUS": {

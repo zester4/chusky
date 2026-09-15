@@ -3,7 +3,7 @@
  * Handles: message history, model selection, rate limiting, composio session IDs.
  */
 import Redis from "ioredis";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
@@ -14,6 +14,7 @@ import type { CapabilityWorkerName } from "./memory/types.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
+import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
 import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProfile, type MeetingRepresentativeProfile } from "./meetings/representative.js";
 import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission.js";
@@ -152,6 +153,27 @@ export interface RecallMeetingSpeakerEvent {
   at: number;
 }
 
+/** A final, normalized Recall transcript segment; it contains no provider payload. */
+export interface RecallTranscriptSegment {
+  id: string;
+  startMs: number;
+  endMs: number;
+  text: string;
+  speakerId?: string;
+  speakerName?: string;
+}
+
+export interface RecallTranscriptRecord {
+  segments: RecallTranscriptSegment[];
+  truncated: boolean;
+}
+
+interface StoredRecallTranscriptSegment {
+  id: string;
+  startMs: number;
+  sealed: string;
+}
+
 /** Owner-scoped meeting metadata and bounded text context. Never stores a meeting URL or media. */
 export interface RecallMeetingRecord {
   id: string;
@@ -159,12 +181,23 @@ export interface RecallMeetingRecord {
   platform: "zoom" | "google_meet" | "microsoft_teams" | "webex";
   /** addressed is conservative default; copilot is explicit per-meeting opt-in. */
   interactionMode?: "addressed" | "copilot" | "representative";
+  /** Explicit owner opt-in to transient shared-screen PNG context for supported platforms. */
+  visualContextEnabled?: boolean;
+  /** Explicit owner opt-in; omitted means the transcript is deleted after outcome processing. */
+  transcriptRetentionDays?: 1 | 7 | 30;
+  /** Absolute expiry for a deliberately retained transcript; never set for default ephemeral transcripts. */
+  transcriptExpiresAt?: number;
+  /** Sanitized provider artifact state for diagnosing failures in the optional live transcript path. */
+  transcriptStatus?: "processing" | "ready" | "failed";
+  transcriptErrorCode?: string;
   status: RecallMeetingStatus;
   providerBotId?: string;
   /** SHA-256 of the link, used only to suppress concurrent duplicate joins. */
   meetingUrlHash: string;
   /** Hash of URL plus scheduled instance; legacy records omit it. */
   meetingInstanceHash?: string;
+  /** Internal ownership marker for a bot scheduled from this exact Calendar event. */
+  calendarPreparationId?: string;
   title?: string;
   /** Explicit owner-selected client context. Never contains a meeting URL or raw provider payload. */
   mission?: MeetingMission;
@@ -176,6 +209,9 @@ export interface RecallMeetingRecord {
   /** Bounded active-speaker timing for the current live meeting; cleared at completion. */
   speakerEvents?: RecallMeetingSpeakerEvent[];
   history: Message[];
+  /** Temporary, account-private source for the outcome job; erased on completion. */
+  outcomeTranscript?: Array<{ role: "participant" | "chusky"; content: string; speakerName?: string }>;
+  outcomeTranscriptCapturedAt?: number;
   /** Owner-private structured follow-through; never contains the raw provider payload. */
   outcome?: RecallMeetingOutcome;
   outcomeFollowThrough?: RecallMeetingFollowThrough;
@@ -194,6 +230,12 @@ export interface CalendarMeetingPreparation {
   calendarEventId?: string;
   lifecycle: "created" | "updated" | "sync" | "starting_soon" | "attendee_response" | "cancelled";
   status: "prepared" | "cancelled" | "joined" | "expired";
+  /** Owned Chusky meeting record created for this calendar event, if any. */
+  meetingId?: string;
+  /** Distinguishes owner-requested joins from calendar-autopilot joins for safe cancellation. */
+  automatic?: boolean;
+  /** Whether the latest verified Calendar event still has a supported meeting link. */
+  meetingUrlAvailable?: boolean;
   title?: string;
   startAt?: string;
   endAt?: string;
@@ -231,6 +273,13 @@ export interface SdkProjectRecord {
   createdAt: number;
   /** Better Auth user that owns a self-service dashboard project. Root-created projects have no owner. */
   ownerWebAuthUserId?: string;
+  /** Better Auth organization that owns this project; Composio remains the connection manager. */
+  organizationId?: string;
+  /** Policy and agent definitions are project-scoped and never stored in a user conversation. */
+  companyPolicy?: CompanyPolicy;
+  companyAgents?: CompanyAgentProfile[];
+  /** Project-scoped replay protection for agent-profile creation. */
+  agentIdempotency?: Record<string, { fingerprint: string; response: unknown; createdAt: number }>;
   /** Telegram owner for keys generated through Chusky's private Telegram UI. */
   ownerTelegramUserId?: number;
   rotatedAt?: number;
@@ -239,12 +288,19 @@ export interface SdkProjectRecord {
 
 export interface SdkRunRecord {
   id: string;
+  /** Set only for runs submitted through a project key; used for company-level status reporting. */
+  companyProjectId?: string;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
   model?: string;
+  agentId?: string;
+  agentName?: string;
+  /** Private snapshot used when an approval or durable run resumes. Never expose in runView. */
+  agentInstructions?: string;
   /** Verified R2 uploads used for this run. Keys are intentionally never exposed. */
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   output?: string;
+  cost?: number;
   approvalId?: string;
   taskId?: string;
   metadata?: Record<string, unknown>;
@@ -255,6 +311,40 @@ export interface SdkRunRecord {
   events: Array<{ id: string; type: string; at: number; text?: string }>;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface CompanyRunSummary {
+  id: string;
+  status: SdkRunRecord["status"];
+  agentId?: string;
+  agentName?: string;
+  cost?: number;
+  errorCode?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompanyAuditEvent {
+  id: string;
+  requestId: string;
+  action: string;
+  status: number;
+  at: number;
+}
+
+export interface CompanyUsagePeriod {
+  month: string;
+  completedRuns: number;
+  costUsd: number;
+}
+
+function usageMonth(at: number, offset = 0): string {
+  const date = new Date(at);
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - offset, 1)).toISOString().slice(0, 7);
+}
+
+function companyProjectDigest(projectId: string): string {
+  return createHash("sha256").update(projectId).digest("hex");
 }
 
 /**
@@ -409,6 +499,7 @@ export interface TaskRecord {
   sdkBudget?: { duration?: string; maxToolCalls?: number; maxCost?: number };
   sdkStartedAt?: number;
   sdkSkills?: string[];
+  sdkInstructions?: string;
   /** Narrow delayed meeting follow-up context; deliberately excludes general chat history and arbitrary tools. */
   meetingFollowUp?: {
     meetingId: string;
@@ -763,6 +854,12 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void>;
+  completeCompanyRun(projectId: string, run: CompanyRunSummary, completedAt: number): Promise<boolean>;
+  listCompanyRuns(projectId: string, limit: number): Promise<CompanyRunSummary[]>;
+  appendCompanyAudit(projectId: string, event: CompanyAuditEvent): Promise<void>;
+  listCompanyAudit(projectId: string, limit: number): Promise<CompanyAuditEvent[]>;
+  listCompanyUsage(projectId: string, periods: number, now: number): Promise<CompanyUsagePeriod[]>;
   getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined>;
   saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord>;
   listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
@@ -785,6 +882,12 @@ interface Backend {
   getBlandProviderCall(providerCallId: string): Promise<{ userId: number; callId: string } | undefined>;
   claimRecallMeetingCreation(userId: number, instanceHash: string, token: string, leaseMs: number): Promise<boolean>;
   releaseRecallMeetingCreation(userId: number, instanceHash: string, token: string): Promise<boolean>;
+  putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean>;
+  readRecallVisualFrame(userId: number, meetingId: string): Promise<string | undefined>;
+  appendRecallTranscriptSegment(userId: number, meetingId: string, segment: StoredRecallTranscriptSegment, ttlSeconds: number): Promise<"stored" | "duplicate" | "full">;
+  readRecallTranscript(userId: number, meetingId: string): Promise<{ segments: StoredRecallTranscriptSegment[]; truncated: boolean } | undefined>;
+  setRecallTranscriptTtl(userId: number, meetingId: string, ttlSeconds: number): Promise<boolean>;
+  deleteRecallTranscript(userId: number, meetingId: string): Promise<boolean>;
   claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, nowMs?: number): Promise<"allowed" | "interval">;
   createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord>;
   getRecallChatEvent(eventId: string, userId?: number): Promise<RecallChatEventRecord | undefined>;
@@ -862,6 +965,59 @@ interface Backend {
 const SUPERVISOR_RUN_TTL_SECONDS = 7 * 24 * 60 * 60;
 const WORKER_RUN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const AGENT_RUN_MAX_BYTES = 2 * 1024 * 1024;
+const RECALL_TRANSCRIPT_MAX_SEGMENTS = 8_000;
+const RECALL_TRANSCRIPT_MAX_BYTES = 200_000;
+const RECALL_TRANSCRIPT_EPHEMERAL_TTL_SECONDS = 6 * 60 * 60;
+
+function validRecallTranscriptSegment(value: unknown): value is RecallTranscriptSegment {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const segment = value as Record<string, unknown>;
+  return typeof segment.id === "string" && /^[a-f0-9]{64}$/.test(segment.id)
+    && Number.isSafeInteger(segment.startMs) && Number(segment.startMs) >= 0 && Number(segment.startMs) <= 7_200_000
+    && Number.isSafeInteger(segment.endMs) && Number(segment.endMs) >= Number(segment.startMs) && Number(segment.endMs) <= 7_200_000
+    && typeof segment.text === "string" && segment.text.trim().length > 0 && segment.text.length <= 2_000
+    && (segment.speakerId === undefined || typeof segment.speakerId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(segment.speakerId))
+    && (segment.speakerName === undefined || typeof segment.speakerName === "string" && segment.speakerName.trim().length > 0 && segment.speakerName.length <= 160);
+}
+
+function recallTranscriptEncryptionKey(): Buffer {
+  const secret = config.recallTranscriptEncryptionKey || config.recallMediaBridgeSecret;
+  if (typeof secret !== "string" || Buffer.byteLength(secret, "utf8") < 32) throw new Error("Recall transcript encryption is not configured");
+  return createHmac("sha256", secret).update("chusky:recall:transcript:key:v1", "utf8").digest();
+}
+
+function recallTranscriptAad(userId: number, meetingId: string, id: string, startMs: number): Buffer {
+  return Buffer.from(`chusky-recall-transcript-v1\0${userId}\0${meetingId}\0${id}\0${startMs}`, "utf8");
+}
+
+function sealRecallTranscriptSegment(userId: number, meetingId: string, segment: RecallTranscriptSegment): StoredRecallTranscriptSegment {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", recallTranscriptEncryptionKey(), iv);
+  cipher.setAAD(recallTranscriptAad(userId, meetingId, segment.id, segment.startMs));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(segment), "utf8"), cipher.final()]);
+  return { id: segment.id, startMs: segment.startMs, sealed: `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${ciphertext.toString("base64url")}` };
+}
+
+function openRecallTranscriptSegment(userId: number, meetingId: string, stored: unknown): RecallTranscriptSegment | undefined {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return undefined;
+  const record = stored as Record<string, unknown>;
+  if (typeof record.id !== "string" || !/^[a-f0-9]{64}$/.test(record.id) || !Number.isSafeInteger(record.startMs)
+    || Number(record.startMs) < 0 || typeof record.sealed !== "string" || record.sealed.length > 8_192) return undefined;
+  const [version, ivText, tagText, ciphertextText, extra] = record.sealed.split(".");
+  if (version !== "v1" || !ivText || !tagText || !ciphertextText || extra !== undefined) return undefined;
+  const iv = Buffer.from(ivText, "base64url");
+  const tag = Buffer.from(tagText, "base64url");
+  const ciphertext = Buffer.from(ciphertextText, "base64url");
+  if (iv.length !== 12 || tag.length !== 16 || ciphertext.length < 2 || ciphertext.length > 4_096) return undefined;
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", recallTranscriptEncryptionKey(), iv);
+    decipher.setAAD(recallTranscriptAad(userId, meetingId, record.id, Number(record.startMs)));
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+    const segment = JSON.parse(plaintext) as unknown;
+    return validRecallTranscriptSegment(segment) && segment.id === record.id && segment.startMs === record.startMs ? segment : undefined;
+  } catch { return undefined; }
+}
 const RECOVERABLE_OUTBOX_STATUSES = ["queued", "failed", "delivering"] as const;
 
 function isRecoverableOutboxStatus(status: OutboxRecord["status"]): status is typeof RECOVERABLE_OUTBOX_STATUSES[number] {
@@ -969,6 +1125,13 @@ class RedisBackend implements Backend {
   /** Avoid a Redis EXISTS call before every idle recovery pass after startup. */
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
+  // Redis hash tags keep every key touched by one project's Lua transaction in the same cluster slot.
+  private companyPrefix = (projectId: string) => `chuck:sdk:company:{${companyProjectDigest(projectId)}}`;
+  private companyRunsDataKey = (projectId: string) => `${this.companyPrefix(projectId)}:runs:data`;
+  private companyRunsIndexKey = (projectId: string) => `${this.companyPrefix(projectId)}:runs:index`;
+  private companyAuditKey = (projectId: string) => `${this.companyPrefix(projectId)}:audit`;
+  private companyCompletionKey = (projectId: string, runId: string) => `${this.companyPrefix(projectId)}:completion:${createHash("sha256").update(runId).digest("hex")}`;
+  private companyUsageKey = (projectId: string, month: string) => `${this.companyPrefix(projectId)}:usage:${month}`;
   private runKey = (id: string) => `chuck:run:${id}`;
   private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
   private handoffKey = (id: string) => `chuck:handoff:${id}`;
@@ -988,6 +1151,10 @@ class RedisBackend implements Backend {
   private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
+  private recallVisualDigest = (userId: number, meetingId: string) => createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
+  private recallVisualFrameKey = (userId: number, meetingId: string) => `chuck:recall:visual:frame:${this.recallVisualDigest(userId, meetingId)}`;
+  private recallVisualRateKey = (userId: number, meetingId: string) => `chuck:recall:visual:rate:${this.recallVisualDigest(userId, meetingId)}`;
+  private recallTranscriptKey = (userId: number, meetingId: string) => `chuck:recall:transcript:${this.recallVisualDigest(userId, meetingId)}`;
   private meetingContactsKey = (id: number) => `chuck:meeting-contacts:${id}`;
   private meetingContactsIndexKey = (id: number) => `chuck:meeting-contacts:${id}:index`;
   private recallMeetingCreationKey = (userId: number, instanceHash: string) => `chuck:recall:meeting:create:${createHash("sha256").update(`${userId}:${instanceHash}`).digest("hex")}`;
@@ -1030,6 +1197,58 @@ class RedisBackend implements Backend {
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+  }
+
+  async saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void> {
+    await this.r.eval(
+      "local prior=redis.call('HGET',KEYS[1],ARGV[1]); if prior and cjson.decode(prior).status=='completed' and cjson.decode(ARGV[3]).status~='completed' then return 0 end; redis.call('HSET',KEYS[1],ARGV[1],ARGV[3]); redis.call('ZADD',KEYS[2],ARGV[2],ARGV[1]); local n=redis.call('ZCARD',KEYS[2]); if n>1000 then local old=redis.call('ZRANGE',KEYS[2],0,n-1001); for _,id in ipairs(old) do redis.call('HDEL',KEYS[1],id) end; redis.call('ZREMRANGEBYRANK',KEYS[2],0,n-1001) end; redis.call('EXPIRE',KEYS[1],7776000); redis.call('EXPIRE',KEYS[2],7776000); return 1",
+      2, this.companyRunsDataKey(projectId), this.companyRunsIndexKey(projectId), run.id, String(run.updatedAt), JSON.stringify(run),
+    );
+  }
+
+  async completeCompanyRun(projectId: string, run: CompanyRunSummary, completedAt: number): Promise<boolean> {
+    const month = usageMonth(completedAt);
+    const result = await this.r.eval(
+      "redis.call('HSET',KEYS[1],ARGV[1],ARGV[3]); redis.call('ZADD',KEYS[2],ARGV[2],ARGV[1]); local n=redis.call('ZCARD',KEYS[2]); if n>1000 then local old=redis.call('ZRANGE',KEYS[2],0,n-1001); for _,id in ipairs(old) do redis.call('HDEL',KEYS[1],id) end; redis.call('ZREMRANGEBYRANK',KEYS[2],0,n-1001) end; redis.call('EXPIRE',KEYS[1],7776000); redis.call('EXPIRE',KEYS[2],7776000); local claimed=redis.call('SET',KEYS[3],'1','EX',31536000,'NX'); if not claimed then return 0 end; redis.call('HINCRBY',KEYS[4],'completedRuns',1); redis.call('HINCRBYFLOAT',KEYS[4],'costUsd',ARGV[5]); redis.call('EXPIRE',KEYS[4],34560000); return 1",
+      4,
+      this.companyRunsDataKey(projectId), this.companyRunsIndexKey(projectId), this.companyCompletionKey(projectId, run.id), this.companyUsageKey(projectId, month),
+      run.id, String(run.updatedAt), JSON.stringify(run), String(completedAt), String(Math.max(0, run.cost ?? 0)),
+    );
+    return Number(result) === 1;
+  }
+
+  async listCompanyRuns(projectId: string, limit: number): Promise<CompanyRunSummary[]> {
+    const ids = await this.r.zrevrange(this.companyRunsIndexKey(projectId), 0, Math.max(0, limit - 1));
+    if (!ids.length) return [];
+    const values = await this.r.hmget(this.companyRunsDataKey(projectId), ...ids);
+    return values.flatMap((value) => {
+      if (!value) return [];
+      try { return [JSON.parse(value) as CompanyRunSummary]; } catch { return []; }
+    });
+  }
+
+  async appendCompanyAudit(projectId: string, event: CompanyAuditEvent): Promise<void> {
+    await this.r.eval(
+      "redis.call('LPUSH',KEYS[1],ARGV[1]); redis.call('LTRIM',KEYS[1],0,499); redis.call('EXPIRE',KEYS[1],34560000); return 1",
+      1, this.companyAuditKey(projectId), JSON.stringify(event),
+    );
+  }
+
+  async listCompanyAudit(projectId: string, limit: number): Promise<CompanyAuditEvent[]> {
+    const values = await this.r.lrange(this.companyAuditKey(projectId), 0, Math.max(0, limit - 1));
+    return values.flatMap((value) => {
+      try { return [JSON.parse(value) as CompanyAuditEvent]; } catch { return []; }
+    });
+  }
+
+  async listCompanyUsage(projectId: string, periods: number, now: number): Promise<CompanyUsagePeriod[]> {
+    return Promise.all(Array.from({ length: periods }, async (_value, offset) => {
+      const month = usageMonth(now, offset);
+      const record = await this.r.hgetall(this.companyUsageKey(projectId, month));
+      const completedRuns = Number(record.completedRuns ?? 0);
+      const costUsd = Number(record.costUsd ?? 0);
+      return { month, completedRuns: Number.isSafeInteger(completedRuns) && completedRuns >= 0 ? completedRuns : 0, costUsd: Number.isFinite(costUsd) && costUsd >= 0 ? costUsd : 0 };
+    }));
   }
   async linkBlandProviderCall(providerCallId: string, userId: number, callId: string): Promise<boolean> {
     const key = `chuck:bland:provider:${createHash("sha256").update(providerCallId).digest("hex")}`;
@@ -1268,6 +1487,67 @@ class RedisBackend implements Backend {
       1, this.recallMeetingCreationKey(userId, instanceHash), token,
     );
     return Number(result) === 1;
+  }
+  async putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean> {
+    const result = await this.r.eval(
+      "if redis.call('SET',KEYS[1],'1','EX',ARGV[2],'NX') then redis.call('SET',KEYS[2],ARGV[1],'EX',ARGV[3]); return 1 else return 0 end",
+      2, this.recallVisualRateKey(userId, meetingId), this.recallVisualFrameKey(userId, meetingId), encryptedFrame, String(minIntervalSeconds), String(ttlSeconds),
+    );
+    return Number(result) === 1;
+  }
+  async readRecallVisualFrame(userId: number, meetingId: string): Promise<string | undefined> {
+    const value = await this.r.get(this.recallVisualFrameKey(userId, meetingId));
+    return typeof value === "string" ? value : undefined;
+  }
+  async appendRecallTranscriptSegment(userId: number, meetingId: string, segment: StoredRecallTranscriptSegment, ttlSeconds: number): Promise<"stored" | "duplicate" | "full"> {
+    const key = this.recallTranscriptKey(userId, meetingId);
+    const meta = `${key}:meta`;
+    const member = JSON.stringify(segment);
+    const result = Number(await this.r.eval(
+      "if redis.call('HGET',KEYS[2],'truncated') == '1' then redis.call('EXPIRE',KEYS[1],ARGV[4]); redis.call('EXPIRE',KEYS[2],ARGV[4]); return -1 end; " +
+      "if redis.call('ZSCORE',KEYS[1],ARGV[1]) then return 0 end; " +
+      "local count = redis.call('ZCARD',KEYS[1]); local bytes = tonumber(redis.call('HGET',KEYS[2],'bytes') or '0'); local nextBytes = string.len(ARGV[2]); " +
+      "if count >= tonumber(ARGV[3]) or bytes + nextBytes > tonumber(ARGV[5]) then redis.call('HSET',KEYS[2],'truncated','1'); redis.call('EXPIRE',KEYS[1],ARGV[4]); redis.call('EXPIRE',KEYS[2],ARGV[4]); return -1 end; " +
+      "redis.call('ZADD',KEYS[1],ARGV[6],ARGV[2]); redis.call('HINCRBY',KEYS[2],'bytes',nextBytes); redis.call('EXPIRE',KEYS[1],ARGV[4]); redis.call('EXPIRE',KEYS[2],ARGV[4]); return 1",
+      2, key, meta, segment.id, member, String(RECALL_TRANSCRIPT_MAX_SEGMENTS), String(ttlSeconds), String(RECALL_TRANSCRIPT_MAX_BYTES), String(segment.startMs),
+    ));
+    return result === 1 ? "stored" : result === 0 ? "duplicate" : "full";
+  }
+  async readRecallTranscript(userId: number, meetingId: string): Promise<{ segments: StoredRecallTranscriptSegment[]; truncated: boolean } | undefined> {
+    const key = this.recallTranscriptKey(userId, meetingId);
+    const [members, truncated] = await Promise.all([
+      this.r.zrange(key, 0, -1),
+      this.r.hget(`${key}:meta`, "truncated"),
+    ]);
+    if (!Array.isArray(members) || members.length === 0) return undefined;
+    const segments: StoredRecallTranscriptSegment[] = [];
+    for (const member of members) {
+      if (typeof member !== "string") continue;
+      try {
+        const parsed = JSON.parse(member) as unknown;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const value = parsed as Record<string, unknown>;
+          if (typeof value.id === "string" && /^[a-f0-9]{64}$/.test(value.id) && Number.isSafeInteger(value.startMs)
+            && Number(value.startMs) >= 0 && Number(value.startMs) <= 7_200_000 && typeof value.sealed === "string" && value.sealed.length <= 8_192) {
+            segments.push({ id: value.id, startMs: Number(value.startMs), sealed: value.sealed });
+          }
+        }
+      } catch { /* Corrupt entries are never exposed. */ }
+    }
+    return segments.length ? { segments, truncated: String(truncated ?? "0") === "1" } : undefined;
+  }
+  async setRecallTranscriptTtl(userId: number, meetingId: string, ttlSeconds: number): Promise<boolean> {
+    const key = this.recallTranscriptKey(userId, meetingId);
+    const ttl = Math.max(1, Math.min(Math.floor(ttlSeconds), 30 * 24 * 60 * 60));
+    const result = await this.r.eval(
+      "if redis.call('EXISTS',KEYS[1]) == 0 then return 0 end; redis.call('EXPIRE',KEYS[1],ARGV[1]); redis.call('EXPIRE',KEYS[2],ARGV[1]); return 1",
+      2, key, `${key}:meta`, String(ttl),
+    );
+    return Number(result) === 1;
+  }
+  async deleteRecallTranscript(userId: number, meetingId: string): Promise<boolean> {
+    const key = this.recallTranscriptKey(userId, meetingId);
+    return Number(await this.r.del(key, `${key}:meta`)) > 0;
   }
   async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, _nowMs?: number): Promise<"allowed" | "interval"> {
     const digest = createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
@@ -1787,6 +2067,10 @@ class RedisBackend implements Backend {
 // ── Memory ────────────────────────────────────────────────────────────────────
 class MemoryBackend implements Backend {
   private sessions = new Map<number, UserSession>();
+  private companyRuns = new Map<string, Map<string, CompanyRunSummary>>();
+  private companyAudits = new Map<string, CompanyAuditEvent[]>();
+  private companyCompletions = new Set<string>();
+  private companyUsage = new Map<string, CompanyUsagePeriod>();
   private agentRuns = new Map<string, AgentRunRecord>();
   private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
@@ -1820,6 +2104,9 @@ class MemoryBackend implements Backend {
   private recallMeetingCreationClaims = new Map<string, { token: string; expiresAt: number }>();
   private recallCopilotEvaluations = new Map<string, { lastAt: number; expiresAt: number }>();
   private recallChatEvents = new Map<string, { record: RecallChatEventRecord; expiresAt: number }>();
+  private recallVisualFrames = new Map<string, { encryptedFrame: string; expiresAt: number }>();
+  private recallVisualFrameRates = new Map<string, number>();
+  private recallTranscripts = new Map<string, { segments: Map<string, StoredRecallTranscriptSegment>; bytes: number; truncated: boolean; expiresAt: number }>();
   private meetingContacts = new Map<number, Map<string, MeetingContactRecord>>();
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
@@ -1829,6 +2116,44 @@ class MemoryBackend implements Backend {
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async saveCompanyRun(projectId: string, run: CompanyRunSummary) {
+    const records = this.companyRuns.get(projectId) ?? new Map<string, CompanyRunSummary>();
+    const previous = records.get(run.id);
+    records.set(run.id, structuredClone(previous?.status === "completed" && run.status !== "completed" ? previous : run));
+    if (records.size > 1000) {
+      for (const [id] of [...records.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt).slice(0, records.size - 1000)) records.delete(id);
+    }
+    this.companyRuns.set(projectId, records);
+  }
+  async completeCompanyRun(projectId: string, run: CompanyRunSummary, completedAt: number) {
+    await this.saveCompanyRun(projectId, run);
+    const completionKey = `${projectId}:${run.id}`;
+    if (this.companyCompletions.has(completionKey)) return false;
+    this.companyCompletions.add(completionKey);
+    const month = usageMonth(completedAt);
+    const usageKey = `${projectId}:${month}`;
+    const previous = this.companyUsage.get(usageKey) ?? { month, completedRuns: 0, costUsd: 0 };
+    this.companyUsage.set(usageKey, { month, completedRuns: previous.completedRuns + 1, costUsd: previous.costUsd + Math.max(0, run.cost ?? 0) });
+    return true;
+  }
+  async listCompanyRuns(projectId: string, limit: number) {
+    return [...(this.companyRuns.get(projectId)?.values() ?? [])].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit).map((run) => structuredClone(run));
+  }
+  async appendCompanyAudit(projectId: string, event: CompanyAuditEvent) {
+    const events = this.companyAudits.get(projectId) ?? [];
+    events.unshift(structuredClone(event));
+    this.companyAudits.set(projectId, events.slice(0, 500));
+  }
+  async listCompanyAudit(projectId: string, limit: number) {
+    return (this.companyAudits.get(projectId) ?? []).slice(0, limit).map((event) => structuredClone(event));
+  }
+  async listCompanyUsage(projectId: string, periods: number, now: number) {
+    return Array.from({ length: periods }, (_value, offset) => {
+      const month = usageMonth(now, offset);
+      const record = this.companyUsage.get(`${projectId}:${month}`);
+      return record ? structuredClone(record) : { month, completedRuns: 0, costUsd: 0 };
+    });
+  }
   async linkBlandProviderCall(providerCallId: string, userId: number, callId: string) {
     const prior = this.blandProviderCalls.get(providerCallId);
     if (prior && prior.expiresAt > Date.now()) return prior.userId === userId && prior.callId === callId;
@@ -2026,6 +2351,61 @@ class MemoryBackend implements Backend {
     if (this.recallMeetingCreationClaims.get(key)?.token !== token) return false;
     this.recallMeetingCreationClaims.delete(key);
     return true;
+  }
+  async putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string, ttlSeconds: number, minIntervalSeconds: number): Promise<boolean> {
+    const key = `${userId}:${meetingId}`;
+    const now = Date.now();
+    if ((this.recallVisualFrameRates.get(key) ?? 0) > now) return false;
+    this.recallVisualFrameRates.set(key, now + minIntervalSeconds * 1000);
+    this.recallVisualFrames.set(key, { encryptedFrame, expiresAt: now + ttlSeconds * 1000 });
+    return true;
+  }
+  async readRecallVisualFrame(userId: number, meetingId: string): Promise<string | undefined> {
+    const key = `${userId}:${meetingId}`;
+    const value = this.recallVisualFrames.get(key);
+    return value && value.expiresAt > Date.now() ? value.encryptedFrame : undefined;
+  }
+  async appendRecallTranscriptSegment(userId: number, meetingId: string, segment: StoredRecallTranscriptSegment, ttlSeconds: number): Promise<"stored" | "duplicate" | "full"> {
+    const key = `${userId}:${meetingId}`;
+    const now = Date.now();
+    let record = this.recallTranscripts.get(key);
+    if (!record || record.expiresAt <= now) {
+      record = { segments: new Map(), bytes: 0, truncated: false, expiresAt: now + ttlSeconds * 1000 };
+      this.recallTranscripts.set(key, record);
+    }
+    record.expiresAt = Math.max(record.expiresAt, now + ttlSeconds * 1000);
+    if (record.segments.has(segment.id)) return "duplicate";
+    const bytes = Buffer.byteLength(JSON.stringify(segment), "utf8");
+    if (record.truncated) return "full";
+    if (record.segments.size >= RECALL_TRANSCRIPT_MAX_SEGMENTS || record.bytes + bytes > RECALL_TRANSCRIPT_MAX_BYTES) {
+      record.truncated = true;
+      return "full";
+    }
+    record.segments.set(segment.id, structuredClone(segment));
+    record.bytes += bytes;
+    return "stored";
+  }
+  async readRecallTranscript(userId: number, meetingId: string): Promise<{ segments: StoredRecallTranscriptSegment[]; truncated: boolean } | undefined> {
+    const key = `${userId}:${meetingId}`;
+    const record = this.recallTranscripts.get(key);
+    if (!record || record.expiresAt <= Date.now()) {
+      this.recallTranscripts.delete(key);
+      return undefined;
+    }
+    return {
+      segments: [...record.segments.values()].sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id)).map((segment) => structuredClone(segment)),
+      truncated: record.truncated,
+    };
+  }
+  async setRecallTranscriptTtl(userId: number, meetingId: string, ttlSeconds: number): Promise<boolean> {
+    const key = `${userId}:${meetingId}`;
+    const record = this.recallTranscripts.get(key);
+    if (!record || record.expiresAt <= Date.now()) return false;
+    record.expiresAt = Date.now() + ttlSeconds * 1000;
+    return true;
+  }
+  async deleteRecallTranscript(userId: number, meetingId: string): Promise<boolean> {
+    return this.recallTranscripts.delete(`${userId}:${meetingId}`);
   }
   async claimRecallCopilotEvaluation(userId: number, meetingId: string, minIntervalSeconds: number, nowMs = Date.now()): Promise<"allowed" | "interval"> {
     const key = `${userId}:${meetingId}`;
@@ -2393,7 +2773,7 @@ export async function getSession(uid: number): Promise<UserSession> {
     ...approval,
     toolSlug: approval.toolSlug === "CHUCK_START_FACETIME_CALL" ? "CHUCK_START_PHONE_CALL" : approval.toolSlug === "CHUCK_LIST_FACETIME_CALLS" ? "CHUCK_LIST_PHONE_CALLS" : approval.toolSlug,
   }));
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -2641,14 +3021,114 @@ export async function addRecallMeeting(uid: number, record: RecallMeetingRecord)
 }
 
 export async function getRecallMeeting(uid: number, id: string): Promise<RecallMeetingRecord | undefined> {
-  return (await getSession(uid)).recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
+  const session = await getSession(uid);
+  const meeting = session.recallMeetings?.find((candidate) => candidate.id === id && candidate.userId === uid);
+  if (meeting?.outcomeTranscript && meeting.outcomeTranscriptCapturedAt && Date.now() - meeting.outcomeTranscriptCapturedAt > 24 * 60 * 60_000) {
+    meeting.outcomeTranscript = undefined;
+    meeting.outcomeTranscriptCapturedAt = undefined;
+    await saveSession(uid, session);
+  }
+  return meeting;
+}
+
+function recallTranscriptRetentionSeconds(meeting: RecallMeetingRecord): number {
+  if (!meeting.transcriptRetentionDays || ![1, 7, 30].includes(meeting.transcriptRetentionDays)) return RECALL_TRANSCRIPT_EPHEMERAL_TTL_SECONDS;
+  return meeting.transcriptExpiresAt
+    ? Math.max(1, Math.ceil((meeting.transcriptExpiresAt - Date.now()) / 1000))
+    : meeting.transcriptRetentionDays * 24 * 60 * 60;
+}
+
+/** Append one verified, normalized Recall segment to a short-lived owner+meeting transcript. */
+export async function appendRecallTranscriptSegment(
+  uid: number,
+  id: string,
+  segment: RecallTranscriptSegment,
+): Promise<"stored" | "duplicate" | "expired" | "full"> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id) || !validRecallTranscriptSegment(segment)) return "expired";
+  const meeting = await getRecallMeeting(uid, id);
+  if (!meeting || (meeting.interactionMode !== "copilot" && meeting.interactionMode !== "representative" && !meeting.transcriptRetentionDays)) return "expired";
+  if (meeting.transcriptRetentionDays && meeting.transcriptExpiresAt && meeting.transcriptExpiresAt <= Date.now()) return "expired";
+  if (!ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status)) {
+    const endedAt = meeting.providerStatusAt ?? meeting.updatedAt;
+    if (meeting.status !== "ended" || Date.now() - endedAt > 15 * 60_000) return "expired";
+  }
+  const ttlSeconds = recallTranscriptRetentionSeconds(meeting);
+  return backend.appendRecallTranscriptSegment(uid, id, sealRecallTranscriptSegment(uid, id, segment), ttlSeconds);
+}
+
+/** Read an owner-scoped transient transcript for end-of-meeting analysis. */
+export async function readRecallTranscript(uid: number, id: string): Promise<RecallTranscriptRecord | undefined> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return undefined;
+  const meeting = await getRecallMeeting(uid, id);
+  if (!meeting || !meeting.providerBotId) return undefined;
+  const stored = await backend.readRecallTranscript(uid, id);
+  if (!stored) return undefined;
+  const segments = stored.segments.flatMap((segment) => {
+    const opened = openRecallTranscriptSegment(uid, id, segment);
+    return opened ? [opened] : [];
+  }).sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
+  return segments.length ? { segments, truncated: stored.truncated } : undefined;
+}
+
+/** Delete a transcript for the authenticated owner and disable further retention/search access. */
+export async function deleteRecallMeetingTranscript(uid: number, id: string): Promise<boolean> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return false;
+  const meeting = await getRecallMeeting(uid, id);
+  if (!meeting || meeting.status !== "ended" || !meeting.transcriptRetentionDays) return false;
+  await backend.deleteRecallTranscript(uid, id);
+  await updateRecallMeeting(uid, id, { transcriptRetentionDays: undefined, transcriptExpiresAt: undefined });
+  return true;
+}
+
+/** Delete default, non-searchable transcript working data once its structured outcome is durably saved. */
+export async function deleteEphemeralRecallTranscriptAfterOutcome(uid: number, id: string): Promise<void> {
+  if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return;
+  const meeting = await getRecallMeeting(uid, id);
+  if (!meeting || meeting.transcriptRetentionDays) return;
+  await backend.deleteRecallTranscript(uid, id);
+}
+
+/** Search only the owner's latest 10 retained meeting transcripts; default ephemeral transcripts are never discoverable. */
+export async function searchRecallMeetingTranscripts(
+  uid: number,
+  query: string,
+  meetingId?: string,
+  limit = 5,
+): Promise<Array<{ meetingId: string; title: string; platform: RecallMeetingRecord["platform"]; expiresAt: number; speakerName?: string; excerpt: string }>> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) return [];
+  const cleanQuery = query.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 200);
+  const terms = [...new Set(cleanQuery.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2))].slice(0, 8);
+  if (!terms.length) return [];
+  const session = await getSession(uid);
+  const now = Date.now();
+  const meetings = (session.recallMeetings ?? [])
+    .filter((meeting) => meeting.userId === uid && meeting.status === "ended" && meeting.transcriptRetentionDays
+      && typeof meeting.transcriptExpiresAt === "number" && meeting.transcriptExpiresAt > now
+      && (!meetingId || meeting.id === meetingId))
+    .slice(0, meetingId ? 1 : 10);
+  const output: Array<{ meetingId: string; title: string; platform: RecallMeetingRecord["platform"]; expiresAt: number; speakerName?: string; excerpt: string; score: number; at: number }> = [];
+  for (const meeting of meetings) {
+    const transcript = await readRecallTranscript(uid, meeting.id);
+    if (!transcript) continue;
+    for (const segment of transcript.segments) {
+      const lowered = segment.text.toLocaleLowerCase();
+      const matches = terms.reduce((count, term) => count + Number(lowered.includes(term)), 0);
+      if (matches === 0) continue;
+      const firstMatch = Math.min(...terms.map((term) => lowered.indexOf(term)).filter((index) => index >= 0));
+      const excerptStart = Math.max(0, firstMatch - 90);
+      const excerpt = `${segment.speakerName ? `${segment.speakerName}: ` : ""}${segment.text.slice(excerptStart, excerptStart + 260)}`;
+      output.push({ meetingId: meeting.id, title: meeting.title ?? "Meeting", platform: meeting.platform, expiresAt: meeting.transcriptExpiresAt!, ...(segment.speakerName ? { speakerName: segment.speakerName } : {}), excerpt, score: matches, at: segment.startMs });
+    }
+  }
+  return output.sort((a, b) => b.score - a.score || b.at - a.at).slice(0, Math.max(1, Math.min(10, Math.floor(limit))))
+    .map(({ score: _score, at: _at, ...result }) => result);
 }
 
 export async function listRecallMeetings(uid: number, limit = 10): Promise<RecallMeetingRecord[]> {
   return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode">>): Promise<RecallMeetingRecord | undefined> {
   const session = await getSession(uid);
   const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
   if (!current) return undefined;
@@ -2658,17 +3138,41 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
     if ([...patch.outcome.decisions, ...patch.outcome.openQuestions].some((item) => typeof item !== "string" || item.length > 700)
       || patch.outcome.actionItems.some((item) => !item || typeof item.task !== "string" || item.task.length > 500 || typeof item.owner !== "string" || item.owner.length > 120 || (item.dueDate !== undefined && item.dueDate.length > 80))) throw new Error("Meeting outcome contains invalid fields");
   }
+  if (patch.outcomeTranscript !== undefined) {
+    if (!Array.isArray(patch.outcomeTranscript) || patch.outcomeTranscript.length > 32) throw new Error("Meeting outcome transcript exceeds turn bounds");
+    let characters = 0;
+    for (const turn of patch.outcomeTranscript) {
+      if (!turn || (turn.role !== "participant" && turn.role !== "chusky") || typeof turn.content !== "string" || !turn.content.trim() || turn.content.length > 1_000
+        || (turn.speakerName !== undefined && (typeof turn.speakerName !== "string" || turn.speakerName.length > 160))) throw new Error("Meeting outcome transcript contains an invalid turn");
+      characters += turn.content.length;
+    }
+    if (characters > 12_000) throw new Error("Meeting outcome transcript exceeds character bounds");
+  }
+  if (patch.outcomeTranscriptCapturedAt !== undefined && (!Number.isSafeInteger(patch.outcomeTranscriptCapturedAt) || patch.outcomeTranscriptCapturedAt <= 0)) throw new Error("Meeting outcome transcript timestamp is invalid");
+  if (patch.transcriptRetentionDays !== undefined && patch.transcriptRetentionDays !== 1 && patch.transcriptRetentionDays !== 7 && patch.transcriptRetentionDays !== 30) throw new Error("Meeting transcript retention must be 1, 7, or 30 days");
+  if (patch.transcriptExpiresAt !== undefined && (!Number.isSafeInteger(patch.transcriptExpiresAt) || patch.transcriptExpiresAt <= 0)) throw new Error("Meeting transcript expiry is invalid");
+  if (patch.transcriptStatus !== undefined && !["processing", "ready", "failed"].includes(patch.transcriptStatus)) throw new Error("Meeting transcript status is invalid");
+  if (patch.transcriptErrorCode !== undefined && (typeof patch.transcriptErrorCode !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(patch.transcriptErrorCode))) throw new Error("Meeting transcript error code is invalid");
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
   if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
   if (patch.speakerEvents && (patch.speakerEvents.length > 200 || patch.speakerEvents.some((event) => !event || (event.type !== "speech_on" && event.type !== "speech_off") || typeof event.participantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(event.participantId) || !Number.isSafeInteger(event.at) || event.at <= 0))) throw new Error("Meeting speaker timeline is invalid");
-  Object.assign(current, patch, { updatedAt: Date.now() });
+  const effectivePatch = { ...patch };
+  if (patch.status === "ended" && current.transcriptRetentionDays && !current.transcriptExpiresAt) {
+    effectivePatch.transcriptExpiresAt = Date.now() + current.transcriptRetentionDays * 24 * 60 * 60_000;
+  }
+  Object.assign(current, effectivePatch, { updatedAt: Date.now() });
   if (current.status === "ended" || current.status === "failed") {
     current.participantRoster = [];
     current.speakerEvents = [];
   }
   current.error = current.error?.slice(0, 300);
   await saveSession(uid, session);
+  if (current.status === "ended" && current.transcriptRetentionDays && current.transcriptExpiresAt) {
+    await backend.setRecallTranscriptTtl(uid, id, Math.max(1, Math.ceil((current.transcriptExpiresAt - Date.now()) / 1000)));
+  } else if (current.status === "failed") {
+    await backend.deleteRecallTranscript(uid, id);
+  }
   return current;
 }
 
@@ -2689,7 +3193,11 @@ export async function appendRecallMeetingMessages(uid: number, id: string, messa
 
 function calendarMeetingPreparationView(record: CalendarMeetingPreparation) {
   const { sealedMeetingUrl: _sealedMeetingUrl, ...safe } = record;
-  return safe;
+  return {
+    ...safe,
+    meetingUrlAvailable: record.meetingUrlAvailable ?? Boolean(record.sealedMeetingUrl),
+    ...(record.automatic && record.meetingId && record.status === "prepared" ? { status: "auto_scheduled" as const } : {}),
+  };
 }
 
 export async function saveCalendarMeetingPreparation(uid: number, record: CalendarMeetingPreparation): Promise<CalendarMeetingPreparation> {
@@ -2697,6 +3205,9 @@ export async function saveCalendarMeetingPreparation(uid: number, record: Calend
   if (record.title !== undefined && record.title.length > 180) throw new Error("Calendar meeting title is too long");
   if (record.participants.length > 30 || record.participants.some((name) => typeof name !== "string" || name.length > 160)) throw new Error("Calendar meeting participants are invalid");
   if (record.sealedMeetingUrl !== undefined && (typeof record.sealedMeetingUrl !== "string" || record.sealedMeetingUrl.length > 4096)) throw new Error("Calendar meeting link is invalid");
+  if (record.meetingId !== undefined && !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(record.meetingId)) throw new Error("Calendar meeting ID is invalid");
+  if (record.automatic !== undefined && typeof record.automatic !== "boolean") throw new Error("Calendar automation flag is invalid");
+  if (record.meetingUrlAvailable !== undefined && typeof record.meetingUrlAvailable !== "boolean") throw new Error("Calendar meeting link state is invalid");
   const session = await getSession(uid);
   const existing = session.calendarMeetingPreparations ?? [];
   const match = existing.find((item) => item.id === record.id || (record.calendarEventId && item.calendarEventId === record.calendarEventId));
@@ -2704,7 +3215,10 @@ export async function saveCalendarMeetingPreparation(uid: number, record: Calend
   const next: CalendarMeetingPreparation = {
     ...record,
     id: match?.id ?? record.id,
-    ...(record.sealedMeetingUrl === undefined && match?.sealedMeetingUrl ? { sealedMeetingUrl: match.sealedMeetingUrl } : {}),
+    meetingId: record.meetingId ?? match?.meetingId,
+    automatic: record.automatic ?? match?.automatic,
+    meetingUrlAvailable: record.meetingUrlAvailable ?? (record.sealedMeetingUrl ? true : match?.meetingUrlAvailable ?? Boolean(match?.sealedMeetingUrl)),
+    ...(record.sealedMeetingUrl === undefined && match?.sealedMeetingUrl && (record.meetingUrlAvailable ?? true) ? { sealedMeetingUrl: match.sealedMeetingUrl } : {}),
     createdAt: match?.createdAt ?? record.createdAt ?? now,
     updatedAt: now,
   };
@@ -2731,13 +3245,17 @@ export async function listCalendarMeetingPreparations(uid: number, limit = 10): 
     if (item.status === "prepared" && item.startAt && Date.parse(item.startAt) + 24 * 60 * 60_000 < now) { item.status = "expired"; item.updatedAt = now; changed = true; }
   }
   if (changed) await saveSession(uid, session);
-  return preparations.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))).map(calendarMeetingPreparationView);
+  return preparations.slice(0, Math.max(1, Math.min(30, Math.floor(limit)))).map(calendarMeetingPreparationView);
 }
 
-export async function updateCalendarMeetingPreparation(uid: number, id: string, patch: Partial<Pick<CalendarMeetingPreparation, "status" | "lifecycle" | "title" | "startAt" | "endAt" | "participants" | "sealedMeetingUrl" | "sourceTriggerEventId">>): Promise<CalendarMeetingPreparation | undefined> {
+export async function updateCalendarMeetingPreparation(uid: number, id: string, patch: Partial<Pick<CalendarMeetingPreparation, "status" | "lifecycle" | "title" | "startAt" | "endAt" | "participants" | "sealedMeetingUrl" | "sourceTriggerEventId" | "meetingId" | "automatic" | "meetingUrlAvailable">>): Promise<CalendarMeetingPreparation | undefined> {
   const session = await getSession(uid);
   const current = session.calendarMeetingPreparations?.find((item) => item.id === id && item.userId === uid);
   if (!current) return undefined;
+  if (patch.meetingId !== undefined && !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(patch.meetingId)) throw new Error("Calendar meeting ID is invalid");
+  if (patch.automatic !== undefined && typeof patch.automatic !== "boolean") throw new Error("Calendar automation flag is invalid");
+  if (patch.meetingUrlAvailable !== undefined && typeof patch.meetingUrlAvailable !== "boolean") throw new Error("Calendar meeting link state is invalid");
+  if (patch.sealedMeetingUrl !== undefined && (typeof patch.sealedMeetingUrl !== "string" || patch.sealedMeetingUrl.length > 4096)) throw new Error("Calendar meeting link is invalid");
   Object.assign(current, patch, { updatedAt: Date.now() });
   await saveSession(uid, session);
   return current;
@@ -2806,6 +3324,25 @@ export async function releaseRecallMeetingCreation(userId: number, instanceHash:
   return backend.releaseRecallMeetingCreation(userId, instanceHash, token);
 }
 
+/**
+ * Store only the latest AES-GCM sealed screen frame. It has a short 12s TTL,
+ * is owner/meeting scoped, and uses an atomic per-meeting ingress rate gate.
+ */
+export async function putRecallVisualFrame(userId: number, meetingId: string, encryptedFrame: string): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)
+    || typeof encryptedFrame !== "string" || encryptedFrame.length < 80 || encryptedFrame.length > 2_100_000
+    || !/^v1\.\d{13}\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]+$/.test(encryptedFrame)) {
+    throw new Error("Invalid encrypted Recall visual frame");
+  }
+  return backend.putRecallVisualFrame(userId, meetingId, encryptedFrame, 12, 2);
+}
+
+/** Read only a fresh encrypted frame; the short TTL allows consecutive turns to inspect a static slide. */
+export async function readRecallVisualFrame(userId: number, meetingId: string): Promise<string | undefined> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) return undefined;
+  return backend.readRecallVisualFrame(userId, meetingId);
+}
+
 /** Atomically smooth bursty proactive evaluation for one owner-scoped meeting. */
 export async function claimRecallCopilotEvaluation(
   userId: number,
@@ -2829,6 +3366,60 @@ export async function addUsage(uid: number, cost: number): Promise<void> {
   const s = await getSession(uid);
   s.totalCost = (s.totalCost ?? 0) + cost;
   await saveSession(uid, s);
+}
+
+function assertCompanyProjectId(projectId: string): void {
+  if (!/^proj_[A-Za-z0-9_-]{1,120}$/.test(projectId)) throw new Error("Invalid company project ID.");
+}
+
+function cleanCompanyRunSummary(value: CompanyRunSummary): CompanyRunSummary {
+  const statuses: SdkRunRecord["status"][] = ["queued", "running", "requires_approval", "completed", "failed", "cancelled"];
+  if (!value || typeof value.id !== "string" || !/^run_[A-Za-z0-9_-]{1,120}$/.test(value.id) || !statuses.includes(value.status)) throw new Error("Invalid company run summary.");
+  if (!Number.isSafeInteger(value.createdAt) || value.createdAt < 0 || !Number.isSafeInteger(value.updatedAt) || value.updatedAt < 0) throw new Error("Invalid company run timestamps.");
+  const cost = value.cost;
+  return {
+    id: value.id,
+    status: value.status,
+    ...(typeof value.agentId === "string" ? { agentId: value.agentId.slice(0, 128) } : {}),
+    ...(typeof value.agentName === "string" ? { agentName: value.agentName.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 160) } : {}),
+    ...(typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? { cost } : {}),
+    ...(typeof value.errorCode === "string" && /^[a-z0-9_-]{1,80}$/i.test(value.errorCode) ? { errorCode: value.errorCode } : {}),
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  };
+}
+
+export async function saveCompanyRunSummary(projectId: string, run: CompanyRunSummary): Promise<void> {
+  assertCompanyProjectId(projectId);
+  await backend.saveCompanyRun(projectId, cleanCompanyRunSummary(run));
+}
+
+/** Complete accounting is idempotent by (project, run) and shared across workers. */
+export async function completeCompanyRunSummary(projectId: string, run: CompanyRunSummary, completedAt = Date.now()): Promise<boolean> {
+  assertCompanyProjectId(projectId);
+  if (!Number.isSafeInteger(completedAt) || completedAt < 0 || run.status !== "completed") throw new Error("Only a completed run can be accounted.");
+  return backend.completeCompanyRun(projectId, cleanCompanyRunSummary(run), completedAt);
+}
+
+export async function listCompanyRunSummaries(projectId: string, limit = 50): Promise<CompanyRunSummary[]> {
+  assertCompanyProjectId(projectId);
+  return backend.listCompanyRuns(projectId, Math.max(1, Math.min(100, Math.floor(limit))));
+}
+
+export async function appendCompanyAuditEvent(projectId: string, event: CompanyAuditEvent): Promise<void> {
+  assertCompanyProjectId(projectId);
+  if (!event || !/^audit_[A-Za-z0-9_-]{1,120}$/.test(event.id) || !/^[A-Za-z0-9_-]{1,120}$/.test(event.requestId) || !Number.isSafeInteger(event.status) || event.status < 100 || event.status > 599 || !Number.isSafeInteger(event.at) || event.at < 0) throw new Error("Invalid company audit event.");
+  await backend.appendCompanyAudit(projectId, { ...event, action: String(event.action).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120) });
+}
+
+export async function listCompanyAuditEvents(projectId: string, limit = 50): Promise<CompanyAuditEvent[]> {
+  assertCompanyProjectId(projectId);
+  return backend.listCompanyAudit(projectId, Math.max(1, Math.min(100, Math.floor(limit))));
+}
+
+export async function listCompanyUsagePeriods(projectId: string, periods = 12, now = Date.now()): Promise<CompanyUsagePeriod[]> {
+  assertCompanyProjectId(projectId);
+  return backend.listCompanyUsage(projectId, Math.max(1, Math.min(13, Math.floor(periods))), now);
 }
 
 export async function canSpend(uid: number, estimatedCost = 0): Promise<boolean> {
@@ -3005,6 +3596,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkBudget: input.sdkBudget,
     sdkStartedAt: input.sdkStartedAt,
     sdkSkills: input.sdkSkills,
+    sdkInstructions: input.sdkInstructions,
     meetingFollowUp: input.meetingFollowUp,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,

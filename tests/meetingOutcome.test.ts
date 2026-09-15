@@ -4,6 +4,7 @@ import {
   deliverMeetingOutcomeOnce,
   buildMeetingFollowThroughPrompt,
   buildMeetingOutcomePrompt,
+  splitMeetingOutcomeTranscript,
   buildScheduledMeetingFollowUpPrompt,
   executeScheduledMeetingFollowUp,
   formatMeetingOutcomeScratchpad,
@@ -78,6 +79,34 @@ test("meeting outcome prompt uses only bounded meeting turns and treats them as 
   assert.match(prompt, /untrusted participant data/i);
   assert.doesNotMatch(prompt, /meetingUrlHash|https?:\/\//i);
   assert.ok(prompt.length < 20_000);
+});
+
+test("meeting outcome prefers the complete bounded in-call transcript and includes only confidently resolved speaker names", () => {
+  const prompt = buildMeetingOutcomePrompt({
+    ...meeting,
+    outcomeTranscript: [
+      { role: "participant", content: "For this package, budget approval is still pending.", speakerName: "Avery" },
+      { role: "chusky", content: "What date should I put against that?" },
+      { role: "participant", content: "Please send the revised proposal by Friday." },
+    ],
+  });
+  assert.match(prompt, /budget approval is still pending/i);
+  assert.match(prompt, /unverified display label: Avery/);
+  assert.match(prompt, /revised proposal by Friday/i);
+  assert.doesNotMatch(prompt, /pilot in October/);
+  assert.match(prompt, /untrusted participant data/i);
+});
+
+test("full Recall transcript is partitioned without dropping utterances or trusting participant names", () => {
+  const segments = Array.from({ length: 12 }, (_, index) => ({
+    id: index.toString(16).padStart(64, "0"), startMs: index * 1_000, endMs: index * 1_000 + 500,
+    text: `Unique meeting statement number ${index}.`, speakerName: index % 2 ? "Avery" : undefined,
+  }));
+  const chunks = splitMeetingOutcomeTranscript(segments, 80);
+  assert.ok(chunks.length > 1);
+  assert.deepEqual(chunks.flatMap((chunk) => chunk.segmentIds), segments.map((segment) => segment.id));
+  assert.equal(chunks.some((chunk) => /unverified display label: Avery/.test(chunk.text)), true);
+  assert.match(chunks[0]?.text ?? "", /Unique meeting statement number 0/);
 });
 
 test("post-meeting actions receive only captured contacts from this meeting and coach tailored follow-up", () => {
@@ -312,6 +341,31 @@ test("a retry resumes from persisted outcome and does not repeat completed exter
   assert.equal(await processMeetingOutcome({ userId: 42, meetingId: meeting.id }, deps), "completed");
   assert.equal(summaries, 1);
   assert.equal(followThroughCalls, 1);
+});
+
+test("outcome workflow supplies the full transient transcript and deletes it only after durable outcome save", async () => {
+  let current = meeting;
+  const order: string[] = [];
+  const transcript = { segments: [{ id: "a".repeat(64), startMs: 0, endMs: 1_000, text: "The customer approved the pilot." }], truncated: false };
+  const deps = {
+    getMeeting: async () => current,
+    getProfile: async () => ({ ...defaultMeetingRepresentativeProfile(), enabled: true, objective: "Represent the owner professionally" }),
+    getTranscript: async () => transcript,
+    summarize: async (_meeting: RecallMeetingRecord, received?: typeof transcript) => {
+      assert.equal(received, transcript);
+      order.push("summarize");
+      return outcomeJson;
+    },
+    deleteEphemeralTranscript: async () => { assert.ok(current.outcome); order.push("delete"); },
+    writeScratchpad: async () => undefined,
+    saveOutcome: async (_userId: number, _id: string, outcome: ReturnType<typeof parseMeetingOutcome>) => { current = { ...current, outcome }; order.push("save"); },
+    notifyOwner: async () => undefined,
+    claim: async () => "acquired" as const,
+    complete: async () => true,
+    release: async () => true,
+  };
+  assert.equal(await processMeetingOutcome({ userId: meeting.userId, meetingId: meeting.id }, deps), "completed");
+  assert.deepEqual(order, ["summarize", "save", "delete", "save", "save", "save", "save"]);
 });
 
 test("a persisted owner-notification claim suppresses a retry after an ambiguous delivery", async () => {

@@ -1,7 +1,6 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { verifyRecallWebhookSignature } from "./recall.js";
-import type { ParsedRecallChatWebhook } from "./recall.js";
-import type { RecallChatEventRecord } from "../store.js";
+import { parseRecallTranscriptWebhook, verifyRecallWebhookSignature, type ParsedRecallChatWebhook, type ParsedRecallTranscriptWebhook } from "./recall.js";
+import type { RecallChatEventRecord, RecallTranscriptSegment } from "../store.js";
 
 export interface RecallRealtimeWebhookResult {
   status: 202 | 204 | 400 | 401 | 409 | 503;
@@ -85,6 +84,38 @@ export async function receiveRecallChatWebhook(input: {
   } catch {
     // Provider retries are useful only when the record or QStash enqueue fails.
     // No participant text or raw provider payload is returned or logged here.
+    return { status: 503 };
+  }
+}
+
+/** Verify and durably accept finalized Recall transcript utterances. The append operation must be idempotent. */
+export async function receiveRecallTranscriptWebhook(input: {
+  secret: string;
+  rawBody: string;
+  headers: Headers;
+  resolve(body: unknown): Promise<ParsedRecallTranscriptWebhook | undefined>;
+  append(userId: number, meetingId: string, segment: RecallTranscriptSegment): Promise<"stored" | "duplicate" | "expired" | "full">;
+}): Promise<Pick<RecallRealtimeWebhookResult, "status">> {
+  if (!verifyRecallWebhookSignature({ secret: input.secret, body: input.rawBody, headers: input.headers })) return { status: 401 };
+  let body: unknown;
+  try { body = JSON.parse(input.rawBody); } catch { return { status: 400 }; }
+  if (!body || typeof body !== "object" || Array.isArray(body)) return { status: 400 };
+  if ((body as Record<string, unknown>).event !== "transcript.data") return { status: 204 };
+  const parsed = parseRecallTranscriptWebhook(body);
+  if (!parsed) return { status: 400 };
+  let resolved: ParsedRecallTranscriptWebhook | undefined;
+  try { resolved = await input.resolve(body); }
+  catch { return { status: 503 }; }
+  if (!resolved || resolved.userId !== parsed.userId || resolved.meetingId !== parsed.meetingId || resolved.providerBotId !== parsed.providerBotId
+    || resolved.segment.id !== parsed.segment.id) return { status: 204 };
+  try {
+    // The store deduplicates by the stable normalized segment ID, not by the
+    // delivery ID, so equivalent provider retries cannot inflate the transcript.
+    await input.append(resolved.userId, resolved.meetingId, resolved.segment);
+    return { status: 204 };
+  } catch {
+    // A 5xx is intentional: Recall may retry after a transient Redis outage.
+    // Provider payloads and transcript text are never attached to the response.
     return { status: 503 };
   }
 }

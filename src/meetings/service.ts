@@ -7,12 +7,15 @@ import {
   getSession,
   getMeetingRepresentativeProfile,
   getCalendarMeetingPreparation,
+  listCalendarMeetingPreparations,
   isDurableStore,
   listRecallMeetings,
   claimDeliveryLease,
   releaseDeliveryLease,
   releaseRecallMeetingCreation,
   updateRecallMeeting,
+  putRecallVisualFrame,
+  readRecallVisualFrame,
   updateCalendarMeetingPreparation,
   type RecallMeetingRecord,
   type RecallMeetingSpeakerEvent,
@@ -27,18 +30,23 @@ import {
   RecallApiError,
   mapRecallBotStatus,
   parseRecallStatusWebhook,
+  parseRecallTranscriptArtifactWebhook,
   recallApiRequest,
   type ParsedRecallChatWebhook,
   type ParsedRecallParticipantWebhook,
   type ParsedRecallSpeakerWebhook,
+  type ParsedRecallTranscriptWebhook,
   parseRecallChatWebhook,
   parseRecallParticipantWebhook,
   parseRecallSpeakerWebhook,
+  parseRecallTranscriptWebhook,
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
 import { lookupMeetingBusinessKnowledge, lookupMeetingMission, prepareMeetingMission } from "./mission.js";
 import { openCalendarMeetingUrl } from "./calendar.js";
+import { planCalendarAutoJoin } from "./calendarAutomation.js";
+import { openRecallVisualFrame, sealRecallVisualFrame } from "./visualFrames.js";
 
 const ACTIVE = new Set<RecallMeetingStatus>(["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"]);
 
@@ -84,6 +92,71 @@ export function recallChatConfigurationStatus(): "configured" | "misconfigured" 
   return recallChatConfigurationReady() ? "configured" : "misconfigured";
 }
 
+/** Shared-screen mode needs Recall's signed websocket and a durable encrypted cross-replica handoff. */
+export function recallVisualContextConfigurationReady(): boolean {
+  // Shared-screen processing must have a participant-visible disclosure path,
+  // not merely a signed video socket. Chat readiness also guarantees durable
+  // ownership/status data for the frame handoff.
+  if (!recallChatConfigurationReady()) return false;
+  try {
+    const endpoint = new URL("/recall/video", config.recallMediaPageUrl);
+    endpoint.protocol = "wss:";
+    return endpoint.protocol === "wss:" && !endpoint.username && !endpoint.password && !endpoint.search && !endpoint.hash;
+  } catch { return false; }
+}
+
+export function recallVisualWebsocketUrl(): string {
+  if (!recallVisualContextConfigurationReady()) throw new Error("Shared-screen understanding requires Recall workspace verification, meeting disclosure, QStash, Redis, and the configured voice media service");
+  const endpoint = new URL("/recall/video", config.recallMediaPageUrl);
+  endpoint.protocol = "wss:";
+  return endpoint.toString();
+}
+
+/** Fail before bot creation if the voice service has not enabled this optional media path. */
+export async function assertRecallVisualServiceHealth(mediaPageUrl: string, fetchImpl: typeof fetch = fetch): Promise<void> {
+  let healthUrl: URL;
+  try {
+    healthUrl = new URL("/recall/health", mediaPageUrl);
+    if (healthUrl.protocol !== "https:" || healthUrl.username || healthUrl.password || healthUrl.search || healthUrl.hash) throw new Error("invalid voice URL");
+  } catch {
+    throw new Error("Shared-screen understanding is unavailable. Check the configured chusky-voice media URL.");
+  }
+  try {
+    const response = await fetchImpl(healthUrl, { method: "GET", signal: AbortSignal.timeout(4_000), headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error("Voice health is unavailable");
+    const payload = await response.json() as { optionalFeatures?: { sharedScreenUnderstanding?: unknown } };
+    if (payload.optionalFeatures?.sharedScreenUnderstanding !== "configured") throw new Error("Voice shared-screen settings are missing");
+  } catch {
+    throw new Error("Shared-screen understanding is unavailable. Configure RECALL_REALTIME_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL on chusky-voice, then retry.");
+  }
+}
+
+export async function assertRecallVisualServiceReady(fetchImpl: typeof fetch = fetch): Promise<void> {
+  if (!recallVisualContextConfigurationReady()) throw new Error("Shared-screen understanding is not configured. Check Recall workspace verification, meeting disclosure, Redis, and the voice service.");
+  await assertRecallVisualServiceHealth(config.recallMediaPageUrl, fetchImpl);
+}
+
+/** Validate provider-bot ownership before accepting a frame into the encrypted, expiring handoff. */
+export async function receiveRecallVisualFrame(input: { userId: number; meetingId: string; providerBotId: string; base64: string }): Promise<"accepted" | "rate_limited" | "not_ready" | "unavailable"> {
+  const { userId, meetingId, providerBotId, base64 } = input;
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !isValidRecallBotId(providerBotId)) return "unavailable";
+  const meeting = await getRecallMeeting(userId, meetingId);
+  if (!meeting || meeting.userId !== userId || meeting.providerBotId !== providerBotId || meeting.visualContextEnabled !== true) return "unavailable";
+  if (meeting.status !== "in_call") return ["creating", "scheduled", "joining", "waiting_room"].includes(meeting.status) ? "not_ready" : "unavailable";
+  const sealed = sealRecallVisualFrame({ meetingId, userId, base64, secret: config.recallMediaBridgeSecret });
+  return await putRecallVisualFrame(userId, meetingId, sealed) ? "accepted" : "rate_limited";
+}
+
+/** Read a fresh frame for a visual question; the encrypted cache expires automatically and never enters history. */
+export async function readRecallVisualContextFrame(userId: number, meetingId: string): Promise<string | undefined> {
+  const meeting = await getRecallMeeting(userId, meetingId);
+  if (!meeting || meeting.status !== "in_call" || meeting.visualContextEnabled !== true) return undefined;
+  const sealed = await readRecallVisualFrame(userId, meetingId);
+  if (!sealed) return undefined;
+  try { return openRecallVisualFrame({ meetingId, userId, sealed, secret: config.recallMediaBridgeSecret }); }
+  catch { return undefined; }
+}
+
 export function recallRealtimeWebhookUrl(): string {
   if (!recallChatConfigurationReady()) throw new Error("Recall meeting chat needs a public HTTPS URL, workspace verification secret, QStash, and Redis");
   const endpoint = new URL("/recall/realtime-webhook", config.webhookUrl);
@@ -104,6 +177,25 @@ export async function resolveRecallChatWebhook(body: unknown): Promise<ParsedRec
   // cannot deliver to the meeting.
   if (meeting.platform === "webex" && event.command.kind !== "leave") return undefined;
   if (event.replyToParticipantId && meeting.platform !== "zoom" && event.command.kind !== "leave") return undefined;
+  return event;
+}
+
+/** Resolve a normalized, signed transcript to the exact owner + provider bot recorded for that meeting. */
+export async function resolveRecallTranscriptWebhook(body: unknown): Promise<ParsedRecallTranscriptWebhook | undefined> {
+  const event = parseRecallTranscriptWebhook(body);
+  if (!event) return undefined;
+  const meeting = await getRecallMeeting(event.userId, event.meetingId);
+  if (!meeting || meeting.userId !== event.userId) return undefined;
+  // Recall can deliver the first real-time utterance while Create Bot's
+  // response is still being saved. Returning a retryable failure here avoids
+  // acknowledging and permanently dropping that initial speech.
+  if (!meeting.providerBotId && meeting.status === "creating") throw new Error("Recall bot ownership is not persisted yet");
+  if (meeting.providerBotId !== event.providerBotId) return undefined;
+  if (meeting.interactionMode !== "copilot" && meeting.interactionMode !== "representative" && !meeting.transcriptRetentionDays) return undefined;
+  if (!ACTIVE.has(meeting.status)) {
+    const endedAt = meeting.providerStatusAt ?? meeting.updatedAt;
+    if (meeting.status !== "ended" || Date.now() - endedAt > 15 * 60_000) return undefined;
+  }
   return event;
 }
 
@@ -145,6 +237,21 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
   } finally {
     await releaseDeliveryLease(lockKey, lockToken).catch(() => undefined);
   }
+}
+
+/** Save only a sanitized transcript artifact state; provider error text and raw payloads are never retained. */
+export async function applyRecallTranscriptArtifactWebhook(body: unknown): Promise<"updated" | "ignored"> {
+  const event = parseRecallTranscriptArtifactWebhook(body);
+  if (!event) return "ignored";
+  const meeting = await getRecallMeeting(event.userId, event.meetingId);
+  if (!meeting || meeting.userId !== event.userId || meeting.providerBotId !== event.providerBotId
+    || (meeting.interactionMode !== "copilot" && meeting.interactionMode !== "representative" && !meeting.transcriptRetentionDays)) return "ignored";
+  if (meeting.transcriptStatus === "ready" && event.status === "processing") return "ignored";
+  await updateRecallMeeting(event.userId, event.meetingId, {
+    transcriptStatus: event.status,
+    transcriptErrorCode: event.status === "failed" ? event.subCode ?? "transcript_failed" : undefined,
+  });
+  return "updated";
 }
 
 export async function sendRecallMeetingChat(userId: number, meetingId: string, message: string, recipient = "everyone", signal?: AbortSignal): Promise<void> {
@@ -195,6 +302,11 @@ function safeMeeting(record: RecallMeetingRecord) {
     platform: record.platform,
     status: record.status,
     interactionMode: record.interactionMode === "copilot" || record.interactionMode === "representative" ? record.interactionMode : "addressed",
+    screenShareUnderstanding: record.visualContextEnabled === true,
+    searchableTranscript: Boolean(record.transcriptRetentionDays && record.transcriptExpiresAt && record.transcriptExpiresAt > Date.now()),
+    ...(record.transcriptStatus && ["processing", "ready", "failed"].includes(record.transcriptStatus) ? { transcriptStatus: record.transcriptStatus } : {}),
+    ...(record.transcriptErrorCode && /^[A-Za-z0-9_-]{1,80}$/.test(record.transcriptErrorCode) ? { transcriptErrorCode: record.transcriptErrorCode } : {}),
+    ...(record.transcriptRetentionDays && record.transcriptExpiresAt ? { transcriptExpiresAt: new Date(record.transcriptExpiresAt).toISOString() } : {}),
     title: record.title,
     joinAt: record.joinAt,
     error: record.error,
@@ -215,6 +327,8 @@ export async function joinRecallMeeting(userId: number, input: {
   title?: unknown;
   joinAt?: unknown;
   interactionMode?: unknown;
+  analyzeScreenShare?: unknown;
+  transcriptRetentionDays?: unknown;
   clientName?: unknown;
   objective?: unknown;
   clientContext?: unknown;
@@ -222,10 +336,28 @@ export async function joinRecallMeeting(userId: number, input: {
   clientContextConfirmed?: unknown;
   /** Internal-only: carry an existing owner-requested mission into a follow-up meeting. */
   inheritMeetingId?: string;
+  /** Internal-only marker preventing an automatic calendar join from adopting a manual bot. */
+  calendarPreparationId?: string;
 }, signal?: AbortSignal) {
   requireRecall();
   assertUserId(userId);
   const meeting = validateMeetingUrl(input.meetingUrl);
+  if (input.analyzeScreenShare !== undefined && typeof input.analyzeScreenShare !== "boolean") throw new Error("analyzeScreenShare must be true or false");
+  const transcriptRetentionDays = input.transcriptRetentionDays;
+  if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) {
+    throw new Error("Transcript retention must be explicitly set to 1, 7, or 30 days");
+  }
+  if (transcriptRetentionDays !== undefined && !recallChatConfigurationReady()) {
+    throw new Error("Searchable transcript retention requires the signed Recall real-time webhook, durable Redis, and QStash to be configured");
+  }
+  if (transcriptRetentionDays !== undefined && Buffer.byteLength(config.recallTranscriptEncryptionKey, "utf8") < 32) {
+    throw new Error("Searchable transcript retention requires RECALL_TRANSCRIPT_ENCRYPTION_KEY with at least 32 bytes; keep it stable until retained transcripts expire");
+  }
+  const analyzeScreenShare = input.analyzeScreenShare === true;
+  if (analyzeScreenShare) {
+    if (meeting.platform === "webex") throw new Error("Shared-screen understanding is supported for Zoom, Google Meet, and Microsoft Teams; Recall does not provide it for Webex");
+    await assertRecallVisualServiceReady();
+  }
   const joinAt = validateRecallJoinAt(input.joinAt);
   const representativeProfile = await getMeetingRepresentativeProfile(userId);
   const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
@@ -241,6 +373,7 @@ export async function joinRecallMeeting(userId: number, input: {
     throw new Error("Configure and enable your meeting representative profile before joining in representative mode");
   }
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 120) : "";
+  if (input.calendarPreparationId !== undefined && !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(input.calendarPreparationId)) throw new Error("Invalid calendar automation identity");
   const inheritedMission = input.inheritMeetingId === undefined ? undefined : await (() => {
     if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(input.inheritMeetingId!)) throw new Error("Invalid source meeting ID");
     return getRecallMeeting(userId, input.inheritMeetingId!);
@@ -267,7 +400,10 @@ export async function joinRecallMeeting(userId: number, input: {
     const existing = (await listRecallMeetings(userId, 20)).find((item) => ACTIVE.has(item.status)
       && (item.meetingInstanceHash === meetingInstanceHash
         || (!item.meetingInstanceHash && item.meetingUrlHash === meetingUrlHash)));
-    if (existing) return { ...safeMeeting(existing), alreadyActive: true };
+    if (existing) {
+      if (analyzeScreenShare && existing.visualContextEnabled !== true) throw new Error("A matching meeting is already active without shared-screen access. Ask Chusky to leave, then rejoin with screen understanding enabled.");
+      return { ...safeMeeting(existing), alreadyActive: true };
+    }
     throw new Error("A matching meeting assistant is already being created; try again shortly");
   }
   const record: RecallMeetingRecord = {
@@ -275,9 +411,12 @@ export async function joinRecallMeeting(userId: number, input: {
     userId,
     platform: meeting.platform,
     interactionMode,
+    visualContextEnabled: analyzeScreenShare,
+    ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
     status: "creating",
     meetingUrlHash,
     meetingInstanceHash,
+    ...(input.calendarPreparationId ? { calendarPreparationId: input.calendarPreparationId } : {}),
     ...(title ? { title } : {}),
     ...(mission ? { mission } : {}),
     ...(joinAt ? { joinAt } : {}),
@@ -288,7 +427,10 @@ export async function joinRecallMeeting(userId: number, input: {
   let providerBotId: string | undefined;
   try {
     const stored = await addRecallMeeting(userId, record);
-    if (stored.id !== id) return { ...safeMeeting(stored), alreadyActive: true };
+    if (stored.id !== id) {
+      if (analyzeScreenShare && stored.visualContextEnabled !== true) throw new Error("A matching meeting is already active without shared-screen access. Ask Chusky to leave, then rejoin with screen understanding enabled.");
+      return { ...safeMeeting(stored), alreadyActive: true };
+    }
 
     const mediaBase = new URL(config.recallMediaPageUrl);
     if (mediaBase.protocol !== "https:" || mediaBase.username || mediaBase.password || mediaBase.searchParams.has("session") || mediaBase.hash) {
@@ -308,6 +450,9 @@ export async function joinRecallMeeting(userId: number, input: {
       meetingId: id,
       userId,
       interactionMode,
+      ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
+      screenShareContextEnabled: analyzeScreenShare,
+      ...(analyzeScreenShare ? { visualWebsocketUrl: recallVisualWebsocketUrl() } : {}),
       ...(recallChatConfigurationReady() ? { realtimeWebhookUrl: recallRealtimeWebhookUrl() } : {}),
       ...(joinAt ? { joinAt } : {}),
     });
@@ -360,7 +505,7 @@ export async function joinPreparedCalendarMeeting(userId: number, preparationId:
   if (typeof preparationId !== "string" || !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(preparationId)) throw new Error("Invalid calendar meeting preparation ID");
   const preparation = await getCalendarMeetingPreparation(userId, preparationId);
   if (!preparation || preparation.status === "cancelled" || preparation.status === "expired") throw new Error("That calendar meeting is no longer available to join");
-  if (!preparation.sealedMeetingUrl) throw new Error("That calendar event does not contain a supported meeting link");
+  if (!preparation.sealedMeetingUrl || preparation.meetingUrlAvailable === false) throw new Error("That calendar event does not contain a supported meeting link");
   const meetingUrl = openCalendarMeetingUrl(preparation.sealedMeetingUrl);
   const startMs = preparation.startAt ? Date.parse(preparation.startAt) : NaN;
   const joinAt = Number.isFinite(startMs) && startMs - Date.now() >= 10 * 60_000 ? new Date(startMs).toISOString() : undefined;
@@ -371,6 +516,112 @@ export async function joinPreparedCalendarMeeting(userId: number, preparationId:
   }, signal);
   await updateCalendarMeetingPreparation(userId, preparation.id, { status: "joined" });
   return { ...result, preparation: { id: preparation.id, title: preparation.title, startAt: preparation.startAt } };
+}
+
+/** Reconcile one verified calendar event against an explicit owner auto-join opt-in. */
+export async function reconcileCalendarMeetingAutoJoin(userId: number, preparationId: string, signal?: AbortSignal) {
+  requireRecall();
+  assertUserId(userId);
+  if (!/^cmp_[A-Za-z0-9_-]{1,96}$/.test(preparationId)) throw new Error("Invalid calendar preparation ID");
+  const preparation = await getCalendarMeetingPreparation(userId, preparationId);
+  if (!preparation) throw new Error("Calendar meeting preparation is not owned by this account");
+
+  const lockKey = `calendar-auto-join:${userId}:${preparationId}`;
+  const lockToken = randomUUID();
+  if ((await claimDeliveryLease(lockKey, lockToken, 9 * 60_000)) !== "acquired") throw new Error("Calendar meeting automation is already reconciling; retry shortly");
+  try {
+    const profile = await getMeetingRepresentativeProfile(userId);
+    const existing = preparation.automatic && preparation.meetingId
+      ? await getRecallMeeting(userId, preparation.meetingId)
+      : undefined;
+    const plan = planCalendarAutoJoin({
+      enabled: profile.enabled && profile.autoJoinCalendar,
+      lifecycle: preparation.lifecycle,
+      meetingUrlHash: preparation.meetingUrlAvailable === false || !preparation.sealedMeetingUrl
+        ? undefined
+        : createHash("sha256").update(openCalendarMeetingUrl(preparation.sealedMeetingUrl)).digest("hex"),
+      startAt: preparation.startAt,
+      endAt: preparation.endAt,
+      existing: existing && preparation.automatic ? {
+        automatic: true,
+        meetingUrlHash: existing.meetingUrlHash,
+        joinAt: existing.joinAt,
+        status: existing.status,
+      } : undefined,
+    });
+
+    if (plan.action === "keep") {
+      if (existing?.status === "in_call" && preparation.lifecycle !== "cancelled") {
+        await updateCalendarMeetingPreparation(userId, preparation.id, { status: "joined" });
+      }
+      return { status: "kept", preparationId, meetingId: existing?.id };
+    }
+    if (plan.action === "skip") return { status: "skipped", reason: plan.reason, preparationId };
+    if (plan.action === "cancel") {
+      if (existing && ACTIVE.has(existing.status)) await leaveRecallMeeting(userId, existing.id, signal);
+      await updateCalendarMeetingPreparation(userId, preparation.id, {
+        status: preparation.lifecycle === "cancelled" ? "cancelled" : "prepared",
+        automatic: false,
+        meetingId: undefined,
+      });
+      return { status: "cancelled", preparationId };
+    }
+
+    if (!preparation.sealedMeetingUrl || preparation.meetingUrlAvailable === false) return { status: "skipped", reason: "missing-link", preparationId };
+    const result = await joinRecallMeeting(userId, {
+      meetingUrl: openCalendarMeetingUrl(preparation.sealedMeetingUrl),
+      title: preparation.title,
+      joinAt: plan.joinAt,
+      interactionMode: "representative",
+      calendarPreparationId: preparation.id,
+    }, signal);
+    const meetingId = typeof result.id === "string" ? result.id : "";
+    const createdMeeting = meetingId ? await getRecallMeeting(userId, meetingId) : undefined;
+    if (!createdMeeting || createdMeeting.calendarPreparationId !== preparation.id) {
+      throw new Error("Calendar auto-join will not take over an independently started meeting for this link");
+    }
+    if (plan.action === "reschedule" && existing && existing.id !== createdMeeting.id && ACTIVE.has(existing.status)) {
+      await leaveRecallMeeting(userId, existing.id, signal);
+    }
+    await updateCalendarMeetingPreparation(userId, preparation.id, {
+      status: "prepared",
+      automatic: true,
+      meetingId: createdMeeting.id,
+      meetingUrlAvailable: true,
+    });
+    return { status: plan.action === "reschedule" ? "rescheduled" : "scheduled", preparationId, meetingId: createdMeeting.id, joinAt: createdMeeting.joinAt };
+  } finally {
+    await releaseDeliveryLease(lockKey, lockToken).catch(() => undefined);
+  }
+}
+
+/** Cancel future automatic joins after the account owner switches the feature off. */
+export async function cancelAutomaticCalendarMeetingJoins(userId: number) {
+  assertUserId(userId);
+  const meetings = await listRecallMeetings(userId, 20);
+  let cancelled = 0;
+  let stillInCall = 0;
+  let failures = 0;
+  for (const meeting of meetings) {
+    if (!meeting.calendarPreparationId) continue;
+    const preparation = await getCalendarMeetingPreparation(userId, meeting.calendarPreparationId);
+    if (!ACTIVE.has(meeting.status)) {
+      if (preparation) await updateCalendarMeetingPreparation(userId, preparation.id, { automatic: false, meetingId: undefined });
+      continue;
+    }
+    if (meeting.status === "in_call" || meeting.status === "leaving") {
+      stillInCall += 1;
+      continue;
+    }
+    try {
+      await leaveRecallMeeting(userId, meeting.id);
+      if (preparation) await updateCalendarMeetingPreparation(userId, preparation.id, { status: "prepared", automatic: false, meetingId: undefined });
+      cancelled += 1;
+    } catch {
+      failures += 1;
+    }
+  }
+  return { cancelled, stillInCall, failures };
 }
 
 /** A live meeting can query only the memory IDs frozen into its owner-requested mission. */
@@ -553,6 +804,14 @@ export async function applyRecallStatusWebhook(input: {
       : undefined;
     const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt" | "participantRoster">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error, ...(["ended", "failed"].includes(status) ? { participantRoster: [] } : {}) };
     const updated = await updateRecallMeeting(userId, meetingId, patch);
+    if (updated) {
+      const preparations = await listCalendarMeetingPreparations(userId, 30);
+      const automaticPreparation = preparations.find((item) => item.meetingId === meetingId && item.automatic);
+      if (automaticPreparation) {
+        const preparationStatus = status === "in_call" || status === "ended" ? "joined" : status === "failed" ? "expired" : undefined;
+        if (preparationStatus) await updateCalendarMeetingPreparation(userId, automaticPreparation.id, { status: preparationStatus });
+      }
+    }
     if (updated && status === "ended" && current.interactionMode !== "addressed") await input.onMeetingEnded?.(userId, meetingId);
     return updated ? "updated" : "ignored";
   } finally {

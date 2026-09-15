@@ -73,6 +73,9 @@ export const config = {
   // this may differ from the Svix secret used by the status webhook above.
   recallRealtimeSecret: optional("RECALL_REALTIME_SECRET", ""),
   recallMediaBridgeSecret: optional("RECALL_MEDIA_BRIDGE_SECRET", ""),
+  // Dedicated application-side transcript encryption key; keep stable through
+  // the maximum configured transcript-retention window.
+  recallTranscriptEncryptionKey: optional("RECALL_TRANSCRIPT_ENCRYPTION_KEY", ""),
   // Smooth bursty proactive meeting turns in Redis without expiring participation.
   recallCopilotMinIntervalSeconds: boundedInt("RECALL_COPILOT_MIN_INTERVAL_SECONDS", 4, 1, 120),
   imageModel: optional("IMAGE_MODEL", "x-ai/grok-imagine-image-2.0"),
