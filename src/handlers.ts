@@ -570,9 +570,18 @@ function channelLinkKeyboard(userId: number): InlineKeyboard {
     .text("🟢 WhatsApp", `chlink:p:whatsapp:${userId}`).row()
     .text("📱 iMessage", `chlink:p:sendblue:${userId}`)
     .text("✉️ Telegram", `chlink:t:${userId}`).row()
+    .text("⌨️ CLI", `chlink:cli:${userId}`).row()
     .text("💬 SMS", `chlink:p:sms:${userId}`)
     .text("𝕏 XChat", `chlink:p:xchat:${userId}`).row()
     .text("👥 Link an iMessage group", `chlink:g:sendblue:${userId}`);
+}
+
+async function sendCliLink(ctx: Context): Promise<void> {
+  const code = await createCliPairing(ctx.from!.id);
+  const serverHint = config.webhookUrl
+    ? ` --server ${escapeTelegramHtml(config.webhookUrl.replace(/\/$/, ""))}`
+    : "";
+  await ctx.reply(`🔐 <b>Terminal pairing code</b>\n\n<code>${code}</code>\n\nThis code expires in 10 minutes and can be used once. In your terminal run:\n\n<code>chusky auth link${serverHint}</code>`, { parse_mode: "HTML" });
 }
 
 async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "xchat"): Promise<void> {
@@ -1240,8 +1249,7 @@ export function registerHandlers(bot: Bot): void {
     const uid = ctx.from!.id;
     const [action, ...rest] = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
     if (action === "link") {
-      const code = await createCliPairing(uid);
-      await ctx.reply(`🔐 <b>Terminal pairing code</b>\n\n<code>${code}</code>\n\nThis code expires in 10 minutes and can be used once. In your terminal run:\n\n<code>npm run cli -- auth link</code>`, { parse_mode: "HTML" });
+      await sendCliLink(ctx);
       return;
     }
     if (action === "devices") {
@@ -1894,7 +1902,7 @@ export function registerHandlers(bot: Bot): void {
     );
   });
 
-  bot.callbackQuery(/^chlink:(p|g|t):([a-z-]+):(\d+)$/, async (ctx) => {
+  bot.callbackQuery(/^chlink:(p|g|t|cli):([a-z-]+):(\d+)$/, async (ctx) => {
     const kind = ctx.match[1];
     const target = ctx.match[2];
     const ownerId = Number(ctx.match[3]);
@@ -1907,6 +1915,10 @@ export function registerHandlers(bot: Bot): void {
     try {
       if (kind === "t") {
         await ctx.editMessageText("✅ You are already using Telegram. Choose another channel if you want to link an external account.", { reply_markup: channelLinkKeyboard(ownerId) });
+        return;
+      }
+      if (kind === "cli") {
+        await sendCliLink(ctx);
         return;
       }
       if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "xchat")) {
