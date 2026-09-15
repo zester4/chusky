@@ -129,6 +129,41 @@ test("SDK exposes tools, skills, workers, artifacts, and channel resources", asy
   ]);
 });
 
+test("SDK exposes typed calls, voice options, and Recall meeting lifecycle resources", async () => {
+  const calls: Array<{ url: string; method: string; body: string }> = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ url, method: init?.method ?? "GET", body: String(init?.body ?? "") });
+    if (url.endsWith("/account/voice-options")) return new Response(JSON.stringify({ fluxVoices: [{ id: "flux-haley-en", name: "Haley", accent: "American" }], blandVoices: [], blandAvailable: false, blandCatalogueAvailable: false }), { status: 200 });
+    if (url.endsWith("/account/calls") && init?.method === "POST") return new Response(JSON.stringify({ id: "apr_1", toolSlug: "CHUCK_START_PHONE_CALL", args: { phoneNumber: "+14155550123" }, status: "pending", expiresAt: "2026-09-15T12:00:00.000Z" }), { status: 201 });
+    if (url.endsWith("/meetings/prepare")) return new Response(JSON.stringify({ clientName: "Jordan Lee", objective: "Qualify", brief: "Client: Jordan Lee", sourceMemoryIds: [], preparedAt: 1 }), { status: 200 });
+    if (url.endsWith("/meetings/profile")) return new Response(JSON.stringify({ enabled: true, representativeName: "Chusky", organizationName: "Acme", role: "sales", objective: "Qualify", communicationStyle: "Natural", approvedKnowledge: "Approved facts", authorityBoundaries: "None", allowedComposioTools: [], composioAccountAliases: {}, allowedNativeTools: [], allowMeetingScheduling: true, autoJoinCalendar: false, updatedAt: 1 }), { status: 200 });
+    if (url.includes("/meetings")) return new Response(JSON.stringify({ id: "mtg_1", platform: "google_meet", status: "scheduled", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:00.000Z" }), { status: init?.method === "POST" ? 201 : 200 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+
+  const options = await sdk.account.voiceOptions();
+  assert.equal(options.fluxVoices[0]?.id, "flux-haley-en");
+  await sdk.account.preferences({ liveVoice: { provider: "meetings", voice: "flux-haley-en" } });
+  await sdk.calls.request({ phoneNumber: "+14155550123", purpose: "Confirm appointment" }, { idempotencyKey: "call_1" });
+  await sdk.calls.list();
+  const brief = await sdk.meetings.prepare({ clientName: "Jordan Lee", objective: "Qualify" });
+  assert.equal(brief.clientName, "Jordan Lee");
+  const meeting = await sdk.meetings.join({ meetingUrl: "https://meet.google.com/example-room", interactionMode: "representative" }, { idempotencyKey: "meeting_1" });
+  await sdk.meetings.list();
+  await sdk.meetings.profile();
+  await sdk.meetings.updateProfile({ objective: "Qualify" });
+  await sdk.meetings.get(meeting.id);
+  await sdk.meetings.joinPreparation("cmp_1");
+  await sdk.meetings.context(meeting.id, "pricing");
+  await sdk.meetings.leave(meeting.id);
+
+  assert.ok(calls.some((call) => call.url.endsWith("/v1/account/voice-options")));
+  assert.ok(calls.some((call) => call.url.endsWith("/v1/account/calls") && call.method === "POST" && call.body.includes("Confirm appointment")));
+  assert.ok(calls.some((call) => call.url.endsWith("/v1/meetings") && call.method === "POST"));
+  assert.ok(calls.some((call) => call.url.includes("/v1/meetings/mtg_1/context?query=pricing")));
+  assert.ok(calls.some((call) => call.url.endsWith("/v1/meetings/mtg_1/leave") && call.method === "POST"));
+});
+
 test("SDK upload helper completes a presigned upload with a distinct idempotency key", async () => {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];
   const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

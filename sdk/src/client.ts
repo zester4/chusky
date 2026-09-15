@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { Activity, Approval, ApprovalDecision, Artifact, AuditEvent, ChannelConnection, ChuskyClientOptions, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, Webhook, WebhookDelivery, Worker } from "./types.js";
+import type { AccountPreferences, Activity, Approval, ApprovalDecision, Artifact, AuditEvent, CallApproval, CallsResponse, ChannelConnection, ChuskyClientOptions, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JoinMeetingParams, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -24,6 +24,8 @@ export class Chusky {
   readonly channels: ChannelsResource;
   readonly activity: ActivityResource;
   readonly account: AccountResource;
+  readonly calls: CallsResource;
+  readonly meetings: MeetingsResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly userId: string;
@@ -61,6 +63,8 @@ export class Chusky {
     this.channels = new ChannelsResource(this);
     this.activity = new ActivityResource(this);
     this.account = new AccountResource(this);
+    this.calls = new CallsResource(this);
+    this.meetings = new MeetingsResource(this);
   }
 
   /** @internal Returns the configured default model for run requests. */
@@ -318,7 +322,9 @@ export class AccountResource {
   constructor(private readonly client: Chusky) {}
   overview(options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/account/overview", {}, options); }
   models(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/account/models", {}, options); }
-  preferences(params: { model?: string; voiceReplies?: boolean }, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/account/preferences", { method: "PATCH", body: JSON.stringify(params) }, options); }
+  preferences(params: { model?: string; voiceReplies?: boolean; liveVoice?: LiveVoicePreference }, options?: RequestOptions): Promise<AccountPreferences> { return this.client.request("/account/preferences", { method: "PATCH", body: JSON.stringify(params) }, options); }
+  getPreferences(options?: RequestOptions): Promise<AccountPreferences> { return this.client.request("/account/preferences", {}, options); }
+  voiceOptions(options?: RequestOptions): Promise<VoiceOptions> { return this.client.request("/account/voice-options", {}, options); }
   apps(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/apps", {}, options); }
   connectApp(toolkit: string, options?: RequestOptions): Promise<{ toolkit: string; url: string }> { return this.client.request(`/apps/${encodeURIComponent(toolkit)}/connect`, { method: "POST", body: "{}" }, options); }
   triggers(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/triggers", {}, options); }
@@ -336,7 +342,29 @@ export class AccountResource {
   setTriggerState(triggerId: string, enabled: boolean, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }, options); }
   deleteTrigger(triggerId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "DELETE" }, options); }
   telegramLink(options?: RequestOptions): Promise<{ code: string; expiresAt: string }> { return this.client.request("/account/telegram-link", { method: "POST", body: "{}" }, options); }
-  calls(options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/account/calls", {}, options); }
+  calls(options?: RequestOptions): Promise<CallsResponse> { return this.client.request("/account/calls", {}, options); }
+}
+
+export class CallsResource {
+  constructor(private readonly client: Chusky) {}
+  list(options?: RequestOptions): Promise<CallsResponse> { return this.client.request("/account/calls", {}, options); }
+  request(params: { phoneNumber: string; purpose: string; profile?: Partial<VoiceCallProfile> }, options?: RequestOptions): Promise<CallApproval> {
+    return this.client.request("/account/calls", { method: "POST", body: JSON.stringify(params) }, options);
+  }
+}
+
+export class MeetingsResource {
+  constructor(private readonly client: Chusky) {}
+  list(options?: RequestOptions): Promise<MeetingsResponse> { return this.client.request("/meetings", {}, options); }
+  get(meetingId: string, options?: RequestOptions): Promise<MeetingRecord> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}`, {}, options); }
+  profile(options?: RequestOptions): Promise<MeetingProfile> { return this.client.request("/meetings/profile", {}, options); }
+  updateProfile(profile: Partial<MeetingProfile>, options?: RequestOptions): Promise<MeetingProfile> { return this.client.request("/meetings/profile", { method: "PATCH", body: JSON.stringify(profile) }, options); }
+  prepare(brief: MeetingBrief, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/meetings/prepare", { method: "POST", body: JSON.stringify(brief) }, options); }
+  join(params: JoinMeetingParams, options?: RequestOptions): Promise<MeetingRecord> { return this.client.request("/meetings", { method: "POST", body: JSON.stringify(params) }, options); }
+  joinPreparation(preparationId: string, options?: RequestOptions): Promise<MeetingRecord & { preparation?: Record<string, unknown> }> { return this.client.request(`/meetings/preparations/${encodeURIComponent(preparationId)}/join`, { method: "POST", body: "{}" }, options); }
+  leave(meetingId: string, options?: RequestOptions): Promise<MeetingRecord & { alreadyFinished?: boolean }> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/leave`, { method: "POST", body: "{}" }, options); }
+  context(meetingId: string, query = "", options?: RequestOptions): Promise<MeetingContext> { const suffix = query ? `?query=${encodeURIComponent(query)}` : ""; return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/context${suffix}`, {}, options); }
+  deleteContact(contactId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/meetings/contacts/${encodeURIComponent(contactId)}`, { method: "DELETE" }, options); }
 }
 export class UsageResource {
   constructor(private readonly client: Chusky) {}

@@ -1,0 +1,76 @@
+---
+title: Embedded chat
+description: Add a safe customer-facing Chusky chat without exposing project credentials.
+---
+
+The widget is a browser UI only. It never talks to Chusky with a project key.
+Your server owns the key, authenticates the visitor, chooses the stable Chusky
+user ID, and proxies the stream.
+
+## Add the widget
+
+```html
+<script type="module">
+  import { defineChuskyChat } from "@chusky/sdk/widget";
+  defineChuskyChat();
+</script>
+<chusky-chat
+  endpoint="/api/chusky/chat"
+  title="Acme assistant"
+  accent-color="#111111"
+></chusky-chat>
+```
+
+The element renders an accessible launcher, message list, loading state, retry
+state, and approval-pending notice. It accepts bounded NDJSON events with
+`run.delta`, `run.completed`, `run.requires_approval`, and `error` types.
+
+## Server route contract
+
+`POST /api/chusky/chat` receives:
+
+```json
+{ "message": "Prepare a sales brief", "conversationId": "optional-client-id" }
+```
+
+The route should:
+
+1. Authenticate the visitor using your own session.
+2. Derive a stable, non-PII customer identifier.
+3. Create or recover a Chusky thread for that customer.
+4. Call `threads.runs.stream()` with the server-side project key.
+5. Forward only bounded run events; never forward raw tool arguments, provider
+   payloads, prompts, tokens, or private account details.
+
+The route must reject missing sessions, cross-customer conversation IDs,
+oversized messages, and cross-origin requests. Add your own rate limit and
+CSRF/origin policy.
+
+## Example server flow
+
+```ts
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  userId: `customer_${session.accountId}`,
+});
+
+const thread = await chusky.threads.create({ source: "embedded-chat" });
+const stream = chusky.threads.runs(thread.id).stream({ input: message });
+// Convert the SDK events to NDJSON and return a streaming Response.
+```
+
+For durable business work, use `runs.create({ wait: false })` instead of the
+interactive stream and show the widget a status link or task progress.
+
+## Approval behavior
+
+The widget cannot approve an external action. When Chusky emits
+`run.requires_approval`, show a neutral waiting state and direct the customer
+to the authenticated company console or your own approved operator workflow.
+
+## Domain and branding
+
+Workspace branding is configured by an owner/admin in Organizations. Custom
+domains require provider-side DNS/TLS routing; Chusky reports `pending_dns`
+until the operator has completed that step. Branding changes do not grant API
+access and do not change project scopes.

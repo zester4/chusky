@@ -9,7 +9,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createTask, createWebTelegramLinkCode, deleteMeetingContact, getApproval, getAgentRun, getCalendarMeetingPreparation, getDaytonaWorkspace, getMeetingRepresentativeProfile, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listRecallMeetings, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyRunSummary, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createTask, createWebTelegramLinkCode, deleteMeetingContact, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listRecallMeetings, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyBranding, type CompanyRunSummary, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -206,6 +206,40 @@ function companyPolicyView(policy: CompanyPolicy | undefined) {
   return policy ?? { tools: {}, budget: {} };
 }
 
+function companyBrandingView(record: CompanyBranding | undefined, organizationId: string) {
+  return record ? {
+    organizationId: record.organizationId,
+    displayName: record.displayName,
+    logoUrl: record.logoUrl,
+    accentColor: record.accentColor,
+    backgroundColor: record.backgroundColor,
+    customDomain: record.customDomain,
+    customDomainStatus: record.customDomainStatus,
+    updatedAt: new Date(record.updatedAt).toISOString(),
+  } : {
+    organizationId,
+    displayName: "Chusky",
+    logoUrl: undefined,
+    accentColor: "#111111",
+    backgroundColor: "#f7f7f4",
+    customDomain: undefined,
+    customDomainStatus: "not_configured" as const,
+    updatedAt: undefined,
+  };
+}
+
+function companyBrandingInput(value: unknown): Pick<CompanyBranding, "displayName" | "logoUrl" | "accentColor" | "backgroundColor" | "customDomain"> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const body = value as Record<string, unknown>;
+  const displayName = typeof body.displayName === "string" ? body.displayName.trim() : "";
+  const logoUrl = typeof body.logoUrl === "string" ? body.logoUrl.trim() : undefined;
+  const accentColor = typeof body.accentColor === "string" ? body.accentColor.trim() : "";
+  const backgroundColor = typeof body.backgroundColor === "string" ? body.backgroundColor.trim() : "";
+  const customDomain = typeof body.customDomain === "string" ? body.customDomain.trim().toLowerCase() || undefined : undefined;
+  if (!displayName || displayName.length > 120 || !accentColor || !backgroundColor) return undefined;
+  return { displayName, ...(logoUrl ? { logoUrl } : {}), accentColor, backgroundColor, ...(customDomain ? { customDomain } : {}) };
+}
+
 function accountProjectView(project: SdkProjectRecord) {
   return {
     id: project.id,
@@ -247,6 +281,14 @@ async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefine
   if (!web?.verified) return undefined;
   const userId = await getTelegramUserIdForWebAuth(web.id);
   return userId ? { userId } : undefined;
+}
+
+async function callOwner(c: any): Promise<{ userId: number } | undefined> {
+  const linked = await linkedWebCallOwner(c);
+  if (linked) return linked;
+  // Preserve the dashboard's existing Telegram-link requirement while allowing
+  // server-side SDK callers to use their explicit project/end-user identity.
+  return c.get("webAuthUserId") ? undefined : sdkUser(c);
 }
 
 function phoneCallingProvider(): "bland" | "twilio" | undefined {
@@ -424,6 +466,19 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
 
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
+  // Public and intentionally minimal: this is the safe branding payload used
+  // by a customer-owned domain before a dashboard session exists.
+  app.get("/public/company-branding", async (c) => {
+    const requestedHost = (c.req.query("hostname") ?? c.req.header("x-forwarded-host") ?? c.req.header("host") ?? "").split(",")[0].trim().split(":")[0];
+    if (!requestedHost) return c.json({ data: null });
+    try {
+      const branding = await findCompanyBrandingByDomain(requestedHost);
+      return c.json({ data: branding ? companyBrandingView(branding, branding.organizationId) : null });
+    } catch {
+      return c.json({ data: null });
+    }
+  });
+
   app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
@@ -529,6 +584,31 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/models", async (c) => {
     try { return c.json({ data: await fetchModels() }); }
     catch (error) { return apiError(c, 502, "models_unavailable", error instanceof Error ? error.message : "Models are temporarily unavailable."); }
+  });
+
+  app.get("/v1/account/organizations/:organizationId/branding", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const access = await organizationAccessForRequest(c, organizationId);
+    if (!access) return apiError(c, 403, "organization_access_required", "A verified organization membership is required.");
+    return c.json({ data: companyBrandingView(await getCompanyBranding(organizationId), organizationId) });
+  });
+
+  app.put("/v1/account/organizations/:organizationId/branding", async (c) => {
+    const organizationId = c.req.param("organizationId");
+    const access = await organizationAccessForRequest(c, organizationId);
+    if (!access || !["owner", "admin"].includes(access.role)) return apiError(c, 403, "organization_admin_required", "An organization owner or admin is required.");
+    const input = companyBrandingInput(await c.req.json().catch(() => undefined));
+    if (!input) return apiError(c, 400, "invalid_branding", "Provide a display name and valid brand colors.");
+    if (input.customDomain) {
+      const existing = await findCompanyBrandingByDomain(input.customDomain).catch(() => undefined);
+      if (existing && existing.organizationId !== organizationId) return apiError(c, 409, "custom_domain_in_use", "That custom domain is already assigned to another workspace.");
+    }
+    try {
+      const record = await saveCompanyBranding({ organizationId, ...input, customDomainStatus: input.customDomain ? "pending_dns" : "not_configured", updatedAt: Date.now() });
+      return c.json({ data: companyBrandingView(record, organizationId) });
+    } catch {
+      return apiError(c, 400, "invalid_branding", "The branding values are invalid. Use HTTPS for logos and hex colors such as #111111.");
+    }
   });
 
   app.get("/v1/account/preferences", async (c) => {
@@ -718,7 +798,7 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/account/calls", async (c) => {
-    const owner = await linkedWebCallOwner(c) ?? sdkUser(c);
+    const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
     const provider = phoneCallingProvider();
     return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
@@ -727,17 +807,27 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/account/calls", async (c) => {
     // Dashboard users resolve to their linked Telegram owner; SDK callers use
     // the project/end-user session established by the v1 middleware.
-    const owner = await linkedWebCallOwner(c) ?? sdkUser(c);
+    const owner = await callOwner(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
-    if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
     const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; profile?: unknown };
     if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
+    if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
     try {
       const phoneNumber = String(body.phoneNumber ?? "").trim();
       const purpose = String(body.purpose ?? "").trim();
       const approval = await requestPhoneCallApproval(owner.userId, { phoneNumber, purpose, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}) }, `/call ${phoneNumber} ${purpose}`);
-      return c.json({ id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() }, 201);
+      const response = { id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() };
+      if (prior.key) {
+        session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
+        await saveSession(owner.userId, session);
+      }
+      return c.json(response, 201);
     } catch (error) {
       return apiError(c, 400, "invalid_phone_call", error instanceof Error ? error.message : "Invalid call request.");
     }
@@ -779,8 +869,18 @@ export function registerSdkApi(app: Hono): void {
 
   app.post("/v1/meetings/preparations/:preparationId/join", async (c) => {
     const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:{}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
     try {
-      return c.json(await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId")), 201);
+      const result = await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId"));
+      if (prior.key) {
+        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
+        await saveSession(owner.userId, session);
+      }
+      return c.json(result, 201);
     } catch (error) {
       return apiError(c, 400, "meeting_join_failed", error instanceof Error ? error.message : "Could not join the prepared calendar meeting.");
     }
@@ -792,8 +892,19 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.post("/v1/meetings/:meetingId/leave", async (c) => {
+    const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:{}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay);
     try {
-      return c.json(await leaveRecallMeeting(sdkUser(c)!.userId, c.req.param("meetingId")));
+      const result = await leaveRecallMeeting(owner.userId, c.req.param("meetingId"));
+      if (prior.key) {
+        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
+        await saveSession(owner.userId, session);
+      }
+      return c.json(result);
     } catch (error) {
       return apiError(c, 400, "meeting_leave_failed", error instanceof Error ? error.message : "Could not leave the meeting.");
     }

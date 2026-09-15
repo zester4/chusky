@@ -193,6 +193,24 @@ test("verified dashboard users can only manage their own bounded project keys", 
   assert.equal((await overLimit.json() as { error: { code: string } }).error.code, "project_limit_reached");
 });
 
+test("workspace branding is admin-scoped and public custom-domain lookup is safe", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => ({ user: { id: headers.get("x-test-user") ?? "workspace-admin", emailVerified: true } }));
+  setOrganizationAccessResolverForTests(async (_headers, organizationId, userId) => userId === "workspace-admin" ? { id: organizationId, role: "owner" } : undefined);
+  const api = app();
+  const adminHeaders = { "x-test-user": "workspace-admin", "Content-Type": "application/json" };
+  const save = await api.fetch(new Request("http://local/v1/account/organizations/org_acme/branding", { method: "PUT", headers: adminHeaders, body: JSON.stringify({ displayName: "Acme Revenue", logoUrl: "https://assets.example.test/acme.svg", accentColor: "#123456", backgroundColor: "#f0f1ee", customDomain: "app.acme.example" }) }));
+  assert.equal(save.status, 200);
+  assert.equal((await save.json() as { data: { customDomainStatus: string } }).data.customDomainStatus, "pending_dns");
+  const publicBranding = await api.fetch(new Request("http://local/public/company-branding?hostname=app.acme.example"));
+  assert.equal(publicBranding.status, 200);
+  const publicBody = await publicBranding.json() as { data: { displayName: string; logoUrl?: string } };
+  assert.equal(publicBody.data.displayName, "Acme Revenue");
+  assert.equal(publicBody.data.logoUrl, "https://assets.example.test/acme.svg");
+  const unauthorized = await api.fetch(new Request("http://local/v1/account/organizations/org_acme/branding", { headers: { "x-test-user": "different-user" } }));
+  assert.equal(unauthorized.status, 403);
+});
+
 test("company projects are shared to workspace members but only admins control credentials and policy", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   setWebAuthSessionResolverForTests(async (headers) => {
@@ -218,6 +236,9 @@ test("company projects are shared to workspace members but only admins control c
   assert.ok(project.scopes.includes("agents:read"));
   assert.ok(project.scopes.includes("apps:write"));
   assert.ok(project.scopes.includes("triggers:write"));
+  assert.ok(project.scopes.includes("calls:write"));
+  assert.ok(project.scopes.includes("voice:read"));
+  assert.ok(project.scopes.includes("meetings:write"));
   assert.ok(project.scopes.includes("approvals:read"));
   assert.ok(!project.scopes.includes("approvals:write"));
   assert.ok(!project.scopes.includes("*"));
@@ -411,6 +432,30 @@ test("Bland readiness controls dashboard call availability and the selected prov
   } finally {
     Object.assign(config, original);
     setWebAuthSessionResolverForTests();
+  }
+});
+
+test("SDK callers can use scoped voice and call resources with idempotent requests", async () => {
+  const keys = ["twilioVoiceEnabled", "twilioAccountSid", "twilioAuthToken", "twilioCallerId", "twilioWebhookBaseUrl", "twilioMediaStreamUrl"] as const;
+  const original = Object.fromEntries(keys.map((key) => [key, config[key]]));
+  try {
+    Object.assign(config, { twilioVoiceEnabled: true, twilioAccountSid: "AC123", twilioAuthToken: "token", twilioCallerId: "+16452437121", twilioWebhookBaseUrl: "https://chusky.example", twilioMediaStreamUrl: "wss://voice.example/twilio/stream" });
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "sdk-caller", "Content-Type": "application/json" };
+    const voices = await api.fetch(new Request("http://local/v1/account/voice-options", { headers }));
+    assert.equal(voices.status, 200);
+    assert.ok((await voices.json() as { fluxVoices: Array<{ id: string }> }).fluxVoices.some((voice) => voice.id === "flux-haley-en"));
+    const callHeaders = { ...headers, "Idempotency-Key": "sdk-call-once" };
+    const first = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers: callHeaders, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment" }) }));
+    assert.equal(first.status, 201);
+    const firstBody = await first.json() as { id: string };
+    const replay = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers: callHeaders, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment" }) }));
+    assert.equal(replay.status, 201);
+    assert.equal((await replay.json() as { id: string }).id, firstBody.id);
+    const mismatch = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers: callHeaders, body: JSON.stringify({ phoneNumber: "+15550002", purpose: "Confirm appointment" }) }));
+    assert.equal(mismatch.status, 409);
+  } finally {
+    Object.assign(config, original);
   }
 });
 

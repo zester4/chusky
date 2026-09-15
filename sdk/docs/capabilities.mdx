@@ -37,3 +37,12 @@ Video generation is durable and independently cancellable. Submit a job with `vi
 ## Workers and channels
 
 Workers are durable scheduled routines. `workers.create()` accepts a schedule, task input, budget, and optional channel target. Channels and activity provide the control-plane view needed for dashboards and operational history.
+
+## Voice and meetings
+
+Voice calls and Recall meetings are first-class API resources rather than
+provider-specific SDK forks. Use `account.voiceOptions()` and
+`account.preferences()` for the deployment's Flux/Bland choices, `calls.request()`
+for an approval-gated outbound call, and `meetings.prepare()` plus
+`meetings.join()` for a meeting representative. See the [calls guide](/docs/calls)
+and [meetings guide](/docs/meetings) for provider details and lifecycle handling.

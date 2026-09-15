@@ -1,0 +1,58 @@
+---
+title: Calls and live voice
+description: Request approval-gated outbound calls and configure Chusky's live voices.
+---
+
+## Providers
+
+Chusky supports outbound calls through the configured provider: Twilio for the
+private live voice bridge, or Bland when Bland is enabled and fully configured.
+The provider is selected by the Chusky deployment; application code does not
+receive provider credentials.
+
+```ts
+const voices = await chusky.account.voiceOptions();
+console.log(voices.fluxVoices.map((voice) => voice.id), voices.blandVoices);
+const current = await chusky.account.getPreferences();
+
+await chusky.account.preferences({
+  liveVoice: { provider: "meetings", voice: "flux-haley-en" },
+});
+```
+
+`provider` may be `twilio`, `meetings`, or `bland`. Flux voice options include an
+`id`, display `name`, and accent;
+Bland selections use the `{ id, name }` object returned by `voiceOptions()`.
+Set `voice: null` to restore the deployment default.
+
+## Requesting a call
+
+Call creation creates the same exact, one-time approval used by Chusky's other
+surfaces. It does not place the call until an authenticated owner approves it.
+
+```ts
+const approval = await chusky.calls.request({
+  phoneNumber: "+14155550123",
+  purpose: "Confirm the test-drive appointment and answer final questions.",
+  profile: {
+    mode: "scheduling",
+    tone: "warm",
+    capabilities: ["memory_lookup", "schedule_lookup"],
+  },
+}, { idempotencyKey: "test-drive-call-2026-09-15" });
+
+if (approval.status === "pending") {
+  // Show the exact recipient, purpose, and profile to your authenticated owner.
+  await chusky.approvals.decide(approval.id, "approve", {
+    idempotencyKey: "approve-test-drive-call-2026-09-15",
+  });
+}
+```
+
+Use `chusky.calls.list()` to inspect safe call metadata. Phone numbers are not
+used as identity keys, and call transcripts/audio are not exposed through this
+resource.
+
+The SDK endpoint requires the `calls:write` scope for requests and
+`calls:read` for listing. On dashboard sessions, the Chusky account must be
+verified and linked to its Telegram workspace.

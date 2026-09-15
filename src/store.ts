@@ -338,6 +338,17 @@ export interface CompanyUsagePeriod {
   costUsd: number;
 }
 
+export interface CompanyBranding {
+  organizationId: string;
+  displayName: string;
+  logoUrl?: string;
+  accentColor: string;
+  backgroundColor: string;
+  customDomain?: string;
+  customDomainStatus: "not_configured" | "pending_dns";
+  updatedAt: number;
+}
+
 function usageMonth(at: number, offset = 0): string {
   const date = new Date(at);
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - offset, 1)).toISOString().slice(0, 7);
@@ -860,6 +871,9 @@ interface Backend {
   appendCompanyAudit(projectId: string, event: CompanyAuditEvent): Promise<void>;
   listCompanyAudit(projectId: string, limit: number): Promise<CompanyAuditEvent[]>;
   listCompanyUsage(projectId: string, periods: number, now: number): Promise<CompanyUsagePeriod[]>;
+  getCompanyBranding(organizationId: string): Promise<CompanyBranding | undefined>;
+  saveCompanyBranding(record: CompanyBranding): Promise<void>;
+  findCompanyBrandingByDomain(hostname: string): Promise<CompanyBranding | undefined>;
   getAgentRun(userId: number, id: string): Promise<AgentRunRecord | undefined>;
   saveAgentRun(record: AgentRunRecord, expectedVersion?: number): Promise<AgentRunRecord>;
   listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
@@ -1132,6 +1146,8 @@ class RedisBackend implements Backend {
   private companyAuditKey = (projectId: string) => `${this.companyPrefix(projectId)}:audit`;
   private companyCompletionKey = (projectId: string, runId: string) => `${this.companyPrefix(projectId)}:completion:${createHash("sha256").update(runId).digest("hex")}`;
   private companyUsageKey = (projectId: string, month: string) => `${this.companyPrefix(projectId)}:usage:${month}`;
+  private brandingKey = (organizationId: string) => `chuck:organization:branding:${createHash("sha256").update(organizationId).digest("hex")}`;
+  private brandingDomainKey = (hostname: string) => `chuck:organization:branding-domain:${createHash("sha256").update(hostname).digest("hex")}`;
   private runKey = (id: string) => `chuck:run:${id}`;
   private runIndexKey = (id: number) => `chuck:user:${id}:runs`;
   private handoffKey = (id: string) => `chuck:handoff:${id}`;
@@ -1249,6 +1265,22 @@ class RedisBackend implements Backend {
       const costUsd = Number(record.costUsd ?? 0);
       return { month, completedRuns: Number.isSafeInteger(completedRuns) && completedRuns >= 0 ? completedRuns : 0, costUsd: Number.isFinite(costUsd) && costUsd >= 0 ? costUsd : 0 };
     }));
+  }
+  async getCompanyBranding(organizationId: string): Promise<CompanyBranding | undefined> {
+    const raw = await this.r.get(this.brandingKey(organizationId));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as CompanyBranding; } catch { return undefined; }
+  }
+  async saveCompanyBranding(record: CompanyBranding): Promise<void> {
+    const key = this.brandingKey(record.organizationId);
+    const previous = await this.getCompanyBranding(record.organizationId);
+    if (previous?.customDomain && previous.customDomain !== record.customDomain) await this.r.del(this.brandingDomainKey(previous.customDomain));
+    await this.r.set(key, JSON.stringify(record));
+    if (record.customDomain) await this.r.set(this.brandingDomainKey(record.customDomain), record.organizationId);
+  }
+  async findCompanyBrandingByDomain(hostname: string): Promise<CompanyBranding | undefined> {
+    const organizationId = await this.r.get(this.brandingDomainKey(hostname));
+    return organizationId ? this.getCompanyBranding(organizationId) : undefined;
   }
   async linkBlandProviderCall(providerCallId: string, userId: number, callId: string): Promise<boolean> {
     const key = `chuck:bland:provider:${createHash("sha256").update(providerCallId).digest("hex")}`;
@@ -2071,6 +2103,8 @@ class MemoryBackend implements Backend {
   private companyAudits = new Map<string, CompanyAuditEvent[]>();
   private companyCompletions = new Set<string>();
   private companyUsage = new Map<string, CompanyUsagePeriod>();
+  private companyBranding = new Map<string, CompanyBranding>();
+  private companyBrandingDomains = new Map<string, string>();
   private agentRuns = new Map<string, AgentRunRecord>();
   private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
@@ -2153,6 +2187,17 @@ class MemoryBackend implements Backend {
       const record = this.companyUsage.get(`${projectId}:${month}`);
       return record ? structuredClone(record) : { month, completedRuns: 0, costUsd: 0 };
     });
+  }
+  async getCompanyBranding(organizationId: string) { return this.companyBranding.get(organizationId); }
+  async saveCompanyBranding(record: CompanyBranding) {
+    const previous = this.companyBranding.get(record.organizationId);
+    if (previous?.customDomain && previous.customDomain !== record.customDomain) this.companyBrandingDomains.delete(previous.customDomain);
+    this.companyBranding.set(record.organizationId, structuredClone(record));
+    if (record.customDomain) this.companyBrandingDomains.set(record.customDomain, record.organizationId);
+  }
+  async findCompanyBrandingByDomain(hostname: string) {
+    const organizationId = this.companyBrandingDomains.get(hostname);
+    return organizationId ? this.companyBranding.get(organizationId) : undefined;
   }
   async linkBlandProviderCall(providerCallId: string, userId: number, callId: string) {
     const prior = this.blandProviderCalls.get(providerCallId);
@@ -3420,6 +3465,41 @@ export async function listCompanyAuditEvents(projectId: string, limit = 50): Pro
 export async function listCompanyUsagePeriods(projectId: string, periods = 12, now = Date.now()): Promise<CompanyUsagePeriod[]> {
   assertCompanyProjectId(projectId);
   return backend.listCompanyUsage(projectId, Math.max(1, Math.min(13, Math.floor(periods))), now);
+}
+
+function normalizeHostname(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const host = value.trim().toLowerCase().replace(/\.$/, "");
+  return /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(host) ? host : undefined;
+}
+
+function cleanCompanyBranding(value: CompanyBranding): CompanyBranding {
+  if (!value || !/^org_[A-Za-z0-9_-]{1,120}$/.test(value.organizationId)) throw new Error("Invalid organization ID.");
+  const displayName = String(value.displayName ?? "").trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").slice(0, 100);
+  if (!displayName) throw new Error("A display name is required.");
+  const color = (input: unknown, fallback: string) => typeof input === "string" && /^#[0-9a-f]{6}$/i.test(input) ? input.toLowerCase() : fallback;
+  const logoUrl = typeof value.logoUrl === "string" && /^https:\/\//i.test(value.logoUrl) && value.logoUrl.length <= 2_000 ? value.logoUrl : undefined;
+  const customDomain = normalizeHostname(value.customDomain);
+  return { organizationId: value.organizationId, displayName, ...(logoUrl ? { logoUrl } : {}), accentColor: color(value.accentColor, "#111111"), backgroundColor: color(value.backgroundColor, "#f7f7f4"), ...(customDomain ? { customDomain, customDomainStatus: "pending_dns" as const } : { customDomainStatus: "not_configured" as const }), updatedAt: Number.isSafeInteger(value.updatedAt) ? value.updatedAt : Date.now() };
+}
+
+export async function getCompanyBranding(organizationId: string): Promise<CompanyBranding | undefined> {
+  if (!/^org_[A-Za-z0-9_-]{1,120}$/.test(organizationId)) return undefined;
+  const value = await backend.getCompanyBranding(organizationId);
+  return value ? cleanCompanyBranding(value) : undefined;
+}
+
+export async function saveCompanyBranding(record: CompanyBranding): Promise<CompanyBranding> {
+  const clean = cleanCompanyBranding(record);
+  await backend.saveCompanyBranding(clean);
+  return clean;
+}
+
+export async function findCompanyBrandingByDomain(hostname: string): Promise<CompanyBranding | undefined> {
+  const cleanHost = normalizeHostname(hostname);
+  if (!cleanHost) return undefined;
+  const value = await backend.findCompanyBrandingByDomain(cleanHost);
+  return value ? cleanCompanyBranding(value) : undefined;
 }
 
 export async function canSpend(uid: number, estimatedCost = 0): Promise<boolean> {

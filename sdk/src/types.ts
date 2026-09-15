@@ -26,6 +26,151 @@ export interface WebhookDelivery { id: string; status: "queued" | "delivering" |
 export interface DeveloperProject { id: string; name: string; keyPrefix: string; scopes: string[]; createdAt: string; revokedAt?: string; key?: string; }
 export interface Usage { messages: number; cost: number; files: { count: number; declaredBytes: number; available: number }; runs: { count: number; active: number }; tasks: { count: number }; }
 
+export type CallProvider = "twilio" | "bland" | "legacy";
+export type CallStatus = "starting" | "bridging" | "active" | "ended" | "failed";
+export interface VoiceOption { id: string; name: string; accent?: string; description?: string; }
+export interface VoiceOptions { fluxVoices: VoiceOption[]; blandVoices: VoiceOption[]; blandAvailable: boolean; blandCatalogueAvailable: boolean; }
+export interface LiveVoicePreference {
+  provider: "twilio" | "meetings" | "bland";
+  voice?: string | VoiceOption | null;
+}
+export interface AccountPreferences {
+  model: string;
+  voiceReplies: boolean;
+  voicePreferences: Record<string, string | VoiceOption>;
+}
+export type VoiceCallMode = "general" | "sales" | "onboarding" | "support" | "scheduling";
+export type VoiceCallTone = "professional" | "warm" | "direct" | "consultative";
+export type VoiceCallCapability = "memory_lookup" | "scratchpad_lookup" | "schedule_lookup" | "task_lookup" | "call_history";
+export interface VoiceCallProfile {
+  identity: string;
+  organization?: string;
+  mode: VoiceCallMode;
+  tone: VoiceCallTone;
+  opening?: string;
+  facts: string[];
+  guardrails: string[];
+  capabilities: VoiceCallCapability[];
+}
+export interface CallRecord {
+  id: string;
+  provider?: CallProvider;
+  direction?: "inbound" | "outbound";
+  phoneNumber: string;
+  purpose: string;
+  status: CallStatus;
+  error?: string;
+  summary?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface CallApproval {
+  id: string;
+  toolSlug: "CHUCK_START_PHONE_CALL";
+  args: JsonObject;
+  status: "pending" | "approved" | "denied" | "consumed";
+  expiresAt: string;
+}
+export interface CallsResponse { available: boolean; provider: CallProvider | null; data: CallRecord[]; }
+
+export type MeetingPlatform = "zoom" | "google_meet" | "microsoft_teams" | "webex";
+export type MeetingInteractionMode = "addressed" | "copilot" | "representative";
+export type MeetingStatus = "creating" | "scheduled" | "joining" | "waiting_room" | "in_call" | "leaving" | "ended" | "failed";
+export interface MeetingMission {
+  clientName: string;
+  objective: string;
+  brief: string;
+  sourceMemoryIds: string[];
+  preparedAt: number;
+}
+export interface MeetingMissionSummary { clientName: string; objective: string; preparedAt: string; }
+export interface MeetingParticipant { id: string; name: string; isHost?: boolean; status: "present" | "left"; updatedAt: string; }
+export interface MeetingSpeakerEvent { type: "speech_on" | "speech_off"; participantId?: string; at: string; }
+export interface MeetingOutcomeActionItem { task: string; owner: string; dueDate?: string; }
+export interface MeetingOutcome { title: string; summary: string; decisions: string[]; actionItems: MeetingOutcomeActionItem[]; openQuestions: string[]; }
+export interface MeetingOutcomeFollowThrough { notionSaved?: boolean; notionTool?: string; notionUrl?: string; completedTools?: string[]; }
+export interface MeetingRecord {
+  id: string;
+  platform: MeetingPlatform;
+  status: MeetingStatus;
+  interactionMode: MeetingInteractionMode;
+  screenShareUnderstanding: boolean;
+  searchableTranscript: boolean;
+  transcriptStatus?: "processing" | "ready" | "failed";
+  transcriptErrorCode?: string;
+  transcriptExpiresAt?: string;
+  title?: string;
+  joinAt?: string;
+  error?: string;
+  mission?: MeetingMissionSummary;
+  participantRoster?: MeetingParticipant[];
+  speakerEvents?: MeetingSpeakerEvent[];
+  history?: Array<{ role: "user" | "assistant"; content: string; createdAt?: string }>;
+  outcome?: MeetingOutcome;
+  outcomeFollowThrough?: MeetingOutcomeFollowThrough;
+  outcomeStatus?: "pending" | "completed";
+  outcomeNotificationStatus?: "pending" | "claimed" | "delivered";
+  providerStatusAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  alreadyActive?: boolean;
+}
+export interface MeetingPreparation {
+  id: string;
+  title?: string;
+  startAt?: string;
+  endAt?: string;
+  status?: "prepared" | "auto_scheduled" | "cancelled" | "joined" | "expired";
+  meetingUrlAvailable?: boolean;
+  brief?: string;
+  briefStatus?: string;
+  createdAt: string;
+  updatedAt: string;
+  [key: string]: unknown;
+}
+export interface MeetingContact {
+  id: string;
+  meetingId?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+  preferredChannel?: string;
+  followUpAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  [key: string]: unknown;
+}
+export interface MeetingsResponse { preparations: MeetingPreparation[]; meetings: MeetingRecord[]; contacts: MeetingContact[]; }
+export interface MeetingProfile {
+  enabled: boolean;
+  representativeName: string;
+  organizationName: string;
+  role: "sales" | "client_onboarding" | "employee_onboarding" | "customer_success" | "custom";
+  objective: string;
+  communicationStyle: string;
+  approvedKnowledge: string;
+  authorityBoundaries: string;
+  allowedComposioTools: string[];
+  composioAccountAliases: Record<string, string>;
+  allowedNativeTools: string[];
+  allowMeetingScheduling: boolean;
+  autoJoinCalendar: boolean;
+  updatedAt: number;
+}
+export interface MeetingBrief { clientName: string; objective?: string; clientContext?: string; }
+export interface JoinMeetingParams {
+  meetingUrl: string;
+  title?: string;
+  joinAt?: string;
+  interactionMode?: MeetingInteractionMode;
+  analyzeScreenShare?: boolean;
+  transcriptRetentionDays?: 1 | 7 | 30;
+  clientName?: string;
+  objective?: string;
+  clientContext?: string;
+}
+export interface MeetingContext { clientName?: string; objective?: string; businessFacts: string[]; relationshipFacts: string[]; note: string; }
+
 export interface Thread {
   id: string;
   externalId?: string;

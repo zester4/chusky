@@ -56,6 +56,9 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Trigger catalogue | `GET /v1/triggers/catalog/toolkits`, `GET /v1/triggers/catalog/toolkits/:toolkit` | Composio-backed, paginated trigger types for connected apps; the dashboard uses the same catalogue as Telegram. `POST /v1/triggers` can pin creation to a verified `connectedAccountId`. |
 | Observability | `GET /v1/audit-events`, `GET /v1/usage` | Bounded per-user audit trail and current usage snapshot. |
 | Company telemetry | `GET /v1/company/runs`, `/v1/company/audit-events`, `/v1/company/usage`; dashboard `GET /v1/account/projects/:id/company/{runs,audit-events,usage}` | Requires `company:read` for project keys; dashboard reads require workspace owner/admin. Run summaries contain no prompt or output. |
+| Calls | `GET/POST /v1/account/calls` | Lists redacted call metadata and creates an approval-gated outbound call request. SDK callers use `calls:read/write`; dashboard callers must be verified and Telegram-linked. |
+| Voice | `GET /v1/account/voice-options`, `PATCH /v1/account/preferences` | Lists Flux and optional Bland catalogue entries and stores the account's live voice preference. Use `voice:read` for the catalogue and `account:write` for preferences. |
+| Meetings | `GET/POST /v1/meetings`, `POST /v1/meetings/prepare`, `GET/PATCH /v1/meetings/profile`, `POST /v1/meetings/preparations/:id/join`, `GET /v1/meetings/:id`, `POST /v1/meetings/:id/leave`, `GET /v1/meetings/:id/context`, `DELETE /v1/meetings/contacts/:id` | Recall lifecycle for Zoom, Google Meet, Microsoft Teams, and Webex. SDK callers use `meetings:read/write`; meeting URLs and sealed calendar links are never returned by list endpoints. |
 
 ## Event stream
 

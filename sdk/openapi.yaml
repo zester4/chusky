@@ -52,11 +52,33 @@ paths:
   /account/models:
     get: { summary: List models available to the authenticated account, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /account/preferences:
+    get: { summary: Get account model and voice preferences, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Preferences } } }
     patch: { summary: Update account model and voice preferences, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+  /account/voice-options:
+    get: { summary: List deployment-supported Flux and Bland voice options, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Voice catalogue and provider availability } } }
   /account/telegram-link:
     post: { summary: Create a Telegram linking code for the account, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Linking code } } }
   /account/calls:
-    get: { summary: List account voice calls, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List account voice calls with redacted destinations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create an approval-gated outbound voice call request, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Pending approval } } }
+  /meetings:
+    get: { summary: List owner-scoped Recall meeting preparations, meetings, participants, and contacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Join or schedule a Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Meeting lifecycle record } } }
+  /meetings/prepare:
+    post: { summary: Generate a private client-bound meeting brief without joining, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Prepared meeting mission } } }
+  /meetings/profile:
+    get: { summary: Get the account meeting representative profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Profile } } }
+    patch: { summary: Update the account meeting representative profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated profile } } }
+  /meetings/preparations/{preparationId}/join:
+    post: { summary: Join a verified calendar meeting preparation without returning its URL, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: preparationId, in: path, required: true, schema: { type: string } }], responses: { '201': { description: Meeting lifecycle record } } }
+  /meetings/{meetingId}:
+    get: { summary: Get one owner-scoped Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: meetingId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Meeting lifecycle record }, '404': { description: Not found } } }
+  /meetings/{meetingId}/leave:
+    post: { summary: Ask Recall to leave an owner-scoped meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }, { name: meetingId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Updated meeting lifecycle record } } }
+  /meetings/{meetingId}/context:
+    get: { summary: Query the active representative meeting's approved business and relationship context, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: meetingId, in: path, required: true, schema: { type: string } }, { name: query, in: query, required: true, schema: { type: string, maxLength: 500 } }], responses: { '200': { description: Meeting context } } }
+  /meetings/contacts/{contactId}:
+    delete: { summary: Delete an owner-scoped meeting follow-up contact, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: contactId, in: path, required: true, schema: { type: string } }], responses: { '204': { description: Deleted }, '404': { description: Not found } } }
   /apps:
     get: { summary: List connected app toolkits, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /apps/{toolkit}/connect:

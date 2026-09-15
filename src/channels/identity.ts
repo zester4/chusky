@@ -57,6 +57,23 @@ export async function setProactivePreference(userId: number, provider: ChannelPr
   return changed;
 }
 
+/** Update one owner-linked identity by a non-secret fingerprint returned to the dashboard. */
+export async function updateLinkedChannelIdentity(userId: number, fingerprint: string, patch: { proactiveOptIn?: boolean }): Promise<ChannelIdentityRecord | undefined> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[a-f0-9]{16}$/.test(fingerprint)) return undefined;
+  const identity = (await listChannelIdentities(userId)).find((item) => identityFingerprint(item) === fingerprint);
+  if (!identity) return undefined;
+  const updated = { ...identity, ...patch, updatedAt: Date.now() };
+  return await saveChannelIdentity(updated) ? updated : undefined;
+}
+
+/** Remove Chusky's owner mapping; provider installations themselves are left untouched. */
+export async function unlinkChannelIdentity(userId: number, fingerprint: string): Promise<boolean> {
+  if (!Number.isSafeInteger(userId) || userId <= 0 || !/^[a-f0-9]{16}$/.test(fingerprint)) return false;
+  const identity = (await listChannelIdentities(userId)).find((item) => identityFingerprint(item) === fingerprint);
+  if (!identity) return false;
+  return saveChannelIdentity({ ...identity, disabledAt: Date.now(), updatedAt: Date.now() });
+}
+
 export async function createLinkCode(userId: number, provider: ChannelProvider): Promise<string> {
   return createChannelLinkCode(userId, provider);
 }

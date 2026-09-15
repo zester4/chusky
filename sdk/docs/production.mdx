@@ -17,6 +17,8 @@ description: Deploy a reliable Chusky integration.
 - Monitor webhook delivery failures, run failures, rate limits, and spend.
 - Rotate project keys and webhook secrets on a schedule or incident.
 - Test duplicate requests, expired approvals, unauthorized IDs, provider outages, and reconnects.
+- For calls, test provider-unavailable responses, redacted call history, approval expiry, and Bland/Twilio configuration separately.
+- For meetings, test direct joins and calendar-prepared joins against an authorized staging meeting for each enabled Recall platform. Verify scheduled joins, cancellation, participant updates, meeting-end reconciliation, and idempotent retries before production use.
 
 ## Local validation
 

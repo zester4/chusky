@@ -13,7 +13,8 @@ export const SELF_SERVICE_PROJECT_SCOPES = [
   "account:write", "apps:read", "apps:write", "triggers:read",
   "triggers:write", "reminders:read", "reminders:write", "jobs:read",
   "jobs:write", "memory:read", "memory:write", "scratchpad:read",
-  "scratchpad:write",
+  "scratchpad:write", "calls:read", "calls:write", "voice:read", "voice:write",
+  "meetings:read", "meetings:write",
 ] as const;
 
 export const TELEGRAM_PROJECT_LIMIT = 10;

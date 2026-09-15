@@ -1,0 +1,73 @@
+---
+title: Meetings
+description: Prepare, join, participate in, and leave Recall meetings from the SDK.
+---
+
+## Supported platforms
+
+The meeting resource supports Recall links for Zoom, Google Meet, Microsoft
+Teams, and Webex. Chusky validates the link and platform before sending
+anything to Recall. Recall's optional shared-screen understanding is available
+only where the deployment and Recall support it.
+
+## Configure the representative
+
+The meeting profile controls how Chusky participates. It contains the display
+identity, communication guidance, approved knowledge, meeting tools, account
+aliases, and calendar auto-join preference.
+
+```ts
+const profile = await chusky.meetings.updateProfile({
+  representativeName: "Chusky",
+  organizationName: "Acme Motors",
+  role: "sales",
+  communicationStyle: "Natural, concise, curious, and helpful.",
+  approvedKnowledge: "Only use the approved product and pricing facts.",
+  allowedComposioTools: ["GOOGLECALENDAR_CREATE_EVENT"],
+  autoJoinCalendar: false,
+});
+```
+
+## Prepare and join
+
+Preparation searches the owner's saved relationship/business context and
+returns a private brief. It does not join a meeting. A direct join can receive
+that brief as `clientContext`; a calendar-prepared join uses the opaque
+preparation ID and never requires the caller to re-send the meeting URL.
+
+```ts
+const brief = await chusky.meetings.prepare({
+  clientName: "Jordan Lee",
+  objective: "Understand whether Acme Motors is a fit for the fleet program.",
+});
+
+const meeting = await chusky.meetings.join({
+  meetingUrl: "https://meet.google.com/example-room",
+  title: "Acme Motors fleet discussion",
+  interactionMode: "representative",
+  clientName: "Jordan Lee",
+  objective: "Understand whether Acme Motors is a fit for the fleet program.",
+}, { idempotencyKey: "acme-fleet-meeting-2026-09-15" });
+```
+
+`joinAt` schedules the Recall bot when the event is at least ten minutes in the
+future. For recurring calendar automation, use the preparation returned by
+`meetings.list()` and call `joinPreparation(preparation.id)`.
+
+## Roster, context, and lifecycle
+
+```ts
+const snapshot = await chusky.meetings.get(meeting.id);
+const context = await chusky.meetings.context(meeting.id, "What approved facts are relevant to pricing?");
+await chusky.meetings.leave(meeting.id);
+```
+
+The meeting snapshot includes the provider platform, lifecycle status, mission
+metadata, and safe retention state. Participant roster and outcomes are
+available in `meetings.list()` for the authenticated owner. Meeting context is
+available only for an active representative meeting and contains relevant
+owner-stored facts, not arbitrary private history.
+
+Use signed Recall webhooks and durable Redis/QStash in production. A successful
+join request means Chusky accepted and persisted the meeting lifecycle; use
+`get()` or `list()` to observe admission, in-call, ended, and failed states.
