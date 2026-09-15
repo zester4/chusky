@@ -89,6 +89,16 @@ export const config = {
   jobWorkflowUrl: optional("JOB_WORKFLOW_URL", ""),
   videoModel: optional("VIDEO_MODEL", "bytedance/seedance-2.0-mini"),
 
+  // Optional third-party MCP clients. The registry is server-side JSON so
+  // account ownership and bearer secrets never enter model context or chat
+  // history. See src/mcp/client.ts and README.md for the shape.
+  mcpEnabled: optional("MCP_ENABLED", "false") === "true",
+  mcpServersJson: optional("MCP_SERVERS_JSON", "[]"),
+  mcpToolTimeoutMs: boundedInt("MCP_TOOL_TIMEOUT_MS", 20_000, 1_000, 120_000),
+  mcpMaxServers: boundedInt("MCP_MAX_SERVERS", 20, 1, 100),
+  mcpMaxToolsPerServer: boundedInt("MCP_MAX_TOOLS_PER_SERVER", 100, 1, 500),
+  mcpMaxResultChars: boundedInt("MCP_MAX_RESULT_CHARS", 20_000, 1_000, 100_000),
+
   // ── Channel adapters ──────────────────────────────────────────────
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",
   slackSigningSecret: optional("SLACK_SIGNING_SECRET", ""),

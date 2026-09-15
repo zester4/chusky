@@ -25,6 +25,14 @@ export interface Webhook { id: string; url: string; createdAt: string; secret?: 
 export interface WebhookDelivery { id: string; status: "queued" | "delivering" | "delivered" | "failed"; attempts: number; lastError?: string; createdAt: string; deliveredAt?: string; }
 export interface DeveloperProject { id: string; name: string; keyPrefix: string; scopes: string[]; createdAt: string; revokedAt?: string; key?: string; }
 export interface Usage { messages: number; cost: number; files: { count: number; declaredBytes: number; available: number }; runs: { count: number; active: number }; tasks: { count: number }; }
+export interface Reminder { id: string; text: string; runAt: string; status: "scheduled" | "sent" | "cancelled" | "failed"; workflowRunId?: string; createdAt: string; }
+export interface RecurringJob { id: string; text: string; cron: string; status?: string; workflowRunId?: string; createdAt: string; [key: string]: unknown; }
+export interface ScratchpadEntry { key: string; content: string; updatedAt: string; }
+export type MemoryCategory = "profile" | "personal" | "preference" | "business" | "relationship" | "project" | "procedural" | "episodic" | "document" | "negative" | "fact" | "instruction" | "asset";
+export interface MemoryFact { id: string; category: MemoryCategory; key: string; value: string; confidence: number; source: string; sensitivity: "normal" | "sensitive"; status?: string; projectId?: string; personKey?: string; createdAt: string; updatedAt: string; expiresAt?: string; reviewAt?: string; }
+export interface CliDevice { id: string; name: string; createdAt: string; lastSeenAt: string; }
+export interface AppConnection { id: string; toolkit?: string; accountId?: string; name?: string; status?: string; [key: string]: unknown; }
+export interface CompanyBranding { organizationId: string; displayName?: string; logoUrl?: string; accentColor?: string; backgroundColor?: string; customDomain?: string; customDomainStatus?: string; updatedAt?: string; }
 
 export type CallProvider = "twilio" | "bland" | "legacy";
 export type CallStatus = "starting" | "bridging" | "active" | "ended" | "failed";
@@ -291,6 +299,7 @@ export interface Artifact { id: string; name: string; type: "website" | "report"
 export interface VideoJob { id: string; prompt: string; destination: "telegram" | "daytona" | "both"; workspacePath?: string; workflowRunId?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; pollCount: number; error?: string; resultPath?: string; createdAt: string; updatedAt: string; completedAt?: string; }
 export interface Worker { id: string; worker: string; from: string; objective: string; expectedOutput: string; status: string; taskId?: string; workflowRunId?: string; timestamp: string; delegation?: JsonObject; context?: JsonObject; }
 export interface ChannelConnection { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; verifiedAt: string; proactiveOptIn: boolean; }
+export type LinkableChannelProvider = "slack" | "whatsapp" | "sendblue";
 export interface Activity { now: number; approvals: Approval[]; tasks: Task[]; reminders: JsonObject[]; jobs: JsonObject[]; }
 export interface Delivery { id: string; provider: string; status: string; kind: string; attempts: number; providerStatus?: string; lastError?: string; createdAt: string; updatedAt: string; deliveredAt?: string; }
 

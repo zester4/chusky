@@ -48,6 +48,7 @@ import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
+import { mcpClient } from "./mcp/client.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -757,7 +758,8 @@ export async function runAgent(
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
     : fullComposioTools).map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
-  const availableTools = composioTools.filter((tool) => {
+  const mcpTools = (!toolsDisabled && !voiceTurn) ? await mcpClient.toolsForUser(userId, signal) : [];
+  const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);
   });
@@ -793,7 +795,7 @@ export async function runAgent(
     }
   }
 
-  logger.debug({ toolCount: composioTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Composio tools loaded");
+  logger.debug({ toolCount: composioTools.length, mcpToolCount: mcpTools.length, fullToolCount: fullComposioTools.length, discoveryOnly: fullComposioTools.length > 80 }, "Agent tools loaded");
 
   // Build message array for OpenRouter
   const durable = options?.ephemeral ? { summaries: [], imageAssets: [] } : await getSession(userId);
@@ -1069,7 +1071,7 @@ export async function runAgent(
           // Always execute the exact arguments the user reviewed instead of
           // requiring the model to reproduce the original serialization.
           executionArgs = approved.args;
-        } else if (!groupArtifactTool && (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args))) {
+        } else if (!groupArtifactTool && (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args) || (slug.startsWith("MCP_") && mcpClient.requiresApproval(slug, userId)))) {
           const approval = await createApproval({
             userId,
             ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
@@ -1172,6 +1174,8 @@ export async function runAgent(
             frameMode: args.frameMode === "first_frame" || args.frameMode === "last_frame" ? args.frameMode : "reference",
             inputReferences: references,
           });
+        } else if (slug.startsWith("MCP_")) {
+          execResult = await mcpClient.callTool(userId, slug, executionArgs, signal);
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
           execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId });

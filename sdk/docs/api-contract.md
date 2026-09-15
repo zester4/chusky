@@ -59,6 +59,10 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Calls | `GET/POST /v1/account/calls` | Lists redacted call metadata and creates an approval-gated outbound call request. SDK callers use `calls:read/write`; dashboard callers must be verified and Telegram-linked. |
 | Voice | `GET /v1/account/voice-options`, `PATCH /v1/account/preferences` | Lists Flux and optional Bland catalogue entries and stores the account's live voice preference. Use `voice:read` for the catalogue and `account:write` for preferences. |
 | Meetings | `GET/POST /v1/meetings`, `POST /v1/meetings/prepare`, `GET/PATCH /v1/meetings/profile`, `POST /v1/meetings/preparations/:id/join`, `GET /v1/meetings/:id`, `POST /v1/meetings/:id/leave`, `GET /v1/meetings/:id/context`, `DELETE /v1/meetings/contacts/:id` | Recall lifecycle for Zoom, Google Meet, Microsoft Teams, and Webex. SDK callers use `meetings:read/write`; meeting URLs and sealed calendar links are never returned by list endpoints. |
+| Connected apps | `GET /v1/apps`, `POST /v1/apps/:toolkit/connect`, `GET /v1/apps/connections`, `DELETE /v1/apps/connections/:id` | Composio toolkit discovery, OAuth connection links, connected-account listing, and disconnect. Credentials remain server-side. |
+| Native schedules | `GET/POST/DELETE /v1/reminders`, `GET/POST/DELETE /v1/jobs` | One-time reminders and recurring QStash schedules owned by the SDK user. |
+| Memory and scratchpad | `GET/POST/DELETE /v1/memory`, `GET/PUT/DELETE /v1/scratchpad` | Explicit structured memory and temporary working notes; both are user-scoped. |
+| Channel and device management | `GET/POST/PATCH/DELETE /v1/channels`, `GET/DELETE /v1/devices` | Link supported channels, control proactive delivery, and revoke CLI devices without exposing credentials. |
 
 ## Event stream
 

@@ -51,6 +51,9 @@ paths:
     get: { summary: Get the authenticated account overview, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /account/models:
     get: { summary: List models available to the authenticated account, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /account/organizations/{organizationId}/branding:
+    get: { summary: Get safe workspace branding, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: organizationId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Branding } } }
+    put: { summary: Update safe workspace branding as an owner or admin, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: organizationId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Updated branding } } }
   /account/preferences:
     get: { summary: Get account model and voice preferences, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Preferences } } }
     patch: { summary: Update account model and voice preferences, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
@@ -83,6 +86,10 @@ paths:
     get: { summary: List connected app toolkits, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /apps/{toolkit}/connect:
     post: { summary: Start connecting an app toolkit, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: OAuth connection URL } } }
+  /apps/connections:
+    get: { summary: List connected Composio accounts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /apps/connections/{connectionId}:
+    delete: { summary: Disconnect an owned Composio account, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Disconnected } } }
   /triggers:
     get: { summary: List account triggers, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Create an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
@@ -203,6 +210,36 @@ paths:
     post: { summary: Cancel a sub-agent delegation, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Cancelled } } }
   /channels:
     get: { summary: List verified channel connections, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /channels/link-code:
+    post: { summary: Create a one-time link code for Slack, WhatsApp, or Sendblue, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Link instructions } } }
+  /channels/{provider}/{identityId}:
+    patch: { summary: Enable or disable proactive delivery for a linked channel, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+    delete: { summary: Unlink an owned channel identity, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Unlinked } } }
+  /devices:
+    get: { summary: List active CLI devices without bearer tokens, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /devices/{deviceId}:
+    delete: { summary: Revoke an owned CLI device, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Revoked } } }
+  /reminders:
+    get: { summary: List one-time reminders, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Schedule a one-time reminder, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Scheduled } } }
+  /reminders/{id}:
+    delete: { summary: Cancel an owned reminder, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cancelled } } }
+  /jobs:
+    get: { summary: List recurring schedules, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create a recurring QStash schedule, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Scheduled } } }
+  /jobs/{id}:
+    delete: { summary: Cancel an owned recurring schedule, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cancelled } } }
+  /scratchpad:
+    get: { summary: Search private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    delete: { summary: Clear private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cleared } } }
+  /scratchpad/{key}:
+    put: { summary: Write a private scratchpad note, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+    delete: { summary: Delete a private scratchpad note, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
+  /memory:
+    get: { summary: Search explicit structured memory, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Save an explicit structured memory fact, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Saved } } }
+  /memory/{id}:
+    delete: { summary: Forget an owned memory fact, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /deliveries:
     get: { summary: List outbound channel delivery receipts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /activity:

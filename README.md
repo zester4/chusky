@@ -90,6 +90,43 @@ and Wrangler configuration. See its README for local development, deployment,
 and client configuration. Production Chusky API durability still depends on
 the backend's Redis and QStash configuration.
 
+### Calling third-party MCP servers
+
+Chusky can also act as an MCP client for owner-approved remote Streamable HTTP
+servers. This is separate from the Cloudflare MCP adapter above: the adapter
+lets another agent call Chusky, while this client lets Chusky call a configured
+third-party MCP server during an ordinary agent run.
+
+Enable it with `MCP_ENABLED=true` and configure `MCP_SERVERS_JSON` as a
+server-side JSON array. Every entry must include an explicit `ownerIds` list.
+Use `auth.type="none"` only for a deliberately public server. For a protected
+server, use `auth.type="bearer"` and put only the name of a Railway secret in
+`tokenEnv`; the token itself never enters the registry, prompt, history, logs,
+or tool result. Production requires HTTPS and rejects credential-bearing,
+localhost, private-network, and metadata URLs.
+
+```json
+[
+  {
+    "id": "linear",
+    "name": "Linear MCP",
+    "url": "https://mcp.example.com/mcp",
+    "ownerIds": [123456789],
+    "auth": { "type": "bearer", "tokenEnv": "MCP_LINEAR_TOKEN" },
+    "allowedTools": ["search_issues", "get_issue"],
+    "requireApproval": true
+  }
+]
+```
+
+The agent discovers tools with the official MCP TypeScript SDK, exposes them
+under stable `MCP_<server>_<tool>_<hash>` names, validates arguments against
+the server's input schema, bounds returned data, and reconnects transient HTTP
+sessions. MCP calls require approval by default so a newly connected server
+cannot silently send mail, change records, spend money, or delete data. Keep
+the server allowlist narrow and only set `requireApproval=false` for a server
+whose side effects have been reviewed.
+
 ---
 
 ## Quickstart (local dev)
@@ -784,6 +821,12 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `SENDBLUE_WEBHOOK_SECRET` | Sendblue | — | Secret used to verify Sendblue receive webhooks |
 | `SENDBLUE_WORKFLOW_URL` | — | derived | Optional public `/workflows/sendblue-event` URL override |
 | `CHUSKY_PROJECT_KEY` | — | — | Optional private Oracle root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
+| `MCP_ENABLED` | — | `false` | Enable Chusky as a client of configured third-party Streamable HTTP MCP servers |
+| `MCP_SERVERS_JSON` | MCP | `[]` | Owner-scoped server registry; use token environment-variable names, never bearer tokens |
+| `MCP_TOOL_TIMEOUT_MS` | — | `20000` | Maximum time for one third-party MCP tool call |
+| `MCP_MAX_SERVERS` | — | `20` | Maximum configured MCP servers loaded at startup |
+| `MCP_MAX_TOOLS_PER_SERVER` | — | `100` | Maximum discovered tools exposed from each MCP server |
+| `MCP_MAX_RESULT_CHARS` | — | `20000` | Maximum MCP output passed back into the model |
 
 ---
 

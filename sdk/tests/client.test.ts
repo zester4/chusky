@@ -177,3 +177,39 @@ test("SDK upload helper completes a presigned upload with a distinct idempotency
   assert.equal(calls[1]?.url, "https://upload.example.test/file_1");
   assert.equal(calls[2]?.url, "https://example.test/v1/files/file_1/complete");
 });
+
+test("SDK exposes native schedules, memory, scratchpad, app connections, channels, and devices", async () => {
+  const calls: string[] = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push(`${init?.method ?? "GET"}:${url}`);
+    if (url.includes("/reminders") && init?.method === "POST") return new Response(JSON.stringify({ id: "rem_1", text: "Call back", runAt: "2026-09-16T10:00:00.000Z", status: "scheduled", createdAt: "2026-09-15T10:00:00.000Z" }), { status: 201 });
+    if (url.includes("/scratchpad/") && init?.method === "PUT") return new Response(JSON.stringify({ key: "brief", content: "notes", updatedAt: "2026-09-15T10:00:00.000Z" }), { status: 200 });
+    if (url.includes("/memory") && init?.method === "POST") return new Response(JSON.stringify({ id: "mem_1", category: "business", key: "product", value: "Cars", confidence: 1, source: "sdk", sensitivity: "normal", createdAt: "2026-09-15T10:00:00.000Z", updatedAt: "2026-09-15T10:00:00.000Z" }), { status: 201 });
+    if (url.includes("/channels/link-code")) return new Response(JSON.stringify({ provider: "slack", code: "ABC123", expiresInSeconds: 600, instructions: "Open the install link." }), { status: 201 });
+    if (url.includes("/apps") && url.includes("connect")) return new Response(JSON.stringify({ toolkit: "googlecalendar", url: "https://example.test/connect" }), { status: 200 });
+    if (init?.method === "DELETE") return new Response(null, { status: 204 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+
+  await sdk.apps.connections();
+  await sdk.apps.connect("googlecalendar", "work");
+  await sdk.reminders.list();
+  await sdk.reminders.create({ text: "Call back", delaySeconds: 60 });
+  await sdk.jobs.list();
+  await sdk.jobs.create({ text: "Check inbox", cron: "0 9 * * 1-5" });
+  await sdk.memory.list("product");
+  await sdk.memory.save({ category: "business", key: "product", value: "Cars", confidence: 1, source: "sdk", sensitivity: "normal" });
+  await sdk.scratchpad.list();
+  await sdk.scratchpad.write("brief", "notes");
+  await sdk.channels.linkCode("slack");
+  await sdk.devices.list();
+
+  assert.ok(calls.includes("GET:https://example.test/v1/apps/connections"));
+  assert.ok(calls.includes("POST:https://example.test/v1/apps/googlecalendar/connect"));
+  assert.ok(calls.includes("POST:https://example.test/v1/reminders"));
+  assert.ok(calls.includes("POST:https://example.test/v1/jobs"));
+  assert.ok(calls.includes("POST:https://example.test/v1/memory"));
+  assert.ok(calls.includes("PUT:https://example.test/v1/scratchpad/brief"));
+  assert.ok(calls.includes("POST:https://example.test/v1/channels/link-code"));
+  assert.ok(calls.includes("GET:https://example.test/v1/devices"));
+});

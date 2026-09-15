@@ -1,6 +1,6 @@
 ---
 name: chusky
-description: Operate, extend, troubleshoot, and safely maintain the Chusky Telegram AI agent. Use when working on Chusky's Composio tools, OpenRouter models, Telegram handlers, media input, Redis sessions, memory, scratchpad, approvals, reminders, CRON jobs, Upstash Workflow, triggers, testing, deployment, or user-facing behavior.
+description: Operate, extend, troubleshoot, and safely maintain the Chusky Telegram AI agent and its developer platform. Use when working on Chusky's Composio tools, OpenRouter models, Telegram handlers, media input, Redis sessions, memory, scratchpad, approvals, reminders, CRON jobs, Upstash Workflow, triggers, REST/SDK API, Cloudflare MCP server, testing, deployment, or user-facing behavior.
 ---
 
 # Chusky Agent Skill
@@ -20,6 +20,7 @@ For deep work, load only the references relevant to the task:
 - [Browser, vault, and Cloudflare](references/browser.md) for Daytona browser operation, private website identities, the credential broker, Cloudflare Worker/D1 deployment, and browser verification.
 - [Shopping engine](references/shopping.md) for retailer-neutral shopping plans, browser/vault routing, cart safety, and shopping verification.
 - [Developer API and SDK](references/sdk/developer-api.md) when changing the `/v1` API, `sdk/` package, project credentials, R2 files, or developer webhooks.
+- [Remote MCP server](references/mcp.md) when configuring, using, extending, deploying, or troubleshooting the Cloudflare MCP interface for Chusky company agents and developer applications.
 
 ## Identity and compatibility
 
