@@ -29,6 +29,8 @@ export interface MeetingRepresentativeProfile {
   allowedNativeTools: string[];
   /** Legacy profile field; enabled representatives may use an owner-granted calendar action without an extra scheduling toggle. */
   allowMeetingScheduling: boolean;
+  /** Explicit owner opt-in for scheduling bots from verified Google Calendar events. */
+  autoJoinCalendar: boolean;
   updatedAt: number;
 }
 
@@ -63,6 +65,7 @@ export function defaultMeetingRepresentativeProfile(): MeetingRepresentativeProf
     composioAccountAliases: {},
     allowedNativeTools: ["CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"],
     allowMeetingScheduling: true,
+    autoJoinCalendar: false,
     updatedAt: 0,
   };
 }
@@ -107,6 +110,7 @@ export function normalizeMeetingRepresentativeProfile(
   const allowedKeys = new Set([
     "enabled", "representativeName", "organizationName", "role", "objective", "communicationStyle",
     "approvedKnowledge", "authorityBoundaries", "allowedComposioTools", "composioAccountAliases", "allowedNativeTools", "allowMeetingScheduling", "updatedAt",
+    "autoJoinCalendar",
   ]);
   if (Object.keys(patch).some((key) => !allowedKeys.has(key))) throw new Error("Meeting representative profile contains an unsupported field");
 
@@ -139,6 +143,10 @@ export function normalizeMeetingRepresentativeProfile(
       if (typeof patch.allowMeetingScheduling !== "boolean") throw new Error("allowMeetingScheduling must be true or false");
       return patch.allowMeetingScheduling;
     })(),
+    autoJoinCalendar: patch.autoJoinCalendar === undefined ? (enabled ? current.autoJoinCalendar : false) : (() => {
+      if (typeof patch.autoJoinCalendar !== "boolean") throw new Error("autoJoinCalendar must be true or false");
+      return patch.autoJoinCalendar;
+    })(),
     updatedAt: patch.updatedAt === undefined ? Date.now() : (() => {
       if (typeof patch.updatedAt !== "number" || !Number.isSafeInteger(patch.updatedAt) || patch.updatedAt < 0) throw new Error("updatedAt must be a non-negative integer");
       return patch.updatedAt;
@@ -146,6 +154,7 @@ export function normalizeMeetingRepresentativeProfile(
   };
   if (!next.representativeName) throw new Error("representativeName cannot be empty");
   if (next.enabled && next.objective.length < 8) throw new Error("Set an objective of at least 8 characters before enabling the representative");
+  if (next.autoJoinCalendar && !next.enabled) throw new Error("Calendar auto-join requires an enabled representative profile");
   return next;
 }
 

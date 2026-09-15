@@ -183,6 +183,23 @@ test("an active duplicate meeting URL is idempotent but a finished meeting can b
   assert.equal(afterEnd.id, "mtg_dedup_3");
 });
 
+test("Recall outcome transcripts are bounded, owner-scoped, and erased on completion or expiry", async () => {
+  const userId = 810123;
+  const meeting = await addRecallMeeting(userId, {
+    id: "mtg_outcome_transcript", userId, platform: "google_meet", interactionMode: "representative", status: "ended",
+    meetingUrlHash: "f".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now(),
+  });
+  const transcript = [{ role: "participant" as const, content: "The revised proposal is due Friday.", speakerName: "Avery" }];
+  await updateRecallMeeting(userId, meeting.id, { outcomeTranscript: transcript, outcomeTranscriptCapturedAt: Date.now() });
+  assert.deepEqual((await getRecallMeeting(userId, meeting.id))?.outcomeTranscript, transcript);
+  assert.equal(await getRecallMeeting(userId + 1, meeting.id), undefined);
+  await updateRecallMeeting(userId, meeting.id, { outcomeTranscript: undefined, outcomeTranscriptCapturedAt: undefined });
+  assert.equal((await getRecallMeeting(userId, meeting.id))?.outcomeTranscript, undefined);
+  await updateRecallMeeting(userId, meeting.id, { outcomeTranscript: transcript, outcomeTranscriptCapturedAt: Date.now() - 25 * 60 * 60_000 });
+  assert.equal((await getRecallMeeting(userId, meeting.id))?.outcomeTranscript, undefined, "stale transcript text expires lazily even if workflow delivery failed");
+  await assert.rejects(updateRecallMeeting(userId, meeting.id, { outcomeTranscript: Array.from({ length: 33 }, () => transcript[0]!) }), /turn bounds/);
+});
+
 test("scheduled meeting dedupe keys distinguish recurring instances on the same URL", async () => {
   const userId = 810122;
   const common = {

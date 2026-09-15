@@ -30,7 +30,7 @@ import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js
 import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
-import { cancelAutomaticCalendarMeetingJoins } from "./meetings/service.js";
+import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import {
   COMPANY_AGENT_TEMPLATES,
   COMPANY_APPROVAL_BEFORE_EXTERNAL_ACTION,
@@ -114,7 +114,10 @@ function userIdFor(externalId: string, projectId: string): number {
 
 type SdkPrincipal = { projectId: string; scopes: string[]; root: boolean; organizationId?: string };
 function requiredScope(path: string, method: string): string {
-  const resource = path.split("/")[2] || "unknown";
+  const parts = path.split("/");
+  let resource = parts[2] || "unknown";
+  if (resource === "account" && parts[3] === "calls") resource = "calls";
+  if (resource === "account" && parts[3] === "voice-options") resource = "voice";
   return `${resource}:${method === "GET" || method === "HEAD" ? "read" : "write"}`;
 }
 function scopeAllowed(principal: SdkPrincipal, path: string, method: string): boolean {
@@ -169,6 +172,7 @@ const COMPANY_PROJECT_DEFAULT_SCOPES = [
   "tasks:read", "tasks:write", "approvals:read",
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
   "apps:read", "apps:write", "triggers:read", "triggers:write",
+  "calls:read", "calls:write", "voice:read", "voice:write", "meetings:read", "meetings:write",
 ];
 
 function safeProjectPolicy(project: SdkProjectRecord): CompanyPolicy | undefined {
@@ -714,14 +718,16 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/account/calls", async (c) => {
-    const owner = await linkedWebCallOwner(c);
+    const owner = await linkedWebCallOwner(c) ?? sdkUser(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
     const provider = phoneCallingProvider();
     return c.json({ available: Boolean(provider), provider: provider ?? null, data: (await listPhoneCalls(owner.userId)).map(callView) });
   });
 
   app.post("/v1/account/calls", async (c) => {
-    const owner = await linkedWebCallOwner(c);
+    // Dashboard users resolve to their linked Telegram owner; SDK callers use
+    // the project/end-user session established by the v1 middleware.
+    const owner = await linkedWebCallOwner(c) ?? sdkUser(c);
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
     if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
@@ -734,6 +740,70 @@ export function registerSdkApi(app: Hono): void {
       return c.json({ id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() }, 201);
     } catch (error) {
       return apiError(c, 400, "invalid_phone_call", error instanceof Error ? error.message : "Invalid call request.");
+    }
+  });
+
+  app.post("/v1/meetings/prepare", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { clientName?: unknown; objective?: unknown; clientContext?: unknown };
+    try {
+      return c.json(await prepareRecallMeetingMission(owner.userId, {
+        clientName: body.clientName,
+        ...(body.objective !== undefined ? { objective: body.objective } : {}),
+        ...(body.clientContext !== undefined ? { clientContext: body.clientContext } : {}),
+      }));
+    } catch (error) {
+      return apiError(c, 400, "invalid_meeting_brief", error instanceof Error ? error.message : "Could not prepare the meeting brief.");
+    }
+  });
+
+  app.post("/v1/meetings", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
+    try {
+      const result = await joinRecallMeeting(owner.userId, body as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string });
+      if (prior.key) {
+        session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
+        await saveSession(owner.userId, session);
+      }
+      return c.json(result, 201);
+    } catch (error) {
+      return apiError(c, 400, "meeting_join_failed", error instanceof Error ? error.message : "Could not join the meeting.");
+    }
+  });
+
+  app.post("/v1/meetings/preparations/:preparationId/join", async (c) => {
+    const owner = sdkUser(c)!;
+    try {
+      return c.json(await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId")), 201);
+    } catch (error) {
+      return apiError(c, 400, "meeting_join_failed", error instanceof Error ? error.message : "Could not join the prepared calendar meeting.");
+    }
+  });
+
+  app.get("/v1/meetings/:meetingId", async (c) => {
+    const meeting = await getRecallMeetingForUser(sdkUser(c)!.userId, c.req.param("meetingId"));
+    return meeting ? c.json(meeting) : apiError(c, 404, "meeting_not_found", "Meeting not found.");
+  });
+
+  app.post("/v1/meetings/:meetingId/leave", async (c) => {
+    try {
+      return c.json(await leaveRecallMeeting(sdkUser(c)!.userId, c.req.param("meetingId")));
+    } catch (error) {
+      return apiError(c, 400, "meeting_leave_failed", error instanceof Error ? error.message : "Could not leave the meeting.");
+    }
+  });
+
+  app.get("/v1/meetings/:meetingId/context", async (c) => {
+    try {
+      return c.json(await lookupRecallMeetingContext(sdkUser(c)!.userId, c.req.param("meetingId"), c.req.query("query") ?? ""));
+    } catch (error) {
+      return apiError(c, 404, "meeting_context_unavailable", error instanceof Error ? error.message : "Meeting context is unavailable.");
     }
   });
 

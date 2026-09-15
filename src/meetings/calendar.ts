@@ -15,6 +15,7 @@ export interface CalendarMeetingCandidate {
 
 const CALENDAR_TRIGGER_LIFECYCLES: Record<string, CalendarMeetingLifecycle> = {
   GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CREATED_TRIGGER: "created",
+  GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_CHANGE_TRIGGER: "updated",
   GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_UPDATED_TRIGGER: "updated",
   GOOGLECALENDAR_GOOGLE_CALENDAR_EVENT_SYNC_TRIGGER: "sync",
   GOOGLECALENDAR_EVENT_STARTING_SOON_TRIGGER: "starting_soon",
@@ -108,8 +109,11 @@ export function parseGoogleCalendarMeetingTrigger(triggerSlug: unknown, payload:
   const source = [event, root];
   const meetingUrl = conferenceUrl(source);
   const calendarEventId = firstText(source, ["eventId", "event_id", "calendarEventId", "calendar_event_id", "id"], 240);
-  if (!meetingUrl && lifecycle !== "cancelled") return undefined;
   const title = firstText(source, ["summary", "title", "eventTitle", "event_title", "name"], 180);
+  // For an update that removes its conference link, retain just enough stable
+  // event identity to reconcile and cancel a previously scheduled bot.
+  // Ignore unrelated non-meeting events that have no stable Calendar ID.
+  if (!meetingUrl && lifecycle !== "cancelled" && !calendarEventId) return undefined;
   const startAt = firstNestedText(source, ["start", "startTime", "start_time"], 80) ?? firstText(source, ["startAt", "start_at", "startTime", "start_time"], 80);
   const endAt = firstNestedText(source, ["end", "endTime", "end_time"], 80) ?? firstText(source, ["endAt", "end_at", "endTime", "end_time"], 80);
   return {

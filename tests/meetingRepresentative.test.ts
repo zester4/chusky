@@ -15,10 +15,22 @@ import {
 test("meeting representative profile is disabled by default and requires a mandate before activation", () => {
   const profile = defaultMeetingRepresentativeProfile();
   assert.equal(profile.enabled, false);
+  assert.equal(profile.autoJoinCalendar, false);
   assert.throws(() => normalizeMeetingRepresentativeProfile({ enabled: true }, profile), /objective of at least 8 characters/);
   const enabled = normalizeMeetingRepresentativeProfile({ enabled: true, role: "sales", objective: "Qualify and progress suitable leads" }, profile);
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.role, "sales");
+});
+
+test("calendar auto-join requires an enabled owner-configured representative", () => {
+  const defaults = defaultMeetingRepresentativeProfile();
+  assert.throws(() => normalizeMeetingRepresentativeProfile({ autoJoinCalendar: true }, defaults), /enabled representative/);
+  const profile = normalizeMeetingRepresentativeProfile({
+    enabled: true,
+    objective: "Represent me in approved customer meetings",
+    autoJoinCalendar: true,
+  }, defaults);
+  assert.equal(profile.autoJoinCalendar, true);
 });
 
 test("meeting profile accepts direct routine actions but rejects broad and high-impact Composio tools", () => {
