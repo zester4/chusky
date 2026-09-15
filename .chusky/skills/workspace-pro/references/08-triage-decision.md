@@ -1,6 +1,6 @@
 # Triage Decision Engine
 
-This is the core judgment process for every trigger. Run it before acting.
+This is the core judgment process for every trigger from any system (email, calendar, GitHub, Slack, CRM, forms, webhooks, boards, sheets, reminders, or anything else). Run it before acting.
 
 ## The Five Questions
 
