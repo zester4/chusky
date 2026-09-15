@@ -451,7 +451,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     activeMeetings: meetings.filter((meeting) => ["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"].includes(meeting.status)).length,
     preparedMeetings: preparations.filter((preparation) => ["prepared", "auto_scheduled"].includes(preparation.status)).length,
     meetingContacts: contacts.length,
-    mcpConnections: mcpConnections.length,
+    mcpConnections: config.mcpEnabled ? mcpConnections.length : 0,
     voiceReplies: session.voiceReplies === true,
   });
   if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
