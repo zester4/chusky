@@ -13,6 +13,8 @@ import {
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
+  getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
+  searchMemories, readScratchpad,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -36,6 +38,11 @@ import { telegramCardFallbackHtml, telegramCardFallbackKeyboard, telegramCardRic
 import { MODEL_PROVIDER_LABELS, isModelProvider, modelsForProvider, type ModelProvider } from "./modelProviders.js";
 import { listBlandCuratedVoices, type BlandSelectableVoice } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voiceSettings.js";
+import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
+import {
+  cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting,
+  listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission,
+} from "./meetings/service.js";
 
 const activeRequests = new Map<number, AbortController>();
 const MODEL_PAGE_SIZE = 8;
@@ -269,7 +276,67 @@ async function editVoiceProvider(ctx: Context, messageId: number, provider: Live
   await editCard(ctx, messageId, voicePickerCard(provider, voices, current, page));
 }
 
-function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; voiceReplies: boolean }): TelegramCard {
+function telegramMeetingParticipantLine(participant: { name?: string; isHost?: boolean; status?: string }): string {
+  const name = escapeTelegramHtml(participant.name?.trim() || "Unknown participant");
+  return `• ${name}${participant.isHost ? " · host" : ""}${participant.status ? ` · ${escapeTelegramHtml(participant.status)}` : ""}`;
+}
+
+function telegramMeetingLine(meeting: {
+  id: string; platform: string; status: string; title?: string; interactionMode?: string;
+  participantRoster?: Array<{ name?: string; isHost?: boolean; status?: string }>;
+}): string {
+  const present = (meeting.participantRoster ?? []).filter((person) => person.status !== "left").map((person) => person.name).filter(Boolean).slice(0, 8);
+  return `• <code>${escapeTelegramHtml(meeting.id)}</code> · <b>${escapeTelegramHtml(meeting.status)}</b> · ${escapeTelegramHtml(meeting.platform)} · ${escapeTelegramHtml(meeting.title || "Untitled meeting")}`
+    + `${meeting.interactionMode ? ` · ${escapeTelegramHtml(meeting.interactionMode)}` : ""}`
+    + `${present.length ? `\n  Participants: ${escapeTelegramHtml(present.join(", "))}` : ""}`;
+}
+
+function telegramPreparationLine(preparation: {
+  id: string; status: string; title?: string; startAt?: string; participants?: string[]; meetingUrlAvailable?: boolean;
+}): string {
+  const time = preparation.startAt ? new Date(preparation.startAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "time not supplied";
+  const people = preparation.participants?.filter(Boolean).slice(0, 8).join(", ");
+  return `• <code>${escapeTelegramHtml(preparation.id)}</code> · <b>${escapeTelegramHtml(preparation.status)}</b> · ${escapeTelegramHtml(preparation.title || "Untitled event")}\n  ${escapeTelegramHtml(time)}${people ? ` · ${escapeTelegramHtml(people)}` : ""}${preparation.meetingUrlAvailable === false ? " · no supported meeting link" : ""}`;
+}
+
+function telegramMeetingDetail(meeting: any, contacts: any[]): string {
+  const lines = [
+    `<b>${escapeTelegramHtml(meeting.title || "Meeting assistant")}</b>`,
+    `<code>${escapeTelegramHtml(meeting.id)}</code> · ${escapeTelegramHtml(meeting.platform)} · <b>${escapeTelegramHtml(meeting.status)}</b>`,
+    `Mode: ${escapeTelegramHtml(meeting.interactionMode || "copilot")}`,
+  ];
+  if (meeting.mission) lines.push(`Mission: ${escapeTelegramHtml(meeting.mission.clientName)} — ${escapeTelegramHtml(meeting.mission.objective || "")}`);
+  if (meeting.participantRoster?.length) {
+    lines.push(`<b>Participants</b>\n${meeting.participantRoster.map(telegramMeetingParticipantLine).join("\n")}`);
+  }
+  if (contacts.length) {
+    lines.push(`<b>Captured follow-up contacts</b>\n${contacts.map((contact) => `• <code>${escapeTelegramHtml(contact.id)}</code> · ${escapeTelegramHtml(contact.participantName)} · ${escapeTelegramHtml(contact.email || contact.phone || "no contact")}${contact.interest ? `\n  ${escapeTelegramHtml(contact.interest)}` : ""}`).join("\n")}`);
+  }
+  if (meeting.outcome) {
+    const outcome = meeting.outcome;
+    lines.push(`<b>Outcome</b>\n${escapeTelegramHtml(outcome.summary || "Outcome recorded")}`);
+    if (Array.isArray(outcome.decisions) && outcome.decisions.length) lines.push(`Decisions: ${escapeTelegramHtml(outcome.decisions.join("; "))}`);
+    if (Array.isArray(outcome.actionItems) && outcome.actionItems.length) lines.push(`Action items: ${escapeTelegramHtml(outcome.actionItems.map((item: any) => `${item.task}${item.owner ? ` (${item.owner})` : ""}`).join("; "))}`);
+  }
+  if (meeting.history?.length) {
+    const recent = meeting.history.slice(-6).map((message: any) => `${message.role === "assistant" ? "Chusky" : "Meeting"}: ${message.content}`).join("\n");
+    lines.push(`<b>Recent meeting context</b>\n${escapeTelegramHtml(recent)}`);
+  }
+  return lines.join("\n\n");
+}
+
+function telegramMeetingJoinFields(raw: string): { meetingUrl: string; clientName?: string; objective?: string; clientContext?: string } | undefined {
+  const fields = raw.split("|").map((field) => field.trim());
+  if (!fields[0]) return undefined;
+  return {
+    meetingUrl: fields[0],
+    ...(fields[1] ? { clientName: fields[1] } : {}),
+    ...(fields[2] ? { objective: fields[2] } : {}),
+    ...(fields[3] ? { clientContext: fields[3] } : {}),
+  };
+}
+
+function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; activeMeetings: number; preparedMeetings: number; meetingContacts: number; mcpConnections: number; voiceReplies: boolean }): TelegramCard {
   const connectionLine = input.connectedApps
     ? `🟢 ${input.connectedApps} app${input.connectedApps === 1 ? "" : "s"} connected across ${input.connectedAccounts} account${input.connectedAccounts === 1 ? "" : "s"}`
     : "⚪ No connected apps yet";
@@ -282,15 +349,67 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       `⚡ ${input.triggerCount} active trigger${input.triggerCount === 1 ? "" : "s"}`,
       `⏰ ${input.activeReminders} reminder${input.activeReminders === 1 ? "" : "s"} · 🗓️ ${input.activeJobs} recurring schedule${input.activeJobs === 1 ? "" : "s"}`,
       `📋 ${input.activeTasks} task${input.activeTasks === 1 ? "" : "s"} in progress · ${input.voiceReplies ? "🔊 voice replies on" : "🔇 voice replies off"}`,
+      `🤝 ${input.activeMeetings} live meeting${input.activeMeetings === 1 ? "" : "s"} · ${input.preparedMeetings} prepared · ${input.meetingContacts} follow-up contact${input.meetingContacts === 1 ? "" : "s"}`,
+      `🔗 ${input.mcpConnections} third-party MCP server${input.mcpConnections === 1 ? "" : "s"} connected`,
     ],
     detail: "Connected accounts, tasks, and approvals remain private to your Chusky account.",
     buttons: [
       [{ text: "🧩 Apps", callbackData: "home:apps", style: "primary" }, { text: "⚡ Triggers", callbackData: "home:triggers" }],
       [{ text: "⏰ Reminders", callbackData: "home:reminders" }, { text: "🗓️ Schedules", callbackData: "home:schedules" }],
       [{ text: "📋 Tasks", callbackData: "home:tasks" }, { text: "✅ Approvals", callbackData: "home:approvals" }],
-      [{ text: "🔊 Voice", callbackData: "home:voice" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
+      [{ text: "🤝 Meetings", callbackData: "home:meetings", style: "primary" }, { text: "🔊 Voice", callbackData: "home:voice" }],
+      [{ text: "MCP servers", callbackData: "home:mcp" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
     ],
   };
+}
+
+function mcpAuthLabel(auth: "none" | "bearer" | "oauth"): string {
+  return auth === "none" ? "public" : auth === "oauth" ? "OAuth" : "access token";
+}
+
+async function showMcpWorkspace(ctx: Context, messageId?: number): Promise<void> {
+  if (isTelegramShared(ctx)) {
+    const card: TelegramCard = {
+      title: "Third-party MCP",
+      body: ["MCP connections are private to your Chusky account. Open /home in a private chat to manage them."],
+      buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
+    };
+    if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
+    return;
+  }
+
+  const catalog = listMcpCatalog();
+  if (catalog.errors.length) logger.warn({ count: catalog.errors.length }, "Some MCP catalog entries were skipped");
+  const connections = await listMcpConnections(ctx.from!.id);
+  const connected = new Set(connections.map((connection) => connection.serverId));
+  const servers = catalog.servers.slice(0, 8);
+  const buttons: NonNullable<TelegramCard["buttons"]> = [];
+
+  for (const server of servers) {
+    const serverConnected = connected.has(server.id);
+    const statusButton = { text: serverConnected ? "Connected" : "Status", callbackData: `home:mcp:s:${server.id}`, style: serverConnected ? "success" as const : undefined };
+    if (server.enabled === false) {
+      buttons.push([statusButton]);
+    } else if (serverConnected) {
+      buttons.push([statusButton, { text: "Disconnect", callbackData: `home:mcp:d:${server.id}`, style: "danger" as const }]);
+    } else {
+      buttons.push([{ text: "Connect", callbackData: `home:mcp:c:${server.id}`, style: "primary" as const }, statusButton]);
+    }
+  }
+  buttons.push([{ text: "Refresh status", callbackData: "home:mcp:r" }, { text: "← Workspace", callbackData: "home:refresh" }]);
+
+  const body = !config.mcpEnabled
+    ? ["Third-party MCP is currently disabled for this deployment.", "No MCP server connections can be changed until it is enabled."]
+    : servers.length
+      ? servers.map((server) => `${server.name} — ${server.enabled === false ? "unavailable" : connected.has(server.id) ? "connected" : "not connected"} · ${mcpAuthLabel(server.auth)}`)
+      : ["No third-party MCP servers are currently published in Chusky's catalog."];
+  const detail = !config.mcpEnabled
+    ? "An operator must set MCP_ENABLED=true and publish approved server definitions in src/mcp/mcp.json."
+    : servers.length
+      ? "Public MCP servers can be connected here. OAuth and access-token servers use a secure dashboard/API handoff; never paste credentials into Telegram. Connected tools remain account-scoped and risky actions still require approval."
+      : "The catalog is empty. Approved servers are added by the Chusky operator; user credentials never belong in the catalog.";
+  const card: TelegramCard = { title: "Third-party MCP", body, detail, buttons };
+  if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
 }
 
 async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
@@ -303,7 +422,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
     return;
   }
-  const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks] = await Promise.all([
+  const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks, meetings, preparations, contacts, mcpConnections] = await Promise.all([
     getSession(ctx.from!.id),
     getToolkitStates(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace app summary"); return []; }),
     listApprovals(ctx.from!.id, 50),
@@ -312,6 +431,10 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     listReminders(ctx.from!.id),
     listJobs(ctx.from!.id),
     listTasks(ctx.from!.id),
+    listRecallMeetings(ctx.from!.id, 20),
+    listCalendarMeetingPreparations(ctx.from!.id, 20),
+    listMeetingContacts(ctx.from!.id, 50),
+    listMcpConnections(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace MCP summary"); return []; }),
   ]);
   const connected = states.filter((state) => state.connected);
   const activeWorkerStatuses = new Set(["queued", "cancel_requested", "interrupted", "requires_approval", "requires_tool_request"]);
@@ -325,6 +448,10 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     activeReminders: reminders.filter((reminder) => reminder.status === "scheduled").length,
     activeJobs: jobs.filter((job) => job.status === "active").length,
     activeTasks: tasks.filter((task) => !["completed", "cancelled", "failed"].includes(task.status)).length,
+    activeMeetings: meetings.filter((meeting) => ["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"].includes(meeting.status)).length,
+    preparedMeetings: preparations.filter((preparation) => ["prepared", "auto_scheduled"].includes(preparation.status)).length,
+    meetingContacts: contacts.length,
+    mcpConnections: mcpConnections.length,
     voiceReplies: session.voiceReplies === true,
   });
   if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
@@ -471,6 +598,19 @@ async function acquireQueuedLock(userId: number, token: string, signal: AbortSig
     if (signal.aborted) throw new DOMException("Request cancelled", "AbortError");
     if (Date.now() >= deadline) throw new Error("Timed out waiting for another Chusky request to finish");
     await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+async function withTelegramUserLock<T>(userId: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const lockToken = randomUUID();
+  activeRequests.set(userId, controller);
+  try {
+    await acquireQueuedLock(userId, lockToken, controller.signal);
+    return await work(controller.signal);
+  } finally {
+    await releaseUserLock(userId, lockToken).catch(() => undefined);
+    if (activeRequests.get(userId) === controller) activeRequests.delete(userId);
   }
 }
 
@@ -748,6 +888,7 @@ export function registerHandlers(bot: Bot): void {
       `<b>Active model:</b> <code>${model}</code>\n\n` +
       `<b>Commands:</b>\n` +
       `  /home — open your Chusky workspace\n` +
+      `  /mcp — view and manage third-party MCP servers\n` +
       `  /connect <code>[toolkit]</code> — connect an app\n` +
       `  /apps — see connected apps\n` +
       `  /model — switch AI model\n` +
@@ -762,6 +903,9 @@ export function registerHandlers(bot: Bot): void {
       `  /accounts [toolkit] — list connected Composio accounts\n` +
       `  /api — create and manage project API keys\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
+      `  /meetings — meeting status, participants, calendar preparations, and contacts\n` +
+      `  /meeting profile|prepare|join|join-prepared|context|leave — meeting controls\n` +
+      `  /voice list|set — choose live-call voices\n` +
       `  /channel — choose a private channel or iMessage group to link\n` +
       `  /linkgroup — open the group-link menu\n` +
       `  /group-access owner|all — set iMessage group access (inside the group)\n` +
@@ -778,6 +922,7 @@ export function registerHandlers(bot: Bot): void {
     await replyHtml(ctx,
       `<b>Chusky — Commands</b>\n\n` +
       `/home — connected apps, tasks, approvals, triggers, and call voice settings\n` +
+      `/mcp — view and manage third-party MCP servers\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -788,6 +933,9 @@ export function registerHandlers(bot: Bot): void {
       `/export — download conversation as .txt\n` +
       `/usage — messages sent, model, turns\n` +
       `/voice on|off|status — control spoken replies\n` +
+      `/voice list|set twilio|meetings|bland — choose a live-call voice\n` +
+      `/meetings [meeting id] — meetings, participants, outcomes, and contacts\n` +
+      `/meeting profile|prepare|join|join-prepared|context|leave — meeting controls\n` +
       `/video-status [job id] — check video generation status\n` +
       `/agents — list recent worker delegations\n` +
       `/agent-status <code>handoff-id</code> — inspect one worker run\n` +
@@ -837,6 +985,16 @@ export function registerHandlers(bot: Bot): void {
     }
   });
 
+  bot.command("mcp", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    try {
+      await showMcpWorkspace(ctx);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id }, "Could not render Telegram MCP workspace");
+      await ctx.reply("❌ I could not load MCP connections right now. Please try /mcp again.");
+    }
+  });
+
   // Project API keys are deliberately a private-chat operation. A key sent in
   // a Telegram group would be visible to every group participant and cannot be
   // safely recalled after delivery.
@@ -879,25 +1037,178 @@ export function registerHandlers(bot: Bot): void {
     await ctx.reply("🛑 Cancellation requested.");
   });
 
+  // /meetings and /meeting are the Telegram transport for the same meeting
+  // lifecycle exposed by the web dashboard and CLI. Keep this owner-private:
+  // participant names, meeting history, briefs, and captured contacts must
+  // never be rendered into a shared Telegram group.
+  bot.command("meetings", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.reply("For privacy, meeting details are available only in your private chat with Chusky."); return; }
+    const requestedId = String(ctx.match ?? "").trim();
+    try {
+      if (requestedId) {
+        const safe = await getRecallMeetingForUser(ctx.from!.id, requestedId);
+        const record = safe ? (await listRecallMeetings(ctx.from!.id, 20)).find((item) => item.id === requestedId) : undefined;
+        if (!safe || !record) { await ctx.reply("I couldn't find that meeting in your account."); return; }
+        const contacts = (await listMeetingContacts(ctx.from!.id, 50, requestedId));
+        await replyHtml(ctx, telegramMeetingDetail(record, contacts));
+        return;
+      }
+      const [safeMeetings, records, preparations, contacts] = await Promise.all([
+        listRecallMeetingsForUser(ctx.from!.id, 20),
+        listRecallMeetings(ctx.from!.id, 20),
+        listCalendarMeetingPreparations(ctx.from!.id, 20),
+        listMeetingContacts(ctx.from!.id, 50),
+      ]);
+      const recordsById = new Map(records.map((record) => [record.id, record]));
+      const active = safeMeetings.map((safe) => recordsById.get(safe.id) ?? safe).map((meeting) => telegramMeetingLine(meeting as any));
+      const prepared = preparations.filter((item) => ["prepared", "auto_scheduled"].includes(item.status)).map(telegramPreparationLine);
+      const contactLines = contacts.slice(0, 12).map((contact) => `• <code>${escapeTelegramHtml(contact.id)}</code> · ${escapeTelegramHtml(contact.participantName)} · ${escapeTelegramHtml(contact.email || contact.phone || "no contact")}`);
+      const sections = [
+        `<b>Meetings</b>\n${active.length ? active.join("\n\n") : "No recent meetings."}`,
+        `<b>Prepared calendar meetings</b>\n${prepared.length ? prepared.join("\n\n") : "No prepared calendar meetings."}`,
+        `<b>Captured follow-up contacts</b>\n${contactLines.length ? contactLines.join("\n") : "No captured contacts."}`,
+        `Open a meeting with <code>/meetings mtg_…</code>. Use <code>/meeting join-prepared cmp_…</code> to join a prepared calendar event.`,
+      ];
+      await replyHtml(ctx, sections.join("\n\n"));
+    } catch (error) {
+      await ctx.reply(`❌ Could not load meetings: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  });
+
+  bot.command("meeting", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.reply("For privacy, meeting controls are available only in your private chat with Chusky."); return; }
+    const raw = String(ctx.match ?? "").trim();
+    const separator = raw.search(/\s/);
+    const action = (separator < 0 ? raw : raw.slice(0, separator)).toLowerCase();
+    const rest = separator < 0 ? "" : raw.slice(separator).trim();
+    const uid = ctx.from!.id;
+    try {
+      if (action === "profile") {
+        if (!rest) {
+          await replyHtml(ctx, `<b>Meeting representative profile</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(await getMeetingRepresentativeProfile(uid), null, 2))}</pre>\n\nUpdate it with <code>/meeting profile set {"enabled":true,...}</code>.`);
+          return;
+        }
+        if (!rest.toLowerCase().startsWith("set ")) { await ctx.reply("Usage: /meeting profile | /meeting profile set <JSON>"); return; }
+        let patch: unknown;
+        try { patch = JSON.parse(rest.slice(4).trim()); } catch { await ctx.reply("Profile updates must be valid JSON. Example: /meeting profile set {\"enabled\":true,\"objective\":\"Represent the company clearly and move meetings toward useful next steps\"}"); return; }
+        const result = await withTelegramUserLock(uid, async () => {
+          const previous = await getMeetingRepresentativeProfile(uid);
+          const updated = await updateMeetingRepresentativeProfile(uid, patch);
+          const autoJoinReconciliation = previous.autoJoinCalendar && !updated.autoJoinCalendar ? await cancelAutomaticCalendarMeetingJoins(uid) : undefined;
+          return { updated, autoJoinReconciliation };
+        });
+        await replyHtml(ctx, `✅ <b>Meeting representative profile updated.</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(result.updated, null, 2))}</pre>${result.autoJoinReconciliation ? `\n\nCalendar auto-join cleanup: ${escapeTelegramHtml(JSON.stringify(result.autoJoinReconciliation))}` : ""}`);
+        return;
+      }
+      if (action === "prepare") {
+        const fields = rest.split("|").map((field) => field.trim());
+        if (!fields[0]) { await ctx.reply("Usage: /meeting prepare <client name> | <objective> | <optional context>"); return; }
+        const brief = await prepareRecallMeetingMission(uid, { clientName: fields[0], ...(fields[1] ? { objective: fields[1] } : {}), ...(fields[2] ? { clientContext: fields[2] } : {}) });
+        await replyHtml(ctx, `✅ <b>Private meeting brief prepared</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(brief, null, 2))}</pre>\n\nThis only prepares context; it does not join or contact anyone.`);
+        return;
+      }
+      if (action === "join") {
+        if (!(await checkRateLimit(uid))) { await ctx.reply("💳 Easy there. Please wait a moment before starting another meeting action."); return; }
+        const fields = telegramMeetingJoinFields(rest);
+        if (!fields) { await ctx.reply("Usage: /meeting join <meeting URL> | <client name> | <objective> | <optional context>"); return; }
+        const meeting = await withTelegramUserLock(uid, (signal) => joinRecallMeeting(uid, fields, signal));
+        await replyHtml(ctx, `✅ <b>Meeting join started.</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(meeting, null, 2))}</pre>\n\nUse <code>/meetings</code> to see live status and participants.`);
+        return;
+      }
+      if (action === "join-prepared") {
+        if (!(await checkRateLimit(uid))) { await ctx.reply("💳 Easy there. Please wait a moment before starting another meeting action."); return; }
+        if (!/^cmp_[A-Za-z0-9_-]{1,96}$/.test(rest)) { await ctx.reply("Usage: /meeting join-prepared <calendar preparation id>"); return; }
+        const result = await withTelegramUserLock(uid, (signal) => joinPreparedCalendarMeeting(uid, rest, signal));
+        await replyHtml(ctx, `✅ <b>Prepared calendar meeting join started.</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(result, null, 2))}</pre>`);
+        return;
+      }
+      if (action === "context") {
+        const [meetingId, ...queryParts] = rest.split(/\s+/).filter(Boolean);
+        if (!meetingId || !queryParts.length) { await ctx.reply("Usage: /meeting context <meeting id> <question>"); return; }
+        const context = await lookupRecallMeetingContext(uid, meetingId, queryParts.join(" "));
+        await replyHtml(ctx, `<b>Meeting context</b>\n\n<pre>${escapeTelegramHtml(JSON.stringify(context, null, 2))}</pre>`);
+        return;
+      }
+      if (action === "leave") {
+        if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(rest)) { await ctx.reply("Usage: /meeting leave <meeting id>"); return; }
+        const meeting = await withTelegramUserLock(uid, (signal) => leaveRecallMeeting(uid, rest, signal));
+        await replyHtml(ctx, `✅ Meeting leave requested.\n\n<pre>${escapeTelegramHtml(JSON.stringify(meeting, null, 2))}</pre>`);
+        return;
+      }
+      if (action === "contacts") {
+        const contacts = await listMeetingContacts(uid, 50);
+        await replyHtml(ctx, contacts.length ? `<b>Captured follow-up contacts</b>\n\n${contacts.map((contact) => `• <code>${escapeTelegramHtml(contact.id)}</code> · ${escapeTelegramHtml(contact.participantName)} · ${escapeTelegramHtml(contact.email || contact.phone || "no contact")}\n  ${escapeTelegramHtml(contact.interest)}${contact.nextStep ? `\n  Next: ${escapeTelegramHtml(contact.nextStep)}` : ""}`).join("\n")}` : "No meeting follow-up contacts have been captured.");
+        return;
+      }
+      if (action === "contact-delete") {
+        if (!/^mct_[a-f0-9]{32}$/.test(rest)) { await ctx.reply("Usage: /meeting contact-delete <contact id>"); return; }
+        const removed = await deleteMeetingContact(uid, rest);
+        await ctx.reply(removed ? "✅ Meeting contact deleted." : "I couldn't find that meeting contact.");
+        return;
+      }
+      await ctx.reply("Usage: /meetings [meeting id] | /meeting profile | prepare <client> | join <url> | join-prepared <cmp_id> | context <id> <question> | leave <id> | contacts | contact-delete <id>");
+    } catch (error) {
+      logger.warn({ err: error, userId: uid, action }, "Telegram meeting command failed");
+      await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  });
+
   bot.command("voice", async (ctx) => {
     if (!(await guard(ctx))) return;
-    const action = (ctx.match?.trim() ?? "status").toLowerCase();
-    const current = (await getSession(ctx.from!.id)).voiceReplies === true;
-    if (action === "on" || action === "enable") {
+    const raw = String(ctx.match ?? "").trim();
+    const [action, provider, voiceId, ...voiceNameParts] = raw.split(/\s+/).filter(Boolean).map((item) => item.trim());
+    const normalizedAction = (action || "status").toLowerCase();
+    const currentSession = await getSession(ctx.from!.id);
+    const current = currentSession.voiceReplies === true;
+    if (normalizedAction === "on" || normalizedAction === "enable") {
       await setVoiceReplies(ctx.from!.id, true);
       await ctx.reply("🔊 Voice replies are on. I’ll send text and an audio reply after each response.");
       return;
     }
-    if (action === "off" || action === "disable") {
+    if (normalizedAction === "off" || normalizedAction === "disable") {
       await setVoiceReplies(ctx.from!.id, false);
       await ctx.reply("🔇 Voice replies are off. I’ll continue replying with text.");
       return;
     }
-    if (action === "status") {
-      await ctx.reply(current ? "🔊 Voice replies are on." : "🔇 Voice replies are off.");
+    if (normalizedAction === "status") {
+      await replyHtml(ctx, `${current ? "🔊" : "🔇"} <b>Telegram voice replies:</b> ${current ? "on" : "off"}\n\nTwilio: ${escapeTelegramHtml(liveVoiceCurrentLabel(currentSession, "twilio"))}\nBland: ${escapeTelegramHtml(liveVoiceCurrentLabel(currentSession, "bland"))}\nMeetings: ${escapeTelegramHtml(liveVoiceCurrentLabel(currentSession, "meetings"))}`);
       return;
     }
-    await ctx.reply("Usage: /voice on, /voice off, or /voice status");
+    if (normalizedAction === "list") {
+      const flux = FLUX_TTS_VOICES.map((voice) => `<code>${escapeTelegramHtml(voice.id)}</code> — ${escapeTelegramHtml(voice.name)} (${escapeTelegramHtml(voice.accent)} English)`).join("\n");
+      let bland = "Bland catalogue unavailable.";
+      if (config.blandApiKey) {
+        try {
+          const voices = await listBlandCuratedVoices(config.blandApiKey);
+          bland = voices.length ? voices.map((voice) => `<code>${escapeTelegramHtml(voice.id)}</code> — ${escapeTelegramHtml(voice.name)}`).join("\n") : "No Bland curated voices returned.";
+        } catch { bland = "Bland catalogue could not be loaded right now."; }
+      }
+      await replyHtml(ctx, `<b>Flux voices</b> (Twilio + meetings)\n${flux}\n\n<b>Bland curated voices</b>\n${bland}\n\nSet one with <code>/voice set twilio|meetings &lt;voice-id&gt;</code> or <code>/voice set bland &lt;uuid&gt; &lt;name&gt;</code>.`);
+      return;
+    }
+    if (normalizedAction === "set") {
+      if (provider !== "twilio" && provider !== "meetings" && provider !== "bland") { await ctx.reply("Usage: /voice set twilio|meetings <flux-voice-id> | /voice set bland <uuid> <name>"); return; }
+      if (!voiceId) { await ctx.reply("Usage: /voice set twilio|meetings <flux-voice-id> | /voice set bland <uuid> <name>"); return; }
+      try {
+        if (provider === "bland") {
+          const name = voiceNameParts.join(" ").trim();
+          if (!name || !config.blandApiKey) throw new Error("Bland voice selection needs a voice name and configured Bland catalogue");
+          const voices = await listBlandCuratedVoices(config.blandApiKey);
+          const selected = voices.find((voice) => voice.id.toLowerCase() === voiceId.toLowerCase());
+          if (!selected) throw new Error("That Bland voice is not in the current curated catalogue");
+          await setLiveVoicePreference(ctx.from!.id, "bland", { id: selected.id, name: selected.name });
+        } else {
+          const selected = FLUX_TTS_VOICES.find((voice) => voice.id === voiceId);
+          if (!selected) throw new Error("That Flux voice is not available");
+          await setLiveVoicePreference(ctx.from!.id, provider, selected.id);
+        }
+        await ctx.reply(`✅ ${provider} voice set to ${voiceId}.`);
+      } catch (error) { await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" }); }
+      return;
+    }
+    await ctx.reply("Usage: /voice list | /voice set twilio|meetings <flux-voice-id> | /voice set bland <uuid> <name> | /voice on | off | status");
   });
 
   bot.command("call", async (ctx) => {
@@ -1213,6 +1524,15 @@ export function registerHandlers(bot: Bot): void {
 
   bot.command("triggers", async (ctx) => {
     if (!(await guard(ctx))) return;
+    if (/^list$/i.test(String(ctx.match ?? "").trim())) {
+      try {
+        const triggers = await listTriggers(ctx.from!.id);
+        await replyHtml(ctx, triggers.length
+          ? `<b>Your Composio triggers</b>\n\n${triggers.map((trigger: any) => `• <code>${escapeTelegramHtml(String(trigger.id ?? trigger.trigger_id ?? "unknown"))}</code> · ${escapeTelegramHtml(String(trigger.trigger_slug ?? trigger.slug ?? "trigger"))} · ${escapeTelegramHtml(String(trigger.status ?? (trigger.enabled === false ? "disabled" : "active")))}`).join("\n")}`
+          : "You have no Composio triggers yet.");
+      } catch (error) { await ctx.reply(`❌ Could not load triggers: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" }); }
+      return;
+    }
     await ctx.reply("<b>Composio triggers</b>\n\nChoose an action. Chusky only shows apps connected to your account, and asks which account to use when you have more than one.", { parse_mode: "HTML", reply_markup: triggerMenuKeyboard() });
   });
 
@@ -1605,7 +1925,7 @@ export function registerHandlers(bot: Bot): void {
 
   // Workspace card actions. They deliberately reuse the existing command
   // handlers' data sources instead of creating a second session model.
-  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals|reminders|schedules|tasks|voice)$/, async (ctx) => {
+  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals|reminders|schedules|tasks|voice|meetings|mcp)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     const action = ctx.match[1];
@@ -1673,8 +1993,33 @@ export function registerHandlers(bot: Bot): void {
         await editCard(ctx, messageId, card);
         return;
       }
+      if (action === "meetings") {
+        if (isTelegramShared(ctx)) { await ctx.editMessageText("Meeting details are available only in your private chat with Chusky."); return; }
+        const [meetings, preparations, contacts] = await Promise.all([
+          listRecallMeetings(ctx.from!.id, 20),
+          listCalendarMeetingPreparations(ctx.from!.id, 20),
+          listMeetingContacts(ctx.from!.id, 50),
+        ]);
+        const active = meetings.filter((meeting) => ["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"].includes(meeting.status));
+        const prepared = preparations.filter((item) => ["prepared", "auto_scheduled"].includes(item.status));
+        const body = [
+          active.length ? `Live / scheduled\n${active.slice(0, 8).map((meeting) => `${meeting.status} · ${meeting.platform} · ${meeting.title || "Untitled"}${meeting.participantRoster?.length ? ` · ${meeting.participantRoster.filter((person) => person.status !== "left").map((person) => person.name).filter(Boolean).slice(0, 5).join(", ")}` : ""}`).join("\n")}` : "No live or scheduled meetings.",
+          prepared.length ? `Prepared calendar events\n${prepared.slice(0, 8).map((item) => `${item.id} · ${item.title || "Untitled"} · ${item.startAt ? new Date(item.startAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }) : "time not supplied"}`).join("\n")}` : "No prepared calendar events.",
+          `Captured follow-up contacts: ${contacts.length}`,
+        ];
+        const buttons: NonNullable<TelegramCard["buttons"]> = [];
+        for (const preparation of prepared.slice(0, 6)) buttons.push([{ text: `Join ${preparation.title || preparation.id}`.slice(0, 54), callbackData: `meet:join-prepared:${preparation.id}`, style: "primary" }]);
+        for (const meeting of active.filter((item) => item.status !== "ended").slice(0, 4)) buttons.push([{ text: `Leave ${meeting.title || meeting.id}`.slice(0, 54), callbackData: `meet:leave:${meeting.id}`, style: "danger" }]);
+        buttons.push([{ text: "Open full meeting list", callbackData: "meet:open" }, { text: "← Workspace", callbackData: "home:refresh" }]);
+        await editCard(ctx, messageId, { title: "🤝 Meetings", body, detail: "Participant rosters are live meeting context. Calendar preparation metadata is safe and link-free; use /meeting for briefs, direct joins, context lookup, and contact review.", buttons });
+        return;
+      }
       if (action === "voice") {
         await editVoiceSettings(ctx, messageId);
+        return;
+      }
+      if (action === "mcp") {
+        await showMcpWorkspace(ctx, messageId);
         return;
       }
       const pending = (await listApprovals(ctx.from!.id, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now()).slice(0, 8);
@@ -1692,6 +2037,131 @@ export function registerHandlers(bot: Bot): void {
       await ctx.editMessageText("❌ I could not load that workspace view. Use /home to try again.");
     }
   });
+
+  bot.callbackQuery(/^home:mcp:(r|c|d|s)(?::([A-Za-z0-9_-]{1,48}))?$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("MCP connections are available only in your private chat with Chusky."); return; }
+    const action = ctx.match[1];
+    const serverId = ctx.match[2] ?? "";
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    try {
+      if (action === "r") {
+        await showMcpWorkspace(ctx, messageId);
+        return;
+      }
+      const server = listMcpCatalog().servers.find((entry) => entry.id === serverId);
+      if (!server) throw new Error("That MCP server is no longer available");
+      if (action === "s") {
+        await showMcpWorkspace(ctx, messageId);
+        return;
+      }
+      if (server.enabled === false) throw new Error("That MCP server is no longer available");
+      if (action === "d") {
+        const removed = await disconnectMcpServer(ctx.from!.id, serverId);
+        if (!removed) throw new Error("That MCP server is not connected to your account");
+        await showMcpWorkspace(ctx, messageId);
+        return;
+      }
+      if (server.auth !== "none") {
+        const authMethod = server.auth === "oauth" ? "OAuth" : "an access token";
+        await ctx.editMessageText(
+          `<b>${escapeTelegramHtml(server.name)}</b> needs ${authMethod}.\n\n` +
+          "For your security, do not send credentials in Telegram. Complete the connection through the authenticated Chusky dashboard/API, then return here and tap Refresh status.",
+          { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("Refresh status", "home:mcp:r").text("← MCP servers", "home:mcp") },
+        );
+        return;
+      }
+      await connectMcpServer(ctx.from!.id, serverId);
+      await showMcpWorkspace(ctx, messageId);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id, action, serverId }, "Telegram MCP action failed");
+      await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("← MCP servers", "home:mcp"),
+      });
+    }
+  });
+
+  bot.callbackQuery(/^meet:(open|join-prepared|leave)(?::([A-Za-z0-9_-]+))?$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.editMessageText("Meeting details are available only in your private chat with Chusky."); return; }
+    const action = ctx.match[1];
+    const id = ctx.match[2] ?? "";
+    try {
+      if (action === "open") {
+        await ctx.editMessageText("Use /meetings to view live participants, meeting outcomes, prepared calendar events, and captured follow-up contacts.");
+        return;
+      }
+      if (action === "join-prepared") {
+        if (!/^cmp_[A-Za-z0-9_-]{1,96}$/.test(id)) throw new Error("Invalid calendar preparation ID");
+        if (!(await checkRateLimit(ctx.from!.id))) throw new Error("Please wait a moment before starting another meeting action");
+        const result = await withTelegramUserLock(ctx.from!.id, (signal) => joinPreparedCalendarMeeting(ctx.from!.id, id, signal));
+        await ctx.editMessageText(`✅ Prepared calendar meeting join started${(result as any).id ? `: ${(result as any).id}` : "."}`);
+        return;
+      }
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) throw new Error("Invalid meeting ID");
+      const result = await withTelegramUserLock(ctx.from!.id, (signal) => leaveRecallMeeting(ctx.from!.id, id, signal));
+      await ctx.editMessageText(`✅ Meeting leave requested${(result as any).id ? ` for ${(result as any).id}` : "."}`);
+    } catch (error) {
+      await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  });
+
+  // Read-only collection commands keep Telegram at parity with the CLI while
+  // leaving writes to the normal agent/tool path. These are private because
+  // memories, scratchpad notes, history, and approvals can be sensitive.
+  for (const command of ["history", "memory", "scratchpad", "reminders", "jobs", "tasks", "approvals"] as const) {
+    bot.command(command, async (ctx) => {
+      if (!(await guard(ctx))) return;
+      if (isTelegramShared(ctx)) { await ctx.reply(`For privacy, /${command} is available only in your private chat with Chusky.`); return; }
+      const uid = ctx.from!.id;
+      try {
+        if (command === "history") {
+          const history = (await getSession(uid)).history.slice(-20);
+          await replyHtml(ctx, history.length ? `<b>Recent history</b>\n\n${history.map((message) => `${message.role === "assistant" ? "Chusky" : "You"}: ${escapeTelegramHtml(message.content)}`).join("\n\n")}` : "Your private history is empty.");
+          return;
+        }
+        if (command === "memory") {
+          const memories = await searchMemories(uid, String(ctx.match ?? "").trim() || undefined, { limit: 30 });
+          await replyHtml(ctx, memories.length ? `<b>Saved memories</b>\n\n${memories.map((memory) => `• <b>${escapeTelegramHtml(memory.key)}</b> · ${escapeTelegramHtml(memory.category)}\n  ${escapeTelegramHtml(memory.value)}`).join("\n")}` : "No matching saved memories.");
+          return;
+        }
+        if (command === "scratchpad") {
+          const entries = await readScratchpad(uid, String(ctx.match ?? "").trim() || undefined);
+          const lines = Object.entries(entries).map(([key, entry]) => `• <b>${escapeTelegramHtml(key)}</b>\n  ${escapeTelegramHtml(entry.content)}`);
+          await replyHtml(ctx, lines.length ? `<b>Scratchpad</b>\n\n${lines.join("\n")}` : "Your scratchpad is empty.");
+          return;
+        }
+        if (command === "reminders") {
+          const reminders = await listReminders(uid);
+          await replyHtml(ctx, reminders.length ? `<b>Upcoming reminders</b>\n\n${reminders.map((reminder) => `• <code>${escapeTelegramHtml(reminder.id)}</code> · ${escapeTelegramHtml(new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }))}\n  ${escapeTelegramHtml(reminder.text)}`).join("\n")}` : "No active reminders.");
+          return;
+        }
+        if (command === "jobs") {
+          const jobs = await listJobs(uid);
+          await replyHtml(ctx, jobs.length ? `<b>Recurring schedules</b>\n\n${jobs.map((job) => `• <code>${escapeTelegramHtml(job.id)}</code> · ${escapeTelegramHtml(job.cron)}\n  ${escapeTelegramHtml(job.text)}`).join("\n")}` : "No active recurring schedules.");
+          return;
+        }
+        if (command === "tasks") {
+          const tasks = (await listTasks(uid)).filter((task) => !["completed", "cancelled"].includes(task.status));
+          await replyHtml(ctx, tasks.length ? `<b>Active tasks</b>\n\n${tasks.map((task) => `• <code>${escapeTelegramHtml(task.id)}</code> · <b>${escapeTelegramHtml(task.status)}</b>\n  ${escapeTelegramHtml(task.title)}\n  ${escapeTelegramHtml(task.objective)}`).join("\n")}` : "No active tasks.");
+          return;
+        }
+        const approvals = (await listApprovals(uid, 50)).filter((approval) => approval.status === "pending" && approval.expiresAt > Date.now());
+        await replyCard(ctx, {
+          title: "✅ Pending approvals",
+          body: approvals.length ? approvals.slice(0, 8).map((approval) => `⚠️ ${approval.toolSlug} · ${approval.id}`) : ["Nothing is waiting for approval."],
+          detail: "Review an approval before a risky external action runs.",
+          buttons: approvals.length ? approvals.slice(0, 8).map((approval) => [{ text: `Review ${approval.toolSlug}`.slice(0, 54), callbackData: `appr:review:${approval.id}`, style: "primary" as const }]) : undefined,
+        });
+      } catch (error) {
+        await ctx.reply(`❌ Could not load /${command}: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+      }
+    });
+  }
 
   bot.callbackQuery(/^home:voice:provider:(twilio|bland|meetings)$/, async (ctx) => {
     await ctx.answerCallbackQuery();

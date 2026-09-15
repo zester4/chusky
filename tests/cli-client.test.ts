@@ -139,3 +139,51 @@ test("CLI client exposes Telegram parity management APIs", async () => {
     assert.deepEqual(calls[7].body, { provider: "slack", enabled: true });
   } finally { globalThis.fetch = original; }
 });
+
+test("CLI client exposes meeting preparation, participant context, and lifecycle APIs", async () => {
+  const original = globalThis.fetch;
+  const calls: { path: string; method: string; body?: unknown }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    calls.push({ path: new URL(request.url).pathname, method: request.method, body: request.method === "GET" ? undefined : JSON.parse(await request.text() || "{}") });
+    return response({ ok: true, profile: {}, meetings: [], preparations: [], contacts: [], context: { businessFacts: [] }, meeting: { id: "mtg_1" } });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    await client.meetings();
+    await client.meeting("mtg_1");
+    await client.meetingProfile();
+    await client.updateMeetingProfile({ enabled: true });
+    await client.prepareMeeting({ clientName: "Acme", objective: "Discuss onboarding" });
+    await client.joinMeeting({ meetingUrl: "https://meet.google.com/example" });
+    await client.joinPreparedMeeting("cmp_1");
+    await client.meetingContext("mtg_1", "pricing");
+    await client.leaveMeeting("mtg_1");
+    await client.deleteMeetingContact("mct_1");
+    assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
+      "GET /cli/meetings", "GET /cli/meetings/mtg_1", "GET /cli/meetings/profile", "PATCH /cli/meetings/profile",
+      "POST /cli/meetings/prepare", "POST /cli/meetings/join", "POST /cli/meetings/preparations/cmp_1/join",
+      "GET /cli/meetings/mtg_1/context", "POST /cli/meetings/mtg_1/leave", "DELETE /cli/meetings/contacts/mct_1",
+    ]);
+    assert.deepEqual(calls[4].body, { clientName: "Acme", objective: "Discuss onboarding" });
+    assert.match(calls[7].path, /context$/);
+  } finally { globalThis.fetch = original; }
+});
+
+test("CLI client exposes provider voice catalogue and selection", async () => {
+  const original = globalThis.fetch;
+  const calls: { path: string; method: string; body?: unknown }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    calls.push({ path: new URL(request.url).pathname, method: request.method, body: request.method === "GET" ? undefined : JSON.parse(await request.text() || "{}") });
+    return response({ ok: true, fluxVoices: [{ id: "flux-haley-en", name: "Haley" }], blandVoices: [], voicePreferences: { meetings: "flux-haley-en" } });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    const options = await client.voiceOptions();
+    await client.setLiveVoice("meetings", "flux-haley-en");
+    assert.equal((options.fluxVoices as any[])[0].id, "flux-haley-en");
+    assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), ["GET /cli/voice-options", "POST /cli/voice"]);
+    assert.deepEqual(calls[1].body, { provider: "meetings", voice: "flux-haley-en" });
+  } finally { globalThis.fetch = original; }
+});

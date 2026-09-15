@@ -31,6 +31,20 @@ export interface CliModelsResponse extends CliResponse { page: number; pageSize:
 export interface CliAppsResponse extends CliResponse { apps: { slug: string; name: string; connected: boolean; logo?: string }[]; }
 export interface CliTriggersResponse extends CliResponse { triggers: unknown[]; }
 export interface CliChannelsResponse extends CliResponse { channels: { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; proactiveOptIn?: boolean }[]; }
+export interface CliMeetingParticipant { id: string; name: string; isHost?: boolean; status: "present" | "left"; updatedAt: string; }
+export interface CliMeeting {
+  id: string; platform: string; status: string; interactionMode: string; title?: string; joinAt?: string;
+  error?: string; mission?: { clientName: string; objective: string; preparedAt: string };
+  participantRoster?: CliMeetingParticipant[];
+  speakerEvents?: { type: string; participantId?: string; at: string }[];
+  history?: { role: string; content: string; createdAt?: string }[];
+  outcome?: Record<string, unknown>; outcomeFollowThrough?: Record<string, unknown>; outcomeStatus?: string;
+  outcomeNotificationStatus?: string; transcriptStatus?: string; transcriptExpiresAt?: string;
+  searchableTranscript?: boolean; createdAt: string; updatedAt: string;
+}
+export interface CliMeetingPreparation { id: string; calendarEventId?: string; lifecycle: string; status: string; meetingUrlAvailable: boolean; title?: string; startAt?: string; endAt?: string; participants: string[]; brief?: string; briefStatus?: string; automatic?: boolean; meetingId?: string; createdAt: string; updatedAt: string; }
+export interface CliMeetingContact { id: string; meetingId: string; participantName: string; email?: string; phone?: string; contactPreference?: string; interest?: string; nextStep?: string; followUpAt?: string; createdAt: string; updatedAt: string; }
+export interface CliMeetingsResponse extends CliResponse { preparations: CliMeetingPreparation[]; meetings: CliMeeting[]; contacts: CliMeetingContact[]; }
 export interface CliGeneratedFile { data: string; name: string; contentType: string; artifactId?: string; type?: string; }
 export interface CliWorker { id: string; worker: string; from: string; objective: string; expectedOutput: string; status: string; taskId?: string; workflowRunId?: string; timestamp: string; delegation?: Record<string, unknown>; context?: Record<string, unknown>; }
 export interface CliSkill { name: string; description: string; path: string; score?: number; files?: number; }
@@ -115,7 +129,19 @@ export class ChuskyClient {
   channelLink(provider: string) { return this.request("/cli/channels/link", { method: "POST", body: JSON.stringify({ provider }) }); }
   channelNotify(provider: string, enabled: boolean) { return this.request("/cli/channels/notify", { method: "POST", body: JSON.stringify({ provider, enabled }) }); }
   voice(enabled?: boolean) { return this.request("/cli/voice", { method: "POST", body: JSON.stringify({ ...(enabled === undefined ? {} : { enabled }) }) }); }
+  voiceOptions() { return this.request("/cli/voice-options"); }
+  setLiveVoice(provider: "twilio" | "meetings" | "bland", voice: string | { id: string; name: string } | null) { return this.request("/cli/voice", { method: "POST", body: JSON.stringify({ provider, voice }) }); }
   call(phoneNumber: string, purpose: string) { return this.request("/cli/call", { method: "POST", body: JSON.stringify({ phoneNumber, purpose }) }); }
+  meetings() { return this.request("/cli/meetings") as Promise<CliMeetingsResponse>; }
+  meeting(id: string) { return this.request(`/cli/meetings/${encodeURIComponent(id)}`) as Promise<CliResponse & { meeting?: CliMeeting; contacts?: CliMeetingContact[] }>; }
+  meetingProfile() { return this.request("/cli/meetings/profile") as Promise<CliResponse & { profile?: Record<string, unknown> }>; }
+  updateMeetingProfile(profile: Record<string, unknown>) { return this.request("/cli/meetings/profile", { method: "PATCH", body: JSON.stringify(profile) }); }
+  prepareMeeting(input: { clientName: string; objective?: string; clientContext?: string }) { return this.request("/cli/meetings/prepare", { method: "POST", body: JSON.stringify(input) }) as Promise<CliResponse & { brief?: Record<string, unknown> }>; }
+  joinMeeting(input: { meetingUrl: string; title?: string; joinAt?: string; interactionMode?: "addressed" | "copilot" | "representative"; analyzeScreenShare?: boolean; transcriptRetentionDays?: 1 | 7 | 30; clientName?: string; objective?: string; clientContext?: string }) { return this.request("/cli/meetings/join", { method: "POST", body: JSON.stringify(input) }) as Promise<CliResponse & { meeting?: CliMeeting }>; }
+  joinPreparedMeeting(preparationId: string) { return this.request(`/cli/meetings/preparations/${encodeURIComponent(preparationId)}/join`, { method: "POST", body: "{}" }) as Promise<CliResponse & { meeting?: CliMeeting }>; }
+  meetingContext(id: string, query = "") { return this.request(`/cli/meetings/${encodeURIComponent(id)}/context${query ? `?query=${encodeURIComponent(query)}` : ""}`) as Promise<CliResponse & { context?: Record<string, unknown> }>; }
+  leaveMeeting(id: string) { return this.request(`/cli/meetings/${encodeURIComponent(id)}/leave`, { method: "POST", body: "{}" }) as Promise<CliResponse & { meeting?: CliMeeting }>; }
+  deleteMeetingContact(id: string) { return this.request(`/cli/meetings/contacts/${encodeURIComponent(id)}`, { method: "DELETE" }); }
   usage() { return this.request("/cli/usage"); }
   dashboard() { return this.request("/cli/dashboard"); }
   clear(scope: "history" | "session") { return this.request("/cli/clear", { method: "POST", body: JSON.stringify({ scope }) }); }

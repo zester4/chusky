@@ -7,7 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
 import { registerHandlers } from "./handlers.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, getMeetingContact, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -41,6 +41,8 @@ import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
+import { listBlandCuratedVoices } from "./calls/blandVoices.js";
+import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
@@ -50,7 +52,7 @@ import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
-import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, readRecallVisualContextFrame, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, receiveRecallVisualFrame, resolveRecallChatWebhook, resolveRecallTranscriptWebhook, sendRecallMeetingChat, leaveRecallMeeting, reconcileCalendarMeetingAutoJoin } from "./meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, readRecallVisualContextFrame, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, receiveRecallVisualFrame, resolveRecallChatWebhook, resolveRecallTranscriptWebhook, sendRecallMeetingChat, leaveRecallMeeting, reconcileCalendarMeetingAutoJoin, cancelAutomaticCalendarMeetingJoins, lookupRecallMeetingContext, joinRecallMeeting, prepareRecallMeetingMission, joinPreparedCalendarMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook, receiveRecallTranscriptWebhook } from "./meetings/webhook.js";
 import { mcpClient } from "./mcp/client.js";
@@ -133,7 +135,7 @@ import { registerAuthRoutes } from "./authRoutes.js";
 import { initAuth } from "./auth.js";
 import { monitoringSnapshot, recordFailure } from "./monitoring.js";
 import { createLinkCode, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
-import { setVoiceReplies } from "./store.js";
+import { setVoiceReplies, setLiveVoicePreference } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
@@ -363,6 +365,46 @@ async function main(): Promise<void> {
     const cliArtifactView = (item: any) => ({ id: item.id, name: item.name, type: item.type, path: item.path, contentType: item.contentType, size: item.size, status: item.status, sandboxId: item.sandboxId, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString() });
     const cliWorkerView = (item: any) => item ? ({ id: item.id, worker: item.to, from: item.from, objective: item.objective, expectedOutput: item.expectedOutput, status: item.status, taskId: item.taskId, workflowRunId: item.workflowRunId, timestamp: new Date(item.timestamp).toISOString(), context: item.context, delegation: item.delegation }) : undefined;
     const cliRunView = (item: any, threadId?: string, taskId?: string) => item ? ({ id: item.id, threadId, taskId: taskId ?? item.taskId, status: item.status, input: item.input, model: item.model, output: item.output, budget: item.budget, error: item.error, events: item.events, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString() }) : undefined;
+    const cliMeetingView = (meeting: any) => meeting ? ({
+      id: meeting.id,
+      platform: meeting.platform,
+      status: meeting.status,
+      interactionMode: meeting.interactionMode ?? "addressed",
+      screenShareUnderstanding: meeting.visualContextEnabled === true,
+      searchableTranscript: Boolean(meeting.transcriptRetentionDays && meeting.transcriptExpiresAt && meeting.transcriptExpiresAt > Date.now()),
+      ...(meeting.transcriptStatus ? { transcriptStatus: meeting.transcriptStatus } : {}),
+      ...(meeting.transcriptExpiresAt ? { transcriptExpiresAt: new Date(meeting.transcriptExpiresAt).toISOString() } : {}),
+      ...(meeting.title ? { title: meeting.title } : {}),
+      ...(meeting.joinAt ? { joinAt: meeting.joinAt } : {}),
+      ...(meeting.error ? { error: "The meeting assistant could not complete this step. Check the meeting link and provider status." } : {}),
+      ...(meeting.mission ? { mission: { clientName: meeting.mission.clientName, objective: meeting.mission.objective, preparedAt: new Date(meeting.mission.preparedAt).toISOString() } } : {}),
+      participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({ id: person.id, name: person.name, ...(person.isHost ? { isHost: true } : {}), status: person.status, updatedAt: new Date(person.updatedAt).toISOString() })),
+      speakerEvents: (meeting.speakerEvents ?? []).slice(-200).map((event: any) => ({ type: event.type, ...(event.participantId ? { participantId: event.participantId } : {}), at: new Date(event.at).toISOString() })),
+      history: (meeting.history ?? []).filter((message: any) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message: any) => ({ role: message.role, content: String(message.content).slice(0, 3000), ...(message.createdAt ? { createdAt: new Date(message.createdAt).toISOString() } : {}) })),
+      ...(meeting.outcome ? { outcome: meeting.outcome } : {}),
+      ...(meeting.outcomeFollowThrough ? { outcomeFollowThrough: meeting.outcomeFollowThrough } : {}),
+      ...(meeting.outcomeStatus ? { outcomeStatus: meeting.outcomeStatus } : {}),
+      ...(meeting.outcomeNotificationStatus ? { outcomeNotificationStatus: meeting.outcomeNotificationStatus } : {}),
+      createdAt: new Date(meeting.createdAt).toISOString(),
+      updatedAt: new Date(meeting.updatedAt).toISOString(),
+    }) : undefined;
+    const cliMeetingPreparationView = (item: any, brief?: string, briefStatus?: string) => ({
+      id: item.id,
+      ...(item.calendarEventId ? { calendarEventId: item.calendarEventId } : {}),
+      lifecycle: item.lifecycle,
+      status: item.status,
+      meetingUrlAvailable: item.meetingUrlAvailable !== false,
+      ...(item.title ? { title: item.title } : {}),
+      ...(item.startAt ? { startAt: item.startAt } : {}),
+      ...(item.endAt ? { endAt: item.endAt } : {}),
+      participants: item.participants ?? [],
+      ...(brief ? { brief: brief.slice(0, 12_000) } : {}),
+      ...(briefStatus ? { briefStatus } : {}),
+      ...(item.automatic ? { automatic: true } : {}),
+      ...(item.meetingId ? { meetingId: item.meetingId } : {}),
+      createdAt: new Date(item.createdAt).toISOString(),
+      updatedAt: new Date(item.updatedAt).toISOString(),
+    });
 
     const twilioCallbackUrl = (path: string, callId: string, userId: number) => `${config.twilioWebhookBaseUrl.replace(/\/+$/, "")}${path}?callId=${encodeURIComponent(callId)}&userId=${encodeURIComponent(String(userId))}`;
     const twilioForm = (body: Record<string, unknown>): Record<string, string> => Object.fromEntries(
@@ -1285,14 +1327,130 @@ async function main(): Promise<void> {
       return c.json({ ok: true, provider, enabled: body.enabled, changed: await setProactivePreference(device.userId, provider as "slack" | "whatsapp" | "sendblue", body.enabled) });
     });
 
+    // Meeting controls use the same Recall service as Telegram and the web
+    // dashboard. The CLI is only a transport: every lookup is owner-scoped,
+    // and every join/leave/profile mutation uses the shared user lock.
+    app.get("/cli/meetings/profile", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      return c.json({ ok: true, profile: await getMeetingRepresentativeProfile(device.userId) });
+    });
+    app.patch("/cli/meetings/profile", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => undefined);
+      if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ ok: false, error: "meeting profile must be an object" }, 400);
+      try {
+        const profile = await withCliLock(device.userId, c.req.raw.signal, async () => {
+          const previous = await getMeetingRepresentativeProfile(device.userId);
+          const updated = await updateMeetingRepresentativeProfile(device.userId, body);
+          const autoJoinReconciliation = previous.autoJoinCalendar && !updated.autoJoinCalendar
+            ? await cancelAutomaticCalendarMeetingJoins(device.userId)
+            : undefined;
+          return { updated, autoJoinReconciliation };
+        });
+        return c.json({ ok: true, profile: profile.updated, ...(profile.autoJoinReconciliation ? { autoJoinReconciliation: profile.autoJoinReconciliation } : {}) });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "meeting profile could not be updated" }, 400); }
+    });
+    app.get("/cli/meetings", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try {
+        const [preparations, meetings, contacts] = await Promise.all([
+          listCalendarMeetingPreparations(device.userId, 20),
+          listRecallMeetings(device.userId, 20),
+          listMeetingContacts(device.userId, 50),
+        ]);
+        const prepared = await Promise.all(preparations.map(async (item) => {
+          const trigger = await getTriggerEvent(item.sourceTriggerEventId);
+          return cliMeetingPreparationView(item, trigger?.userId === device.userId && trigger.status === "completed" ? trigger.result : undefined, trigger?.userId === device.userId ? trigger.status : undefined);
+        }));
+        return c.json({ ok: true, preparations: prepared, meetings: meetings.map(cliMeetingView), contacts: contacts.map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() })) });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not load meetings" }, 502); }
+    });
+    app.get("/cli/meetings/:meetingId", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try {
+        const meeting = await getRecallMeeting(device.userId, c.req.param("meetingId"));
+        if (!meeting) return c.json({ ok: false, error: "meeting not found" }, 404);
+        const contacts = (await listMeetingContacts(device.userId, 50)).filter((contact) => contact.meetingId === meeting.id).map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() }));
+        return c.json({ ok: true, meeting: cliMeetingView(meeting), contacts });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not load meeting" }, 404); }
+    });
+    app.post("/cli/meetings/prepare", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { clientName?: unknown; objective?: unknown; clientContext?: unknown };
+      try { return c.json({ ok: true, brief: await prepareRecallMeetingMission(device.userId, { clientName: body.clientName, ...(body.objective !== undefined ? { objective: body.objective } : {}), ...(body.clientContext !== undefined ? { clientContext: body.clientContext } : {}) }) }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not prepare meeting brief" }, 400); }
+    });
+    app.post("/cli/meetings/join", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      try {
+        const meeting = await withCliLock(device.userId, c.req.raw.signal, () => joinRecallMeeting(device.userId, body as Parameters<typeof joinRecallMeeting>[1], c.req.raw.signal));
+        return c.json({ ok: true, meeting: cliMeetingView(await getRecallMeeting(device.userId, String((meeting as any).id))) }, 201);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not join meeting" }, 400); }
+    });
+    app.post("/cli/meetings/preparations/:preparationId/join", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      try {
+        const result = await withCliLock(device.userId, c.req.raw.signal, () => joinPreparedCalendarMeeting(device.userId, c.req.param("preparationId"), c.req.raw.signal));
+        return c.json({ ok: true, meeting: cliMeetingView(await getRecallMeeting(device.userId, String((result as any).id))), preparation: (result as any).preparation }, 201);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not join prepared meeting" }, 400); }
+    });
+    app.get("/cli/meetings/:meetingId/context", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try { return c.json({ ok: true, context: await lookupRecallMeetingContext(device.userId, c.req.param("meetingId"), c.req.query("query") ?? "") }); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "meeting context is unavailable" }, 404); }
+    });
+    app.post("/cli/meetings/:meetingId/leave", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      try {
+        const meeting = await withCliLock(device.userId, c.req.raw.signal, () => leaveRecallMeeting(device.userId, c.req.param("meetingId"), c.req.raw.signal));
+        return c.json({ ok: true, meeting: cliMeetingView(await getRecallMeeting(device.userId, c.req.param("meetingId"))) ?? meeting });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not leave meeting" }, 400); }
+    });
+    app.delete("/cli/meetings/contacts/:contactId", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const removed = await deleteMeetingContact(device.userId, c.req.param("contactId"));
+      return removed ? c.json({ ok: true }) : c.json({ ok: false, error: "meeting contact not found" }, 404);
+    });
+
+    app.get("/cli/voice-options", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      let blandVoices: Array<{ id: string; name: string; description?: string }> = [];
+      let blandCatalogueAvailable = false;
+      if (config.blandVoiceEnabled && config.blandApiKey) {
+        try { blandVoices = await listBlandCuratedVoices(config.blandApiKey); blandCatalogueAvailable = true; }
+        catch { /* Flux voice selection remains available when Bland is unavailable. */ }
+      }
+      return c.json({ ok: true, fluxVoices: FLUX_TTS_VOICES, blandVoices, blandAvailable: isBlandVoiceConfigured(), blandCatalogueAvailable });
+    });
     app.post("/cli/voice", async (c) => {
       const device = await cliAuth(c);
       if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { enabled?: boolean };
-      const current = (await getSession(device.userId)).voiceReplies === true;
+      const body = await c.req.json().catch(() => ({})) as { enabled?: boolean; provider?: unknown; voice?: unknown };
+      const currentSession = await getSession(device.userId);
+      const current = currentSession.voiceReplies === true;
       if (body.enabled !== undefined && typeof body.enabled !== "boolean") return c.json({ ok: false, error: "enabled must be boolean" }, 400);
       if (body.enabled !== undefined) await setVoiceReplies(device.userId, body.enabled);
-      return c.json({ ok: true, enabled: body.enabled ?? current });
+      if (body.provider !== undefined) {
+        const provider = body.provider;
+        if (provider !== "twilio" && provider !== "meetings" && provider !== "bland") return c.json({ ok: false, error: "provider must be twilio, meetings, or bland" }, 400);
+        try {
+          if (body.voice === null || body.voice === undefined) await setLiveVoicePreference(device.userId, provider);
+          else if (provider === "bland") {
+            if (!body.voice || typeof body.voice !== "object" || Array.isArray(body.voice)) return c.json({ ok: false, error: "Bland voice must include id and name" }, 400);
+            const voice = body.voice as { id?: unknown; name?: unknown };
+            await setLiveVoicePreference(device.userId, provider, { id: String(voice.id ?? ""), name: String(voice.name ?? "") });
+          } else {
+            if (typeof body.voice !== "string") return c.json({ ok: false, error: "Flux voice must be a voice ID" }, 400);
+            await setLiveVoicePreference(device.userId, provider, body.voice as never);
+          }
+        } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "voice selection is invalid" }, 400); }
+      }
+      const updated = await getSession(device.userId);
+      return c.json({ ok: true, enabled: body.enabled ?? current, voicePreferences: updated.voicePreferences ?? {} });
     });
 
     app.post("/cli/call", async (c) => {

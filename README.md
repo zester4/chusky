@@ -327,6 +327,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/start` | Welcome + current config |
 | `/connect [app]` | Connect an app (e.g. `/connect github`) |
 | `/apps` | See connected apps + available apps |
+| `/mcp` | View and manage account-scoped third-party MCP connections |
 | `/model` | Switch AI model (per-session, no restart) |
 | `/clear` | Show clear-session help |
 | `/clear history` | Wipe conversation history while keeping the Composio session |

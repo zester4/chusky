@@ -106,6 +106,39 @@ test("home workspace exposes durable reminders, schedules, tasks, and voice cont
   assert.equal((await getSession(userId)).voiceReplies, true);
 });
 
+test("home exposes a private third-party MCP status and management view", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840016;
+  const previousMcpEnabled = config.mcpEnabled;
+  config.mcpEnabled = true;
+  try {
+    const workspace = bot.callbacks.find((item) => item.pattern.source.includes("mcp"));
+    assert.ok(workspace);
+    const ctx = context(userId);
+    ctx.callbackQuery = { message: { message_id: 1 } };
+    ctx.match = ["home:mcp", "mcp"];
+    await workspace.handler(ctx);
+    assert.match(ctx.sent.at(-1).text, /No third-party MCP servers/);
+    const mcp = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:mcp:"));
+    assert.ok(mcp);
+    const invalidConnect = context(userId);
+    invalidConnect.callbackQuery = { message: { message_id: 1 } };
+    invalidConnect.match = ["home:mcp:c:not-in-catalog", "c", "not-in-catalog"];
+    await mcp.handler(invalidConnect);
+    assert.match(invalidConnect.sent.at(-1).text, /no longer available/i);
+
+    const shared = context(userId);
+    shared.chat = { id: -100840016, type: "group" };
+    shared.callbackQuery = { message: { message_id: 1 } };
+    shared.match = ["home:mcp", "mcp"];
+    await workspace.handler(shared);
+    assert.match(shared.sent.at(-1).text, /private chat/i);
+  } finally {
+    config.mcpEnabled = previousMcpEnabled;
+  }
+});
+
 test("home voice menu saves independent live-call voice choices for the owner", async () => {
   const bot = new FakeBot();
   registerHandlers(bot as any);

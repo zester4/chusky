@@ -40,6 +40,21 @@ function taskLine(task: CliTask, color: boolean): string {
   return `${paint(task.id, "dim", color)}  ${paint(`[${task.status}]`, statusColors[task.status], color)}  ${task.title}`;
 }
 
+function meetingLine(meeting: any, color: boolean): string {
+  const participants = Array.isArray(meeting.participantRoster) ? meeting.participantRoster.filter((person: any) => person.status !== "left").map((person: any) => person.name).filter(Boolean).slice(0, 8).join(", ") : "";
+  return `${paint(meeting.id, "dim", color)}  ${paint(`[${meeting.status}]`, meeting.status === "in_call" ? "green" : meeting.status === "failed" ? "red" : "cyan", color)}  ${meeting.platform}  ${meeting.title || "Untitled meeting"}${participants ? `\n  Participants: ${participants}` : ""}`;
+}
+
+function meetingDetail(meeting: any, contacts: any[] = [], color: boolean): string {
+  const lines = [meetingLine(meeting, color), `Mode: ${meeting.interactionMode}`, `Searchable transcript: ${meeting.searchableTranscript ? "yes" : "no"}`];
+  if (meeting.mission) lines.push(`Mission: ${meeting.mission.clientName} — ${meeting.mission.objective}`);
+  if (meeting.participantRoster?.length) lines.push(`\nParticipants:\n${meeting.participantRoster.map((person: any) => `- ${person.name}${person.isHost ? " (host)" : ""} — ${person.status}`).join("\n")}`);
+  if (contacts.length) lines.push(`\nCaptured contacts:\n${contacts.map((contact: any) => `- ${contact.participantName}: ${contact.email || contact.phone || "no contact"}${contact.interest ? ` — ${contact.interest}` : ""}`).join("\n")}`);
+  if (meeting.outcome) lines.push(`\nOutcome:\n${JSON.stringify(meeting.outcome, null, 2)}`);
+  if (meeting.history?.length) lines.push(`\nRecent meeting conversation:\n${meeting.history.map((message: any) => `${message.role === "assistant" ? "Chusky" : "Meeting"}: ${message.content}`).join("\n")}`);
+  return lines.join("\n");
+}
+
 function attachmentParts(line: string): { path: string; message: string } | undefined {
   const raw = line.slice("/attach".length).trim();
   if (!raw) return undefined;
@@ -127,7 +142,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /meetings [id] /meeting profile|prepare|join|join-prepared|context|leave ...\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice list|set twilio|meetings|bland <voice> /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -189,9 +204,107 @@ async function chat(): Promise<void> {
         else console.log(formatError("Usage: /channel list | /channel link <provider> | /channel notify <provider> on|off", color));
         continue;
       }
+      if (line === "/meetings" || line.startsWith("/meetings ")) {
+        const id = line.slice("/meetings".length).trim();
+        if (id) {
+          const result = await client.meeting(id);
+          if (!result.ok || !result.meeting) console.log(formatError(result.error || "Could not load meeting.", color));
+          else await showPaged(meetingDetail(result.meeting, result.contacts || [], color), true);
+        } else {
+          const result = await client.meetings();
+          if (!result.ok) console.log(formatError(result.error || "Could not load meetings.", color));
+          else {
+            const prepared = result.preparations?.length ? `Prepared calendar meetings:\n${result.preparations.map((item: any) => `${item.id}  [${item.status}]  ${item.title || "Untitled"} — ${item.participants?.join(", ") || "no attendees"}${item.briefStatus ? ` — brief ${item.briefStatus}` : ""}`).join("\n")}` : "Prepared calendar meetings: none";
+            const active = result.meetings?.length ? result.meetings.map((meeting: any) => meetingLine(meeting, color)).join("\n\n") : "No meetings.";
+            const contacts = result.contacts?.length ? `\n\nCaptured contacts:\n${result.contacts.map((contact: any) => `${contact.id}  ${contact.participantName}  ${contact.email || contact.phone || "no contact"}`).join("\n")}` : "";
+            await showPaged(`${prepared}\n\nMeetings:\n${active}${contacts}`, true);
+          }
+        }
+        continue;
+      }
+      if (line === "/meeting" || line.startsWith("/meeting ")) {
+        const raw = line.slice("/meeting".length).trim();
+        const parts = raw.split(/\s+/); const action = (parts.shift() || "").toLowerCase();
+        if (action === "profile") {
+          if (parts[0] === "set") {
+            const json = raw.slice("profile set".length).trim();
+            try { const result = await client.updateMeetingProfile(JSON.parse(json)); console.log(result.ok ? formatSuccess("Meeting representative profile updated.", color) : formatError(result.error || "Could not update meeting profile.", color)); }
+            catch { console.log(formatError("Usage: /meeting profile set <json>", color)); }
+          } else {
+            const result = await client.meetingProfile();
+            console.log(result.ok ? JSON.stringify(result.profile, null, 2) : formatError(result.error || "Could not load meeting profile.", color));
+          }
+          continue;
+        }
+        if (action === "prepare") {
+          const fields = raw.slice("prepare".length).trim().split("|").map((value) => value.trim());
+          if (!fields[0]) console.log(formatError("Usage: /meeting prepare <client name> | <objective> | <context>", color));
+          else {
+            const result = await client.prepareMeeting({ clientName: fields[0], ...(fields[1] ? { objective: fields[1] } : {}), ...(fields[2] ? { clientContext: fields[2] } : {}) });
+            console.log(result.ok ? `${formatSuccess("Meeting brief prepared.", color)}\n${JSON.stringify(result.brief, null, 2)}` : formatError(result.error || "Could not prepare meeting brief.", color));
+          }
+          continue;
+        }
+        if (action === "join-prepared") {
+          const id = parts[0];
+          if (!id) console.log(formatError("Usage: /meeting join-prepared <preparation id>", color));
+          else { const result = await client.joinPreparedMeeting(id); console.log(result.ok ? formatSuccess(`Prepared meeting join started${result.meeting?.id ? `: ${result.meeting.id}` : "."}`, color) : formatError(result.error || "Could not join prepared meeting.", color)); }
+          continue;
+        }
+        if (action === "join") {
+          const fields = raw.slice("join".length).trim().split("|").map((value) => value.trim());
+          const meetingUrl = fields[0];
+          if (!meetingUrl) console.log(formatError("Usage: /meeting join <meeting URL> | <client name> | <objective> | <context>", color));
+          else {
+            const result = await client.joinMeeting({ meetingUrl, ...(fields[1] ? { clientName: fields[1], objective: fields[2], clientContext: fields[3] } : {}) });
+            console.log(result.ok ? formatSuccess(`Meeting join started${result.meeting?.id ? `: ${result.meeting.id}` : "."}`, color) : formatError(result.error || "Could not join meeting.", color));
+          }
+          continue;
+        }
+        if (action === "context") {
+          const id = parts.shift(); const query = parts.join(" ");
+          if (!id) console.log(formatError("Usage: /meeting context <meeting id> [question]", color));
+          else { const result = await client.meetingContext(id, query); console.log(result.ok ? JSON.stringify(result.context, null, 2) : formatError(result.error || "Meeting context is unavailable.", color)); }
+          continue;
+        }
+        if (action === "leave") {
+          const id = parts[0];
+          if (!id) console.log(formatError("Usage: /meeting leave <meeting id>", color));
+          else { const result = await client.leaveMeeting(id); console.log(result.ok ? formatSuccess("Meeting leave requested.", color) : formatError(result.error || "Could not leave meeting.", color)); }
+          continue;
+        }
+        if (action === "contact-delete") {
+          const id = parts[0];
+          if (!id) console.log(formatError("Usage: /meeting contact-delete <contact id>", color));
+          else { const result = await client.deleteMeetingContact(id); console.log(result.ok ? formatSuccess("Meeting contact deleted.", color) : formatError(result.error || "Could not delete meeting contact.", color)); }
+          continue;
+        }
+        console.log(formatError("Usage: /meeting profile | prepare <client> | join <url> | join-prepared <id> | context <id> [question] | leave <id>", color));
+        continue;
+      }
       if (line === "/voice" || line.startsWith("/voice ")) {
-        const action = line.slice(6).trim().toLowerCase(); const result = await client.voice(action === "on" || action === "enable" ? true : action === "off" || action === "disable" ? false : undefined);
-        console.log(result.ok ? formatSuccess(result.enabled ? "Voice replies are on." : "Voice replies are off.", color) : formatError(result.error || "Could not update voice replies.", color)); continue;
+        const rawVoice = line.slice(6).trim(); const voiceParts = rawVoice.split(/\s+/); const action = (voiceParts.shift() || "status").toLowerCase();
+        if (action === "list") {
+          const result = await client.voiceOptions();
+          if (!result.ok) console.log(formatError(result.error || "Could not load voice options.", color));
+          else {
+            const flux = Array.isArray(result.fluxVoices) ? result.fluxVoices.map((voice: any) => `${voice.id} — ${voice.name}${voice.accent ? ` (${voice.accent})` : ""}`).join("\n") : "No Flux voices.";
+            const bland = Array.isArray(result.blandVoices) && result.blandVoices.length ? result.blandVoices.map((voice: any) => `${voice.id} — ${voice.name}`).join("\n") : "No Bland voices available.";
+            await showPaged(`Flux / Twilio / Meetings:\n${flux}\n\nBland (${result.blandAvailable ? "available" : "unavailable"}):\n${bland}`, true);
+          }
+          continue;
+        }
+        if (action === "set") {
+          const provider = voiceParts.shift(); const id = voiceParts.shift(); const name = voiceParts.join(" ");
+          if ((provider !== "twilio" && provider !== "meetings" && provider !== "bland") || !id || (provider === "bland" && !name)) console.log(formatError("Usage: /voice set twilio|meetings <flux-voice-id> | /voice set bland <uuid> <name>", color));
+          else {
+            const result = await client.setLiveVoice(provider, provider === "bland" ? { id, name } : id);
+            console.log(result.ok ? formatSuccess(`${provider} voice set to ${id}.`, color) : formatError(result.error || "Could not set voice.", color));
+          }
+          continue;
+        }
+        const result = await client.voice(action === "on" || action === "enable" ? true : action === "off" || action === "disable" ? false : undefined);
+        console.log(result.ok ? `${formatSuccess(result.enabled ? "Voice replies are on." : "Voice replies are off.", color)}${result.voicePreferences ? `\nPreferences: ${JSON.stringify(result.voicePreferences)}` : ""}` : formatError(result.error || "Could not update voice replies.", color)); continue;
       }
       if (line === "/call" || line.startsWith("/call ")) {
         const raw = line.slice(5).trim(); const split = raw.search(/\s/);
