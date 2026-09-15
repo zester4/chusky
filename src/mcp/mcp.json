@@ -1,4 +1,30 @@
 {
   "version": 1,
-  "servers": []
+  "servers": [
+    {
+      "id": "context7",
+      "name": "Context7 (Live Docs)",
+      "url": "https://mcp.context7.com/mcp",
+      "auth": "none",
+      "allowedTools": [
+        "resolve-library-id",
+        "get-library-docs",
+        "query-docs"
+      ],
+      "requireApproval": false
+    },
+    {
+      "id": "chrome-devtools",
+      "name": "Chrome DevTools",
+      "url": "https://mcp.chrome-devtools.dev/mcp",
+      "auth": "none",
+      "allowedTools": [
+        "performance_trace",
+        "network_requests",
+        "console_messages",
+        "dom_snapshot"
+      ],
+      "requireApproval": true
+    }
+  ]
 }
