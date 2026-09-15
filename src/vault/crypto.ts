@@ -27,9 +27,9 @@ function open(ciphertext: Buffer, iv: Buffer, tag: Buffer, key: Buffer): Buffer 
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-/** Envelope encryption: every credential has a random data key; only that key is wrapped by VAULT_MASTER_KEY. */
-export function encryptCredential(value: Record<string, unknown>, masterKeyValue: string): EncryptedCredential {
-  const masterKey = keyFromBase64(masterKeyValue, "VAULT_MASTER_KEY");
+/** Envelope encryption: every credential has a random data key; only that key is wrapped by the configured master key. */
+export function encryptCredential(value: Record<string, unknown>, masterKeyValue: string, keyName = "VAULT_MASTER_KEY"): EncryptedCredential {
+  const masterKey = keyFromBase64(masterKeyValue, keyName);
   const dataKey = randomBytes(32);
   const plaintext = Buffer.from(JSON.stringify(value), "utf8");
   try {
@@ -42,8 +42,8 @@ export function encryptCredential(value: Record<string, unknown>, masterKeyValue
   } finally { plaintext.fill(0); dataKey.fill(0); masterKey.fill(0); }
 }
 
-export function decryptCredential<T extends Record<string, unknown>>(encrypted: EncryptedCredential, masterKeyValue: string): T {
-  const masterKey = keyFromBase64(masterKeyValue, "VAULT_MASTER_KEY");
+export function decryptCredential<T extends Record<string, unknown>>(encrypted: EncryptedCredential, masterKeyValue: string, keyName = "VAULT_MASTER_KEY"): T {
+  const masterKey = keyFromBase64(masterKeyValue, keyName);
   let dataKey: Buffer | undefined;
   let plaintext: Buffer | undefined;
   try {

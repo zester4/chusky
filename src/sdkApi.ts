@@ -31,6 +31,7 @@ import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
 import {
   COMPANY_AGENT_TEMPLATES,
   COMPANY_APPROVAL_BEFORE_EXTERNAL_ACTION,
@@ -175,6 +176,7 @@ const COMPANY_PROJECT_DEFAULT_SCOPES = [
   "calls:read", "calls:write", "voice:read", "voice:write", "meetings:read", "meetings:write",
   "channels:read", "channels:write", "devices:read", "devices:write", "reminders:read", "reminders:write",
   "jobs:read", "jobs:write", "memory:read", "memory:write", "scratchpad:read", "scratchpad:write",
+  "mcp:read", "mcp:write",
 ];
 
 function safeProjectPolicy(project: SdkProjectRecord): CompanyPolicy | undefined {
@@ -739,6 +741,38 @@ export function registerSdkApi(app: Hono): void {
       if (!(await disconnectConnectedAccount(sdkUser(c)!.userId, id))) return apiError(c, 404, "connection_not_found", "Connected account not found for this Chusky account.");
       return c.body(null, 204);
     } catch (error) { return apiError(c, 502, "connection_disconnect_failed", error instanceof Error ? error.message : "Could not disconnect this account."); }
+  });
+
+  app.get("/v1/mcp/catalog", async (c) => {
+    const catalog = listMcpCatalog();
+    return c.json({ data: catalog.servers, ...(catalog.errors.length ? { errors: catalog.errors } : {}) });
+  });
+
+  app.get("/v1/mcp/connections", async (c) => {
+    try { return c.json({ data: await listMcpConnections(sdkUser(c)!.userId) }); }
+    catch (error) { return apiError(c, 502, "mcp_connections_unavailable", error instanceof Error ? error.message : "MCP connections are temporarily unavailable."); }
+  });
+
+  app.post("/v1/mcp/connections", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const serverId = typeof body.serverId === "string" ? body.serverId.trim() : "";
+    if (!/^[A-Za-z0-9_-]{1,48}$/.test(serverId)) return apiError(c, 400, "invalid_mcp_server", "serverId must contain 1-48 letters, numbers, underscores, or hyphens.");
+    const accessToken = typeof body.accessToken === "string" ? body.accessToken : undefined;
+    const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : undefined;
+    const expiresAt = typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? body.expiresAt : undefined;
+    try {
+      const connection = await connectMcpServer(sdkUser(c)!.userId, serverId, accessToken ? { accessToken, ...(refreshToken ? { refreshToken } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) } : undefined);
+      return c.json(connection, 201);
+    } catch (error) { return apiError(c, 400, "mcp_connect_failed", error instanceof Error ? error.message : "MCP server could not be connected."); }
+  });
+
+  app.delete("/v1/mcp/connections/:serverId", async (c) => {
+    const serverId = c.req.param("serverId").trim();
+    if (!/^[A-Za-z0-9_-]{1,48}$/.test(serverId)) return apiError(c, 400, "invalid_mcp_server", "Invalid MCP server ID.");
+    try {
+      if (!(await disconnectMcpServer(sdkUser(c)!.userId, serverId))) return apiError(c, 404, "mcp_connection_not_found", "MCP connection not found for this Chusky account.");
+      return c.body(null, 204);
+    } catch (error) { return apiError(c, 502, "mcp_disconnect_failed", error instanceof Error ? error.message : "MCP connection could not be removed."); }
   });
 
   app.get("/v1/triggers", async (c) => {

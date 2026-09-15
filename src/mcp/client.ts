@@ -3,6 +3,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createHash } from "node:crypto";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import catalogDocument from "./mcp.json";
+import { decryptCredential, encryptCredential, type EncryptedCredential } from "../vault/crypto.js";
+import { getSession, saveSession, type McpConnectionRecord } from "../store.js";
 
 const MAX_DESCRIPTION_CHARS = 2_000;
 const MAX_SCHEMA_CHARS = 40_000;
@@ -12,7 +15,26 @@ const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 export type McpAuth =
   | { type: "none" }
-  | { type: "bearer"; tokenEnv: string };
+  | { type: "bearer"; tokenEnv?: string }
+  | { type: "oauth" };
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  url: string;
+  auth: "none" | "bearer" | "oauth";
+  scopes?: string[];
+  enabled?: boolean;
+  allowedTools?: string[];
+  requireApproval?: boolean;
+}
+
+export interface McpCredential {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType?: string;
+  expiresAt?: number;
+}
 
 /** Server-side registry entry. Never serialize the resolved bearer token. */
 export interface McpServerDefinition {
@@ -22,6 +44,7 @@ export interface McpServerDefinition {
   ownerIds: number[];
   enabled?: boolean;
   auth?: McpAuth;
+  scopes?: string[];
   /** Empty means all discovered tools; prefer an explicit allowlist in production. */
   allowedTools?: string[];
   /** Unknown/side-effecting MCP actions require Chusky approval by default. */
@@ -82,12 +105,13 @@ function normalizeDefinition(value: unknown, index: number, production: boolean)
   const ownerIds = Array.isArray(item.ownerIds) ? [...new Set(item.ownerIds.filter((id): id is number => Number.isSafeInteger(id) && id > 0))] : [];
   if (!ownerIds.length) throw new Error(`MCP server ${id} must have at least one positive ownerId`);
   const authValue = item.auth && typeof item.auth === "object" && !Array.isArray(item.auth) ? item.auth as Record<string, unknown> : { type: "none" };
-  const authType = authValue.type === "bearer" ? "bearer" : authValue.type === "none" || authValue.type === undefined ? "none" : "invalid";
-  if (authType === "invalid") throw new Error(`MCP server ${id} has unsupported authentication; use none or bearer`);
+  const authType = authValue.type === "bearer" || authValue.type === "oauth" ? authValue.type : authValue.type === "none" || authValue.type === undefined ? "none" : "invalid";
+  if (authType === "invalid") throw new Error(`MCP server ${id} has unsupported authentication; use none, bearer, or oauth`);
   const auth: McpAuth = authType === "bearer"
-    ? { type: "bearer", tokenEnv: safeString(authValue.tokenEnv, 120) }
-    : { type: "none" };
-  if (auth.type === "bearer" && !/^[A-Z][A-Z0-9_]{1,119}$/.test(auth.tokenEnv)) throw new Error(`MCP server ${id} needs a valid bearer tokenEnv`);
+    ? { type: "bearer", ...(typeof authValue.tokenEnv === "string" ? { tokenEnv: safeString(authValue.tokenEnv, 120) } : {}) }
+    : authType === "oauth" ? { type: "oauth" } : { type: "none" };
+  if (auth.type === "bearer" && auth.tokenEnv !== undefined && !/^[A-Z][A-Z0-9_]{1,119}$/.test(auth.tokenEnv)) throw new Error(`MCP server ${id} needs a valid bearer tokenEnv`);
+  const scopes = Array.isArray(item.scopes) ? [...new Set(item.scopes.map((scope) => safeString(scope, 120)).filter((scope) => /^[A-Za-z0-9._:-]{1,120}$/.test(scope)))].slice(0, 30) : [];
   const allowedTools = Array.isArray(item.allowedTools) ? [...new Set(item.allowedTools.map((tool) => safeString(tool, 128)).filter((tool) => TOOL_NAME.test(tool)))] : [];
   return {
     id,
@@ -96,9 +120,18 @@ function normalizeDefinition(value: unknown, index: number, production: boolean)
     ownerIds,
     enabled: item.enabled !== false,
     auth,
+    ...(scopes.length ? { scopes } : {}),
     ...(allowedTools.length ? { allowedTools } : {}),
     requireApproval: item.requireApproval !== false,
   };
+}
+
+function catalogRegistry(): RegistryResult {
+  const entries = Array.isArray((catalogDocument as { servers?: unknown }).servers) ? (catalogDocument as { servers: unknown[] }).servers : [];
+  return parseMcpRegistry(JSON.stringify(entries.map((entry) => {
+    const item = entry as Record<string, unknown>;
+    return { ...item, ownerIds: [1], auth: item.auth === "oauth" ? { type: "oauth" } : item.auth === "bearer" ? { type: "bearer" } : { type: "none" } };
+  })));
 }
 
 export function parseMcpRegistry(raw: string, production = process.env.NODE_ENV === "production"): RegistryResult {
@@ -172,6 +205,67 @@ export function normalizeMcpResult(value: unknown, maxChars = config.mcpMaxResul
   return `${output.slice(0, maxChars)}\n[MCP tool output truncated by Chusky]`;
 }
 
+function publicCatalog(registry: RegistryResult): McpCatalogEntry[] {
+  return registry.servers.map((server) => ({ id: server.id, name: server.name, url: server.url, auth: server.auth?.type === "oauth" ? "oauth" : server.auth?.type === "bearer" ? "bearer" : "none", ...(server.scopes?.length ? { scopes: server.scopes } : {}), ...(server.enabled === false ? { enabled: false } : {}), ...(server.allowedTools?.length ? { allowedTools: server.allowedTools } : {}), requireApproval: server.requireApproval !== false }));
+}
+
+function normalizeMcpCredential(value: McpCredential | undefined): McpCredential | undefined {
+  if (!value) return undefined;
+  if (typeof value.accessToken !== "string" || !value.accessToken || value.accessToken.length > 4096 || /[\u0000-\u001F\u007F]/.test(value.accessToken)) throw new Error("MCP accessToken is invalid");
+  if (value.refreshToken !== undefined && (typeof value.refreshToken !== "string" || value.refreshToken.length > 4096 || /[\u0000-\u001F\u007F]/.test(value.refreshToken))) throw new Error("MCP refreshToken is invalid");
+  if (value.tokenType !== undefined && (typeof value.tokenType !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,30}$/.test(value.tokenType))) throw new Error("MCP tokenType is invalid");
+  if (value.expiresAt !== undefined && (!Number.isSafeInteger(value.expiresAt) || value.expiresAt <= 0)) throw new Error("MCP expiresAt is invalid");
+  return { accessToken: value.accessToken, ...(value.refreshToken ? { refreshToken: value.refreshToken } : {}), ...(value.tokenType ? { tokenType: value.tokenType } : {}), ...(value.expiresAt ? { expiresAt: value.expiresAt } : {}) };
+}
+
+export function listMcpCatalog(): { servers: McpCatalogEntry[]; errors: string[] } {
+  const registry = catalogRegistry();
+  return { servers: publicCatalog(registry), errors: registry.errors };
+}
+
+function encryptedCredential(record: McpConnectionRecord): McpCredential | undefined {
+  if (!record.credential) return undefined;
+  if (!config.mcpConnectionEncryptionKey) throw new Error("MCP_CONNECTION_ENCRYPTION_KEY is not configured");
+  return normalizeMcpCredential(decryptCredential<Record<string, unknown>>(record.credential, config.mcpConnectionEncryptionKey, "MCP_CONNECTION_ENCRYPTION_KEY") as unknown as McpCredential);
+}
+
+function safeConnection(record: McpConnectionRecord, catalog: McpCatalogEntry | undefined) {
+  return { serverId: record.serverId, name: catalog?.name ?? record.serverId, auth: catalog?.auth ?? "oauth", enabled: record.enabled, connectedAt: new Date(record.createdAt).toISOString(), updatedAt: new Date(record.updatedAt).toISOString() };
+}
+
+export async function listMcpConnections(userId: number): Promise<ReturnType<typeof safeConnection>[]> {
+  const catalog = new Map(listMcpCatalog().servers.map((server) => [server.id, server]));
+  return (await getSession(userId)).mcpConnections!.filter((connection) => connection.enabled && catalog.has(connection.serverId)).map((connection) => safeConnection(connection, catalog.get(connection.serverId)));
+}
+
+export async function connectMcpServer(userId: number, serverId: string, credential?: McpCredential): Promise<ReturnType<typeof safeConnection>> {
+  if (!config.mcpEnabled) throw new Error("Third-party MCP is disabled");
+  const server = listMcpCatalog().servers.find((entry) => entry.id === serverId && entry.enabled !== false);
+  if (!server) throw new Error("MCP server is not in the Chusky catalog");
+  const normalizedCredential = normalizeMcpCredential(credential);
+  if (server.auth !== "none" && !normalizedCredential) throw new Error("This MCP server requires a valid access token");
+  if (normalizedCredential && !config.mcpConnectionEncryptionKey) throw new Error("MCP_CONNECTION_ENCRYPTION_KEY is not configured");
+  const now = Date.now();
+  const session = await getSession(userId);
+  const existing = session.mcpConnections!.find((connection) => connection.serverId === serverId);
+  const record: McpConnectionRecord = { serverId, enabled: true, createdAt: existing?.createdAt ?? now, updatedAt: now, ...(normalizedCredential ? { credential: encryptCredential(normalizedCredential as unknown as Record<string, unknown>, config.mcpConnectionEncryptionKey, "MCP_CONNECTION_ENCRYPTION_KEY") } : {}) };
+  session.mcpConnections = [...session.mcpConnections!.filter((connection) => connection.serverId !== serverId), record].slice(-50);
+  await saveSession(userId, session);
+  await mcpClient.invalidate(userId, serverId);
+  return safeConnection(record, server);
+}
+
+export async function disconnectMcpServer(userId: number, serverId: string): Promise<boolean> {
+  const session = await getSession(userId);
+  const before = session.mcpConnections!.length;
+  session.mcpConnections = session.mcpConnections!.filter((connection) => connection.serverId !== serverId);
+  if (session.mcpConnections.length !== before) {
+    await saveSession(userId, session);
+    await mcpClient.invalidate(userId, serverId);
+  }
+  return session.mcpConnections.length !== before;
+}
+
 type Connection = { userId: number; client: Client; transport: StreamableHTTPClientTransport; tools: Map<string, McpToolRef>; lastUsedAt: number };
 
 /** One bounded, reconnectable MCP client manager for the Chusky process. */
@@ -179,35 +273,46 @@ export class McpClientManager {
   private readonly connections = new Map<string, Connection>();
   private readonly pendingConnections = new Map<string, Promise<Connection>>();
   private readonly registry: RegistryResult;
+  private readonly legacyRegistry: boolean;
 
-  constructor(rawRegistry = config.mcpServersJson) { this.registry = parseMcpRegistry(rawRegistry); }
-
-  configurationErrors(): string[] { return [...this.registry.errors]; }
-
-  private definition(userId: number, serverId: string): McpServerDefinition {
-    if (!config.mcpEnabled) throw new Error("Third-party MCP is disabled");
-    const server = this.registry.servers.find((candidate) => candidate.id === serverId && candidate.enabled && candidate.ownerIds.includes(userId));
-    if (!server) throw new Error("MCP server is not configured for this account");
-    return server;
+  constructor(rawRegistry = config.mcpServersJson) {
+    this.legacyRegistry = Boolean(rawRegistry && rawRegistry !== "[]");
+    this.registry = this.legacyRegistry ? parseMcpRegistry(rawRegistry) : catalogRegistry();
   }
 
-  private async connect(userId: number, server: McpServerDefinition, signal?: AbortSignal): Promise<Connection> {
+  configurationErrors(): string[] {
+    const errors = [...this.registry.errors];
+    if (!this.legacyRegistry && this.registry.servers.some((server) => server.auth?.type !== "none") && !config.mcpConnectionEncryptionKey) errors.push("MCP_CONNECTION_ENCRYPTION_KEY is required for connected MCP accounts");
+    return errors;
+  }
+
+  private async definition(userId: number, serverId: string): Promise<{ server: McpServerDefinition; credential?: McpCredential }> {
+    if (!config.mcpEnabled) throw new Error("Third-party MCP is disabled");
+    const server = this.registry.servers.find((candidate) => candidate.id === serverId && candidate.enabled && (this.legacyRegistry || candidate.ownerIds.includes(userId)));
+    if (!server) throw new Error("MCP server is not in the Chusky catalog");
+    if (this.legacyRegistry) return { server, credential: undefined };
+    const connection = (await getSession(userId)).mcpConnections!.find((item) => item.serverId === serverId && item.enabled);
+    if (!connection) throw new Error("MCP server is not connected for this account");
+    return { server, credential: encryptedCredential(connection) };
+  }
+
+  private async connect(userId: number, server: McpServerDefinition, credential?: McpCredential, signal?: AbortSignal): Promise<Connection> {
     const key = `${userId}:${server.id}`;
     const existing = this.connections.get(key);
     if (existing) { existing.lastUsedAt = Date.now(); return existing; }
     const pending = this.pendingConnections.get(key);
     if (pending) return pending;
-    const connectionPromise = this.openConnection(userId, server, key, signal);
+    const connectionPromise = this.openConnection(userId, server, key, credential, signal);
     this.pendingConnections.set(key, connectionPromise);
     try { return await connectionPromise; } finally { this.pendingConnections.delete(key); }
   }
 
-  private async openConnection(userId: number, server: McpServerDefinition, key: string, signal?: AbortSignal): Promise<Connection> {
+  private async openConnection(userId: number, server: McpServerDefinition, key: string, credential?: McpCredential, signal?: AbortSignal): Promise<Connection> {
     const headers: Record<string, string> = {};
-    if (server.auth?.type === "bearer") {
-      const token = process.env[server.auth.tokenEnv];
+    if (server.auth?.type === "bearer" || server.auth?.type === "oauth") {
+      const token = credential?.accessToken ?? (server.auth.type === "bearer" && server.auth.tokenEnv ? process.env[server.auth.tokenEnv] : undefined);
       if (!token) throw new Error(`MCP server ${server.id} is missing its configured bearer secret`);
-      headers.Authorization = `Bearer ${token}`;
+      headers.Authorization = `${credential?.tokenType ?? "Bearer"} ${token}`;
     }
     const transport = new StreamableHTTPClientTransport(new URL(server.url), {
       requestInit: { headers, redirect: "error" },
@@ -237,9 +342,11 @@ export class McpClientManager {
     if (!config.mcpEnabled) return [];
     await this.closeIdle();
     const result: McpOpenAITool[] = [];
-    for (const server of this.registry.servers.filter((candidate) => candidate.enabled && candidate.ownerIds.includes(userId))) {
+    const connectedIds = this.legacyRegistry ? undefined : new Set((await getSession(userId)).mcpConnections!.filter((connection) => connection.enabled).map((connection) => connection.serverId));
+    for (const server of this.registry.servers.filter((candidate) => candidate.enabled && (this.legacyRegistry ? candidate.ownerIds.includes(userId) : connectedIds!.has(candidate.id)))) {
       try {
-        const connection = await this.connect(userId, server, signal);
+        const connectionInfo = await this.definition(userId, server.id);
+        const connection = await this.connect(userId, server, connectionInfo.credential, signal);
         for (const [name, ref] of connection.tools) result.push({ type: "function", function: { name, description: `[${server.name}] ${ref.description}`, parameters: ref.inputSchema } });
       } catch (error) {
         logger.warn({ userId, serverId: server.id, err: error }, "Third-party MCP discovery failed");
@@ -260,8 +367,8 @@ export class McpClientManager {
     const existing = [...this.connections.values()].find((candidate) => candidate.userId === userId && candidate.tools.has(name));
     if (!existing) throw new Error("MCP tool is no longer available; refresh discovery and retry");
     const ref = existing.tools.get(name)!;
-    const server = this.definition(userId, ref.serverId);
-    const connection = await this.connect(userId, server, signal);
+    const connectionInfo = await this.definition(userId, ref.serverId);
+    const connection = await this.connect(userId, connectionInfo.server, connectionInfo.credential, signal);
     if (!ref) throw new Error("MCP tool is no longer available; refresh discovery and retry");
     validateMcpArguments(args, ref.inputSchema);
     const result = await connection.client.callTool({ name: ref.toolName, arguments: args }, undefined, { signal, timeout: config.mcpToolTimeoutMs });
@@ -272,6 +379,14 @@ export class McpClientManager {
   async closeIdle(maxIdleMs = 10 * 60_000): Promise<void> {
     const cutoff = Date.now() - maxIdleMs;
     for (const [key, connection] of this.connections) if (connection.lastUsedAt < cutoff) { await connection.transport.close().catch(() => undefined); this.connections.delete(key); }
+  }
+
+  async invalidate(userId: number, serverId: string): Promise<void> {
+    const key = `${userId}:${serverId}`;
+    const connection = this.connections.get(key);
+    if (!connection) return;
+    await connection.transport.close().catch(() => undefined);
+    this.connections.delete(key);
   }
 
   async close(): Promise<void> { for (const [key, connection] of this.connections) { await connection.transport.close().catch(() => undefined); this.connections.delete(key); } }

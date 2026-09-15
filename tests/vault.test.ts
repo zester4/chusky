@@ -16,6 +16,13 @@ test("vault encryption uses a random envelope and restores only within the trust
   assert.throws(() => decryptCredential(first, Buffer.alloc(32, 8).toString("base64url")));
 });
 
+test("envelope encryption supports separately named account-connection keys", () => {
+  const connectionKey = Buffer.alloc(32, 9).toString("base64url");
+  const encrypted = encryptCredential({ accessToken: "token" }, connectionKey, "MCP_CONNECTION_ENCRYPTION_KEY");
+  assert.deepEqual(decryptCredential(encrypted, connectionKey, "MCP_CONNECTION_ENCRYPTION_KEY"), { accessToken: "token" });
+  assert.throws(() => decryptCredential(encrypted, Buffer.alloc(32, 10).toString("base64url"), "MCP_CONNECTION_ENCRYPTION_KEY"));
+});
+
 test("model-facing vault tool schemas cannot carry credential material", () => {
   const names = ["CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT"];
   for (const name of names) {

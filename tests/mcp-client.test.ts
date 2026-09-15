@@ -11,6 +11,13 @@ test("MCP registry is owner scoped and rejects unsafe URLs", () => {
   assert.throws(() => validateMcpUrl("https://user:pass@example.com/mcp", true), /disallowed/);
 });
 
+test("MCP catalog definitions support OAuth and bounded scopes", () => {
+  const parsed = parseMcpRegistry(JSON.stringify([{ id: "linear", name: "Linear", url: "https://mcp.example.com/mcp", ownerIds: [1], auth: { type: "oauth" }, scopes: ["issues:read", "issues:read", "bad scope"] }]), true);
+  assert.equal(parsed.errors.length, 0);
+  assert.equal(parsed.servers[0]?.auth?.type, "oauth");
+  assert.deepEqual(parsed.servers[0]?.scopes, ["issues:read"]);
+});
+
 test("MCP tools receive stable namespaced OpenAI definitions", () => {
   const server = { id: "linear", name: "Linear", url: "https://mcp.example.com/mcp", ownerIds: [42], requireApproval: true } as const;
   const converted = toOpenAITool(server, { name: "search_issues", description: "Search issues", inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" } } } });

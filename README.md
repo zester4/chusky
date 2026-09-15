@@ -97,27 +97,44 @@ servers. This is separate from the Cloudflare MCP adapter above: the adapter
 lets another agent call Chusky, while this client lets Chusky call a configured
 third-party MCP server during an ordinary agent run.
 
-Enable it with `MCP_ENABLED=true` and configure `MCP_SERVERS_JSON` as a
-server-side JSON array. Every entry must include an explicit `ownerIds` list.
-Use `auth.type="none"` only for a deliberately public server. For a protected
-server, use `auth.type="bearer"` and put only the name of a Railway secret in
-`tokenEnv`; the token itself never enters the registry, prompt, history, logs,
-or tool result. Production requires HTTPS and rejects credential-bearing,
-localhost, private-network, and metadata URLs.
+Enable it with `MCP_ENABLED=true`. Add supported public servers to
+`src/mcp/mcp.json`; this catalog contains URLs, names, auth type, scopes, and
+tool policy—not user tokens. Users connect their own account through the
+authenticated `/v1/mcp/connections` API. Access and refresh tokens are encrypted
+with `MCP_CONNECTION_ENCRYPTION_KEY` and never enter the catalog, prompt,
+history, logs, or tool result. Production requires HTTPS and rejects
+credential-bearing, localhost, private-network, and metadata URLs.
 
 ```json
-[
-  {
+{
+  "version": 1,
+  "servers": [
+    {
     "id": "linear",
     "name": "Linear MCP",
     "url": "https://mcp.example.com/mcp",
-    "ownerIds": [123456789],
-    "auth": { "type": "bearer", "tokenEnv": "MCP_LINEAR_TOKEN" },
+    "auth": "oauth",
     "allowedTools": ["search_issues", "get_issue"],
     "requireApproval": true
-  }
-]
+    }
+  ]
+}
 ```
+
+The service exposes three account-scoped endpoints:
+
+- `GET /v1/mcp/catalog` lists the servers Chusky supports.
+- `GET /v1/mcp/connections` lists only the current user's connected servers.
+- `POST /v1/mcp/connections` connects a server. For `none` use only
+  `{"serverId":"..."}`; for `oauth` or `bearer`, send the provider-issued
+  access token over HTTPS in `accessToken` (and optionally `refreshToken`,
+  `tokenType`, and `expiresAt`). The response never contains credentials.
+- `DELETE /v1/mcp/connections/:serverId` disconnects the current user's server.
+
+This is the secure backend seam for a future one-click OAuth screen: the
+catalog is product-controlled, while credentials belong to the user. A generic
+OAuth consent/callback flow still needs provider metadata and redirect setup
+before it can replace the token handoff for every MCP vendor.
 
 The agent discovers tools with the official MCP TypeScript SDK, exposes them
 under stable `MCP_<server>_<tool>_<hash>` names, validates arguments against
@@ -165,7 +182,7 @@ npm run cli
 
 The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
 
-CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` creates a one-time approval and cannot place the call until that approval is explicitly granted. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
+CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/meetings [id]`, `/meeting profile`, `/meeting prepare <client> | <objective> | <context>`, `/meeting join <url> | <client> | <objective> | <context>`, `/meeting join-prepared <preparation-id>`, `/meeting context <meeting-id> [question]`, `/meeting leave <meeting-id>`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Meeting commands share the Recall lifecycle with Telegram and the dashboard: prepared calendar meetings, participant rosters, bounded conversation history, outcomes, and captured follow-up contacts remain owner-scoped. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` creates a one-time approval and cannot place the call until that approval is explicitly granted. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
 
 Routine email, messaging, publishing, artifact creation, triggers, reminders, and memory maintenance are autonomous. Deletion, payment, permission changes, production deployment, remote Git push, outbound calls, and other materially risky actions use the approval picker before execution. Chusky's private Daytona computer and sandbox are agent-controlled and do not prompt for approval. `COMPOSIO_MULTI_EXECUTE_TOOL` pauses only when one of its nested actions is materially risky. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
 `/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
@@ -822,7 +839,8 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `SENDBLUE_WORKFLOW_URL` | — | derived | Optional public `/workflows/sendblue-event` URL override |
 | `CHUSKY_PROJECT_KEY` | — | — | Optional private Oracle root/bootstrap key for the self-hosted Developer API; enables `/v1` and provisions scoped project keys |
 | `MCP_ENABLED` | — | `false` | Enable Chusky as a client of configured third-party Streamable HTTP MCP servers |
-| `MCP_SERVERS_JSON` | MCP | `[]` | Owner-scoped server registry; use token environment-variable names, never bearer tokens |
+| `MCP_SERVERS_JSON` | legacy MCP | `[]` | Temporary backwards-compatible server registry; prefer `src/mcp/mcp.json` |
+| `MCP_CONNECTION_ENCRYPTION_KEY` | MCP connections | — | Stable base64url-encoded 32-byte key used to encrypt connected-account tokens |
 | `MCP_TOOL_TIMEOUT_MS` | — | `20000` | Maximum time for one third-party MCP tool call |
 | `MCP_MAX_SERVERS` | — | `20` | Maximum configured MCP servers loaded at startup |
 | `MCP_MAX_TOOLS_PER_SERVER` | — | `100` | Maximum discovered tools exposed from each MCP server |
