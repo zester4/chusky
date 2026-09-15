@@ -1,0 +1,76 @@
+---
+title: Company workspaces
+description: Configure shared Chusky agent projects and run governed business workflows.
+---
+
+Company workspaces use Better Auth organizations for membership and invitations. Workspace owners and admins create a company API project in the Chusky dashboard. Members can see project profiles and policy; only owners/admins can create or rotate keys or change policy.
+
+OAuth and connected-account lifecycle stay with Composio. Chusky calls its existing Composio integration for toolkit discovery, OAuth consent URLs, account listing, tool execution, and triggers. A company backend connects an app using the same stable Chusky identity it will later use to run the agent:
+
+```ts
+import { Chusky } from "@chusky/sdk";
+
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  userId: "acme-crm-service",
+});
+
+const apps = await chusky.account.apps();
+const { url } = await chusky.account.connectApp("GMAIL");
+// Send the URL to an authorized company admin to complete Composio consent.
+```
+
+Use a stable server-side user identifier, not a browser-controlled header or a person's email address. Chusky's thread history, tasks, approvals, and Composio session are scoped to the API project plus that identity. For multi-user products, provide each authenticated end user with their own stable identifier.
+
+## Choose a specialist profile
+
+Built-in templates cover Sales Development, Lead Research, Competitive Intelligence, Customer Support, Executive Assistant, Recruiting, and Marketing Operations. Templates include bounded instructions, an allowlist, and default per-run limits. Project policy and saved profiles can further restrict tool use. The server applies the strictest budget and always requires approval before the Composio execution wrappers run.
+
+```ts
+const templates = await chusky.agents.templates();
+const leadAgent = await chusky.agents.create({
+  template: "lead-research",
+  name: "Fintech lead scout",
+  instructions: "Target companies with 50+ employees. Cite the source for headcount and prepare outreach drafts for review.",
+});
+```
+
+User-supplied company criteria are instructions/data for the profile, not tool permissions. A caller cannot expand the project or profile grant in a run request.
+
+## Run an outcome
+
+```ts
+const { thread, run } = await chusky.runs.create({
+  input: "Find fintech companies that match our ICP and prepare CRM-ready profiles and outreach drafts.",
+  agentId: leadAgent.id,
+  wait: false,
+  budget: { duration: "30m", maxToolCalls: 20, maxCost: 2 },
+}, { idempotencyKey: "acme-lead-research-2026-09-15" });
+
+const latest = await chusky.runs.get(thread.id, run.id);
+```
+
+The run is durable and task-backed when `wait: false` is used with the configured Redis/QStash execution service. Poll run/task status or receive signed webhook events. A human approves pending external actions through the authenticated dashboard or a separately authorized application. Company-project keys have approval-read scope, not approval-write scope, by default; the MCP server also cannot approve its own actions.
+
+## Read company-wide outcomes
+
+Run content and Composio sessions stay scoped to each stable caller identity. Workspace admins can still monitor shared execution status and spend without exposing prompts or outputs:
+
+```ts
+const [runs, events, usage] = await Promise.all([
+  chusky.company.runs({ limit: 20 }),
+  chusky.company.audit(),
+  chusky.company.usage(),
+]);
+
+console.log(runs.data.map(({ id, status, agentName }) => ({ id, status, agentName })));
+console.log(usage.currentMonth.completedRuns, usage.currentMonth.costUsd);
+```
+
+These reads require the project key's `company:read` scope. The dashboard shows the same project-scoped view to workspace owners/admins. Audit entries contain bounded action paths, status, request IDs, and timestamps—not request bodies. Successful durable completion is counted once per project/run even if a workflow completion is retried.
+
+## Integrate a company system
+
+Use the SDK in a trusted backend, call the versioned REST API directly, or connect the Cloudflare Streamable HTTP MCP server at `/mcp`. MCP clients pass the scoped `chsk_` key and the same stable `X-Chusky-User-Id` header. See [`cloudflare/chusky-mcp`](../../cloudflare/chusky-mcp/README.md) for tools and deployment configuration.
+
+Use existing Composio triggers or Chusky's scheduling facilities for event-driven and delayed work. Make the business instruction explicit—for example, draft a follow-up after three days—and keep sending gated by human approval. The standard agent profile does not itself create a prospect-facing recurring schedule.

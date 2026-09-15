@@ -31,6 +31,46 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("company SDK provisions agents and creates a durable profile-governed run", async () => {
+  const calls: Array<{ url: string; headers: Headers; method: string; body: string }> = [];
+  const sdk = new Chusky({ apiKey: "chsk_company_key", userId: "account-42", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ url, headers: new Headers(init?.headers), method: init?.method ?? "GET", body: String(init?.body ?? "") });
+    if (url.endsWith("/v1/threads")) return new Response(JSON.stringify({ id: "thr_company", metadata: { source: "chusky-sdk" }, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }), { status: 201 });
+    if (url.endsWith("/runs")) return new Response(JSON.stringify({ id: "run_company", threadId: "thr_company", status: "queued", input: "Research fintech", agentId: "lead-research", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }), { status: 202 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+  await sdk.agents.templates();
+  const { thread, run } = await sdk.runs.create({ input: "Research fintech", agentId: "lead-research" }, { idempotencyKey: "company-run-1" });
+  assert.equal(thread.id, "thr_company");
+  assert.equal(run.status, "queued");
+  assert.deepEqual(calls.slice(0, 2).map((call) => call.url), [
+    "https://example.test/v1/agents/templates",
+    "https://example.test/v1/threads",
+  ]);
+  assert.equal(calls[1]?.headers.get("idempotency-key"), "company-run-1:thread");
+  assert.equal(calls[2]?.headers.get("idempotency-key"), "company-run-1:run");
+  assert.equal(calls[2]?.url, "https://example.test/v1/threads/thr_company/runs");
+  assert.deepEqual(JSON.parse(calls[2]?.body ?? "{}"), { input: "Research fintech", agentId: "lead-research", wait: false });
+});
+
+test("company SDK reads cross-caller runs, audit events, and usage through scoped endpoints", async () => {
+  const urls: string[] = [];
+  const sdk = new Chusky({ apiKey: "chsk_company", userId: "service-user", baseUrl: "https://example.test", fetch: mockFetch((url) => {
+    urls.push(url);
+    if (url.includes("/company/usage")) return new Response(JSON.stringify({ currentMonth: { month: "2026-09", completedRuns: 2, costUsd: 1.5 }, periods: [], runs: { indexed: 4, active: 1 } }), { status: 200 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+  await sdk.company.runs({ limit: 12 });
+  await sdk.company.audit({ after: 1234 });
+  const usage = await sdk.company.usage();
+  assert.deepEqual(urls, [
+    "https://example.test/v1/company/runs?limit=12",
+    "https://example.test/v1/company/audit-events?after=1234",
+    "https://example.test/v1/company/usage",
+  ]);
+  assert.equal(usage.currentMonth.completedRuns, 2);
+});
+
 test("SDK exposes typed authentication and rate-limit errors", async () => {
   const unauthorized = new Chusky({ apiKey: "bad", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch(() => new Response(JSON.stringify({ error: { code: "invalid_api_key", message: "Nope" } }), { status: 401, headers: { "x-request-id": "req_1" } })) });
   await assert.rejects(() => unauthorized.threads.get("thr_1"), (error: unknown) => error instanceof ChuskyAuthenticationError && error.requestId === "req_1");

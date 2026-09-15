@@ -3,27 +3,52 @@ import type { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, deleteTrigger, fetchModels, getConnectionUrl, getToolkitStates, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, appendMessages, canSpend, cancelTask, checkRateLimit, claimApproval, createTask, createWebTelegramLinkCode, getApproval, getAgentRun, getDaytonaWorkspace, getSession, getTask, getTelegramUserIdForWebAuth, isDurableStore, listApprovals, listAgentRuns, listChannelIdentities, listCliDevices, listPhoneCalls, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveHandoffRecord, saveSession, setApprovalStatus, setModel, setTaskWorkflowRunId, setVoiceReplies, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createTask, createWebTelegramLinkCode, deleteMeetingContact, getApproval, getAgentRun, getCalendarMeetingPreparation, getDaytonaWorkspace, getMeetingRepresentativeProfile, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listRecallMeetings, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyRunSummary, type SdkProjectRecord, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import type { ContentPart } from "./types.js";
 import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
+import { FLUX_TTS_VOICES } from "./voiceSettings.js";
+import { listBlandCuratedVoices } from "./calls/blandVoices.js";
+import { createLinkCode, identityFingerprint, unlinkChannelIdentity, updateLinkedChannelIdentity } from "./channels/identity.js";
+import type { ChannelProvider } from "./channels/contracts.js";
+import type { VoiceCallProfileInput } from "./calls/voiceProfile.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { isTwilioVoiceConfigured } from "./calls/twilio.js";
 import { cancelJob, cancelReminder, nativeTool, scheduleJob, setReminder } from "./nativeTools.js";
+
 import { validateNativeToolArguments } from "./agentTools.js";
 import { chuckTools } from "./agentTools.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
+import { cancelAutomaticCalendarMeetingJoins } from "./meetings/service.js";
+import {
+  COMPANY_AGENT_TEMPLATES,
+  COMPANY_APPROVAL_BEFORE_EXTERNAL_ACTION,
+  COMPANY_TOOL_STARTER_ALLOWLIST,
+  createCompanyAgentProfile,
+  effectiveCompanyRunPolicy,
+  getCompanyTemplate,
+  validateCompanyPolicy,
+  type CompanyAgentProfile,
+  type CompanyPolicy,
+  type CompanyToolPolicy,
+} from "./companyPlatform.js";
+
+let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
+/** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
+export function setSdkTaskWorkflowEnqueuerForTests(enqueuer?: typeof enqueueTaskWorkflow): void {
+  sdkTaskWorkflowEnqueuer = enqueuer ?? enqueueTaskWorkflow;
+}
 
 const activeRuns = new Map<string, AbortController>();
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
@@ -33,10 +58,26 @@ const SELF_SERVICE_SCOPES = new Set<string>(SELF_SERVICE_PROJECT_SCOPES);
 type WebAuthSession = { user?: { id?: string; emailVerified?: boolean } } | null;
 const defaultWebAuthSessionResolver = (headers: Headers): Promise<WebAuthSession> => getAuth().api.getSession({ headers }) as Promise<WebAuthSession>;
 let webAuthSessionResolver = defaultWebAuthSessionResolver;
+type OrganizationAccess = { id: string; role: string } | undefined;
+type OrganizationAccessResolver = (headers: Headers, organizationId: string, userId: string) => Promise<OrganizationAccess>;
+const defaultOrganizationAccessResolver: OrganizationAccessResolver = async (headers, organizationId, userId) => {
+  const organization = await getAuth().api.getFullOrganization({ headers, query: { organizationId } }) as {
+    id?: string;
+    members?: Array<{ userId?: string; role?: string }>;
+  } | null;
+  if (organization?.id !== organizationId) return undefined;
+  const member = organization.members?.find((item) => item.userId === userId);
+  return member?.role ? { id: organizationId, role: member.role } : undefined;
+};
+let organizationAccessResolver = defaultOrganizationAccessResolver;
 
 /** Test-only seam; production always validates the Better Auth session cookie. */
 export function setWebAuthSessionResolverForTests(resolver?: (headers: Headers) => Promise<WebAuthSession>): void {
   webAuthSessionResolver = resolver ?? defaultWebAuthSessionResolver;
+}
+/** Test-only seam; production always checks Better Auth's organization membership. */
+export function setOrganizationAccessResolverForTests(resolver?: OrganizationAccessResolver): void {
+  organizationAccessResolver = resolver ?? defaultOrganizationAccessResolver;
 }
 
 function apiError(c: any, status: number, code: string, message: string) {
@@ -45,6 +86,25 @@ function apiError(c: any, status: number, code: string, message: string) {
   return c.json({ error: { code, message, requestId } }, status);
 }
 async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> { const session = await getSession(userId); session.sdkAudit!.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() }); session.sdkAudit = session.sdkAudit!.slice(-500); await saveSession(userId, session); }
+async function companyAudit(projectId: string, action: string, requestId: string, status: number): Promise<void> {
+  await appendCompanyAuditEvent(projectId, { id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
+}
+async function auditDashboardProjectWrite(c: any, requestId: string): Promise<void> {
+  const method = String(c.req.method);
+  if (method === "GET" || method === "HEAD" || c.res.status >= 400) return;
+  const pathname = new URL(c.req.url).pathname;
+  if (!pathname.startsWith("/v1/account/projects")) return;
+  let projectId = pathname.match(/^\/v1\/account\/projects\/([^/]+)/)?.[1];
+  if (!projectId && pathname === "/v1/account/projects" && method === "POST") {
+    const payload = await c.res.clone().json().catch(() => undefined) as { id?: unknown } | undefined;
+    if (typeof payload?.id === "string") projectId = payload.id;
+  }
+  if (!projectId) return;
+  let decoded: string;
+  try { decoded = decodeURIComponent(projectId); } catch { return; }
+  const project = (await getSession(0)).sdkProjects!.find((item) => item.id === decoded && item.organizationId && !item.revokedAt);
+  if (project) await companyAudit(project.id, `${method} ${pathname}`, requestId, c.res.status);
+}
 async function notifyWebhooks(userId: number, hooks: Array<{ id: string; url: string; secretCiphertext: string; disabledAt?: number }>, type: string, data: unknown): Promise<void> { await Promise.all(hooks.filter((hook) => !hook.disabledAt).map((hook) => enqueueSdkWebhook(userId, hook, type, data))); }
 
 function userIdFor(externalId: string, projectId: string): number {
@@ -52,7 +112,7 @@ function userIdFor(externalId: string, projectId: string): number {
   return Number.parseInt(createHash("sha256").update(`sdk:${projectId}:${externalId}`).digest("hex").slice(0, 12), 16);
 }
 
-type SdkPrincipal = { projectId: string; scopes: string[]; root: boolean };
+type SdkPrincipal = { projectId: string; scopes: string[]; root: boolean; organizationId?: string };
 function requiredScope(path: string, method: string): string {
   const resource = path.split("/")[2] || "unknown";
   return `${resource}:${method === "GET" || method === "HEAD" ? "read" : "write"}`;
@@ -66,10 +126,10 @@ async function authorized(token: string): Promise<SdkPrincipal | undefined> {
   if (config.apiKey && token.length === config.apiKey.length && timingSafeEqual(Buffer.from(token), Buffer.from(config.apiKey))) return { projectId: "root", scopes: ["*"], root: true };
   if (!token.startsWith("chsk_")) return undefined;
   const project = (await getSession(0)).sdkProjects!.find((item) => !item.revokedAt && item.keyHash === digestKey(token));
-  return project ? { projectId: project.id, scopes: project.scopes, root: false } : undefined;
+  return project ? { projectId: project.id, scopes: project.scopes, root: false, ...(project.organizationId ? { organizationId: project.organizationId } : {}) } : undefined;
 }
 
-type SdkOwner = { externalId: string; userId: number; projectId: string };
+type SdkOwner = { externalId: string; userId: number; projectId: string; organizationId?: string };
 function sdkUserFromRequest(c: any): SdkOwner | undefined {
   // Cookie-authenticated dashboard requests must use the authenticated Better
   // Auth subject. Never let a browser-supplied tenant header select another
@@ -78,7 +138,7 @@ function sdkUserFromRequest(c: any): SdkOwner | undefined {
   const externalId = (webAuthUserId ?? c.req.header("X-Chusky-User-Id") ?? "").trim();
   if (!externalId || externalId.length > 200) return undefined;
   const principal = c.get("sdkPrincipal") as SdkPrincipal | undefined;
-  return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId } : undefined;
+  return principal ? { externalId, userId: userIdFor(externalId, principal.projectId), projectId: principal.projectId, ...(principal.organizationId ? { organizationId: principal.organizationId } : {}) } : undefined;
 }
 function sdkUser(c: any): SdkOwner | undefined { return c.get("sdkOwner") as SdkOwner | undefined; }
 async function resolveSdkUser(c: any): Promise<SdkOwner | undefined> {
@@ -104,12 +164,51 @@ function accountProjectScopes(value: unknown): string[] | undefined {
   return scopes.includes("*") && scopes.length !== 1 ? undefined : scopes;
 }
 
+const COMPANY_PROJECT_DEFAULT_SCOPES = [
+  "threads:read", "threads:write", "agents:read", "agents:write",
+  "tasks:read", "tasks:write", "approvals:read",
+  "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
+  "apps:read", "apps:write", "triggers:read", "triggers:write",
+];
+
+function safeProjectPolicy(project: SdkProjectRecord): CompanyPolicy | undefined {
+  return project.companyPolicy ? structuredClone(project.companyPolicy) : undefined;
+}
+
+function companyAgentView(agent: CompanyAgentProfile) {
+  return { ...agent, createdAt: new Date(agent.createdAt).toISOString(), updatedAt: new Date(agent.updatedAt).toISOString() };
+}
+
+function projectAgentIdempotency(project: SdkProjectRecord, key: string, fingerprint: string): { replay?: unknown; mismatch?: boolean } {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const entries = Object.entries(project.agentIdempotency ?? {}).filter(([, entry]) => entry.createdAt >= cutoff)
+    .sort((a, b) => b[1].createdAt - a[1].createdAt).slice(0, 200);
+  project.agentIdempotency = Object.fromEntries(entries);
+  const existing = project.agentIdempotency[key];
+  if (!existing) return {};
+  return existing.fingerprint === fingerprint ? { replay: existing.response } : { mismatch: true };
+}
+
+function saveProjectAgentIdempotency(project: SdkProjectRecord, key: string, fingerprint: string, response: unknown): void {
+  project.agentIdempotency ??= {};
+  project.agentIdempotency[key] = { fingerprint, response, createdAt: Date.now() };
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const entries = Object.entries(project.agentIdempotency).filter(([, entry]) => entry.createdAt >= cutoff)
+    .sort((a, b) => b[1].createdAt - a[1].createdAt).slice(0, 200);
+  project.agentIdempotency = Object.fromEntries(entries);
+}
+
+function companyPolicyView(policy: CompanyPolicy | undefined) {
+  return policy ?? { tools: {}, budget: {} };
+}
+
 function accountProjectView(project: SdkProjectRecord) {
   return {
     id: project.id,
     name: project.name,
     keyPrefix: project.keyPrefix,
     scopes: project.scopes,
+    ...(project.organizationId ? { organizationId: project.organizationId } : {}),
     createdAt: new Date(project.createdAt).toISOString(),
     rotatedAt: project.rotatedAt ? new Date(project.rotatedAt).toISOString() : undefined,
     revokedAt: project.revokedAt ? new Date(project.revokedAt).toISOString() : undefined,
@@ -119,6 +218,24 @@ function accountProjectView(project: SdkProjectRecord) {
 function webProjectOwner(c: any): { id: string; verified: boolean } | undefined {
   const id = c.get("webAuthUserId") as string | undefined;
   return id ? { id, verified: c.get("webAuthEmailVerified") === true } : undefined;
+}
+
+async function organizationAccessForRequest(c: any, organizationId: string): Promise<OrganizationAccess> {
+  const owner = webProjectOwner(c);
+  if (!owner?.verified || !organizationId || organizationId.length > 200) return undefined;
+  try { return await organizationAccessResolver(c.req.raw.headers, organizationId, owner.id); }
+  catch { return undefined; }
+}
+
+async function accountCanAccessProject(c: any, project: SdkProjectRecord, manage: boolean): Promise<boolean> {
+  const owner = webProjectOwner(c);
+  if (!owner?.verified) return false;
+  if (project.organizationId) {
+    const access = await organizationAccessForRequest(c, project.organizationId);
+    if (!access) return false;
+    return !manage || access.role === "owner" || access.role === "admin";
+  }
+  return project.ownerWebAuthUserId === owner.id;
 }
 
 async function linkedWebCallOwner(c: any): Promise<{ userId: number } | undefined> {
@@ -143,29 +260,115 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
-function runView(threadId: string, run: SdkRunRecord) { return { ...run, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }; }
+function runView(threadId: string, run: SdkRunRecord) {
+  const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, ...visible } = run;
+  return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
+}
+function companyRunRecord(run: SdkRunRecord): CompanyRunSummary {
+  return {
+    id: run.id, status: run.status,
+    ...(run.agentId ? { agentId: run.agentId } : {}),
+    ...(run.agentName ? { agentName: run.agentName } : {}),
+    ...(typeof run.cost === "number" ? { cost: run.cost } : {}),
+    ...(run.error?.code ? { errorCode: run.error.code } : {}),
+    createdAt: run.createdAt, updatedAt: run.updatedAt,
+  };
+}
+
+/** Projects only a minimal, content-free run summary into company telemetry. */
+export async function persistSdkCompanyRun(run: SdkRunRecord): Promise<void> {
+  if (!run.companyProjectId) return;
+  const summary = companyRunRecord(run);
+  if (run.status === "completed") await completeCompanyRunSummary(run.companyProjectId, summary, run.updatedAt);
+  else await saveCompanyRunSummary(run.companyProjectId, summary);
+}
+
+function projectLimit(c: any): number {
+  const value = Number(c.req.query("limit") ?? 50);
+  return Number.isSafeInteger(value) ? Math.max(1, Math.min(100, value)) : 50;
+}
+
+async function companyUsageView(projectId: string) {
+  const [periods, runs] = await Promise.all([listCompanyUsagePeriods(projectId, 13), listCompanyRunSummaries(projectId, 100)]);
+  return { currentMonth: periods[0] ?? { month: new Date().toISOString().slice(0, 7), completedRuns: 0, costUsd: 0 }, periods, runs: { indexed: runs.length, active: runs.filter((run) => run.status === "queued" || run.status === "running").length } };
+}
+
+function companyRunViews(data: CompanyRunSummary[]) {
+  return data.map((run) => ({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }));
+}
+
+function companyAuditViews(data: Awaited<ReturnType<typeof listCompanyAuditEvents>>, after = 0) {
+  return data.filter((event) => event.at > after).map((event) => ({ ...event, at: new Date(event.at).toISOString() }));
+}
+
 function artifactView(artifact: NonNullable<Awaited<ReturnType<typeof getSession>>["artifacts"]>[number]) { return { ...artifact, createdAt: new Date(artifact.createdAt).toISOString(), updatedAt: new Date(artifact.updatedAt).toISOString() }; }
 function videoView(job: Awaited<ReturnType<typeof getVideoJob>>) { return job ? { ...job, createdAt: new Date(job.createdAt).toISOString(), updatedAt: new Date(job.updatedAt).toISOString(), ...(job.completedAt ? { completedAt: new Date(job.completedAt).toISOString() } : {}) } : undefined; }
 function workerView(record: Awaited<ReturnType<typeof getHandoffRecord>>) { return record ? { id: record.id, worker: record.to, from: record.from, objective: record.objective, expectedOutput: record.expectedOutput, status: record.status, taskId: record.taskId, workflowRunId: record.workflowRunId, context: record.context, delegation: record.delegation, timestamp: new Date(record.timestamp).toISOString() } : undefined; }
-type RunBody = { input?: string; attachments?: string[]; model?: string; metadata?: Record<string, unknown>; budget?: { duration?: string; maxToolCalls?: number; maxCost?: number }; tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] }; skills?: string[]; wait?: boolean };
+type RunBody = { input?: string; attachments?: string[]; model?: string; agentId?: string; metadata?: Record<string, unknown>; budget?: { duration?: string; maxToolCalls?: number; maxCost?: number }; tools?: CompanyToolPolicy; skills?: string[]; wait?: boolean };
 
-async function sdkAgentOptions(body: RunBody, runId?: string, parentRunId?: string): Promise<{ toolAllow?: string[]; toolDeny?: string[]; toolRequireApproval?: string[]; maxToolCalls?: number; maxCost?: number; instructions?: string; runId?: string; parentRunId?: string }> {
+function principalFromContext(c: any): SdkPrincipal {
+  return (c.get as (key: string) => unknown)("sdkPrincipal") as SdkPrincipal;
+}
+
+async function requestCompanyProject(c: any): Promise<SdkProjectRecord | undefined> {
+  const principal = principalFromContext(c);
+  if (principal.root || !principal.organizationId) return undefined;
+  return (await getSession(0)).sdkProjects!.find((item) => item.id === principal.projectId && item.organizationId === principal.organizationId && !item.revokedAt);
+}
+
+async function sdkAgentOptions(body: RunBody, runId?: string, parentRunId?: string, profileInstructions?: string): Promise<{ toolAllow?: string[]; toolDeny?: string[]; toolRequireApproval?: string[]; maxToolCalls?: number; maxCost?: number; instructions?: string; runId?: string; parentRunId?: string }> {
   const allow = Array.isArray(body.tools?.allow) ? body.tools!.allow!.filter((item): item is string => typeof item === "string").slice(0, 100) : undefined;
   const deny = Array.isArray(body.tools?.deny) ? body.tools!.deny!.filter((item): item is string => typeof item === "string").slice(0, 100) : undefined;
   const requireApproval = Array.isArray(body.tools?.requireApproval) ? body.tools!.requireApproval!.filter((item): item is string => typeof item === "string").slice(0, 100) : undefined;
   const skills = Array.isArray(body.skills) ? [...new Set(body.skills.filter((item): item is string => typeof item === "string"))].slice(0, 10) : [];
   const limits = { ...(body.budget?.maxToolCalls !== undefined ? { maxToolCalls: body.budget.maxToolCalls } : {}), ...(body.budget?.maxCost !== undefined ? { maxCost: body.budget.maxCost } : {}) };
-  if (!skills.length) return { ...(allow ? { toolAllow: allow } : {}), ...(deny ? { toolDeny: deny } : {}), ...(requireApproval ? { toolRequireApproval: requireApproval } : {}), ...limits, ...(runId ? { runId } : {}), ...(parentRunId ? { parentRunId } : {}) };
-  const blocks: string[] = [];
+  if (!skills.length && !profileInstructions) return { ...(allow ? { toolAllow: allow } : {}), ...(deny ? { toolDeny: deny } : {}), ...(requireApproval ? { toolRequireApproval: requireApproval } : {}), ...limits, ...(runId ? { runId } : {}), ...(parentRunId ? { parentRunId } : {}) };
+  const blocks: string[] = profileInstructions ? [`Company agent profile instructions:\n${profileInstructions.slice(0, 6000)}`] : [];
   for (const skill of skills) { try { const file = await readSkillFile(skill, "SKILL.md", 12000); if (file.content) blocks.push(`Trusted skill guidance (${skill}):\n${file.content}`); } catch { /* unknown skills are ignored; the run remains usable */ } }
   return { ...(allow ? { toolAllow: allow } : {}), ...(deny ? { toolDeny: deny } : {}), ...(requireApproval ? { toolRequireApproval: requireApproval } : {}), ...limits, ...(blocks.length ? { instructions: blocks.join("\n\n").slice(0, 24000) } : {}), ...(runId ? { runId } : {}), ...(parentRunId ? { parentRunId } : {}) };
 }
 function validateRunPolicy(body: RunBody): string | undefined {
   const durations = new Set(["5m", "30m", "1h", "3h", "6h", "3d", "1w"]);
+  const toolSlug = /^[A-Za-z][A-Za-z0-9_]{0,119}$/;
   if (body.budget?.duration !== undefined && !durations.has(body.budget.duration)) return "budget.duration must be one of 5m, 30m, 1h, 3h, 6h, 3d, or 1w";
   if (body.budget?.maxToolCalls !== undefined && (!Number.isInteger(body.budget.maxToolCalls) || body.budget.maxToolCalls < 1 || body.budget.maxToolCalls > 100)) return "budget.maxToolCalls must be between 1 and 100";
   if (body.budget?.maxCost !== undefined && (!Number.isFinite(body.budget.maxCost) || body.budget.maxCost < 0)) return "budget.maxCost must be a non-negative number";
+  if (body.tools !== undefined && (!body.tools || typeof body.tools !== "object" || Array.isArray(body.tools))) return "tools must be an object containing valid tool-slug arrays";
+  for (const field of ["allow", "deny", "requireApproval"] as const) {
+    const list = body.tools?.[field];
+    if (list !== undefined && (!Array.isArray(list) || list.length > 100 || !list.every((item) => typeof item === "string" && toolSlug.test(item)))) return `tools.${field} must contain at most 100 valid tool slugs`;
+  }
+  if (body.agentId !== undefined && (typeof body.agentId !== "string" || !/^(?:agt_[A-Za-z0-9_-]{1,100}|[a-z][a-z0-9-]{1,80})$/.test(body.agentId))) return "agentId must be a valid profile ID or template slug";
   return undefined;
+}
+
+async function applyCompanyRunPolicy(c: any, body: RunBody): Promise<{ agent?: CompanyAgentProfile; error?: string }> {
+  const principal = principalFromContext(c);
+  const control = await getSession(0);
+  const project = control.sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+  let agent: CompanyAgentProfile | undefined;
+  if (body.agentId) {
+    agent = project?.companyAgents?.find((item) => item.id === body.agentId);
+    if (!agent) {
+      const template = getCompanyTemplate(body.agentId);
+      if (template) agent = createCompanyAgentProfile({ template: template.slug }, template.slug);
+    }
+    if (!agent) return { error: "The selected agent profile or template is unavailable to this API project." };
+  }
+  if (!project?.organizationId && !project?.companyPolicy && !agent) return {};
+  const requestedAllow = body.tools?.allow;
+  const effective = effectiveCompanyRunPolicy(project?.companyPolicy, agent, body);
+  const agentGrant = agent?.tools.allow;
+  const projectGrant = project?.companyPolicy?.tools?.allow;
+  const grant = agentGrant && projectGrant
+    ? agentGrant.filter((slug) => projectGrant.includes(slug))
+    : agentGrant ?? projectGrant;
+  if (requestedAllow && grant && requestedAllow.some((slug) => !grant.includes(slug))) {
+    return { error: "This run requested a tool outside the project's or agent profile's allowed tool grant." };
+  }
+  body.tools = effective.tools;
+  body.budget = effective.budget;
+  return { agent };
 }
 
 async function resolveRunModel(requested: unknown, fallback: string): Promise<string> {
@@ -244,7 +447,11 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required.");
     (c.set as (key: string, value: unknown) => void)("sdkOwner", owner);
     const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
-    if (c.req.method !== "GET") await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+    if (c.req.method !== "GET" && c.req.method !== "HEAD") {
+      await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+      if (principal.organizationId) await companyAudit(principal.projectId, `${c.req.method} ${new URL(c.req.url).pathname}`, requestId, c.res.status);
+      else if ((c.get as (key: string) => unknown)("webAuthUserId")) await auditDashboardProjectWrite(c, requestId);
+    }
   });
 
   app.get("/v1/ops/health", async (c) => {
@@ -285,8 +492,9 @@ export function registerSdkApi(app: Hono): void {
     return c.json({
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
+      voicePreferences: session.voicePreferences ?? {},
       approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
-      channels: channels.filter((item) => !item.disabledAt).map((item) => ({ provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
+      channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       memory: session.memories.map((item) => ({
@@ -306,7 +514,7 @@ export function registerSdkApi(app: Hono): void {
       })),
       scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
       triggers: session.triggerIds,
-      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash: _tokenHash, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
+      devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
       workspace: workspace ? { sandboxId: workspace.sandboxId, name: workspace.name, lastKnownState: workspace.lastKnownState, createdAt: new Date(workspace.createdAt).toISOString(), updatedAt: new Date(workspace.updatedAt).toISOString(), ptySessions: workspace.ptySessions?.length ?? 0, lastUrl: workspace.browser?.lastUrl } : null,
       webhooks: (session.sdkWebhooks ?? []).filter((item) => !item.disabledAt).map(({ secretCiphertext: _secret, ...item }) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
       telegramLink: { linked: Boolean(webAuthUserId && await getTelegramUserIdForWebAuth(webAuthUserId)) },
@@ -319,12 +527,28 @@ export function registerSdkApi(app: Hono): void {
     catch (error) { return apiError(c, 502, "models_unavailable", error instanceof Error ? error.message : "Models are temporarily unavailable."); }
   });
 
+  app.get("/v1/account/preferences", async (c) => {
+    const session = await getSession(sdkUser(c)!.userId);
+    return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies), voicePreferences: session.voicePreferences ?? {} });
+  });
+
+  app.get("/v1/account/voice-options", async (c) => {
+    let blandVoices: Array<{ id: string; name: string; description?: string }> = [];
+    let blandCatalogueAvailable = false;
+    if (config.blandVoiceEnabled && config.blandApiKey) {
+      try { blandVoices = await listBlandCuratedVoices(config.blandApiKey); blandCatalogueAvailable = true; }
+      catch { /* Keep Flux options usable when Bland's optional catalogue is unavailable. */ }
+    }
+    return c.json({ fluxVoices: FLUX_TTS_VOICES, blandVoices, blandAvailable: isBlandVoiceConfigured(), blandCatalogueAvailable });
+  });
+
   app.patch("/v1/account/preferences", async (c) => {
     const owner = sdkUser(c)!;
-    const body = await c.req.json().catch(() => ({})) as { model?: unknown; voiceReplies?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { model?: unknown; voiceReplies?: unknown; liveVoice?: unknown };
     if (body.model !== undefined && (typeof body.model !== "string" || !/^[a-zA-Z0-9._:/~-]{1,200}$/.test(body.model))) return apiError(c, 400, "invalid_model", "model must be a valid model ID.");
     if (body.voiceReplies !== undefined && typeof body.voiceReplies !== "boolean") return apiError(c, 400, "invalid_voice_setting", "voiceReplies must be a boolean.");
-    if (body.model === undefined && body.voiceReplies === undefined) return apiError(c, 400, "empty_preferences", "Provide model or voiceReplies.");
+    if (body.liveVoice !== undefined && (!body.liveVoice || typeof body.liveVoice !== "object" || Array.isArray(body.liveVoice))) return apiError(c, 400, "invalid_live_voice", "liveVoice must identify a provider and voice selection.");
+    if (body.model === undefined && body.voiceReplies === undefined && body.liveVoice === undefined) return apiError(c, 400, "empty_preferences", "Provide model, voiceReplies, or liveVoice.");
     const currentSession = await getSession(owner.userId);
     if (body.model !== undefined) {
       try { await resolveRunModel(body.model, currentSession.model); }
@@ -332,8 +556,75 @@ export function registerSdkApi(app: Hono): void {
       await setModel(owner.userId, body.model);
     }
     if (body.voiceReplies !== undefined) await setVoiceReplies(owner.userId, body.voiceReplies);
+    if (body.liveVoice !== undefined) {
+      const liveVoice = body.liveVoice as Record<string, unknown>;
+      const provider = liveVoice.provider;
+      if (provider !== "twilio" && provider !== "meetings" && provider !== "bland") return apiError(c, 400, "invalid_live_voice", "provider must be twilio, meetings, or bland.");
+      try {
+        if (provider === "bland") {
+          if (liveVoice.voice === null) await setLiveVoicePreference(owner.userId, provider);
+          else if (liveVoice.voice && typeof liveVoice.voice === "object" && !Array.isArray(liveVoice.voice)) {
+            const voice = liveVoice.voice as Record<string, unknown>;
+            if (typeof voice.id !== "string" || typeof voice.name !== "string") return apiError(c, 400, "invalid_live_voice", "Bland voice must include an available id and name.");
+            await setLiveVoicePreference(owner.userId, provider, { id: voice.id, name: voice.name });
+          } else return apiError(c, 400, "invalid_live_voice", "Select an available Bland voice or set voice to null to use the service default.");
+        } else if (liveVoice.voice === null) await setLiveVoicePreference(owner.userId, provider);
+        else if (typeof liveVoice.voice === "string") await setLiveVoicePreference(owner.userId, provider, liveVoice.voice as never);
+        else return apiError(c, 400, "invalid_live_voice", "Select an available Flux voice or set voice to null to use the default.");
+      } catch (error) { return apiError(c, 400, "invalid_live_voice", error instanceof Error ? error.message : "That voice selection is invalid."); }
+    }
     const session = await getSession(owner.userId);
-    return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies) });
+    return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies), voicePreferences: session.voicePreferences ?? {} });
+  });
+
+  app.get("/v1/meetings/profile", async (c) => c.json(await getMeetingRepresentativeProfile(sdkUser(c)!.userId)));
+  app.patch("/v1/meetings/profile", async (c) => {
+    const body = await c.req.json().catch(() => undefined);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return apiError(c, 400, "invalid_meeting_profile", "Meeting representative profile must be an object.");
+    try {
+      const userId = sdkUser(c)!.userId;
+      const previous = await getMeetingRepresentativeProfile(userId);
+      const updated = await updateMeetingRepresentativeProfile(userId, body);
+      let autoJoinReconciliation: { cancelled: number; stillInCall: number; failures: number } | undefined;
+      if (previous.autoJoinCalendar && !updated.autoJoinCalendar) {
+        try { autoJoinReconciliation = await cancelAutomaticCalendarMeetingJoins(userId); }
+        catch { autoJoinReconciliation = { cancelled: 0, stillInCall: 0, failures: 1 }; }
+      }
+      return c.json({ ...updated, ...(autoJoinReconciliation ? { autoJoinReconciliation } : {}) });
+    }
+    catch (error) { return apiError(c, 400, "invalid_meeting_profile", error instanceof Error ? error.message : "Meeting representative profile is invalid."); }
+  });
+
+  app.get("/v1/meetings", async (c) => {
+    const owner = sdkUser(c)!;
+    const [preparations, records, contacts] = await Promise.all([
+      listCalendarMeetingPreparations(owner.userId, 20), listRecallMeetings(owner.userId, 20), listMeetingContacts(owner.userId, 50),
+    ]);
+    const prepared = await Promise.all(preparations.map(async (item) => {
+      const trigger = await getTriggerEvent(item.sourceTriggerEventId);
+      return {
+        ...item,
+        brief: trigger?.userId === owner.userId && trigger.status === "completed" ? trigger.result?.slice(0, 12_000) : undefined,
+        briefStatus: trigger?.userId === owner.userId ? trigger.status : undefined,
+        createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(),
+      };
+    }));
+    const meetings = records.map((meeting) => ({
+      id: meeting.id, platform: meeting.platform, interactionMode: meeting.interactionMode ?? "addressed", status: meeting.status,
+      title: meeting.title, joinAt: meeting.joinAt, error: meeting.error ? "The meeting assistant could not complete this step. Check the meeting link and provider status." : undefined,
+      providerStatusAt: meeting.providerStatusAt ? new Date(meeting.providerStatusAt).toISOString() : undefined,
+      participantRoster: (meeting.participantRoster ?? []).map((person) => ({ ...person, updatedAt: new Date(person.updatedAt).toISOString() })),
+      speakerEvents: (meeting.speakerEvents ?? []).map((entry) => ({ ...entry, at: new Date(entry.at).toISOString() })),
+      history: meeting.history.filter((message) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message) => ({ role: message.role, content: String(message.content).slice(0, 3_000), createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : undefined })),
+      outcome: meeting.outcome, outcomeFollowThrough: meeting.outcomeFollowThrough, outcomeStatus: meeting.outcomeStatus,
+      outcomeNotificationStatus: meeting.outcomeNotificationStatus, createdAt: new Date(meeting.createdAt).toISOString(), updatedAt: new Date(meeting.updatedAt).toISOString(),
+    }));
+    return c.json({ preparations: prepared, meetings, contacts: contacts.map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() })) });
+  });
+
+  app.delete("/v1/meetings/contacts/:contactId", async (c) => {
+    const removed = await deleteMeetingContact(sdkUser(c)!.userId, c.req.param("contactId"));
+    return removed ? c.body(null, 204) : apiError(c, 404, "meeting_contact_not_found", "Meeting follow-up contact not found.");
   });
 
   app.get("/v1/apps", async (c) => {
@@ -344,8 +635,24 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/apps/:toolkit/connect", async (c) => {
     const toolkit = c.req.param("toolkit").trim();
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(toolkit)) return apiError(c, 400, "invalid_toolkit", "Invalid toolkit name.");
-    try { return c.json({ toolkit, url: await getConnectionUrl(sdkUser(c)!.userId, toolkit) }); }
+    const body = await c.req.json().catch(() => ({})) as { alias?: unknown };
+    if (body.alias !== undefined && (typeof body.alias !== "string" || !body.alias.trim() || body.alias.trim().length > 160)) return apiError(c, 400, "invalid_connection_alias", "alias must be a non-empty name of 160 characters or fewer.");
+    try { return c.json({ toolkit, alias: typeof body.alias === "string" ? body.alias.trim() : undefined, url: await getConnectionUrl(sdkUser(c)!.userId, toolkit, typeof body.alias === "string" ? body.alias.trim() : undefined) }); }
     catch (error) { return apiError(c, 502, "connection_unavailable", error instanceof Error ? error.message : "Could not create an app connection link."); }
+  });
+
+  app.get("/v1/apps/connections", async (c) => {
+    try { return c.json({ data: await listConnectedAccounts(sdkUser(c)!.userId) }); }
+    catch (error) { return apiError(c, 502, "connections_unavailable", error instanceof Error ? error.message : "Connected accounts are temporarily unavailable."); }
+  });
+
+  app.delete("/v1/apps/connections/:connectionId", async (c) => {
+    const id = c.req.param("connectionId").trim();
+    if (!/^[A-Za-z0-9_-]{1,200}$/.test(id)) return apiError(c, 400, "invalid_connection_id", "Invalid connected account ID.");
+    try {
+      if (!(await disconnectConnectedAccount(sdkUser(c)!.userId, id))) return apiError(c, 404, "connection_not_found", "Connected account not found for this Chusky account.");
+      return c.body(null, 204);
+    } catch (error) { return apiError(c, 502, "connection_disconnect_failed", error instanceof Error ? error.message : "Could not disconnect this account."); }
   });
 
   app.get("/v1/triggers", async (c) => {
@@ -418,11 +725,12 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "workspace_link_required", "Verify your email and link your Telegram workspace before using calls.");
     if (!phoneCallingProvider()) return apiError(c, 503, "phone_calling_unavailable", "The selected phone provider is not configured on this Chusky deployment.");
     if (!(await checkRateLimit(owner.userId))) return apiError(c, 429, "rate_limit_exceeded", "Too many requests. Try again shortly.");
-    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { phoneNumber?: unknown; purpose?: unknown; profile?: unknown };
+    if (body.profile !== undefined && (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile))) return apiError(c, 400, "invalid_call_profile", "profile must be an object.");
     try {
       const phoneNumber = String(body.phoneNumber ?? "").trim();
       const purpose = String(body.purpose ?? "").trim();
-      const approval = await requestPhoneCallApproval(owner.userId, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`);
+      const approval = await requestPhoneCallApproval(owner.userId, { phoneNumber, purpose, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}) }, `/call ${phoneNumber} ${purpose}`);
       return c.json({ id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() }, 201);
     } catch (error) {
       return apiError(c, 400, "invalid_phone_call", error instanceof Error ? error.message : "Invalid call request.");
@@ -434,23 +742,63 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
     if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before creating or managing API keys.");
     const control = await getSession(0);
-    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id).map(accountProjectView) });
+    const organizationId = c.req.query("organizationId");
+    if (organizationId) {
+      if (!(await organizationAccessForRequest(c, organizationId))) return apiError(c, 404, "not_found", "Workspace not found.");
+      return c.json({ data: control.sdkProjects!.filter((project) => project.organizationId === organizationId && !project.revokedAt).map(accountProjectView) });
+    }
+    return c.json({ data: control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.organizationId).map(accountProjectView) });
+  });
+
+  app.get("/v1/account/projects/:projectId/company/runs", async (c) => {
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Company project not found.");
+    return c.json({ data: companyRunViews(await listCompanyRunSummaries(project.id, projectLimit(c))) });
+  });
+
+  app.get("/v1/account/projects/:projectId/company/audit-events", async (c) => {
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Company project not found.");
+    const after = Number(c.req.query("after") ?? 0);
+    return c.json({ data: companyAuditViews(await listCompanyAuditEvents(project.id, 100), Number.isFinite(after) && after > 0 ? after : 0) });
+  });
+
+  app.get("/v1/account/projects/:projectId/company/usage", async (c) => {
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Company project not found.");
+    return c.json(await companyUsageView(project.id));
   });
 
   app.post("/v1/account/projects", async (c) => {
     const owner = webProjectOwner(c);
     if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
     if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before creating an API key.");
-    const body = await c.req.json().catch(() => ({})) as { name?: unknown; scopes?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { name?: unknown; scopes?: unknown; organizationId?: unknown };
     const name = typeof body.name === "string" ? body.name.trim().slice(0, 100) : "";
-    const scopes = accountProjectScopes(body.scopes);
+    const organizationId = typeof body.organizationId === "string" ? body.organizationId.trim() : undefined;
+    if (organizationId && !(await organizationAccessForRequest(c, organizationId).then((access) => access?.role === "owner" || access?.role === "admin"))) {
+      return apiError(c, 403, "workspace_admin_required", "Only workspace owners and admins can create company API projects.");
+    }
+    const scopes = accountProjectScopes(body.scopes === undefined && organizationId ? COMPANY_PROJECT_DEFAULT_SCOPES : body.scopes);
     if (!name) return apiError(c, 400, "invalid_project", "Project name is required.");
     if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
     const control = await getSession(0);
-    if (control.sdkProjects!.filter((project) => project.ownerWebAuthUserId === owner.id && !project.revokedAt).length >= SELF_SERVICE_PROJECT_LIMIT) return apiError(c, 409, "project_limit_reached", `You can have up to ${SELF_SERVICE_PROJECT_LIMIT} active API keys.`);
+    const ownedProjects = control.sdkProjects!.filter((project) => organizationId ? project.organizationId === organizationId : project.ownerWebAuthUserId === owner.id && !project.organizationId);
+    if (ownedProjects.filter((project) => !project.revokedAt).length >= SELF_SERVICE_PROJECT_LIMIT) return apiError(c, 409, "project_limit_reached", `You can have up to ${SELF_SERVICE_PROJECT_LIMIT} active API projects per workspace.`);
     const id = `proj_${randomUUID()}`;
     const key = `chsk_${id}_${randomBytes(24).toString("base64url")}`;
-    const project: SdkProjectRecord = { id, name, keyPrefix: key.slice(0, 18), keyHash: digestKey(key), scopes, createdAt: Date.now(), ownerWebAuthUserId: owner.id };
+    const project: SdkProjectRecord = {
+      id, name, keyPrefix: key.slice(0, 18), keyHash: digestKey(key), scopes,
+      createdAt: Date.now(), ownerWebAuthUserId: owner.id,
+      ...(organizationId ? {
+        organizationId,
+        companyPolicy: {
+          tools: { allow: [...COMPANY_TOOL_STARTER_ALLOWLIST], requireApproval: [...COMPANY_APPROVAL_BEFORE_EXTERNAL_ACTION] },
+          budget: { duration: "30m" as const, maxToolCalls: 40, maxCost: 5 },
+        },
+        companyAgents: [],
+      } : {}),
+    };
     control.sdkProjects!.push(project);
     await saveSession(0, control);
     return c.json({ ...accountProjectView(project), key }, 201);
@@ -463,8 +811,8 @@ export function registerSdkApi(app: Hono): void {
     const scopes = accountProjectScopes((await c.req.json().catch(() => ({})) as { scopes?: unknown }).scopes);
     if (!scopes) return apiError(c, 400, "invalid_scopes", "Choose supported API scopes.");
     const control = await getSession(0);
-    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
-    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Active API key not found.");
     project.scopes = scopes;
     await saveSession(0, control);
     return c.json(accountProjectView(project));
@@ -475,8 +823,8 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
     if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before managing API keys.");
     const control = await getSession(0);
-    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
-    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Active API key not found.");
     const key = `chsk_${project.id}_${randomBytes(24).toString("base64url")}`;
     project.keyHash = digestKey(key);
     project.keyPrefix = key.slice(0, 18);
@@ -490,9 +838,171 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
     if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before managing API keys.");
     const control = await getSession(0);
-    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.ownerWebAuthUserId === owner.id && !item.revokedAt);
-    if (!project) return apiError(c, 404, "not_found", "Active API key not found.");
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Active API key not found.");
     project.revokedAt = Date.now();
+    await saveSession(0, control);
+    return c.body(null, 204);
+  });
+
+  app.get("/v1/account/projects/:projectId/policy", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Active API project not found.");
+    return c.json({ data: companyPolicyView(safeProjectPolicy(project)) });
+  });
+
+  app.put("/v1/account/projects/:projectId/policy", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before changing project policies.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Active API project not found.");
+    const policy = validateCompanyPolicy(await c.req.json().catch(() => undefined));
+    if (!policy) return apiError(c, 400, "invalid_policy", "Choose valid tool scopes and run budgets (up to 100 tool calls and $1,000 per run).");
+    project.companyPolicy = policy;
+    await saveSession(0, control);
+    return c.json({ data: companyPolicyView(safeProjectPolicy(project)) });
+  });
+
+  app.get("/v1/account/projects/:projectId/agents", async (c) => {
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Active API project not found.");
+    return c.json({ data: (project.companyAgents ?? []).map(companyAgentView) });
+  });
+
+  app.post("/v1/account/projects/:projectId/agents", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before creating an agent.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Active API project not found.");
+    const body = await c.req.json().catch(() => undefined);
+    const fingerprint = createHash("sha256").update(`POST:/account/projects/${project.id}/agents:${JSON.stringify(body)}`).digest("hex");
+    const key = (c.req.header("Idempotency-Key") ?? "").trim().slice(0, 255);
+    const prior = key ? projectAgentIdempotency(project, key, fingerprint) : {};
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay !== undefined) return c.json(prior.replay, 201);
+    project.companyAgents ??= [];
+    if (project.companyAgents.length >= 20) return apiError(c, 409, "agent_limit_reached", "A project can have up to 20 agent profiles.");
+    const agent = createCompanyAgentProfile(body, `agt_${randomUUID()}`);
+    if (!agent) return apiError(c, 400, "invalid_agent", "Choose a supported template and valid tool permissions.");
+    project.companyAgents.push(agent);
+    const response = companyAgentView(agent);
+    if (key) saveProjectAgentIdempotency(project, key, fingerprint, response);
+    await saveSession(0, control);
+    return c.json(response, 201);
+  });
+
+  app.patch("/v1/account/projects/:projectId/agents/:agentId", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before changing an agent.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    const index = project?.companyAgents?.findIndex((item) => item.id === c.req.param("agentId")) ?? -1;
+    if (!project || index < 0 || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Agent profile not found.");
+    const existing = project.companyAgents![index]!;
+    const body = await c.req.json().catch(() => ({})) as { name?: unknown; instructions?: unknown };
+    const agent = createCompanyAgentProfile({
+      template: existing.template,
+      name: body.name ?? existing.name,
+      instructions: body.instructions ?? existing.instructions,
+      policy: { tools: existing.tools, budget: existing.budget },
+    }, existing.id, existing.createdAt);
+    if (!agent) return apiError(c, 400, "invalid_agent", "The profile name or instructions are invalid.");
+    agent.updatedAt = Date.now();
+    project.companyAgents![index] = agent;
+    await saveSession(0, control);
+    return c.json(companyAgentView(agent));
+  });
+
+  app.delete("/v1/account/projects/:projectId/agents/:agentId", async (c) => {
+    const owner = webProjectOwner(c);
+    if (!owner) return apiError(c, 403, "web_session_required", "A Chusky dashboard session is required.");
+    if (!owner.verified) return apiError(c, 403, "email_verification_required", "Verify your email before removing an agent.");
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && !item.revokedAt);
+    const index = project?.companyAgents?.findIndex((item) => item.id === c.req.param("agentId")) ?? -1;
+    if (!project || index < 0 || !(await accountCanAccessProject(c, project, true))) return apiError(c, 404, "not_found", "Agent profile not found.");
+    project.companyAgents!.splice(index, 1);
+    await saveSession(0, control);
+    return c.body(null, 204);
+  });
+
+  app.get("/v1/agents/templates", async (c) => c.json({
+    data: COMPANY_AGENT_TEMPLATES.map(({ slug, name, outcome, allowedTools, requireApproval }) => ({
+      slug, name, outcome, allowedTools: [...allowedTools], requireApproval: [...requireApproval],
+    })),
+  }));
+
+  app.get("/v1/agents", async (c) => {
+    const principal = principalFromContext(c);
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+    return c.json({ data: (project?.companyAgents ?? []).map(companyAgentView) });
+  });
+
+  app.post("/v1/agents", async (c) => {
+    const principal = principalFromContext(c);
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+    if (!project) return apiError(c, 400, "project_required", "Agent profiles require a project API key.");
+    const body = await c.req.json().catch(() => undefined);
+    const fingerprint = createHash("sha256").update(`POST:/agents:${JSON.stringify(body)}`).digest("hex");
+    const key = (c.req.header("Idempotency-Key") ?? "").trim().slice(0, 255);
+    const prior = key ? projectAgentIdempotency(project, key, fingerprint) : {};
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay !== undefined) return c.json(prior.replay, 201);
+    const agent = createCompanyAgentProfile(body, `agt_${randomUUID()}`);
+    if (!agent) return apiError(c, 400, "invalid_agent", "Choose a supported template, valid instructions, and tool permissions within that template's grant.");
+    project.companyAgents ??= [];
+    if (project.companyAgents.length >= 20) return apiError(c, 409, "agent_limit_reached", "A project can have up to 20 agent profiles.");
+    project.companyAgents.push(agent);
+    const response = companyAgentView(agent);
+    if (key) saveProjectAgentIdempotency(project, key, fingerprint, response);
+    await saveSession(0, control);
+    return c.json(response, 201);
+  });
+
+  app.get("/v1/agents/:agentId", async (c) => {
+    const principal = principalFromContext(c);
+    const project = (await getSession(0)).sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+    const agent = project?.companyAgents?.find((item) => item.id === c.req.param("agentId"));
+    return agent ? c.json(companyAgentView(agent)) : apiError(c, 404, "not_found", "Agent profile not found.");
+  });
+
+  app.patch("/v1/agents/:agentId", async (c) => {
+    const principal = principalFromContext(c);
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+    const index = project?.companyAgents?.findIndex((item) => item.id === c.req.param("agentId")) ?? -1;
+    if (!project || index < 0) return apiError(c, 404, "not_found", "Agent profile not found.");
+    const existing = project.companyAgents![index]!;
+    const patch = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const agent = createCompanyAgentProfile({
+      template: patch.template ?? existing.template,
+      name: patch.name ?? existing.name,
+      instructions: patch.instructions ?? existing.instructions,
+      policy: patch.policy ?? { tools: existing.tools, budget: existing.budget },
+    }, existing.id, existing.createdAt);
+    if (!agent) return apiError(c, 400, "invalid_agent", "Choose a supported template, valid instructions, and tool permissions within that template's grant.");
+    agent.updatedAt = Date.now();
+    project.companyAgents![index] = agent;
+    await saveSession(0, control);
+    return c.json(companyAgentView(agent));
+  });
+
+  app.delete("/v1/agents/:agentId", async (c) => {
+    const principal = principalFromContext(c);
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === principal.projectId && !item.revokedAt);
+    const index = project?.companyAgents?.findIndex((item) => item.id === c.req.param("agentId")) ?? -1;
+    if (!project || index < 0) return apiError(c, 404, "not_found", "Agent profile not found.");
+    project.companyAgents!.splice(index, 1);
     await saveSession(0, control);
     return c.body(null, 204);
   });
@@ -521,6 +1031,8 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/threads/:threadId/runs", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
+    const companyPolicy = await applyCompanyRunPolicy(c, body);
+    if (companyPolicy.error) return apiError(c, 403, "agent_policy_denied", companyPolicy.error);
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
@@ -528,30 +1040,32 @@ export function registerSdkApi(app: Hono): void {
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     try {
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", input: resolved.input, model: body.model ?? session.model, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
     if (body.wait === false) {
       let task: Awaited<ReturnType<typeof createTask>>;
       try {
-        task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills });
-        const workflowRunId = await enqueueTaskWorkflow(owner.userId, task.id, task.runAt ?? Date.now());
-        await setTaskWorkflowRunId(owner.userId, task.id, workflowRunId); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
+        task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills, sdkInstructions: companyPolicy.agent?.instructions });
+        const workflowRunId = await sdkTaskWorkflowEnqueuer(owner.userId, task.id, task.runAt ?? Date.now());
+        await setTaskWorkflowRunId(owner.userId, task.id, workflowRunId); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
       } catch (error) { if (task!) await cancelTask(owner.userId, task.id); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
     }
-     try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id)); run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions)); run.status = "completed"; run.output = result.text; run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
+    const companyPolicy = await applyCompanyRunPolicy(c, body);
+    if (companyPolicy.error) return apiError(c, 403, "agent_policy_denied", companyPolicy.error);
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input: resolved.input, model: body.model ?? session.model, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
     await saveSession(owner.userId, session);
     const abort = new AbortController(); const abortOnDisconnect = () => abort.abort(); c.req.raw.signal.addEventListener("abort", abortOnDisconnect, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
@@ -559,13 +1073,13 @@ export function registerSdkApi(app: Hono): void {
       const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
-        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id));
-        run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions));
+        run.status = "completed"; run.output = result.text; run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
         else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
         else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
-      } finally { c.req.raw.signal.removeEventListener("abort", abortOnDisconnect); activeRuns.delete(run.id); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); await releaseUserLock(owner.userId, lockToken); controller.close(); }
+      } finally { c.req.raw.signal.removeEventListener("abort", abortOnDisconnect); activeRuns.delete(run.id); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); await releaseUserLock(owner.userId, lockToken); controller.close(); }
     } });
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
   });
@@ -577,12 +1091,12 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const prior = thread?.runs.find((item) => item.id === c.req.param("runId"));
     if (!thread || !prior) return apiError(c, 404, "not_found", "Run not found.");
     if (!["failed", "cancelled", "requires_approval"].includes(prior.status)) return apiError(c, 409, "run_not_resumable", "Only failed, cancelled, or approval-paused runs can be resumed.");
-    const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
-     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id)); run.status = "completed"; run.output = result.text; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
+    const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
+     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions)); run.status = "completed"; run.output = result.text; run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); return c.json(runView(thread.id, run), 201);
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
-  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); return c.json(runView(thread.id, run)); });
+  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
   app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
@@ -609,7 +1123,49 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/workers/:id", async (c) => { const record = await getHandoffRecord(sdkUser(c)!.userId, c.req.param("id")); return record ? c.json(workerView(record)) : apiError(c, 404, "not_found", "Worker delegation not found."); });
   app.get("/v1/workers/:id/trace", async (c) => { const record = await getHandoffRecord(sdkUser(c)!.userId, c.req.param("id")); if (!record?.delegation?.runId) return apiError(c, 404, "not_found", "Worker trace not found."); const trace = await getAgentRun(sdkUser(c)!.userId, record.delegation.runId); return trace ? c.json({ workerId: record.id, runId: trace.id, status: trace.status, version: trace.version, events: trace.events, state: c.req.query("include_state") === "true" ? trace.state : undefined }) : apiError(c, 404, "not_found", "Worker trace not found."); });
   app.post("/v1/workers/:id/cancel", async (c) => { const owner = sdkUser(c)!; const record = await getHandoffRecord(owner.userId, c.req.param("id")); if (!record) return apiError(c, 404, "not_found", "Worker delegation not found."); const updated = await requestDelegationCancellation(owner.userId, record.id); return updated ? c.json(workerView(updated), 202) : apiError(c, 409, "worker_not_cancellable", "This worker delegation is already finished."); });
-  app.get("/v1/channels", async (c) => { const data = (await listChannelIdentities(sdkUser(c)!.userId)).filter((item) => !item.disabledAt).map((item) => ({ provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })); return c.json({ data }); });
+  app.get("/v1/channels", async (c) => { const data = (await listChannelIdentities(sdkUser(c)!.userId)).filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })); return c.json({ data }); });
+  app.post("/v1/channels/link-code", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as { provider?: unknown };
+    const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+    if (provider !== "slack" && provider !== "whatsapp" && provider !== "sendblue") return apiError(c, 400, "invalid_channel_provider", "Channel linking is available for Slack, WhatsApp, and Sendblue.");
+    const code = await createLinkCode(sdkUser(c)!.userId, provider);
+    if (provider === "slack") {
+      let installUrl: string | undefined;
+      if (config.webhookUrl) {
+        try { const url = new URL("/slack/install", config.webhookUrl); url.searchParams.set("code", code); installUrl = url.toString(); } catch { /* Return the code without manufacturing an invalid URL. */ }
+      }
+      return c.json({ provider, code, expiresInSeconds: 600, instructions: installUrl ? "Open the secure Slack install link and complete Slack OAuth." : "Open /slack/install?code=<code> on your Chusky server and complete Slack OAuth.", installUrl }, 201);
+    }
+    return c.json({ provider, code, expiresInSeconds: 600, instructions: `Send /link ${code} from the ${provider} account you want to connect.` }, 201);
+  });
+  app.patch("/v1/channels/:provider/:identityId", async (c) => {
+    const provider = c.req.param("provider") as ChannelProvider;
+    const body = await c.req.json().catch(() => ({})) as { proactiveOptIn?: unknown };
+    if (typeof body.proactiveOptIn !== "boolean") return apiError(c, 400, "invalid_channel_preference", "proactiveOptIn must be a boolean.");
+    const identity = (await listChannelIdentities(sdkUser(c)!.userId)).find((item) => item.provider === provider && identityFingerprint(item) === c.req.param("identityId"));
+    if (!identity) return apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
+    const updated = await updateLinkedChannelIdentity(sdkUser(c)!.userId, c.req.param("identityId"), { proactiveOptIn: body.proactiveOptIn });
+    return updated ? c.json({ id: identityFingerprint(updated), provider: updated.provider, proactiveOptIn: updated.proactiveOptIn !== false }) : apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
+  });
+  app.delete("/v1/channels/:provider/:identityId", async (c) => {
+    const provider = c.req.param("provider") as ChannelProvider;
+    if (provider === "telegram") return apiError(c, 409, "primary_channel_link", "The primary Telegram workspace link is managed from account settings.");
+    const identity = (await listChannelIdentities(sdkUser(c)!.userId)).find((item) => item.provider === provider && identityFingerprint(item) === c.req.param("identityId"));
+    if (!identity) return apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
+    return await unlinkChannelIdentity(sdkUser(c)!.userId, c.req.param("identityId")) ? c.body(null, 204) : apiError(c, 404, "channel_not_found", "Linked channel not found for this Chusky account.");
+  });
+  app.get("/v1/devices", async (c) => {
+    const data = (await listCliDevices(sdkUser(c)!.userId)).filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), name: item.name, createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() }));
+    return c.json({ data });
+  });
+  app.delete("/v1/devices/:deviceId", async (c) => {
+    const id = c.req.param("deviceId");
+    if (!/^[a-f0-9]{24}$/.test(id)) return apiError(c, 400, "invalid_device_id", "Invalid device ID.");
+    const owner = sdkUser(c)!;
+    const device = (await listCliDevices(owner.userId)).find((item) => !item.revokedAt && createHash("sha256").update(item.tokenHash).digest("hex").slice(0, 24) === id);
+    if (!device || !(await revokeCliDeviceHash(owner.userId, device.tokenHash))) return apiError(c, 404, "device_not_found", "CLI device not found for this Chusky account.");
+    return c.body(null, 204);
+  });
   app.get("/v1/deliveries", async (c) => { const data = (await listOutbox(undefined, 100, sdkUser(c)!.userId)).filter((item) => !item.webhook).map((item) => ({ id: item.id, provider: item.provider, status: item.status, kind: item.kind, attempts: item.attempts, providerStatus: item.providerStatus, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ data }); });
   app.get("/v1/reminders", async (c) => { const data = (await listReminders(sdkUser(c)!.userId)).map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })); return c.json({ data }); });
   app.post("/v1/reminders", async (c) => { const body = await c.req.json().catch(() => ({})) as { text?: string; delaySeconds?: number; runAt?: string }; const text = String(body.text ?? "").trim(); if (!text || text.length > 2000) return apiError(c, 400, "invalid_reminder", "text is required and must be 2000 characters or fewer."); try { const reminder = await setReminder(sdkUser(c)!.userId, { text, ...(body.delaySeconds !== undefined ? { delaySeconds: body.delaySeconds } : {}), ...(body.runAt ? { runAt: body.runAt } : {}) }); return c.json({ ...reminder, runAt: new Date(reminder.runAt).toISOString(), createdAt: new Date(reminder.createdAt).toISOString() }, 201); } catch (error) { return apiError(c, 400, "reminder_create_failed", error instanceof Error ? error.message : "Reminder could not be scheduled."); } });
@@ -625,8 +1181,24 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/memory", async (c) => { const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const categories = new Set(["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"]); const category = String(body.category ?? "fact"); const key = String(body.key ?? "").trim(); const value = String(body.value ?? "").trim(); if (!categories.has(category) || !key || !value || key.length > 200 || value.length > 20_000) return apiError(c, 400, "invalid_memory", "category, key, and value are required."); try { const memory = await upsertMemory(sdkUser(c)!.userId, { category: category as any, key, value, confidence: Number(body.confidence ?? 1), source: String(body.source ?? "web_dashboard"), sensitivity: body.sensitivity === "sensitive" ? "sensitive" : "normal", projectId: typeof body.projectId === "string" ? body.projectId : undefined, personKey: typeof body.personKey === "string" ? body.personKey : undefined }); return c.json({ ...memory, createdAt: new Date(memory.createdAt).toISOString(), updatedAt: new Date(memory.updatedAt).toISOString() }, 201); } catch (error) { return apiError(c, 400, "memory_save_failed", error instanceof Error ? error.message : "Memory could not be saved."); } });
   app.delete("/v1/memory/:id", async (c) => { const removed = await forgetMemory(sdkUser(c)!.userId, decodeURIComponent(c.req.param("id"))); return removed ? c.body(null, 204) : apiError(c, 404, "memory_not_found", "Memory not found."); });
   app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
-  app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now()); const updated = await setTaskWorkflowRunId(userId, task.id, workflowRunId); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
+  app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await sdkTaskWorkflowEnqueuer(userId, task.id, task.runAt ?? Date.now()); const updated = await setTaskWorkflowRunId(userId, task.id, workflowRunId); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
+  app.get("/v1/company/runs", async (c) => {
+    const project = await requestCompanyProject(c);
+    if (!project) return apiError(c, 404, "company_project_not_found", "Company telemetry is not available for this API project.");
+    return c.json({ data: companyRunViews(await listCompanyRunSummaries(project.id, projectLimit(c))) });
+  });
+  app.get("/v1/company/audit-events", async (c) => {
+    const project = await requestCompanyProject(c);
+    if (!project) return apiError(c, 404, "company_project_not_found", "Company telemetry is not available for this API project.");
+    const after = Number(c.req.query("after") ?? 0);
+    return c.json({ data: companyAuditViews(await listCompanyAuditEvents(project.id, 100), Number.isFinite(after) && after > 0 ? after : 0) });
+  });
+  app.get("/v1/company/usage", async (c) => {
+    const project = await requestCompanyProject(c);
+    if (!project) return apiError(c, 404, "company_project_not_found", "Company telemetry is not available for this API project.");
+    return c.json(await companyUsageView(project.id));
+  });
   app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
   app.get("/v1/activity", async (c) => { const userId = sdkUser(c)!.userId; const since = Number(c.req.query("since") ?? 0) || 0; const session = await getSession(userId); return c.json({ now: Date.now(), approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()), tasks: (await listTasks(userId)).filter((item) => item.updatedAt > since).slice(0, 50), reminders: (await listReminders(userId)).filter((item) => item.createdAt > since).slice(0, 50), jobs: (await listJobs(userId)).filter((item) => item.createdAt > since).slice(0, 50) }); });
   app.get("/v1/runs", async (c) => { const userId = sdkUser(c)!.userId; const status = c.req.query("status"); const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50) || 50)); const data = (await listAgentRuns(userId, limit)).filter((run) => !status || run.status === status).map((run) => ({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() })); return c.json({ data }); });
@@ -678,10 +1250,10 @@ export function registerSdkApi(app: Hono): void {
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;
       try {
-        const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, approval.id, undefined, await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }));
-        run.status = "completed"; run.output = result.text; run.error = undefined; thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text });
+        const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, approval.id, undefined, await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions));
+        run.status = "completed"; run.output = result.text; run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.error = undefined; thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text });
       } catch (error) { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; }
-      run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); return c.json(runView(thread.id, run));
+      run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run));
     } finally { await releaseUserLock(owner.userId, token); }
   });
 }

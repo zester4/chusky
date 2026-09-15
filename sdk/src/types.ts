@@ -17,6 +17,10 @@ export interface FileUpload { id: string; name: string; contentType: string; siz
 export interface FileDownload { id: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; downloadUrl: string; expiresAt: string; }
 export interface FileRecord { id: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; }
 export interface AuditEvent { id: string; action: string; requestId: string; status: number; at: number; }
+export interface CompanyRunSummary { id: string; status: Run["status"]; agentId?: string; agentName?: string; cost?: number; errorCode?: string; createdAt: string; updatedAt: string; }
+export interface CompanyAuditEvent { id: string; action: string; requestId: string; status: number; at: string; }
+export interface CompanyUsagePeriod { month: string; completedRuns: number; costUsd: number; }
+export interface CompanyUsage { currentMonth: CompanyUsagePeriod; periods: CompanyUsagePeriod[]; runs: { indexed: number; active: number }; }
 export interface Webhook { id: string; url: string; createdAt: string; secret?: string; }
 export interface WebhookDelivery { id: string; status: "queued" | "delivering" | "delivered" | "failed"; attempts: number; lastError?: string; createdAt: string; deliveredAt?: string; }
 export interface DeveloperProject { id: string; name: string; keyPrefix: string; scopes: string[]; createdAt: string; revokedAt?: string; key?: string; }
@@ -40,9 +44,12 @@ export interface Run {
   threadId: string;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
+  agentId?: string;
+  agentName?: string;
   model?: string;
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   output?: string;
+  cost?: number;
   taskId?: string;
   approvalId?: string;
   metadata?: JsonObject;
@@ -66,6 +73,32 @@ export interface CreateRunParams {
   skills?: string[];
   /** Wait for a terminal result. Use stream() for token-level progress. */
   wait?: boolean;
+  /** Saved company agent ID or one of the built-in template slugs. */
+  agentId?: string;
+}
+
+export interface CompanyAgentTemplate {
+  slug: string;
+  name: string;
+  outcome: string;
+  allowedTools: string[];
+  requireApproval: string[];
+}
+export interface CompanyAgent {
+  id: string;
+  name: string;
+  template: string;
+  instructions: string;
+  tools: RunToolPolicy;
+  budget: RunBudget;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface CompanyAgentCreateParams {
+  template: string;
+  name?: string;
+  instructions?: string;
+  policy?: { tools?: RunToolPolicy; budget?: RunBudget };
 }
 
 export type DurationBudget = "5m" | "30m" | "1h" | "3h" | "6h" | "3d" | "1w";

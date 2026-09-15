@@ -1314,6 +1314,15 @@ export async function listConnectedAccounts(userId: number, toolkit?: string): P
   })).filter((item: ConnectedComposioAccount) => item.id);
 }
 
+/** Permanently revoke one Composio connection only after proving it belongs to this Chusky owner. */
+export async function disconnectConnectedAccount(userId: number, connectedAccountId: string): Promise<boolean> {
+  const account = (await listConnectedAccounts(userId)).find((item) => item.id === connectedAccountId);
+  if (!account) return false;
+  await composio.connectedAccounts.delete(account.id);
+  invalidateSession(userId);
+  return true;
+}
+
 // ── Get toolkit connection states ─────────────────────────────────────────────
 
 export async function getToolkitStates(

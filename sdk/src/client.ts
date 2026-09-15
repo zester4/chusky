@@ -1,11 +1,14 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { Activity, Approval, ApprovalDecision, Artifact, AuditEvent, ChannelConnection, ChuskyClientOptions, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, Webhook, WebhookDelivery, Worker } from "./types.js";
+import type { Activity, Approval, ApprovalDecision, Artifact, AuditEvent, ChannelConnection, ChuskyClientOptions, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, Page, RequestOptions, Run, RunEvent, RunStreamEvent, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, Webhook, WebhookDelivery, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
 export class Chusky {
   readonly threads: ThreadsResource;
+  readonly runs: CompanyRunsResource;
+  readonly company: CompanyResource;
+  readonly agents: AgentsResource;
   readonly tasks: TasksResource;
   readonly approvals: ApprovalsResource;
   readonly files: FilesResource;
@@ -40,6 +43,9 @@ export class Chusky {
     this.userAgent = options.userAgent ?? "chusky-typescript";
     this.model = options.model;
     this.threads = new ThreadsResource(this);
+    this.runs = new CompanyRunsResource(this);
+    this.company = new CompanyResource(this);
+    this.agents = new AgentsResource(this);
     this.tasks = new TasksResource(this);
     this.approvals = new ApprovalsResource(this);
     this.files = new FilesResource(this);
@@ -170,6 +176,57 @@ export class RunsResource {
     );
     try { yield* readNdjson<RunStreamEvent>(response.body); } finally { dispose(); }
   }
+}
+
+/** Cross-thread convenience API for durable, template-governed company runs. */
+export class CompanyRunsResource {
+  constructor(private readonly client: Chusky) {}
+  async create(params: CreateRunParams, options?: RequestOptions): Promise<{ thread: Thread; run: Run }> {
+    const key = options?.idempotencyKey;
+    const thread = await this.client.threads.create({ metadata: { source: "chusky-sdk" } }, {
+      ...options,
+      ...(key ? { idempotencyKey: `${key}:thread`.slice(0, 255) } : {}),
+    });
+    const run = await this.client.threads.runs(thread.id).create({
+      ...params,
+      ...(params.model ? {} : this.client.modelForRuns()),
+      wait: params.wait ?? false,
+    }, {
+      ...options,
+      ...(key ? { idempotencyKey: `${key}:run`.slice(0, 255) } : {}),
+    });
+    return { thread, run };
+  }
+  get(threadId: string, runId: string, options?: RequestOptions): Promise<Run> { return this.client.threads.runs(threadId).get(runId, options); }
+  list(threadId: string, params: { cursor?: string; limit?: number } = {}, options?: RequestOptions): Promise<Page<Run>> { return this.client.threads.runs(threadId).list(params, options); }
+  cancel(threadId: string, runId: string, options?: RequestOptions): Promise<Run> { return this.client.threads.runs(threadId).cancel(runId, options); }
+  resume(threadId: string, runId: string, options?: RequestOptions): Promise<Run> { return this.client.threads.runs(threadId).resume(runId, options); }
+  events(threadId: string, runId: string, after?: number, options?: RequestOptions): Promise<Page<RunEvent>> { return this.client.threads.runs(threadId).events(runId, after, options); }
+  wait(threadId: string, runId: string, options: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal | null } = {}): Promise<Run> { return this.client.threads.runs(threadId).wait(runId, options); }
+}
+
+/** Project-scoped, cross-caller company telemetry. Requires the `company:read` scope. */
+export class CompanyResource {
+  constructor(private readonly client: Chusky) {}
+  runs(params: { limit?: number } = {}, options?: RequestOptions): Promise<Page<CompanyRunSummary>> {
+    const query = new URLSearchParams(); if (params.limit) query.set("limit", String(params.limit));
+    return this.client.request(`/company/runs${query.size ? `?${query}` : ""}`, {}, options);
+  }
+  audit(params: { after?: number } = {}, options?: RequestOptions): Promise<Page<CompanyAuditEvent>> {
+    const query = new URLSearchParams(); if (params.after) query.set("after", String(params.after));
+    return this.client.request(`/company/audit-events${query.size ? `?${query}` : ""}`, {}, options);
+  }
+  usage(options?: RequestOptions): Promise<CompanyUsage> { return this.client.request("/company/usage", {}, options); }
+}
+
+export class AgentsResource {
+  constructor(private readonly client: Chusky) {}
+  templates(options?: RequestOptions): Promise<Page<CompanyAgentTemplate>> { return this.client.request("/agents/templates", {}, options); }
+  list(options?: RequestOptions): Promise<Page<CompanyAgent>> { return this.client.request("/agents", {}, options); }
+  create(params: CompanyAgentCreateParams, options?: RequestOptions): Promise<CompanyAgent> { return this.client.request("/agents", { method: "POST", body: JSON.stringify(params) }, options); }
+  get(agentId: string, options?: RequestOptions): Promise<CompanyAgent> { return this.client.request(`/agents/${encodeURIComponent(agentId)}`, {}, options); }
+  update(agentId: string, params: Partial<CompanyAgentCreateParams>, options?: RequestOptions): Promise<CompanyAgent> { return this.client.request(`/agents/${encodeURIComponent(agentId)}`, { method: "PATCH", body: JSON.stringify(params) }, options); }
+  delete(agentId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" }, options); }
 }
 
 export class TasksResource {

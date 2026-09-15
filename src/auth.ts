@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { Pool } from "pg";
 import { betterAuth } from "better-auth";
+import { organization } from "better-auth/plugins";
+import { createAccessControl } from "better-auth/plugins/access";
 import { getMigrations } from "better-auth/db/migration";
 import { redisStorage } from "@better-auth/redis-storage";
 import Redis from "ioredis";
@@ -19,6 +21,27 @@ let sqlite: Database.Database | undefined;
 let migration: Promise<void> | undefined;
 
 type AuthDatabase = Database.Database | Pool;
+
+const organizationAc = createAccessControl({
+  organization: ["update", "delete"],
+  member: ["create", "update", "delete"],
+  invitation: ["create", "cancel"],
+});
+const organizationOwner = organizationAc.newRole({
+  organization: ["update"],
+  member: ["create", "update", "delete"],
+  invitation: ["create", "cancel"],
+});
+const organizationAdmin = organizationAc.newRole({
+  organization: [],
+  member: ["create", "update", "delete"],
+  invitation: ["create", "cancel"],
+});
+const organizationMember = organizationAc.newRole({
+  organization: [],
+  member: [],
+  invitation: [],
+});
 
 function createDatabase(): AuthDatabase {
   const databaseUrl = config.betterAuthDatabaseUrl;
@@ -37,6 +60,7 @@ function authConfig(database: AuthDatabase) {
   const baseURL = (process.env.BETTER_AUTH_URL?.trim() || "http://localhost:8080").replace(/\/+$/, "");
   const trustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS || "http://localhost:3000,http://localhost:3010")
     .split(",").map((origin) => origin.trim()).filter(Boolean);
+  const webOrigin = new URL(process.env.CHUSKY_WEB_ORIGIN?.trim() || trustedOrigins.find((origin) => origin.startsWith("https://")) || trustedOrigins[0] || baseURL).origin;
   const redisUrl = process.env.REDIS_URL?.trim();
   if (redisUrl) redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 2 });
 
@@ -62,6 +86,26 @@ function authConfig(database: AuthDatabase) {
         await sendAuthEmail("verification", { email: user.email, name: user.name, url });
       },
     },
+    plugins: [
+      organization({
+        ac: organizationAc,
+        roles: { owner: organizationOwner, admin: organizationAdmin, member: organizationMember },
+        allowUserToCreateOrganization: true,
+        organizationLimit: 10,
+        membershipLimit: 100,
+        invitationLimit: 50,
+        requireEmailVerificationOnInvitation: true,
+        sendInvitationEmail: async ({ id, email, organization: org, inviter }) => {
+          const invitationUrl = `${webOrigin}/accept-invitation?id=${encodeURIComponent(id)}`;
+          await sendAuthEmail("organization-invitation", {
+            email,
+            name: inviter.user.name,
+            organizationName: org.name,
+            url: invitationUrl,
+          });
+        },
+      }),
+    ],
     session: {
       expiresIn: 60 * 60 * 24 * 7,
       updateAge: 60 * 60 * 24,

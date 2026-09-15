@@ -19,13 +19,34 @@ paths:
   /admin/projects/{projectId}/rotate-key:
     post: { summary: Replace a project key and return the new value exactly once, responses: { '201': { description: Rotated } } }
   /account/projects:
-    get: { summary: List the verified dashboard user's project keys without raw secrets, responses: { '200': { description: OK } } }
-    post: { summary: Create a verified dashboard user's project key and return it exactly once, responses: { '201': { description: Created }, '403': { description: Dashboard session or verified email required }, '409': { description: Active key limit reached } } }
+    get: { summary: List personal projects or projects attached to a verified organization member, responses: { '200': { description: OK } } }
+    post: { summary: Create a personal or organization project and return its key exactly once, responses: { '201': { description: Created }, '403': { description: Dashboard session, verified email, or organization admin required }, '409': { description: Active key limit reached } } }
   /account/projects/{projectId}:
     patch: { summary: Replace scopes for the authenticated owner's active project key, responses: { '200': { description: Updated }, '404': { description: Not found } } }
     delete: { summary: Revoke the authenticated owner's project key, responses: { '204': { description: Revoked }, '404': { description: Not found } } }
   /account/projects/{projectId}/rotate-key:
     post: { summary: Rotate the authenticated owner's project key and return it exactly once, responses: { '201': { description: Rotated }, '404': { description: Not found } } }
+  /account/projects/{projectId}/company/runs:
+    get: { summary: List status-only company run summaries for a workspace owner or admin, responses: { '200': { description: OK }, '404': { description: Not found } } }
+  /account/projects/{projectId}/company/audit-events:
+    get: { summary: List bounded company project audit events for a workspace owner or admin, responses: { '200': { description: OK }, '404': { description: Not found } } }
+  /account/projects/{projectId}/company/usage:
+    get: { summary: Read company project usage for a workspace owner or admin, responses: { '200': { description: OK }, '404': { description: Not found } } }
+  /account/projects/{projectId}/policy:
+    get: { summary: Read an organization project policy as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
+    put: { summary: Replace project tool grants and per-run budgets as an owner or admin, responses: { '200': { description: Updated }, '400': { description: Invalid policy }, '404': { description: Not found } } }
+  /account/projects/{projectId}/agents:
+    get: { summary: List organization project agent profiles as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
+    post: { summary: Create a template-based company agent profile as an owner or admin, responses: { '201': { description: Created }, '404': { description: Not found } } }
+  /agents/templates:
+    get: { summary: List built-in company agent templates, responses: { '200': { description: OK } } }
+  /agents:
+    get: { summary: List agent profiles belonging to the current project key, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    post: { summary: Create a template-based agent profile within the current project, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created }, '403': { description: Invalid template or grant } } }
+  /agents/{agentId}:
+    get: { summary: Get one current-project agent profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    patch: { summary: Update a current-project agent profile, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Updated } } }
+    delete: { summary: Delete a current-project agent profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /account/overview:
     get: { summary: Get the authenticated account overview, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /account/models:
@@ -107,6 +128,12 @@ paths:
     post: { summary: Verify an uploaded R2 object before it becomes downloadable, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Verified file } } }
   /audit-events:
     get: { summary: List bounded SDK audit events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /company/runs:
+    get: { summary: List status-only run summaries aggregated across callers of this company project; requires company:read, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK }, '404': { description: Not a company project } } }
+  /company/audit-events:
+    get: { summary: List bounded project audit events; requires company:read, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK }, '404': { description: Not a company project } } }
+  /company/usage:
+    get: { summary: Get monthly completed-run and model-cost totals for this company project; requires company:read, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK }, '404': { description: Not a company project } } }
   /usage:
     get: { summary: Get current SDK-user usage totals, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /webhooks:

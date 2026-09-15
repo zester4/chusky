@@ -23,6 +23,27 @@ for await (const event of chusky.threads.runs(thread.id).stream(
 }
 ```
 
+For company workflows, provision an agent profile from a specialist template
+and create a durable run in one call. The project key's scopes and the company
+policy are enforced by Chusky; send an idempotency key so retries do not create
+duplicate threads or tasks.
+
+```ts
+const templates = await chusky.agents.templates();
+const agent = await chusky.agents.create({ template: "lead-research", name: "Fintech lead scout" });
+const { thread, run } = await chusky.runs.create({
+  input: "Find fintech companies with more than 50 employees and prepare sourced CRM-ready profiles.",
+  agentId: agent.id,
+  wait: false,
+}, { idempotencyKey: "customer-42-lead-research-2026-09-14" });
+console.log(thread.id, run.id, run.status);
+```
+
+Poll with `chusky.runs.get(thread.id, run.id)` or use the task ID on the run
+with `chusky.tasks.get()`. Composio remains responsible for OAuth, connected
+accounts, and tool execution; Chusky enforces the orchestration policy and
+approval boundary.
+
 ## Operator-only API key provisioning
 
 Run this only on a trusted backend or operator machine. Never expose the root
@@ -60,7 +81,7 @@ remains solely for trusted operator `/v1/admin/*` provisioning.
 
 ## Available resources
 
-The current resources are `projects`, `threads`, `runs`, `tasks`, `approvals`, `files`, `tools`, `skills`, `artifacts`, `videos`, `workers`, `channels`, `activity`, `webhooks`, `audit`, and `usage`. Files use short-lived, direct Cloudflare R2 URLs: create an upload intent, upload with the returned URL, call `files.complete()`, then request a download URL. `files.upload()` is a convenience helper for this sequence. Artifact downloads return verified bytes from the Daytona workspace through the API.
+The current resources are `projects`, `threads`, `runs`, `company`, `tasks`, `approvals`, `files`, `tools`, `skills`, `artifacts`, `videos`, `workers`, `channels`, `activity`, `webhooks`, `audit`, and `usage`. `company.runs()`, `company.audit()`, and `company.usage()` read bounded, cross-caller telemetry for a company project and require its `company:read` scope. Files use short-lived, direct Cloudflare R2 URLs: create an upload intent, upload with the returned URL, call `files.complete()`, then request a download URL. `files.upload()` is a convenience helper for this sequence. Artifact downloads return verified bytes from the Daytona workspace through the API.
 
 See [`docs/architecture.mdx`](docs/architecture.mdx) for the request, durability, capability, storage, and delivery boundaries that implement these resources.
 

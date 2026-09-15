@@ -1,4 +1,4 @@
-type AuthEmailKind = "verification" | "password-reset";
+type AuthEmailKind = "verification" | "password-reset" | "organization-invitation";
 
 function maskEmail(email: string): string {
   const [local, domain] = email.split("@", 2);
@@ -7,22 +7,35 @@ function maskEmail(email: string): string {
 }
 
 function subjectFor(kind: AuthEmailKind): string {
-  return kind === "verification" ? "Verify your Chusky email" : "Reset your Chusky password";
+  if (kind === "verification") return "Verify your Chusky email";
+  if (kind === "password-reset") return "Reset your Chusky password";
+  return "Invitation to a Chusky workspace";
 }
 
-function bodyFor(kind: AuthEmailKind, url: string, name: string): string {
-  const action = kind === "verification" ? "verify your email" : "reset your password";
+function bodyFor(kind: AuthEmailKind, url: string, name: string, organizationName?: string): string {
+  if (kind === "organization-invitation") {
+    return [
+      `Hi ${name || "there"},`,
+      "",
+      `You have been invited to join ${organizationName || "a Chusky workspace"}.`,
+      "Review and accept the invitation using this link:",
+      url,
+      "",
+      "If you were not expecting this invitation, you can ignore this email.",
+    ].join("\n");
+  }
+  const action = kind === "verification" ? "verify your email" : kind === "password-reset" ? "reset your password" : "join the Chusky workspace";
   return [
     `Hi ${name || "there"},`,
     "",
-    `Use the link below to ${action} for Chusky:`,
+    `Use the link below to ${action}:`,
     url,
     "",
     "If you did not request this, you can safely ignore this email.",
   ].join("\n");
 }
 
-export async function sendAuthEmail(kind: AuthEmailKind, input: { email: string; name: string; url: string }): Promise<void> {
+export async function sendAuthEmail(kind: AuthEmailKind, input: { email: string; name: string; url: string; organizationName?: string }): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY?.trim();
   const from = process.env.AUTH_EMAIL_FROM?.trim();
   if (!apiKey || !from) {
@@ -34,7 +47,7 @@ export async function sendAuthEmail(kind: AuthEmailKind, input: { email: string;
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to: [input.email], subject: subjectFor(kind), text: bodyFor(kind, input.url, input.name) }),
+    body: JSON.stringify({ from, to: [input.email], subject: subjectFor(kind), text: bodyFor(kind, input.url, input.name, input.organizationName) }),
   });
   if (!response.ok) throw new Error(`Auth email provider returned HTTP ${response.status}`);
 }
