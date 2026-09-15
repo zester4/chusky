@@ -173,6 +173,8 @@ const COMPANY_PROJECT_DEFAULT_SCOPES = [
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
   "apps:read", "apps:write", "triggers:read", "triggers:write",
   "calls:read", "calls:write", "voice:read", "voice:write", "meetings:read", "meetings:write",
+  "channels:read", "channels:write", "devices:read", "devices:write", "reminders:read", "reminders:write",
+  "jobs:read", "jobs:write", "memory:read", "memory:write", "scratchpad:read", "scratchpad:write",
 ];
 
 function safeProjectPolicy(project: SdkProjectRecord): CompanyPolicy | undefined {
