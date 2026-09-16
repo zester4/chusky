@@ -17,7 +17,7 @@ import {
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
-  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit,
+  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
@@ -27,9 +27,9 @@ import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObje
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
-import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, normaliseVaultOrigin, normaliseVaultService, vaultStatus } from "./vault/vault.js";
+import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, normaliseVaultOrigin, normaliseVaultService, recordVaultSession, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
-import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserPlaybookRecord } from "./vault/browserOps.js";
+import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserHandoffReason, type BrowserPlaybookRecord } from "./vault/browserOps.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
@@ -107,6 +107,33 @@ function assertSafeBrowserRecipe(value: unknown, path = "recipe"): void {
     if (/^(password|username|credential|cookie|secret|token|accessToken|refreshToken|inputValue|textValue)$/i.test(key)) throw new Error(`${path} contains a forbidden secret field`);
     assertSafeBrowserRecipe(child, `${path}.${key}`);
   }
+}
+
+function browserHandoffReason(value: unknown): BrowserHandoffReason {
+  const reason = String(value ?? "site_challenge");
+  if (!["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(reason)) throw new Error("reason is not a supported browser handoff reason");
+  return reason as BrowserHandoffReason;
+}
+
+async function createBrowserHandoffRecord(userId: number, input: { reason?: unknown; service?: unknown; origin?: unknown; shoppingPlanId?: unknown }) {
+  const reason = browserHandoffReason(input.reason);
+  const service = input.service ? normaliseVaultService(text(input.service)) : undefined;
+  const origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
+  const handoff = await daytonaEngine.browserHandoff(userId, reason.replaceAll("_", " "));
+  const record = await saveBrowserHandoff(userId, {
+    id: `bh_${randomUUID()}`,
+    userId,
+    workspaceId: handoff.sandboxId,
+    ...(service ? { service } : {}),
+    ...(origin ? { origin } : {}),
+    reason,
+    status: "waiting",
+    createdAt: Date.now(),
+    expiresAt: handoff.expiresAt,
+  });
+  await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_requested", ...(service ? { service } : {}), ...(origin ? { origin } : {}), status: "waiting", summary: `Private browser handoff requested for ${reason.replaceAll("_", " ")}`, createdAt: Date.now() });
+  const shoppingPlan = input.shoppingPlanId ? await pauseShopping(userId, { id: text(input.shoppingPlanId), reason }) : undefined;
+  return { ...handoff, handoffId: record.id, status: record.status, reason, ...(service ? { service } : {}), ...(origin ? { origin } : {}), ...(shoppingPlan ? { shoppingPlan: { id: shoppingPlan.id, status: shoppingPlan.status, pausedReason: shoppingPlan.pausedReason } } : {}) };
 }
 
 async function runDelegationWithDurableContinuation(
@@ -659,6 +686,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const service = args.service ? text(args.service) : undefined;
       const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
       const health = await browserSessionHealth(userId, service, origin);
+      const expired = health.filter((item) => item.status === "expired" || item.status === "needs_reauth");
+      for (const item of expired) {
+        try {
+          await logoutVault(userId, item.service, item.accountAlias, item.origin);
+          await daytonaEngine.workspace(userId, "pause");
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service: item.service, origin: item.origin, status: "succeeded", summary: `Expired ${item.service} browser session was revoked and its workspace paused`, createdAt: Date.now() });
+        } catch {
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service: item.service, origin: item.origin, status: "failed", summary: `Expired ${item.service} browser session needs manual revocation`, createdAt: Date.now() });
+        }
+      }
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_health_checked", ...(service ? { service } : {}), status: "succeeded", summary: `Checked ${health.length} saved browser session${health.length === 1 ? "" : "s"}`, createdAt: Date.now() });
       return health;
     }
@@ -689,6 +726,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_BROWSER_AUDIT_LIST": return listBrowserAudit(userId, args.limit === undefined ? 50 : Number(args.limit));
     case "CHUCK_BROWSER_VERIFY": {
       if (!Array.isArray(args.detectors)) throw new Error("detectors must be an array");
+      const handoffId = args.handoffId ? text(args.handoffId) : undefined;
+      if (handoffId && args.detectors.length === 0) throw new Error("A browser handoff requires at least one required verification detector");
       const result = verifyBrowserResult({
         currentUrl: args.currentUrl === undefined ? undefined : text(args.currentUrl).slice(0, 500),
         title: args.title === undefined ? undefined : text(args.title).slice(0, 300),
@@ -696,6 +735,23 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         detectors: args.detectors as Parameters<typeof verifyBrowserResult>[0]["detectors"],
       });
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: result.passed ? "verification_passed" : "verification_failed", status: result.passed ? "succeeded" : "failed", summary: result.passed ? "Browser result verification passed" : "Browser result verification needs review", createdAt: Date.now() });
+      if (handoffId && result.passed) {
+        const handoff = await getBrowserHandoff(userId, handoffId);
+        if (!handoff) throw new Error("Browser handoff not found or not owned by you");
+        if (!["waiting", "awaiting_verification"].includes(handoff.status)) throw new Error(`Browser handoff is ${handoff.status} and cannot be completed`);
+        const credentials = await listVault(userId);
+        const saved = credentials.find((credential) => credential.session?.workspaceId === handoff.workspaceId && credential.session.status === "awaiting_user_interaction" && (!handoff.origin || credential.origin === handoff.origin) && (!handoff.service || credential.service === handoff.service));
+        if (!saved?.session) throw new Error("The retained browser session is not awaiting verification. Inspect the same browser and start a fresh vault login if necessary.");
+        if (args.currentUrl && handoff.origin) {
+          let verifiedOrigin: string;
+          try { verifiedOrigin = new URL(text(args.currentUrl)).origin; } catch { throw new Error("currentUrl must be a valid HTTPS URL for handoff verification"); }
+          if (verifiedOrigin !== handoff.origin) throw new Error("The verification page is outside the website origin bound to this handoff");
+        }
+        const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
+        await updateBrowserHandoff(userId, handoffId, "completed", Date.now());
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", service: saved.service, origin: saved.origin, status: "succeeded", summary: "Private browser handoff passed verification", createdAt: Date.now() });
+        return { ...result, handoffId, handoffCompleted: true, session: { id: session.id, workspaceId: session.workspaceId, status: session.status, origin: session.origin } };
+      }
       return result;
     }
     case "CHUCK_DAYTONA_BROWSER": {
@@ -710,11 +766,23 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw error;
       }
     }
-    case "CHUCK_DAYTONA_BROWSER_HANDOFF": return daytonaCall(runtime, async () => {
-      const handoff = await daytonaEngine.browserHandoff(userId, args.reason ? text(args.reason) : undefined);
-      const shoppingPlan = args.shoppingPlanId ? await pauseShopping(userId, { id: text(args.shoppingPlanId), reason: args.reason ?? "site_challenge" }) : undefined;
-      return { ...handoff, ...(shoppingPlan ? { shoppingPlan: { id: shoppingPlan.id, status: shoppingPlan.status, pausedReason: shoppingPlan.pausedReason } } : {}) };
-    });
+    case "CHUCK_DAYTONA_BROWSER_HANDOFF": return daytonaCall(runtime, () => createBrowserHandoffRecord(userId, args));
+    case "CHUCK_BROWSER_HANDOFF_STATUS": {
+      const id = args.id ? text(args.id) : undefined;
+      const records = id ? [await getBrowserHandoff(userId, id)] : await listBrowserHandoffs(userId, args.limit === undefined ? 10 : Number(args.limit));
+      const visible = records.filter((record): record is NonNullable<typeof record> => Boolean(record)).map((record) => ({ id: record.id, workspaceId: record.workspaceId, ...(record.service ? { service: record.service } : {}), ...(record.origin ? { origin: record.origin } : {}), reason: record.reason, status: record.status, createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.completedAt ? { completedAt: record.completedAt } : {}) }));
+      return id ? visible[0] ?? { id, status: "not_found" } : visible;
+    }
+    case "CHUCK_BROWSER_HANDOFF_COMPLETE": {
+      const id = text(args.id);
+      const handoff = await getBrowserHandoff(userId, id);
+      if (!handoff) throw new Error("Browser handoff not found or not owned by you");
+      if (handoff.status === "expired") throw new Error("This browser handoff has expired. Request a new private handoff.");
+      if (handoff.status === "cancelled") throw new Error("This browser handoff was cancelled. Request a new private handoff.");
+      if (handoff.status === "completed") return { id, status: "completed", alreadyCompleted: true };
+      const updated = await updateBrowserHandoff(userId, id, "awaiting_verification");
+      return { id, status: updated?.status ?? "awaiting_verification", next: "Inspect the retained browser, then call CHUCK_BROWSER_VERIFY with this handoffId and required detectors before taking any further action." };
+    }
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
     case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined, args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined);
@@ -736,7 +804,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!login.needsUserInteraction) return login;
       return {
         ...login,
-        browserHandoff: await daytonaEngine.browserHandoff(userId, "Complete the website's sign-in or verification step, then return to Chusky."),
+        browserHandoff: await createBrowserHandoffRecord(userId, { reason: "login", service, origin: login.origin }),
       };
     });
     case "CHUCK_VAULT_LOGOUT": return (async () => {

@@ -36,7 +36,24 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   const workspaceSessions = (await vaultStatus(userId)).filter((session) => session.workspaceId === workspaceId);
   const activeSessions = workspaceSessions.filter((session) => session.status === "authenticated" && (!session.expiresAt || session.expiresAt > Date.now()));
   const active = activeSessions.length > 0;
+  const pendingSessions = workspaceSessions.filter((session) => session.status === "awaiting_user_interaction");
   if (!active) {
+    if (pendingSessions.length) {
+      const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
+      const pendingOrigins = pendingSessions.map((session) => session.origin);
+      if (["status", "start", "windows"].includes(action)) return;
+      if (["snapshot", "find", "accessibility_tree"].includes(action)) {
+        if (!currentOrigin || !pendingOrigins.includes(currentOrigin)) throw new Error("Inspect the same saved website origin after completing the private browser handoff; Chusky will not inspect a different page.");
+        return;
+      }
+      if (action === "open") {
+        let nextOrigin = "";
+        try { nextOrigin = new URL(String(args.url ?? "")).origin; } catch { /* browser validates the URL */ }
+        if (!nextOrigin || !pendingOrigins.includes(nextOrigin)) throw new Error("The browser handoff is bound to its saved website origin. Reopen only that origin before verification.");
+        return;
+      }
+      throw new Error("A private browser handoff is awaiting verification. Inspect the retained website, then call CHUCK_BROWSER_VERIFY with the handoffId before taking another action.");
+    }
     const hasRevokedIdentity = workspaceSessions.some(browserSessionIsRevoked);
     if (hasRevokedIdentity && !["status", "start"].includes(action)) throw new Error("This Daytona workspace contains a revoked or expired website session. Log in again with CHUCK_VAULT_LOGIN or complete a private browser handoff before using the browser.");
     return;

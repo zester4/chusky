@@ -420,13 +420,16 @@ SSO, passkeys, and device approvals use a private browser handoff in the same Da
 Replacing a saved identity logs out its prior browser identities, and aliases allow separate
 personal and work accounts for the same service.
 
-The private Telegram controls are `/browser`, `/browser health`, `/browser audit`, and
+The private Telegram controls are `/browser`, `/browser health`, `/browser audit`, `/browser handoffs`, and
 `/browser revoke <service> [account-alias] [origin]` (with `/browser logout` retained as a compatibility
 alias). Revocation pauses the workspace and blocks browser reuse until a fresh vault login. Saved
 identities are keyed by account, service label, alias, and exact HTTPS origin, so one service label
 can safely represent different websites. The agent can also use `CHUCK_BROWSER_PLAN`,
 `CHUCK_BROWSER_SESSION_HEALTH`, `CHUCK_BROWSER_PLAYBOOK_SAVE`, `CHUCK_BROWSER_PLAYBOOK_LIST`,
-`CHUCK_BROWSER_PLAYBOOK_REMOVE`, `CHUCK_BROWSER_VERIFY`, and `CHUCK_BROWSER_AUDIT_LIST`.
+`CHUCK_BROWSER_PLAYBOOK_REMOVE`, `CHUCK_BROWSER_VERIFY`, `CHUCK_BROWSER_AUDIT_LIST`,
+`CHUCK_BROWSER_HANDOFF_STATUS`, and `CHUCK_BROWSER_HANDOFF_COMPLETE`. Human CAPTCHA/2FA handoffs
+remain metadata-only and move from waiting to awaiting verification before the retained session is
+re-authorized.
 
 ### Artifact Studio
 

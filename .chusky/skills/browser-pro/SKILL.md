@@ -33,6 +33,11 @@ adapt when a selector, label, layout, or login step changes.
 - Multi-step login, SSO, passkeys, magic links, OTP, device approval, CAPTCHA,
   and security-key flows require a private `CHUCK_DAYTONA_BROWSER_HANDOFF`.
   Never request a password, OTP, recovery code, cookie, or token in chat.
+- A handoff is a durable state machine, not a bearer link alone. After the owner
+  returns, call `CHUCK_BROWSER_HANDOFF_COMPLETE`, inspect the same-origin page,
+  then call `CHUCK_BROWSER_VERIFY` with the handoff ID and required detectors.
+  Do not invoke or fill controls until verification passes. Use
+  `CHUCK_BROWSER_HANDOFF_STATUS` to recover or explain an interrupted handoff.
 - Save a playbook only after a verified success, and store labels/detectors—not
   credentials, cookies, screenshots, or raw page text.
 

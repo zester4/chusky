@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
+import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
 
 test("recognizes materially risky tools", () => {
   for (const slug of ["GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "AWS_UPDATE_PERMISSION", "GITHUB_DEPLOY_PRODUCTION"]) {
@@ -44,7 +44,7 @@ test("uses explicit native policies and gates only side-effecting Composio batch
 });
 
 test("renders human tool progress", () => {
-  assert.match(humanToolStatus("COMPOSIO_SEARCH_TOOL"), /I’m looking/);
+  assert.match(humanToolStatus("COMPOSIO_SEARCH_TOOL"), /I’m finding/);
   assert.match(humanToolStatus("GITHUB_CREATE_ISSUE"), /I’m using Github to create issue/);
   assert.equal(humanToolStatus("CHUCK_GENERATE_IMAGE"), "🎨 I’m creating your image…");
   assert.equal(humanToolStatus("CHUCK_DAYTONA_WORKSPACE"), "🖥️ I’m opening my private computer workspace…");
@@ -53,6 +53,15 @@ test("renders human tool progress", () => {
   assert.equal(humanToolStatus("CHUCK_CREATE_PDF"), "📄 I’m building and checking your PDF…");
   assert.doesNotMatch(humanToolStatus("CHUCK_DAYTONA_EXECUTE"), /CHUCK|Daytona|sandbox|isolated/i);
   assert.doesNotMatch(humanToolStatus("CHUCK_NEW_INTERNAL_TOOL"), /CHUCK|NEW_INTERNAL_TOOL/i);
+});
+
+test("renders natural high-level progress phases", () => {
+  assert.equal(humanProgressStatus("understanding"), "🧠 I’m understanding what you need…");
+  assert.equal(humanProgressStatus("preparing"), "🧰 I’m lining up the best way to help…");
+  assert.equal(humanProgressStatus("finalizing"), "✍️ I’m pulling everything together…");
+  for (const phase of ["understanding", "preparing", "finalizing"] as const) {
+    assert.doesNotMatch(humanProgressStatus(phase), /prompt|model loop|tool registry|internal/i);
+  }
 });
 
 test("handles unknown and empty actions", () => {

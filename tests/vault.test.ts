@@ -8,6 +8,7 @@ import { classifyBrowserTarget, vaultActionPolicy } from "../src/vault/policy.js
 import { normaliseVaultOrigin, normaliseVaultService } from "../src/vault/vault.js";
 import { redactVaultAudit } from "../src/vault/audit.js";
 import { browserSessionIsRevoked, classifyBrowserIntent, createBrowserOperationPlan, normalizePlaybook, sessionHealth, verifyBrowserResult } from "../src/vault/browserOps.js";
+import { getBrowserHandoff, initStore, listBrowserHandoffs, saveBrowserHandoff, updateBrowserHandoff } from "../src/store.js";
 
 const masterKey = Buffer.alloc(32, 7).toString("base64url");
 
@@ -130,4 +131,17 @@ test("browser verification requires every required detector and returns no page 
   assert.equal(failed.passed, false);
   assert.match(failed.missing.join(" "), /order confirmed/i);
   assert.equal(Object.hasOwn(failed, "text"), false);
+});
+
+test("browser handoffs are durable, owner-scoped, expiring, and require verification", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 99142;
+  const now = Date.now();
+  await saveBrowserHandoff(userId, { id: "bh_waiting", userId, workspaceId: "ws-1", service: "shop", origin: "https://shop.example.com", reason: "two_factor", status: "waiting", createdAt: now, expiresAt: now + 60_000 });
+  assert.equal((await getBrowserHandoff(userId, "bh_waiting"))?.status, "waiting");
+  assert.equal((await updateBrowserHandoff(userId, "bh_waiting", "awaiting_verification"))?.status, "awaiting_verification");
+  assert.equal((await listBrowserHandoffs(userId))[0]?.status, "awaiting_verification");
+  assert.equal(await getBrowserHandoff(userId + 1, "bh_waiting"), undefined);
+  await saveBrowserHandoff(userId, { id: "bh_expired", userId, workspaceId: "ws-1", reason: "captcha", status: "waiting", createdAt: now - 120_000, expiresAt: now - 1 });
+  assert.equal((await getBrowserHandoff(userId, "bh_expired"))?.status, "expired");
 });

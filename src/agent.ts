@@ -32,7 +32,7 @@ import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
-import { isRiskyToolSlug, humanToolStatus } from "./policy.js";
+import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -723,7 +723,7 @@ export async function runAgent(
   options?: AgentRunOptions
 ): Promise<AgentResult> {
 
-  if (onStatus) await onStatus("📜 I’m reading your message……");
+  if (onStatus) await onStatus(humanProgressStatus("understanding"));
 
   const durableRunId = options?.runId ?? channelContext?.runId ?? `run_${randomUUID()}`;
   const voiceTurn = options?.voiceTurn === true;
@@ -746,7 +746,7 @@ export async function runAgent(
   // pay the Composio session/tools round trips before beginning speech.
   const sessionObj = toolsDisabled || voiceTurn ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
 
-  if (onStatus) await onStatus("🧭 I’m getting the right tools for you…");
+  if (onStatus) await onStatus(humanProgressStatus("preparing"));
 
   const deny = new Set(options?.toolDeny ?? []);
   // Composio sessions expose discovery and execution meta-tools by default.
@@ -1202,7 +1202,7 @@ export async function runAgent(
             const vaultResult = execResult as { browserHandoff?: unknown };
             const handoff = (slug === "CHUCK_VAULT_LOGIN" && vaultResult.browserHandoff && typeof vaultResult.browserHandoff === "object"
               ? vaultResult.browserHandoff
-              : execResult) as { url?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
+              : execResult) as { url?: unknown; handoffId?: unknown; status?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
             const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
             if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" && !/^https:\/\//i.test(url)) throw new Error("Daytona did not return a valid private browser handoff link");
             if (url) privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
@@ -1210,9 +1210,9 @@ export async function runAgent(
             // not put a short-lived bearer URL into model context, run state,
             // logs, or the saved conversation history.
             if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF") {
-              execResult = { browserHandoffIssued: true, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
+              execResult = { browserHandoffIssued: true, handoffId: handoff.handoffId, status: handoff.status, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
             } else if (url) {
-              execResult = { ...(execResult as Record<string, unknown>), browserHandoffIssued: true, browserHandoff: { issued: true, expiresAt: handoff.expiresAt } };
+              execResult = { ...(execResult as Record<string, unknown>), browserHandoffIssued: true, browserHandoff: { issued: true, handoffId: handoff.handoffId, status: handoff.status, expiresAt: handoff.expiresAt } };
             }
           }
           if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
@@ -1288,7 +1288,7 @@ export async function runAgent(
 
   // ── Max rounds exhausted — force final answer ─────────────────────────
   logger.warn({ model, toolsUsed }, "Max tool rounds reached");
-  if (onStatus) await onStatus("✍️ I’m putting everything together…");
+  if (onStatus) await onStatus(humanProgressStatus("finalizing"));
 
   const final = await orChat(requestModel, messages, [], signal, onDelta);
   if (final.usage?.cost) totalCost += final.usage.cost;

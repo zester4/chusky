@@ -14,7 +14,7 @@ import {
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
-  searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit,
+  searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -711,9 +711,10 @@ const SHARED_GROUP_TOOL_DENY = [
   // A setup link is a bearer credential and an authenticated identity belongs
   // to one account, never a shared group conversation.
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
+  "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
   // Shopping plans include private purchase intent and lead into a private
   // website identity, so a shared group must not create or inspect them.
-  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE",
   "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
 ] as const;
 
@@ -876,16 +877,29 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
 // giving users real-time feedback on every step.
 
 function buildStatusBar(steps: string[]): string {
-  if (steps.length === 0) return "⏳ I’m thinking…";
-  const lines: string[] = [];
-  for (let i = 0; i < steps.length; i++) {
-    const isLast = i === steps.length - 1;
-    const icon = isLast ? "⟳" : "✓";
-    lines.push(`${icon} ${steps[i]}`);
+  if (steps.length === 0) return "⏳ I’m getting started…";
+
+  // Status callbacks can arrive more than once for the same capability (for
+  // example, a native tool can report both its family and its delegated work).
+  // Keep the message readable instead of rendering an internal event log.
+  const unique: string[] = [];
+  for (const step of steps) {
+    if (!step.trim()) continue;
+    const previousIndex = unique.indexOf(step);
+    if (previousIndex >= 0) unique.splice(previousIndex, 1);
+    unique.push(step);
   }
-  // Show last 4 steps max to keep it tidy
-  const visible = lines.slice(-4);
-  return visible.join("\n");
+  if (unique.length === 0) return "⏳ I’m getting started…";
+
+  const current = unique[unique.length - 1]!;
+  const completed = unique.slice(0, -1).slice(-2);
+  const lines = completed.map((step) => `✓ ${step}`);
+  if (unique.length > completed.length + 1) {
+    const hidden = unique.length - completed.length - 1;
+    lines.unshift(`✓ ${hidden} earlier step${hidden === 1 ? "" : "s"} complete`);
+  }
+  lines.push(`⟳ ${current}`);
+  return lines.join("\n");
 }
 
 // ── Register all handlers ─────────────────────────────────────────────────────
@@ -914,7 +928,7 @@ export function registerHandlers(bot: Bot): void {
       `<b>Commands:</b>\n` +
       `  /home — open your Chusky workspace\n` +
       `  /mcp — view and manage third-party MCP servers\n` +
-      `  /browser — website playbooks, session health, and activity\n` +
+      `  /browser — website playbooks, session health, handoffs, and activity\n` +
       `  /connect <code>[toolkit]</code> — connect an app\n` +
       `  /apps — see connected apps\n` +
       `  /model — switch AI model\n` +
@@ -949,7 +963,7 @@ export function registerHandlers(bot: Bot): void {
       `<b>Chusky — Commands</b>\n\n` +
       `/home — connected apps, tasks, approvals, triggers, and call voice settings\n` +
       `/mcp — view and manage third-party MCP servers\n` +
-      `/browser — saved website playbooks, session health, and activity\n` +
+      `/browser — saved website playbooks, session health, handoffs, and activity\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -1036,6 +1050,11 @@ export function registerHandlers(bot: Bot): void {
       if (subcommand === "health") {
         const health = await browserSessionHealth(uid);
         await replyHtml(ctx, health.length ? `<b>Website session health</b>\n\n${health.map((item) => `• <b>${escapeTelegramHtml(item.service)}</b> · ${escapeTelegramHtml(item.status)}\n  ${escapeTelegramHtml(item.origin)} · next: ${escapeTelegramHtml(item.recommendedAction)}`).join("\n")}` : "No saved website sessions.");
+        return;
+      }
+      if (subcommand === "handoffs") {
+        const handoffs = await listBrowserHandoffs(uid, 20);
+        await replyHtml(ctx, handoffs.length ? `<b>Private browser handoffs</b>\n\n${handoffs.map((item) => `• <code>${escapeTelegramHtml(item.id)}</code> · <b>${escapeTelegramHtml(item.status)}</b>\n  ${escapeTelegramHtml(item.reason.replaceAll("_", " "))} · ${escapeTelegramHtml(item.origin ?? item.service ?? "browser")}\n  expires ${escapeTelegramHtml(new Date(item.expiresAt).toLocaleString("en-GB"))}`).join("\n\n")}` : "No browser handoffs recorded.");
         return;
       }
       if (subcommand === "logout" || subcommand === "revoke") {
@@ -2418,7 +2437,7 @@ export function registerHandlers(bot: Bot): void {
     }
 
     // Post the live status message
-    const statusMsg = await ctx.reply("🐶 <b>Alright, just a sec…</b>", { parse_mode: "HTML" });
+    const statusMsg = await ctx.reply("🐶 <b>I’m on it…</b>", { parse_mode: "HTML" });
 
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
@@ -2426,15 +2445,30 @@ export function registerHandlers(bot: Bot): void {
 
     // Track steps for the live status bar
     const steps: string[] = [];
+    let lastStatus = "";
+    let lastStatusEditAt = 0;
+    let statusEdit: Promise<void> = Promise.resolve();
     let streamedText = "";
     let lastStreamEdit = 0;
 
     async function updateStatus(step: string): Promise<void> {
-      steps.push(step);
+      const normalized = step.replace(/\.{2,}/g, "…").trim();
+      if (!normalized || normalized === lastStatus) return;
+      lastStatus = normalized;
+      steps.push(normalized);
       const bar = buildStatusBar(steps);
-      try {
-        await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, bar);
-      } catch { /* ignore */ }
+      // Serialize edits: concurrent tool callbacks otherwise make Telegram
+      // show stale stages out of order. A small client-side cooldown also
+      // avoids hammering the Bot API during fast tool chains.
+      const wait = Math.max(0, 350 - (Date.now() - lastStatusEditAt));
+      statusEdit = statusEdit.then(async () => {
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        try {
+          await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id, bar);
+          lastStatusEditAt = Date.now();
+        } catch { /* ignore status-only failures */ }
+      });
+      await statusEdit;
     }
 
     try {

@@ -34,7 +34,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
-  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
+  "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE",
   "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
 ]);
 
@@ -81,9 +82,9 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 }
 
 const STATUSES: Record<string, string> = {
-  CHUCK_SEARCH_SKILLS: "🧭 I’m checking the relevant project skills…",
-  CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the skill’s supporting files…",
-  CHUCK_READ_SKILL_FILE: "📖 I’m reading the relevant skill guidance…",
+  CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",
+  CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the supporting guidance…",
+  CHUCK_READ_SKILL_FILE: "📖 I’m reviewing the relevant guidance…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking my phone-call history…",
   CHUCK_MEETING_JOIN: "🎥 I’m joining the meeting...",
@@ -96,13 +97,13 @@ const STATUSES: Record<string, string> = {
   COMPOSIO_MANAGE_CONNECTIONS: "🔗 I’m opening the connection screen…",
   COMPOSIO_REMOTE_BASH_TOOL: "🖥️ I’m running that command…",
   COMPOSIO_REMOTE_WORKBENCH: "🛠️ I’m working in your remote workspace…",
-  COMPOSIO_SEARCH_TOOL: "🔎 I’m looking for the best tool…",
-  COMPOSIO_SEARCH_TOOLS: "🔎 I’m looking for the best tool…",
+  COMPOSIO_SEARCH_TOOL: "🔎 I’m finding the right connected capability…",
+  COMPOSIO_SEARCH_TOOLS: "🔎 I’m finding the right connected capability…",
   COMPOSIO_SEARCH_WEB: "🌐 I’m searching the live web…",
   COMPOSIO_SEARCH_FETCH_URL_CONTENT: "🔗 I’m reading that URL…",
-  COMPOSIO_GET_TOOL_SCHEMAS: "🧩 I’m checking the tool schema…",
-  COMPOSIO_EXECUTE_TOOL: "⚡ I’m running the verified action…",
-  COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ I’m carrying out those steps…",
+  COMPOSIO_GET_TOOL_SCHEMAS: "🧩 I’m checking how that capability works…",
+  COMPOSIO_EXECUTE_TOOL: "⚡ I’m carrying that out through your connected app…",
+  COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ I’m carrying those steps out through your connected apps…",
   CHUCK_GENERATE_IMAGE: "🎨 I’m creating your image…",
   CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
   CHUCK_CREATE_TRIGGER: "🔔 I’m setting up that automation…",
@@ -132,6 +133,8 @@ const STATUSES: Record<string, string> = {
   CHUCK_VAULT_LOGIN: "🔐 I’m signing in through your encrypted website identity…",
   CHUCK_VAULT_LOGOUT: "🔐 I’m ending Chusky’s saved browser session…",
   CHUCK_DAYTONA_BROWSER_HANDOFF: "🔐 I’m preparing a private browser handoff…",
+  CHUCK_BROWSER_HANDOFF_STATUS: "🔐 I’m checking the private browser handoff…",
+  CHUCK_BROWSER_HANDOFF_COMPLETE: "🔐 I’m verifying the private browser handoff…",
   CHUCK_SHOPPING_START: "🛒 I’m setting up your shopping plan…",
   CHUCK_SHOPPING_LIST: "🛒 I’m checking your shopping plans…",
   CHUCK_SHOPPING_SELECT_RETAILER: "🛒 I’m selecting that retailer…",
@@ -197,4 +200,22 @@ export function humanToolStatus(slug: string): string {
   const toolkit = parts[0] ? parts[0].charAt(0) + parts[0].slice(1).toLowerCase() : slug;
   const action = parts.slice(1).join(" ").toLowerCase() || "that task";
   return `⚙️ I’m using ${toolkit} to ${action}…`;
+}
+
+/**
+ * Human-facing phases for the live Telegram progress message. These describe
+ * the work Chusky is doing without exposing the model loop, prompt, or tool
+ * registry to the user.
+ */
+export type HumanProgressPhase = "understanding" | "preparing" | "finalizing";
+
+export function humanProgressStatus(phase: HumanProgressPhase): string {
+  switch (phase) {
+    case "understanding":
+      return "🧠 I’m understanding what you need…";
+    case "preparing":
+      return "🧰 I’m lining up the best way to help…";
+    case "finalizing":
+      return "✍️ I’m pulling everything together…";
+  }
 }

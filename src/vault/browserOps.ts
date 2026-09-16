@@ -52,6 +52,7 @@ export type BrowserAuditEvent =
   | "verification_passed"
   | "verification_failed"
   | "handoff_requested"
+  | "handoff_completed"
   | "playbook_saved"
   | "playbook_used"
   | "session_revoked";
@@ -69,8 +70,29 @@ export type BrowserAuditRecord = {
   createdAt: number;
 };
 
+export type BrowserHandoffReason = "captcha" | "two_factor" | "age_verification" | "site_challenge" | "login" | "user_requested";
+
+/**
+ * Durable, owner-scoped state for a human browser handoff. The record is
+ * deliberately metadata-only: the signed URL, cookies, challenge text, and
+ * any code entered by the owner never enter the session store.
+ */
+export type BrowserHandoffRecord = {
+  id: string;
+  userId: number;
+  workspaceId: string;
+  service?: string;
+  origin?: string;
+  reason: BrowserHandoffReason;
+  status: "waiting" | "awaiting_verification" | "completed" | "expired" | "cancelled";
+  createdAt: number;
+  expiresAt: number;
+  completedAt?: number;
+};
+
 export type BrowserSessionHealth = {
   service: string;
+  accountAlias?: string;
   origin: string;
   workspaceId: string;
   status: "healthy" | "stale" | "expired" | "needs_reauth" | "logged_out" | "unknown";
@@ -198,12 +220,13 @@ export function verifyBrowserResult(input: { currentUrl?: string; title?: string
   return { passed: requiredCount === 0 || !requiredMissing, matched, missing };
 }
 
-export function sessionHealth(input: { service: string; origin: string; workspaceId: string; status: string; lastUsedAt?: number; expiresAt?: number }): BrowserSessionHealth {
+export function sessionHealth(input: { service: string; accountAlias?: string; origin: string; workspaceId: string; status: string; lastUsedAt?: number; expiresAt?: number }): BrowserSessionHealth {
   const now = Date.now();
   const expired = typeof input.expiresAt === "number" && input.expiresAt <= now;
   const status = expired ? "expired" : input.status === "authenticated" ? (input.lastUsedAt && now - input.lastUsedAt > 7 * 24 * 60 * 60_000 ? "stale" : "healthy") : input.status === "needs_reauth" ? "needs_reauth" : input.status === "logged_out" ? "logged_out" : "unknown";
   return {
     service: input.service,
+    ...(input.accountAlias ? { accountAlias: input.accountAlias } : {}),
     origin: input.origin,
     workspaceId: input.workspaceId,
     status,
