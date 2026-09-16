@@ -692,6 +692,8 @@ export interface ApprovalRecord {
   accountId?: string;
   channelProvider?: ChannelProvider;
   channelConversationId?: string;
+  /** Scope of the conversation that originally requested the approval. */
+  channelScope?: "private" | "shared";
   triggerEventId?: string;
   toolSlug: string;
   args: Record<string, unknown>;

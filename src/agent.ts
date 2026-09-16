@@ -49,6 +49,7 @@ import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus }
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
+import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -991,6 +992,20 @@ export async function runAgent(
     const legacyToolCalls = typeof assistantMsg.content === "string" ? parseLegacyDsmlToolCalls(assistantMsg.content) : [];
     const toolCalls = assistantMsg.tool_calls ?? legacyToolCalls;
 
+    // Shared conversations must not present current financial, pricing, news,
+    // or other externally verifiable facts from model memory when the live web
+    // tool is available. A short model nudge is safer than silently accepting
+    // an uncited fallback answer; if the tool is unavailable, the model still
+    // follows the explicit group instruction to say it could not verify facts
+    // and avoid unsupported current claims.
+    const liveWebToolAvailable = availableTools.some((tool) => toolName(tool) === "COMPOSIO_SEARCH_WEB");
+    if (toolCalls.length === 0 && round === 0 && channelContext?.scope === "shared" && typeof userMessage === "string" && requiresLiveWebResearchRequest(userMessage) && liveWebToolAvailable) {
+      logger.info({ userId, model: requestModel }, "Nudging shared current-information request through live web search");
+      messages.push({ role: "assistant", content: cleanModelText(typeof assistantMsg.content === "string" ? assistantMsg.content : "") || "(live research required)" });
+      messages.push({ role: "user", content: "This shared-group request depends on current or externally verifiable information. Do not answer from memory. Call COMPOSIO_SEARCH_WEB now, then answer only from the returned evidence and include useful source URLs." });
+      continue;
+    }
+
     // ── Done: no tool calls or explicit stop ──────────────────────────
     if (toolCalls.length === 0) {
       const rawText = typeof assistantMsg.content === "string" ? cleanModelText(assistantMsg.content) : "";
@@ -1074,7 +1089,7 @@ export async function runAgent(
         } else if (!groupArtifactTool && (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args) || (slug.startsWith("MCP_") && mcpClient.requiresApproval(slug, userId)))) {
           const approval = await createApproval({
             userId,
-            ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, triggerEventId: channelContext.triggerEventId } : {}),
+            ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, channelScope: channelContext.scope, triggerEventId: channelContext.triggerEventId } : {}),
             toolSlug: slug,
             args,
             request: typeof userMessage === "string" ? userMessage : "User request with attachment",
@@ -1178,7 +1193,7 @@ export async function runAgent(
           execResult = await mcpClient.callTool(userId, slug, executionArgs, signal);
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined });
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);

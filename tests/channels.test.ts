@@ -12,12 +12,28 @@ import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } fr
 import { sendblueFileExtensionForMime } from "../src/channels/sendblueMedia.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
-import { createAgentChannelHandler } from "../src/channels/agentHandler.js";
+import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
 import { acquireUserLock, appendChannelConversationMessages, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock, setChannelConversationModel } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
+
+test("channel approval resumes preserve shared privacy boundaries", () => {
+  const shared = {
+    accountId: "account_42", userId: 42, provider: "sendblue" as const, scope: "shared" as const,
+    conversationId: "group-1", permissions: { canUseAgent: true, canApprove: true, canUseSharedContext: true, canReceiveProactive: true },
+    replyTarget: { provider: "sendblue" as const, conversationId: "group-1" },
+  };
+  const sharedOptions = channelAgentRunOptions(shared, 123);
+  assert.match(sharedOptions.instructions ?? "", /shared sendblue group/i);
+  assert.ok(sharedOptions.toolDeny?.includes("CHUCK_SEARCH_MEMORY"));
+  assert.deepEqual(sharedOptions.temporalContext, { messageReceivedAt: 123 });
+
+  const privateOptions = channelAgentRunOptions({ ...shared, scope: "private", conversationId: "+15550001", replyTarget: { provider: "sendblue", conversationId: "+15550001" } }, 123);
+  assert.equal(privateOptions.instructions, undefined);
+  assert.equal(privateOptions.toolDeny, undefined);
+});
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 

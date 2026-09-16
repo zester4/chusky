@@ -18,6 +18,14 @@ import {
   verifyRecallMediaTicket,
   verifyRecallWebhookSignature,
 } from "../src/meetings/recall.js";
+import { ownerExplicitlyRequestedTranscriptRetention } from "../src/meetings/service.js";
+
+test("transcript retention requires an explicit owner request", () => {
+  assert.equal(ownerExplicitlyRequestedTranscriptRetention("Join the prepared calendar meeting"), false);
+  assert.equal(ownerExplicitlyRequestedTranscriptRetention("Join the meeting and retain a searchable transcript for 7 days"), true);
+  assert.equal(ownerExplicitlyRequestedTranscriptRetention("Join without retaining the transcript"), false);
+  assert.equal(ownerExplicitlyRequestedTranscriptRetention("Save the meeting transcript so I can search it later"), true);
+});
 
 test("accepts supported HTTPS meeting links and identifies their provider", () => {
   assert.equal(validateMeetingUrl("https://meet.google.com/abc-defg-hij").platform, "google_meet");

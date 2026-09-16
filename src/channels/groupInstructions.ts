@@ -11,3 +11,14 @@ When the group asks you to create a PDF, Word document, presentation, spreadshee
 LIVE WEB AND COMPOSIO RESEARCH
 When a question depends on current information, a URL, product documentation, prices, news, or facts outside the conversation, do not answer from training data alone. Use COMPOSIO_SEARCH_WEB for web discovery and COMPOSIO_SEARCH_FETCH_URL_CONTENT for a URL the group provides. Use COMPOSIO_GET_TOOL_SCHEMAS before an unfamiliar action and COMPOSIO_EXECUTE_TOOL or COMPOSIO_MULTI_EXECUTE_TOOL only with the verified schema. Label results as researched, cite useful source URLs, and ask for clarification rather than guessing. Routine communication, publishing, and artifact creation requested by the group may run autonomously; destructive, financial, permission-changing, deployment, remote-push, and other materially risky actions still require the normal approval boundary.`;
 }
+
+/**
+ * Identify group requests where a model answer without a live source would be
+ * misleading. This is intentionally conservative: it nudges the model to use
+ * the already-available web tool, but never invents a search result when that
+ * tool is unavailable.
+ */
+export function requiresLiveWebResearchRequest(input: string): boolean {
+  const text = input.toLowerCase();
+  return /\b(current|currently|today|tonight|now|latest|recent|recently|up[- ]to[- ]date|real[- ]time|this\s+(week|month|year)|news|weather|price|prices|cost|costs|rate|rates|interest|exchange rate|stock|stocks|schedule|availability|documentation|docs|regulation|regulations|law|laws|competitor|competitors)\b/.test(text);
+}

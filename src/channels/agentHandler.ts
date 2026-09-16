@@ -1,4 +1,4 @@
-import { runAgent, ApprovalRequiredError, transcribeAudio } from "../agent.js";
+import { runAgent, ApprovalRequiredError, transcribeAudio, type AgentRunOptions } from "../agent.js";
 import { config } from "../config.js";
 import {
   addUsage,
@@ -42,6 +42,24 @@ function withPrivateLinks(text: string, links: Awaited<ReturnType<typeof runAgen
 function agentInstructions(conversation: ChuskyConversation): string | undefined {
   if (conversation.scope !== "shared") return undefined;
   return sharedGroupInstructions(conversation.provider);
+}
+
+const SHARED_CHANNEL_TOOL_DENY = [
+  "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY",
+  "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
+  "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
+  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE",
+  "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE",
+  "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
+] as const;
+
+/** Build the same privacy boundary for a normal turn and an approval resume. */
+export function channelAgentRunOptions(conversation: ChuskyConversation, receivedAt?: number): AgentRunOptions {
+  return {
+    ...(conversation.scope === "shared" ? { instructions: agentInstructions(conversation), toolDeny: [...SHARED_CHANNEL_TOOL_DENY] } : {}),
+    ...(receivedAt !== undefined ? { temporalContext: { messageReceivedAt: receivedAt } } : {}),
+  };
 }
 
 async function privateOrSharedHistory(conversation: ChuskyConversation) {
@@ -155,8 +173,24 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
     return reply(conversation, "✅ Approved. Chusky is resuming the triggered workflow.", message.providerEventId, { kind: "approval", correlationId: approvalId });
   }
   try {
-    const result = await runAgent(conversation.userId, approval.request, approval.history, approval.model, undefined, undefined, undefined, approvalId, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId });
-    await saveConversation(conversation, message, approval.request, result.text);
+    // Resume with the scope and identity captured when the approval was
+    // created. This prevents a shared-channel approval from regaining private
+    // memory/tools, even if it is approved from another surface.
+    const approvalConversation: ChuskyConversation = {
+      ...conversation,
+      accountId: approval.accountId ?? conversation.accountId,
+      provider: approval.channelProvider ?? conversation.provider,
+      conversationId: approval.channelConversationId ?? conversation.conversationId,
+      scope: approval.channelScope ?? conversation.scope,
+    };
+    const result = await runAgent(conversation.userId, approval.request, approval.history, approval.model, undefined, undefined, undefined, approvalId, {
+      accountId: approvalConversation.accountId,
+      provider: approvalConversation.provider,
+      conversationId: approvalConversation.conversationId,
+      scope: approvalConversation.scope,
+      deliveryTarget: conversation.replyTarget,
+    }, channelAgentRunOptions(approvalConversation, message.receivedAt));
+    await saveConversation(approvalConversation, message, approval.request, result.text);
     if (result.cost) await addUsage(conversation.userId, result.cost);
     const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
     const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
@@ -178,7 +212,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     try {
       const prepared = await buildAgentInput(message);
       await persistInboundImages(message, conversation.userId);
-      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, { instructions: agentInstructions(conversation), toolDeny: conversation.scope === "shared" ? ["CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY", "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT", "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE"] : undefined, temporalContext: { messageReceivedAt: message.receivedAt } });
+      const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, channelAgentRunOptions(conversation, message.receivedAt));
       await saveConversation(conversation, message, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];

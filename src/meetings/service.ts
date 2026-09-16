@@ -92,6 +92,18 @@ export function recallChatConfigurationStatus(): "configured" | "misconfigured" 
   return recallChatConfigurationReady() ? "configured" : "misconfigured";
 }
 
+/**
+ * Transcript retention is an owner opt-in, not a model-selectable default.
+ * Keep this check at the native-tool boundary so a model cannot accidentally
+ * turn a normal or calendar join into a retained transcript request.
+ */
+export function ownerExplicitlyRequestedTranscriptRetention(input: string): boolean {
+  const text = input.trim();
+  if (!text || !/\btranscript\b/i.test(text)) return false;
+  if (/\b(?:no|not|never|without|don't|do not|dont)\b[\s\S]{0,40}\b(?:transcript|retain|keep|save|store|searchable)\b/i.test(text)) return false;
+  return /\b(?:searchable\s+transcript|transcript\s+retention|(?:retain|keep|save|store|preserve)\b[\s\S]{0,40}\btranscript\b|\btranscript\b[\s\S]{0,40}\b(?:retain|keep|save|store|preserve|searchable)\b)/i.test(text);
+}
+
 /** Shared-screen mode needs Recall's signed websocket and a durable encrypted cross-replica handoff. */
 export function recallVisualContextConfigurationReady(): boolean {
   // Shared-screen processing must have a participant-visible disclosure path,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { sharedGroupInstructions } from "../src/channels/groupInstructions.js";
+import { requiresLiveWebResearchRequest, sharedGroupInstructions } from "../src/channels/groupInstructions.js";
 
 test("shared group instructions direct verified deliverables back to the originating group", () => {
   const instructions = sharedGroupInstructions("Telegram");
@@ -13,4 +13,9 @@ test("shared group instructions direct verified deliverables back to the origina
   assert.match(instructions, /COMPOSIO_SEARCH_FETCH_URL_CONTENT/);
   assert.doesNotMatch(instructions, /COMPOSIO_SEARCH_TOOLS/);
   assert.match(instructions, /do not answer from training data alone/i);
+});
+
+test("shared research detection catches current rates without forcing ordinary conversation to search", () => {
+  assert.equal(requiresLiveWebResearchRequest("What are the current interest rates in Ghana?"), true);
+  assert.equal(requiresLiveWebResearchRequest("Can you explain this concept in simple terms?"), false);
 });

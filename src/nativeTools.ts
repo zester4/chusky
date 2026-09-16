@@ -30,7 +30,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
-import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 
 const MAX_TEXT = 1000;
@@ -54,6 +54,8 @@ export interface NativeToolRuntime {
   meetingId?: string;
   /** Private relationship preparation must never run from a shared channel. */
   sharedConversation?: boolean;
+  /** Current owner request, used for explicit-opt-in checks at native boundaries. */
+  userRequest?: string;
 }
 
 function text(value: unknown): string {
@@ -521,9 +523,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const profile = await getMeetingRepresentativeProfile(userId);
       const hasClientMission = args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined;
       const interactionMode = hasClientMission ? "representative" : args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
+        const transcriptRetentionDays = ownerExplicitlyRequestedTranscriptRetention(runtime.userRequest ?? "")
+          ? args.transcriptRetentionDays
+          : undefined;
         return joinRecallMeeting(userId, {
           meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, analyzeScreenShare: args.analyzeScreenShare,
-          transcriptRetentionDays: args.transcriptRetentionDays,
+          ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
         clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, clientContextConfirmed: args.clientContextConfirmed,
         ...(runtime.meetingId && args.clientName === undefined ? { inheritMeetingId: runtime.meetingId } : {}),
       }, runtime.signal);

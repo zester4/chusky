@@ -70,6 +70,49 @@ test("agent uses the selected model for a normal text response", async () => {
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("shared current-information requests are nudged into live web search", async () => {
+  const userId = 830053;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  let responseIndex = 0;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({
+      sessionId: "shared-search-session",
+      tools: async () => [{ type: "function", function: { name: "COMPOSIO_SEARCH_WEB", description: "Search live web", parameters: { type: "object" } } }],
+      execute: async (name: string, args: unknown) => ({ name, args, sources: [{ title: "Official source", url: "https://example.com/rates" }] }),
+    }),
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    requests.push(JSON.parse(String(init?.body)));
+    const responses = [
+      chatResponse({ role: "assistant", content: "I cannot access current rates." }),
+      toolResponse("COMPOSIO_SEARCH_WEB", JSON.stringify({ query: "current Ghana interest rates official financial institutions" })),
+      chatResponse({ role: "assistant", content: "I checked the current sources and found these rates." }),
+    ];
+    return responses[responseIndex++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "What are the current interest rates in Ghana?",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: "account_830053", provider: "telegram", conversationId: "telegram:-:-100830053:-", scope: "shared" },
+    );
+    assert.match(result.text, /I checked the current sources and found these rates\.$/);
+    assert.deepEqual(result.toolsUsed, ["COMPOSIO_SEARCH_WEB"]);
+    assert.equal(requests.length, 3);
+    assert.match(String(requests[1]?.messages.at(-1)?.content), /COMPOSIO_SEARCH_WEB/i);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("ephemeral shared turns expose no tools, skip Composio, and do not persist meeting transcript context", async () => {
   const userId = 830050;
   await initStore({ memoryOnly: true });

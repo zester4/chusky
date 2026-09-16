@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { registerHandlers } from "../src/handlers.js";
+import { registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
 import { config } from "../src/config.js";
 import { addJob, addReminder, appendChannelConversationMessages, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
@@ -28,6 +28,24 @@ function context(userId: number, match = "") {
 }
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
+
+test("Telegram agent context marks groups as shared and keeps their conversation identity", () => {
+  const group = context(840020);
+  group.chat = { id: -100840020, type: "supergroup" };
+  const groupContext = telegramAgentChannelContext(group, 840020);
+  assert.deepEqual(groupContext, {
+    accountId: "account_840020",
+    provider: "telegram",
+    conversationId: "telegram:-:-100840020:-",
+    scope: "shared",
+  });
+
+  const privateChat = context(840020);
+  const privateContext = telegramAgentChannelContext(privateChat, 840020);
+  assert.equal(privateContext.scope, "private");
+  assert.equal(privateContext.accountId, "account_840020");
+  assert.equal(privateContext.provider, "telegram");
+});
 
 test("clear history preserves the Composio session while clear session removes it", async () => {
   const bot = new FakeBot();
