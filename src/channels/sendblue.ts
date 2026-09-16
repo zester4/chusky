@@ -116,6 +116,8 @@ export function normalizeSendblueMessage(payload: any, receivedAt = Date.now()):
   const sender = String(payload.from_number).trim();
   const recipient = String(payload.sendblue_number ?? payload.to_number ?? "").trim();
   if (!sender || !recipient) return undefined;
+  const displayName = [payload.from_name, payload.sender_name, payload.contact_name, payload.display_name, payload.contact?.name]
+    .find((value: unknown) => typeof value === "string" && value.trim()) as string | undefined;
   const participants = Array.isArray(payload.participants)
     ? [...new Set<string>(payload.participants
       .map((value: unknown) => typeof value === "string" ? value.trim() : "")
@@ -128,6 +130,7 @@ export function normalizeSendblueMessage(payload: any, receivedAt = Date.now()):
     providerConversationId: groupId || sender,
     ...(groupId && participants.length ? { providerParticipantIds: participants } : {}),
     ...(groupId ? { providerWorkspaceId: recipient } : {}),
+    ...(displayName ? { displayName: displayName.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 200) } : {}),
     ...(payload.reply_to?.message_handle ? { providerReplyToId: String(payload.reply_to.message_handle) } : {}),
     text: typeof payload.content === "string" && payload.content.trim() ? payload.content.trim() : undefined,
     attachments: attachment(payload),

@@ -20,6 +20,7 @@ import { persistSendblueMedia, persistWhatsAppMedia } from "./sendblueMedia.js";
 import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 import { sharedGroupInstructions } from "./groupInstructions.js";
+import { formatInboundMessageForAgent } from "./conversations.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -135,8 +136,9 @@ function transcriptionFormat(mimeType: string): "mp3" | "m4a" | "wav" | "webm" |
 
 async function buildAgentInput(message: InboundMessage): Promise<{ input: string | ContentPart[]; historyLabel: string }> {
   const attachments = message.attachments.slice(0, 5);
-  if (!attachments.length) return { input: message.text ?? "", historyLabel: message.text ?? "" };
-  const parts: ContentPart[] = [{ type: "text", text: message.text || "Please analyze the attached media." }];
+  const messageText = formatInboundMessageForAgent(message, message.text ?? "");
+  if (!attachments.length) return { input: messageText, historyLabel: messageText };
+  const parts: ContentPart[] = [{ type: "text", text: messageText || "Please analyze the attached media." }];
   const labels: string[] = [];
   for (const attachment of attachments) {
     const decoded = attachment.url ? dataUrlBytes(attachment.url) : undefined;
@@ -152,8 +154,8 @@ async function buildAgentInput(message: InboundMessage): Promise<{ input: string
       parts[0] = { type: "text", text: `${message.text ?? ""}\n\nTranscript of ${attachment.filename ?? "voice message"}:\n${transcript}`.trim() };
     }
   }
-  if (parts.length === 1 && labels.length === 0) return { input: message.text ?? "", historyLabel: message.text ?? "" };
-  return { input: parts, historyLabel: `${message.text ?? "[Attachment]"}\nAttached: ${labels.join(", ")}` };
+  if (parts.length === 1 && labels.length === 0) return { input: messageText, historyLabel: messageText };
+  return { input: parts, historyLabel: `${messageText || "[Attachment]"}\nAttached: ${labels.join(", ")}` };
 }
 
 async function handleApproval(message: InboundMessage, conversation: ChuskyConversation): Promise<OutboundMessage> {

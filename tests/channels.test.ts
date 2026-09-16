@@ -12,6 +12,7 @@ import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } fr
 import { sendblueFileExtensionForMime } from "../src/channels/sendblueMedia.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
+import { formatInboundMessageForAgent, sharedSenderLabel } from "../src/channels/conversations.js";
 import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
@@ -98,6 +99,18 @@ test("Sendblue verifies its webhook secret and normalizes direct and group iMess
   const group = normalizeSendblueMessage({ message_handle: "sb-2", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "plan this", participants: ["+15550001", "+15550002"] });
   assert.equal(group?.providerConversationId, "group-1");
   assert.equal(group?.scope, "shared");
+});
+
+test("shared iMessage turns preserve sender attribution without leaking raw provider IDs", () => {
+  const named = normalizeSendblueMessage({ message_handle: "sb-named", from_number: "+15550001", from_name: "Alex", sendblue_number: "+15550002", group_id: "group-1", content: "Can we meet tomorrow?" });
+  assert.equal(named?.displayName, "Alex");
+  assert.equal(formatInboundMessageForAgent(named!, named!.text!), "[Alex]: Can we meet tomorrow?");
+
+  const unnamed = normalizeSendblueMessage({ message_handle: "sb-unnamed", from_number: "+15550003", sendblue_number: "+15550002", group_id: "group-1", content: "What time works?" });
+  const label = sharedSenderLabel(unnamed!);
+  assert.match(label, /^iMessage participant [A-F0-9]{8}$/);
+  assert.equal(formatInboundMessageForAgent(unnamed!, unnamed!.text!), `[${label}]: What time works?`);
+  assert.doesNotMatch(formatInboundMessageForAgent(unnamed!, unnamed!.text!), /\+15550003/);
 });
 
 test("Sendblue hydrates bounded media for the shared agent handler", async () => {

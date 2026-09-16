@@ -31,6 +31,24 @@ export function buildReplyTarget(message: InboundMessage): ReplyTarget {
   };
 }
 
+/**
+ * Shared-channel sender metadata is conversation context, not authorization.
+ * Keep a stable fallback label when a provider does not expose a display name
+ * so the model can still distinguish participants without seeing raw IDs.
+ */
+export function sharedSenderLabel(message: Pick<InboundMessage, "provider" | "providerUserId" | "displayName" | "scope">): string {
+  const name = message.displayName?.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+  if (name) return name;
+  const digest = createHash("sha256").update(`${message.provider}:${message.providerUserId}`).digest("hex").slice(0, 8).toUpperCase();
+  return `${message.provider === "sendblue" ? "iMessage" : message.provider} participant ${digest}`;
+}
+
+/** Prefix shared turns so the agent can attribute each message correctly. */
+export function formatInboundMessageForAgent(message: InboundMessage, text: string): string {
+  if (message.scope !== "shared") return text;
+  return `[${sharedSenderLabel(message)}]: ${text}`;
+}
+
 export function buildConversation(userId: number, message: InboundMessage): ChuskyConversation {
   const scope = message.scope;
   return {
