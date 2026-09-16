@@ -13,8 +13,8 @@ export interface WorkflowDependencies {
   getTelegramChatId(userId: number): Promise<number | undefined>;
   sendMessage(chatId: number, text: string, options: { parse_mode: "HTML" }): Promise<unknown>;
   sendChannelMessage?(target: ReminderDeliveryTarget, text: string, idempotencyKey: string): Promise<unknown>;
-  runAgent?(job: JobRecord): Promise<{ text: string; cost?: number }>;
-  runWorker?(job: JobRecord): Promise<{ text: string; cost?: number }>;
+  runAgent?(job: JobRecord): Promise<{ text: string; cost?: number; suppressDelivery?: boolean }>;
+  runWorker?(job: JobRecord): Promise<{ text: string; cost?: number; suppressDelivery?: boolean }>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery?(key: string, ttlSeconds: number): Promise<void>;
 }
@@ -80,11 +80,16 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
       : deps.runAgent
         ? await deps.runAgent(job)
         : { text: job.text };
+    if (result.suppressDelivery) {
+      if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
+      return { skipped: true, delivered: false };
+    }
     const response = result.text.trim() || "Scheduled job completed.";
     if (target && target.provider !== "telegram") {
-      await deps.sendChannelMessage!(target, `🔁 Chusky scheduled job\n\n${response}`, `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}`);
+      const title = job.kind === "attention_pulse" ? "🧭 Chusky attention pulse" : "🔁 Chusky scheduled job";
+      await deps.sendChannelMessage!(target, `${title}\n\n${response}`, `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}`);
     } else {
-      const header = "🔁 <b>Chusky scheduled job</b>\n\n";
+      const header = job.kind === "attention_pulse" ? "🧭 <b>Chusky attention pulse</b>\n\n" : "🔁 <b>Chusky scheduled job</b>\n\n";
       for (const chunk of splitHtml(mdToTelegramHtml(response), 3900)) {
         await deps.sendMessage(chatId!, `${header}${chunk}`, { parse_mode: "HTML" });
       }

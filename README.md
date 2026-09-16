@@ -374,6 +374,18 @@ Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/r
 Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
 Chusky checks ownership and cancellation state before delivering a notification.
 
+### Proactive attention pulse
+
+The attention state is an owner-scoped substrate for open loops, attention candidates,
+standing orders, and delivery preferences. It becomes proactive only after the owner asks
+Chusky to enable the pulse. The agent then creates one stable QStash schedule (hourly by
+default) for Elena, the workflow governor. Each run reviews bounded state, applies only
+active standing-order authority, preserves normal approvals for risky actions, suppresses
+quiet/silent or daily-limit deliveries, and deduplicates unchanged digests. Ask Chusky:
+“Enable my proactive attention pulse,” “Disable my attention pulse,” or “What is my pulse
+status?” A custom CRON expression can be supplied when enabling it. Redis and QStash are
+required in production.
+
 ### Event-driven Composio triggers
 
 Composio trigger events are verified, ownership-checked, deduplicated, stored as a bounded safe

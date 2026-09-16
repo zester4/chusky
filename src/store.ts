@@ -587,6 +587,9 @@ export interface JobRecord {
   cron: string;
   scheduleId: string;
   status: "active" | "cancelled";
+  /** Standard recurring work or the owner-enabled attention governor. */
+  kind?: "standard" | "attention_pulse";
+  attentionPulse?: { lastDigestKey?: string; lastDeliveredAt?: number };
   workerBinding?: ScheduledWorkerBinding;
   /** Durable provider-neutral destination captured when the job is created. */
   deliveryTarget?: ReminderDeliveryTarget;

@@ -337,7 +337,7 @@ function telegramMeetingJoinFields(raw: string): { meetingUrl: string; clientNam
   };
 }
 
-function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; activeMeetings: number; preparedMeetings: number; meetingContacts: number; mcpConnections: number; voiceReplies: boolean }): TelegramCard {
+function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; activeMeetings: number; preparedMeetings: number; meetingContacts: number; mcpConnections: number; voiceReplies: boolean; attentionPulseEnabled: boolean }): TelegramCard {
   const connectionLine = input.connectedApps
     ? `🟢 ${input.connectedApps} app${input.connectedApps === 1 ? "" : "s"} connected across ${input.connectedAccounts} account${input.connectedAccounts === 1 ? "" : "s"}`
     : "⚪ No connected apps yet";
@@ -352,6 +352,7 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       `📋 ${input.activeTasks} task${input.activeTasks === 1 ? "" : "s"} in progress · ${input.voiceReplies ? "🔊 voice replies on" : "🔇 voice replies off"}`,
       `🤝 ${input.activeMeetings} live meeting${input.activeMeetings === 1 ? "" : "s"} · ${input.preparedMeetings} prepared · ${input.meetingContacts} follow-up contact${input.meetingContacts === 1 ? "" : "s"}`,
       `🔗 ${input.mcpConnections} third-party MCP server${input.mcpConnections === 1 ? "" : "s"} connected`,
+      `🧭 Attention pulse: ${input.attentionPulseEnabled ? "enabled" : "disabled"}`,
     ],
     detail: "Connected accounts, tasks, and approvals remain private to your Chusky account.",
     buttons: [
@@ -359,6 +360,7 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       [{ text: "⏰ Reminders", callbackData: "home:reminders" }, { text: "🗓️ Schedules", callbackData: "home:schedules" }],
       [{ text: "📋 Tasks", callbackData: "home:tasks" }, { text: "✅ Approvals", callbackData: "home:approvals" }],
       [{ text: "🤝 Meetings", callbackData: "home:meetings", style: "primary" }, { text: "🔊 Voice", callbackData: "home:voice" }],
+      [{ text: input.attentionPulseEnabled ? "🧭 Pulse on · Disable" : "🧭 Pulse off · Enable", callbackData: "home:pulse:toggle", style: input.attentionPulseEnabled ? "success" : "primary" }],
       [{ text: "MCP servers", callbackData: "home:mcp" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
     ],
   };
@@ -454,6 +456,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     meetingContacts: contacts.length,
     mcpConnections: config.mcpEnabled ? mcpConnections.length : 0,
     voiceReplies: session.voiceReplies === true,
+    attentionPulseEnabled: jobs.some((job) => job.kind === "attention_pulse" && job.status === "active"),
   });
   if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
 }
@@ -2228,6 +2231,29 @@ export function registerHandlers(bot: Bot): void {
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id, action }, "Telegram workspace action failed");
       await ctx.editMessageText("❌ I could not load that workspace view. Use /home to try again.");
+    }
+  });
+
+  bot.callbackQuery(/^home:pulse:toggle$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Updating attention pulse…" });
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) {
+      await ctx.editMessageText("Attention pulse is available only in your private chat with Chusky.");
+      return;
+    }
+    const messageId = ctx.callbackQuery.message?.message_id;
+    if (!messageId) return;
+    let active = false;
+    try {
+      active = (await listJobs(ctx.from!.id)).some((job) => job.kind === "attention_pulse" && job.status === "active");
+      await nativeTool(ctx.from!.id, "CHUCK_ATTENTION_PULSE", { action: active ? "disable" : "enable" }, {
+        deliveryTarget: { provider: "telegram", conversationId: String(ctx.chat?.id ?? ctx.from!.id) },
+      });
+      await showWorkspace(ctx, messageId);
+    } catch (error) {
+      logger.warn({ err: error, userId: ctx.from!.id }, "Telegram attention pulse toggle failed");
+      const detail = error instanceof Error ? error.message : "Please try again.";
+      await ctx.editMessageText(`❌ I could not ${active ? "disable" : "enable"} the attention pulse. ${detail}`.slice(0, 3900));
     }
   });
 

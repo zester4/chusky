@@ -310,6 +310,59 @@ function requireQStash(): string {
   return config.qstashToken;
 }
 
+const ATTENTION_PULSE_JOB_ID = (userId: number) => `pulse_${userId}`;
+const ATTENTION_PULSE_SCHEDULE_ID = (userId: number) => `chuck-attention-pulse-${userId}`;
+const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
+  worker: "elena",
+  objective: "Review the owner's attention state and act within standing-order authority.",
+  expectedOutput: "A concise owner-facing attention digest, or NO_ACTION when nothing needs delivery.",
+  model: config.defaultModel,
+  allowedTools: WORKER_CAPABILITIES.elena.allowedTools,
+  allowedComposioTools: [],
+  approvalPolicy: "require_chusky_approval",
+  timeoutSeconds: 90,
+  maxToolCalls: 30,
+  duration: "30m",
+  budgetSeconds: 1800,
+};
+
+export async function configureAttentionPulse(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
+  const action = String(args.action ?? "");
+  if (!["enable", "disable", "status"].includes(action)) throw new Error("Attention pulse action must be enable, disable, or status");
+  const active = (await listJobs(userId)).filter((job) => job.kind === "attention_pulse");
+  if (action === "status") return { enabled: active.length > 0, jobs: active };
+  if (action === "disable") {
+    for (const job of active) await cancelJob(userId, job.id);
+    return { enabled: false, cancelled: active.map((job) => job.id) };
+  }
+  const existing = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
+  if (existing) return existing;
+  const cron = validateCronExpression(args.cron ? text(args.cron) : "0 * * * *");
+  const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
+  const job: JobRecord = {
+    id: ATTENTION_PULSE_JOB_ID(userId), userId,
+    text: "Run the owner's proactive attention pulse.", cron,
+    scheduleId: ATTENTION_PULSE_SCHEDULE_ID(userId), status: "active", kind: "attention_pulse",
+    workerBinding: ATTENTION_PULSE_BINDING,
+    ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now(),
+  };
+  const client = new QStashClient({ token: requireQStash() });
+  await addJob(userId, job);
+  try {
+    await client.schedules.create({
+      scheduleId: job.scheduleId,
+      destination: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
+      body: JSON.stringify({ jobId: job.id, userId }), headers: { "Content-Type": "application/json" },
+      cron, retries: 3, retryDelay: "1000 * (1 + retried)",
+      ...(workflowFailureUrl() ? { failureCallback: workflowFailureUrl() } : {}),
+    });
+  } catch (error) {
+    await updateJob(userId, job.id, { status: "cancelled", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
+  return job;
+}
+
 function futureTimestamp(args: Record<string, unknown>): number {
   const now = Date.now();
   const delay = Number(args.delaySeconds ?? 0);
@@ -431,6 +484,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
     case "CHUCK_CANCEL_REMINDER": return cancelReminder(userId, text(args.id));
     case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args, runtime);
+    case "CHUCK_ATTENTION_PULSE": return configureAttentionPulse(userId, args, runtime);
     case "CHUCK_LIST_JOBS": return listJobs(userId);
     case "CHUCK_CANCEL_JOB": return cancelJob(userId, text(args.id));
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };

@@ -7,6 +7,8 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
 import { registerHandlers } from "./handlers.js";
+import { listAttentionRecords } from "./store.js";
+import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
@@ -33,6 +35,7 @@ import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { voiceProfileNativeTools } from "./calls/voiceProfile.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
+import { attentionPulseDeliveryDecision, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
@@ -1731,6 +1734,44 @@ async function main(): Promise<void> {
         runWorker: async (job) => withCliLock(payload.userId, undefined, async () => {
           const binding = job.workerBinding;
           if (!binding) return { text: job.text };
+          if (job.kind === "attention_pulse") {
+            const preferences = await listAttentionRecords(payload.userId, "delivery_preference", { limit: 20 });
+            const candidates = await listAttentionRecords(payload.userId, "attention_candidate", { limit: 200 }) as AttentionCandidateRecord[];
+            const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
+            const deliveredToday = candidates.filter((item) => item.status === "delivered" && item.updatedAt >= dayStart.getTime()).length;
+            const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], Date.now(), deliveredToday);
+            if (delivery.suppressed) return { text: "", suppressDelivery: true };
+            const plan = await buildAttentionPulsePlan(payload.userId);
+            if (!plan.hasWork) return { text: "", suppressDelivery: true };
+            if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) return { text: "", suppressDelivery: true };
+            const result = await executeDelegation(payload.userId, {
+              worker: binding.worker,
+              objective: plan.prompt,
+              expectedOutput: binding.expectedOutput,
+              model: binding.model,
+              allowedTools: binding.allowedTools,
+              allowedComposioTools: binding.allowedComposioTools,
+              approvalPolicy: binding.approvalPolicy,
+              timeoutSeconds: binding.timeoutSeconds,
+              maxToolCalls: binding.maxToolCalls,
+              duration: binding.duration,
+              budgetSeconds: binding.budgetSeconds,
+              context: { attentionPulse: true, ...(job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : {}) },
+            }, { model: binding.model, historySummary: "Attention pulse uses only the bounded attention state supplied in its prompt.", deliveryTarget: job.deliveryTarget });
+            if (result.status === "requires_tool_request" && result.handoffRecord) {
+              const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
+              return { text: `The attention pulse paused for a verified capability request. Continuation ${continuation.workflowRunId} was queued.` };
+            }
+            if (result.status === "requires_approval") {
+              return { text: `The attention pulse needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}.` };
+            }
+            const noAction = isNoActionPulseOutput(result.output);
+            if (!noAction) {
+              await markAttentionPulseDelivered(payload.userId, plan.candidateIds);
+              await updateJob(payload.userId, job.id, { attentionPulse: { ...job.attentionPulse, lastDigestKey: plan.dedupeKey, lastDeliveredAt: Date.now() } });
+            }
+            return { text: result.output, suppressDelivery: noAction };
+          }
           const session = await getSession(payload.userId);
           try {
             // This is intentionally a direct specialist invocation. The

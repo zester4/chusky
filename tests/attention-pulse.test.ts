@@ -1,0 +1,47 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { attentionPulseDeliveryDecision, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput } from "../src/attentionPulse.js";
+import { validateNativeToolArguments } from "../src/agentTools.js";
+import { createAttentionRecord, initStore, listAttentionRecords, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
+
+const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
+  id: "pref_test", userId: 1, provider: "telegram", enabled: true, mode: "immediate", createdAt: 1, updatedAt: 1, ...patch,
+});
+
+test("attention pulse applies wrapped and non-wrapped quiet hours", () => {
+  assert.equal(isWithinQuietHours(23 * 60 + 30, { startMinute: 23 * 60, endMinute: 60 }), true);
+  assert.equal(isWithinQuietHours(30, { startMinute: 23 * 60, endMinute: 60 }), true);
+  assert.equal(isWithinQuietHours(12 * 60, { startMinute: 23 * 60, endMinute: 60 }), false);
+  assert.equal(isWithinQuietHours(9 * 60, { startMinute: 8 * 60, endMinute: 10 * 60 }), true);
+});
+
+test("attention pulse defaults to Telegram delivery and honors explicit controls", () => {
+  assert.equal(attentionPulseDeliveryDecision([], Date.UTC(2026, 0, 1, 12, 0)).suppressed, false);
+  assert.equal(attentionPulseDeliveryDecision([preference({ mode: "silent" })]).reason, "silent");
+  assert.equal(attentionPulseDeliveryDecision([preference({ quietHoursUtc: { startMinute: 12 * 60, endMinute: 12 * 60 } })], Date.UTC(2026, 0, 1, 12, 0)).reason, undefined);
+  assert.equal(attentionPulseDeliveryDecision([preference({ quietHoursUtc: { startMinute: 0, endMinute: 1439 } })], Date.UTC(2026, 0, 1, 12, 0)).reason, "quiet_hours");
+  assert.equal(attentionPulseDeliveryDecision([preference({ maxPerDay: 2 })], Date.UTC(2026, 0, 1, 12, 0), 2).reason, "daily_limit");
+});
+
+test("attention pulse native contract and no-action sentinel are stable", () => {
+  validateNativeToolArguments("CHUCK_ATTENTION_PULSE", { action: "enable" });
+  assert.equal(isNoActionPulseOutput(" no_action\n"), true);
+  assert.equal(isNoActionPulseOutput("There is an action"), false);
+});
+
+test("attention pulse bounds context and deduplicates unchanged state", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910005;
+  await createAttentionRecord(userId, "open_loop", { title: "Follow up with the launch partner", nextAction: "Send the approved overview" });
+  await createAttentionRecord(userId, "attention_candidate", { candidateType: "nudge", score: 0.9, reason: "The launch partner is waiting for a reply" });
+  await createAttentionRecord(userId, "standing_order", { name: "Keep launches moving", instruction: "Prepare routine next steps", authority: "prepare", scope: ["launch"] });
+  const first = await buildAttentionPulsePlan(userId);
+  const second = await buildAttentionPulsePlan(userId);
+  assert.equal(first.hasWork, true);
+  assert.equal(first.dedupeKey, second.dedupeKey);
+  assert.equal(first.prompt.length <= 12_000, true);
+  const record = (await listAttentionRecords(userId, "open_loop"))[0];
+  if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
+  const changed = await buildAttentionPulsePlan(userId);
+  assert.notEqual(changed.dedupeKey, first.dedupeKey);
+});
