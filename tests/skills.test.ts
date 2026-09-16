@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, searchSkills } from "../src/skills/catalog.js";
+import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "chusky-skills-"));
@@ -40,6 +40,23 @@ test("lists nested resources and reads only files inside the skill", async () =>
     const binary = await readSkillFile("spreadsheets", "assets/template.png", 100, root);
     assert.equal(binary.binary, true);
     assert.equal(binary.content, undefined);
+  } finally {
+    clearSkillCatalogCache();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("loads explicitly bound skills and required references before objective fallback", async () => {
+  const root = await fixture();
+  try {
+    const context = await skillContextForBinding({
+      primary: ["spreadsheets"],
+      supporting: [],
+      requiredReferences: { spreadsheets: ["references/formatting.md"] },
+    }, "unrelated query", root);
+    assert.match(context, /### spreadsheets \(primary\)/);
+    assert.match(context, /Reference: references\/formatting\.md/);
+    assert.match(context, /Set explicit widths/);
   } finally {
     clearSkillCatalogCache();
     await rm(root, { recursive: true, force: true });

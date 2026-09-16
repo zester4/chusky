@@ -1,4 +1,5 @@
 import type { CapabilityWorkerName, MemoryCategory } from "../memory/types.js";
+import type { SkillBinding } from "../skills/catalog.js";
 
 export interface CapabilityManifest {
   name: CapabilityWorkerName;
@@ -10,6 +11,8 @@ export interface CapabilityManifest {
   /** Exact, low-friction Composio actions exposed when the user's connection has them. */
   starterComposioTools: string[];
   allowedMemoryCategories: MemoryCategory[];
+  /** Trusted project skills to preload before the worker model runs. */
+  skills: SkillBinding;
   systemPrompt: string;
   reflectionChecklist: string[];
 }
@@ -64,6 +67,14 @@ export const WORKER_CAPABILITIES: Record<CapabilityWorkerName, CapabilityManifes
     allowedComposioPrefixes: ["GITHUB_", "GITLAB_", "VERCEL_", "CLOUDFLARE_", "LINEAR_", "JIRA_", "SENTRY_"],
     starterComposioTools: [...NORA_COMPOSIO_META_TOOLS],
     allowedMemoryCategories: ["project", "procedural", "asset"],
+    skills: {
+      primary: ["fullstack-dev", "computer-pro"],
+      supporting: ["verification", "handoff", "code-review", "fullstack-guardian"],
+      requiredReferences: {
+        "fullstack-dev": ["references/testing-strategy.md", "references/release-checklist.md"],
+        "computer-pro": ["references/01-workspace-hygiene.md"],
+      },
+    },
     systemPrompt: `You are Lucas, Chusky's Software Engineering & Systems Specialist.
 Your focus is technical execution in Daytona sandboxes: writing clean code, running builds, executing test suites, debugging, and compiling PDFs/presentations.
 Operating Rules:
@@ -102,6 +113,13 @@ Operating Rules:
       "LINKEDIN_CREATE_LINKED_IN_POST",
     ],
     allowedMemoryCategories: ["business", "relationship", "procedural"],
+    skills: {
+      primary: ["writing-pro", "workspace-pro"],
+      supporting: ["content-strategy", "cold-email", "verification"],
+      requiredReferences: {
+        "workspace-pro": ["references/08-triage-decision.md", "references/10-voice-and-style.md"],
+      },
+    },
     systemPrompt: `You are Maya, Chusky's Social Media & Integrations Specialist.
 Your focus is platform-specific social media publishing, API payload formatting, and automated trigger configuration.
 Operating Rules:
@@ -136,6 +154,10 @@ Operating Rules:
     allowedComposioPrefixes: ["CANVA_", "FIGMA_", "GOOGLEDRIVE_", "DROPBOX_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "asset", "profile"],
+    skills: {
+      primary: ["writing-pro", "imagine", "openrouter-video-editing"],
+      supporting: ["marketing-ideas", "marketing-psychology", "media"],
+    },
     systemPrompt: `You are Leo, Chusky's Marketing & Visual Studio Specialist.
 Your focus is creative copywriting (AIDA, PAS frameworks), brand positioning, AI image/video prompt engineering, and visual asset management.
 Operating Rules:
@@ -165,6 +187,13 @@ Operating Rules:
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "CALENDLY_", "HUBSPOT_", "SALESFORCE_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["relationship", "business"],
+    skills: {
+      primary: ["voice-call-pro"],
+      supporting: ["workspace-pro", "verification", "decision-pro"],
+      requiredReferences: {
+        "voice-call-pro": ["references/03-lead-qualification.md", "references/04-appointment-booking.md", "references/05-follow-up.md"],
+      },
+    },
     systemPrompt: `You are Sofia, Chusky's Voice Operations & Real-World Negotiator.
 Your focus is executing outbound Twilio phone calls, formulating call scripts, conducting voice interactions, and logging call outcomes.
 Operating Rules:
@@ -192,6 +221,13 @@ Operating Rules:
     allowedComposioPrefixes: [],
     starterComposioTools: [],
     allowedMemoryCategories: ["project"],
+    skills: {
+      primary: ["computer-pro"],
+      supporting: ["agent-browser", "browser-pro", "verification"],
+      requiredReferences: {
+        "computer-pro": ["references/03-browser-automation.md", "references/05-artifacts-qa.md"],
+      },
+    },
     systemPrompt: `You are Dexter, Chusky's Desktop & Computer Use Specialist.
 Your focus is operating virtual desktop GUIs: inspecting window accessibility trees, performing coordinate mouse clicks/drags, typing text, and automating web UI workflows when direct APIs do not exist.
 Operating Rules:
@@ -233,6 +269,15 @@ Operating Rules:
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "LINEAR_", "JIRA_", "SLACK_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["project", "procedural", "episodic"],
+    skills: {
+      primary: ["project-pro", "workspace-pro"],
+      supporting: ["handoff", "verification"],
+      requiredReferences: {
+        "project-pro": ["references/status-update.md"],
+        "workspace-pro": ["references/07-reminders-recurring.md"],
+        "handoff": ["references/packet.md"],
+      },
+    },
     systemPrompt: `You are Elena, Chusky's Task Operations & Workflow Governor.
 Your focus is governing durable background tasks, recording task checkpoints, managing recurring cron jobs, and tracking active attention loops.
 Operating Rules:
@@ -266,6 +311,14 @@ Operating Rules:
     allowedComposioPrefixes: ["TAVILY_", "EXA_", "FIRECRAWL_", "GOOGLEDRIVE_", "NOTION_", "GITHUB_", "GMAIL_", "SLACK_", "GOOGLECALENDAR_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["project", "business", "procedural"],
+    skills: {
+      primary: ["research-pro"],
+      supporting: ["customer-research", "workspace-pro", "verification"],
+      requiredReferences: {
+        "research-pro": ["references/brief-template.md"],
+        "verification": ["references/evidence-checklist.md"],
+      },
+    },
     systemPrompt: `You are Nora, Chusky's Research & Intelligence Specialist.
 Your focus is rigorous, source-backed technical, market, competitive, product, and operational research.
 Operating Rules:
@@ -291,6 +344,10 @@ Operating Rules:
     allowedComposioPrefixes: [], // Chusky is not constrained by a worker manifest.
     starterComposioTools: [],
     allowedMemoryCategories: ["profile", "relationship", "business", "project", "episodic", "procedural", "negative", "asset"],
+    skills: {
+      primary: ["meeting-pro", "workspace-pro"],
+      supporting: ["verification", "handoff", "project-pro"],
+    },
     systemPrompt: "Chusky Orchestrator",
     reflectionChecklist: [],
   },

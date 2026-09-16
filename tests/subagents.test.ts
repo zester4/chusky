@@ -16,9 +16,21 @@ test("validates capability registry manifests for all 7 worker capabilities", ()
     assert.ok(cap.allowedTools.length > 0);
     assert.ok(cap.allowedMemoryCategories.length > 0);
     assert.ok(Array.isArray(cap.allowedComposioPrefixes));
+    assert.ok(cap.skills.primary.length > 0);
+    assert.ok(Array.isArray(cap.skills.supporting));
     assert.ok(cap.systemPrompt.length > 20);
     assert.ok(cap.reflectionChecklist.length > 0);
   }
+});
+
+test("declares the intended worker-to-skill map", () => {
+  assert.deepEqual(WORKER_CAPABILITIES.nora.skills.primary, ["research-pro"]);
+  assert.ok(WORKER_CAPABILITIES.lucas.skills.primary.includes("fullstack-dev"));
+  assert.ok(WORKER_CAPABILITIES.maya.skills.primary.includes("writing-pro"));
+  assert.deepEqual(WORKER_CAPABILITIES.sofia.skills.primary, ["voice-call-pro"]);
+  assert.deepEqual(WORKER_CAPABILITIES.dexter.skills.primary, ["computer-pro"]);
+  assert.ok(WORKER_CAPABILITIES.elena.skills.primary.includes("project-pro"));
+  assert.ok(WORKER_CAPABILITIES.chusky.skills.primary.includes("meeting-pro"));
 });
 
 test("gives Nora only scoped Composio research-provider families", () => {

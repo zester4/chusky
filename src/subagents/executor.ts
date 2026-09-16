@@ -11,7 +11,7 @@ import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } fr
 import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
 import type { ReplyTarget } from "../channels/contracts.js";
-import { relevantSkillContext } from "../skills/catalog.js";
+import { skillContextForBinding } from "../skills/catalog.js";
 import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
 import { CancellationError, isCancellationError, safeToolAudit, throwIfAborted } from "../cancellation.js";
 
@@ -337,7 +337,7 @@ export async function executeDelegation(
     } else if (canRunModel) {
       // ── Autonomous OpenRouter Worker Model Loop ─────────────────────────────
       let skillContext = "";
-      try { skillContext = await relevantSkillContext(contract.objective); } catch { /* Skill tools remain available for explicit lookup. */ }
+      try { skillContext = await skillContextForBinding(manifest.skills, contract.objective); } catch { /* Skill tools remain available for explicit lookup. */ }
       const systemPrompt = `${manifest.systemPrompt}
 
 ${memorySnippet}

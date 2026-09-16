@@ -38,6 +38,15 @@ export type SkillFileContent = SkillFile & {
   truncated: boolean;
 };
 
+export type SkillBinding = {
+  /** Skills that define the worker's default operating method. */
+  primary: string[];
+  /** Skills added when the worker's objective needs adjacent guidance. */
+  supporting: string[];
+  /** Bounded nested references that must accompany a named skill. */
+  requiredReferences?: Record<string, string[]>;
+};
+
 type CatalogCache = { signature: string; skills: SkillManifest[] };
 const cache = new Map<string, CatalogCache>();
 
@@ -235,6 +244,59 @@ export async function relevantSkillContext(query: string, root = DEFAULT_SKILLS_
     const content = skill.body.slice(0, Math.min(12_000, remaining));
     blocks.push(`### ${skill.name}\n${content}`);
     remaining -= content.length;
+  }
+  return blocks.join("\n\n");
+}
+
+/**
+ * Load a worker's declared skills deterministically, then add a small amount
+ * of objective-based discovery as a fallback. Explicit bindings are ordered
+ * first and their required nested references are included inside the same
+ * bounded context budget.
+ */
+export async function skillContextForBinding(binding: SkillBinding, query = "", root = DEFAULT_SKILLS_ROOT): Promise<string> {
+  const primary = [...new Set(binding.primary.map((name) => name.trim()).filter(Boolean))];
+  const supporting = [...new Set(binding.supporting.map((name) => name.trim()).filter((name) => name && !primary.includes(name)))];
+  const explicit = [...primary, ...supporting];
+  const fallback = query
+    ? (await searchSkills(query, 3, root)).map((match) => match.name).filter((name) => !explicit.includes(name))
+    : [];
+  const selected = [...explicit, ...fallback];
+  if (!selected.length) return "";
+
+  const skills = await loadCatalog(root);
+  const blocks: string[] = [];
+  let remaining = MAX_CONTEXT_CHARS;
+  for (let index = 0; index < selected.length && remaining > 0; index += 1) {
+    const name = selected[index];
+    const skill = skills.find((candidate) => candidate.name === name || path.basename(candidate.directory) === name);
+    if (!skill) continue;
+
+    const remainingSkills = selected.length - index;
+    const skillBudget = Math.min(6_500, Math.max(2_000, Math.floor(remaining / remainingSkills)));
+    const referencePaths = binding.requiredReferences?.[skill.name] ?? binding.requiredReferences?.[path.basename(skill.directory)] ?? [];
+    const referenceBlocks: string[] = [];
+    let referenceBudget = Math.min(3_000, Math.floor(skillBudget * 0.45));
+    for (const referencePath of referencePaths) {
+      if (referenceBudget <= 0) break;
+      try {
+        const reference = await readSkillFile(skill.name, referencePath, referenceBudget, root);
+        if (!reference.content) continue;
+        const content = reference.content.slice(0, referenceBudget);
+        referenceBlocks.push(`\nReference: ${reference.path}\n${content}`);
+        referenceBudget -= content.length;
+      } catch {
+        // A missing optional reference must not prevent the worker from using
+        // the primary skill or objective-based fallback context.
+      }
+    }
+
+    const referenceText = referenceBlocks.join("\n");
+    const bodyBudget = Math.max(1_000, skillBudget - referenceText.length);
+    const role = primary.includes(skill.name) ? "primary" : "supporting";
+    const block = `### ${skill.name} (${role})\n${skill.body.slice(0, bodyBudget)}${referenceText}`;
+    blocks.push(block.slice(0, remaining));
+    remaining -= Math.min(remaining, block.length);
   }
   return blocks.join("\n\n");
 }
