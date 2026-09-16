@@ -163,6 +163,7 @@ async function main(): Promise<void> {
   await bot.api.setMyCommands([
     { command: "start", description: "Open Chusky" },
     { command: "home", description: "Open your agent workspace" },
+    { command: "browser", description: "Website sessions and playbooks" },
     { command: "help", description: "See commands and capabilities" },
     { command: "api", description: "Create and manage project API keys" },
     { command: "connect", description: "Connect an app account" },

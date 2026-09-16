@@ -17,7 +17,7 @@ import {
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
-  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript,
+  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
@@ -27,8 +27,9 @@ import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObje
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
-import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
+import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
+import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserPlaybookRecord } from "./vault/browserOps.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
@@ -94,6 +95,18 @@ function stringList(value: unknown, label: string, maxItems = 12): string[] {
     throw new Error(`${label} must contain 1-${maxItems} non-empty items of at most 200 characters`);
   }
   return items;
+}
+
+function assertSafeBrowserRecipe(value: unknown, path = "recipe"): void {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertSafeBrowserRecipe(item, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (/^(password|username|credential|cookie|secret|token|accessToken|refreshToken|inputValue|textValue)$/i.test(key)) throw new Error(`${path} contains a forbidden secret field`);
+    assertSafeBrowserRecipe(child, `${path}.${key}`);
+  }
 }
 
 async function runDelegationWithDurableContinuation(
@@ -635,7 +648,67 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return result;
     })();
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
-    case "CHUCK_DAYTONA_BROWSER": return daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+    case "CHUCK_BROWSER_PLAN": {
+      const origin = args.origin ? normalizeBrowserOrigin(text(args.origin)) : undefined;
+      const playbook = origin ? await findBrowserPlaybook(userId, origin, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : "default") : undefined;
+      const plan = createBrowserOperationPlan(text(args.goal), origin, playbook);
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "plan_created", ...(origin ? { origin } : {}), ...(playbook ? { service: playbook.service, playbookId: playbook.id } : {}), action: plan.action, status: "started", summary: `Planned ${plan.action.replaceAll("_", " ")} browser work`, createdAt: Date.now() });
+      return { ...plan, ...(playbook ? { playbook: { id: playbook.id, service: playbook.service, accountAlias: playbook.accountAlias, version: playbook.version } } : {}) };
+    }
+    case "CHUCK_BROWSER_SESSION_HEALTH": {
+      const service = args.service ? text(args.service) : undefined;
+      const health = await browserSessionHealth(userId, service);
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_health_checked", ...(service ? { service } : {}), status: "succeeded", summary: `Checked ${health.length} saved browser session${health.length === 1 ? "" : "s"}`, createdAt: Date.now() });
+      return health;
+    }
+    case "CHUCK_BROWSER_PLAYBOOK_SAVE": {
+      assertSafeBrowserRecipe(args.login);
+      assertSafeBrowserRecipe(args.tasks);
+      const service = text(args.service).toLowerCase();
+      const origin = normalizeBrowserOrigin(text(args.origin));
+      const accountAlias = normalizeBrowserAlias(args.accountAlias);
+      if (!args.login || typeof args.login !== "object" || Array.isArray(args.login)) throw new Error("login must be an object");
+      const playbook = normalizePlaybook({ userId, service, origin, accountAlias, login: args.login as BrowserPlaybookRecord["login"], tasks: Array.isArray(args.tasks) ? args.tasks as BrowserPlaybookRecord["tasks"] : [] });
+      await saveBrowserPlaybook(userId, playbook);
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "playbook_saved", service, origin, playbookId: playbook.id, status: "succeeded", summary: `Saved browser recipe for ${service}`, createdAt: Date.now() });
+      return { id: playbook.id, service, origin, accountAlias, version: playbook.version, taskCount: playbook.tasks.length, lastVerifiedAt: playbook.login.lastVerifiedAt };
+    }
+    case "CHUCK_BROWSER_PLAYBOOK_LIST": {
+      const origin = args.origin ? normalizeBrowserOrigin(text(args.origin)) : undefined;
+      const playbooks = (await listBrowserPlaybooks(userId, args.limit === undefined ? 25 : Number(args.limit))).filter((item) => !origin || item.origin === origin);
+      return playbooks.map((item) => ({ id: item.id, service: item.service, origin: item.origin, accountAlias: item.accountAlias, version: item.version, taskCount: item.tasks.length, successCount: item.successCount, failureCount: item.failureCount, lastUsedAt: item.lastUsedAt, loginLastVerifiedAt: item.login.lastVerifiedAt }));
+    }
+    case "CHUCK_BROWSER_PLAYBOOK_REMOVE": {
+      const id = text(args.id);
+      const removed = await removeBrowserPlaybook(userId, id);
+      if (!removed) throw new Error("Browser playbook not found or not owned by you");
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", playbookId: id, status: "succeeded", summary: "Removed a saved browser playbook", createdAt: Date.now() });
+      return { id, removed: true };
+    }
+    case "CHUCK_BROWSER_AUDIT_LIST": return listBrowserAudit(userId, args.limit === undefined ? 50 : Number(args.limit));
+    case "CHUCK_BROWSER_VERIFY": {
+      if (!Array.isArray(args.detectors)) throw new Error("detectors must be an array");
+      const result = verifyBrowserResult({
+        currentUrl: args.currentUrl === undefined ? undefined : text(args.currentUrl).slice(0, 500),
+        title: args.title === undefined ? undefined : text(args.title).slice(0, 300),
+        text: args.text === undefined ? undefined : String(args.text).slice(0, 5000),
+        detectors: args.detectors as Parameters<typeof verifyBrowserResult>[0]["detectors"],
+      });
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: result.passed ? "verification_passed" : "verification_failed", status: result.passed ? "succeeded" : "failed", summary: result.passed ? "Browser result verification passed" : "Browser result verification needs review", createdAt: Date.now() });
+      return result;
+    }
+    case "CHUCK_DAYTONA_BROWSER": {
+      const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
+      const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
+      try {
+        const result = await daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "succeeded", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} completed`, createdAt: Date.now() });
+        return result;
+      } catch (error) {
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "failed", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} failed`, createdAt: Date.now() });
+        throw error;
+      }
+    }
     case "CHUCK_DAYTONA_BROWSER_HANDOFF": return daytonaCall(runtime, async () => {
       const handoff = await daytonaEngine.browserHandoff(userId, args.reason ? text(args.reason) : undefined);
       const shoppingPlan = args.shoppingPlanId ? await pauseShopping(userId, { id: text(args.shoppingPlanId), reason: args.reason ?? "site_challenge" }) : undefined;
@@ -643,9 +716,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     });
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
-    case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined);
+    case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined);
     case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, async () => {
-      const login = await loginWithVault(userId, text(args.service), { workspaceId: (owner) => daytonaEngine.workspaceId(owner), login: (owner, input) => daytonaEngine.vaultLogin(owner, input) });
+      const login = await loginWithVault(userId, text(args.service), { workspaceId: (owner) => daytonaEngine.workspaceId(owner), login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : "default");
       // A CAPTCHA, 2FA prompt, or an unfamiliar login form must not fail the
       // entire sign-in or expose credentials. Give the owner a short-lived
       // direct browser handoff and retain the same browser session instead.
@@ -657,8 +730,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     });
     case "CHUCK_VAULT_LOGOUT": return (async () => {
       const service = text(args.service);
-      const saved = (await listVault(userId)).find((credential) => credential.service === service);
-      const result = await logoutVault(userId, service);
+      const accountAlias = args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined;
+      const saved = (await listVault(userId)).find((credential) => credential.service === service && (!accountAlias || credential.accountAlias === accountAlias));
+      const result = await logoutVault(userId, service, accountAlias);
       if (!saved?.logoutUrl) return { ...result, browserLogout: { attempted: false, note: "No site logout URL was configured; Chusky stopped reusing the retained session." } };
       try {
         await daytonaEngine.browser(userId, { action: "open", url: saved.logoutUrl });

@@ -1960,28 +1960,40 @@ export class DaytonaEngine {
       }
       return undefined;
     };
-    const usernameNode = await node("textbox", input.usernameFieldLabel, ["Email", "Email address", "Email or username", "Username", "User name", "Phone number", "Mobile number"]);
-    const passwordNode = await node("textbox", input.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
-    const submitNode = await node("button", input.submitButtonLabel, ["Sign in", "Log in", "Login", "Continue", "Next", "Submit"]);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    // Do not guess or type into an ambiguous/unrecognised form. The trusted
-    // caller turns this into a direct owner handoff for CAPTCHA, 2FA, or a
-    // site-specific sign-in page while preserving the retained browser state.
-    if (!usernameNode || !passwordNode || !submitNode) {
+    const usernameNode = await node("textbox", input.usernameFieldLabel, ["Email", "Email address", "Email or username", "Username", "User name", "Phone number", "Mobile number"]);
+    let passwordNode = await node("textbox", input.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
+    const submit = async (): Promise<boolean> => {
+      const submitNode = await node("button", input.submitButtonLabel, ["Sign in", "Log in", "Login", "Continue", "Next", "Submit", "Verify", "Done"]);
+      if (!submitNode) return false;
+      await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode }, { trustedVaultFlow: true });
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      return true;
+    };
+    // Login is a bounded state machine rather than one fragile form submit:
+    // username-only screens transition to password screens, while forms that
+    // expose both fields are completed in one transition.
+    if (!usernameNode && !passwordNode) {
       return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
     }
-    await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username }, { trustedVaultFlow: true });
+    if (usernameNode) {
+      await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username }, { trustedVaultFlow: true });
+      if (!passwordNode && !(await submit())) return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
+    }
+    passwordNode = await node("textbox", input.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
+    if (!passwordNode) return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
     await this.computer(userId, { action: "accessibility_set_value", nodeId: passwordNode, value: input.password }, { trustedVaultFlow: true });
-    await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode }, { trustedVaultFlow: true });
+    if (!(await submit())) return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
     // Never claim success merely because the form was submitted. A site that
     // still exposes its password field is treated as requiring re-auth.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    const after = await this.computer(userId, { action: "accessibility_find", role: "textbox", name: input.passwordFieldLabel, nameMatch: "exact", limit: 1 }, { trustedVaultFlow: true }) as any;
-    const remaining = Array.isArray(after) ? after : Array.isArray(after?.matches) ? after.matches : [];
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const afterPasswordNode = await node("textbox", input.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
+    const remaining = afterPasswordNode ? [afterPasswordNode] : [];
     const page = await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 8 }, { trustedVaultFlow: true });
     const failureText = JSON.stringify(page).toLowerCase();
-    const loginFailed = /(incorrect|invalid|wrong|unable to sign|could not sign|try again|failed to log)/.test(failureText);
-    return { workspaceId: sandbox.id, authenticated: remaining.length === 0 && !loginFailed, ...(loginFailed ? { needsUserInteraction: true } : {}) };
+    const loginFailed = /(incorrect|invalid|wrong|unable to sign|could not sign|try again|failed to log|verification required)/.test(failureText);
+    const challenge = /(captcha|security check|two.factor|one.time|verification code|approve sign.in|passkey|security key|magic link)/.test(failureText);
+    return { workspaceId: sandbox.id, authenticated: remaining.length === 0 && !loginFailed && !challenge, ...(loginFailed || challenge ? { needsUserInteraction: true } : {}) };
   }
 
   private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<void> {

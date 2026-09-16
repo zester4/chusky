@@ -20,6 +20,7 @@ import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProf
 import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission.js";
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 import type { EncryptedCredential } from "./vault/crypto.js";
+import type { BrowserAuditRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -62,6 +63,10 @@ export interface UserSession {
   shoppingSites?: ShoppingSite[];
   /** Per-user third-party MCP connections. Credentials are encrypted at rest. */
   mcpConnections?: McpConnectionRecord[];
+  /** Per-origin browser operating recipes; never contains credentials or cookies. */
+  browserPlaybooks?: BrowserPlaybookRecord[];
+  /** Bounded, owner-visible browser operation history with safe summaries only. */
+  browserAudit?: BrowserAuditRecord[];
   handoffRecords?: HandoffRecord[];
   createdAt: number;
   updatedAt: number;
@@ -2838,7 +2843,9 @@ export async function getSession(uid: number): Promise<UserSession> {
     ...approval,
     toolSlug: approval.toolSlug === "CHUCK_START_FACETIME_CALL" ? "CHUCK_START_PHONE_CALL" : approval.toolSlug === "CHUCK_LIST_FACETIME_CALLS" ? "CHUCK_LIST_PHONE_CALLS" : approval.toolSlug,
   }));
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  const browserPlaybooks = Array.isArray(s.browserPlaybooks) ? s.browserPlaybooks.filter((item): item is BrowserPlaybookRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.origin === "string").slice(0, 50) : [];
+  const browserAudit = Array.isArray(s.browserAudit) ? s.browserAudit.filter((item): item is BrowserAuditRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.summary === "string").slice(-200) : [];
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -4027,6 +4034,48 @@ export async function clearScratchpad(uid: number, key?: string): Promise<void> 
   const s = await getSession(uid);
   if (key) delete s.scratchpad[key]; else s.scratchpad = {};
   await saveSession(uid, s);
+}
+
+export async function saveBrowserPlaybook(uid: number, playbook: BrowserPlaybookRecord): Promise<BrowserPlaybookRecord> {
+  const s = await getSession(uid);
+  const next = [playbook, ...(s.browserPlaybooks ?? []).filter((item) => item.id !== playbook.id && !(item.origin === playbook.origin && item.accountAlias === playbook.accountAlias))].slice(0, 50);
+  s.browserPlaybooks = next;
+  await saveSession(uid, s);
+  return playbook;
+}
+
+export async function getBrowserPlaybook(uid: number, id: string): Promise<BrowserPlaybookRecord | undefined> {
+  return (await getSession(uid)).browserPlaybooks?.find((item) => item.userId === uid && item.id === id);
+}
+
+export async function findBrowserPlaybook(uid: number, origin: string, accountAlias = "default"): Promise<BrowserPlaybookRecord | undefined> {
+  return (await getSession(uid)).browserPlaybooks?.find((item) => item.userId === uid && item.origin === origin && item.accountAlias === accountAlias);
+}
+
+export async function listBrowserPlaybooks(uid: number, limit = 25): Promise<BrowserPlaybookRecord[]> {
+  return (await getSession(uid)).browserPlaybooks?.slice(0, Math.max(1, Math.min(50, Math.floor(limit)))) ?? [];
+}
+
+export async function removeBrowserPlaybook(uid: number, id: string): Promise<boolean> {
+  const s = await getSession(uid);
+  const current = s.browserPlaybooks ?? [];
+  const next = current.filter((item) => item.userId !== uid || item.id !== id);
+  if (next.length === current.length) return false;
+  s.browserPlaybooks = next;
+  await saveSession(uid, s);
+  return true;
+}
+
+export async function addBrowserAudit(uid: number, record: BrowserAuditRecord): Promise<BrowserAuditRecord> {
+  const s = await getSession(uid);
+  const safe: BrowserAuditRecord = { ...record, userId: uid, summary: record.summary.replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 500) };
+  s.browserAudit = [...(s.browserAudit ?? []).filter((item) => item.id !== safe.id), safe].slice(-200);
+  await saveSession(uid, s);
+  return safe;
+}
+
+export async function listBrowserAudit(uid: number, limit = 50): Promise<BrowserAuditRecord[]> {
+  return ((await getSession(uid)).browserAudit ?? []).slice(-Math.max(1, Math.min(200, Math.floor(limit)))).reverse();
 }
 
 /** Durable private shopping state. Retailer choices and items are stored here;

@@ -5,6 +5,7 @@ import { decryptCredential, encryptCredential } from "../src/vault/crypto.js";
 import { classifyBrowserTarget, vaultActionPolicy } from "../src/vault/policy.js";
 import { normaliseVaultOrigin, normaliseVaultService } from "../src/vault/vault.js";
 import { redactVaultAudit } from "../src/vault/audit.js";
+import { classifyBrowserIntent, createBrowserOperationPlan, normalizePlaybook, sessionHealth, verifyBrowserResult } from "../src/vault/browserOps.js";
 
 const masterKey = Buffer.alloc(32, 7).toString("base64url");
 
@@ -58,4 +59,54 @@ test("vault audit records retain identifiers and keys only, never raw values", (
   assert.match(entry.userHash, /^[a-f0-9]{64}$/);
   assert.deepEqual(entry.metadata, { origin: "https://www.amazon.com", password: "[redacted]" });
   assert.equal(JSON.stringify(entry).includes("stored"), false);
+});
+
+test("browser intent classification treats ambiguous and high-impact controls conservatively", () => {
+  assert.equal(classifyBrowserIntent({ label: "Subscribe to Pro" }), "place_order");
+  assert.equal(classifyBrowserIntent({ label: "Export account statement" }), "download_sensitive");
+  assert.equal(classifyBrowserIntent({ label: "Confirm" }), "unknown");
+  const plan = createBrowserOperationPlan("Prepare the cart and stop before payment", "https://shop.example.com");
+  assert.equal(plan.requiresApproval, false);
+  assert.match(plan.stopBefore.join(" "), /payment/i);
+});
+
+test("browser playbooks are bounded, origin-scoped, and never accept secret fields", () => {
+  const playbook = normalizePlaybook({
+    userId: 42,
+    service: "shop",
+    origin: "https://shop.example.com",
+    accountAlias: "work",
+    login: { steps: [{ role: "textbox", name: "Email", action: "fill" }], success: [{ urlIncludes: "/home" }] },
+    tasks: [],
+  });
+  assert.equal(playbook.origin, "https://shop.example.com");
+  assert.equal(playbook.accountAlias, "work");
+  assert.throws(() => normalizePlaybook({
+    userId: 42, service: "shop", origin: "https://shop.example.com", accountAlias: "default",
+    login: { steps: [], success: [], failure: [] }, tasks: [],
+  } as any), /login\.steps/);
+});
+
+test("browser session health recommends rechecking stale identities and logging in expired ones", () => {
+  const stale = sessionHealth({ service: "shop", origin: "https://shop.example.com", workspaceId: "ws", status: "authenticated", lastUsedAt: Date.now() - 8 * 24 * 60 * 60_000 });
+  assert.equal(stale.status, "stale");
+  assert.equal(stale.recommendedAction, "recheck");
+  const expired = sessionHealth({ service: "shop", origin: "https://shop.example.com", workspaceId: "ws", status: "authenticated", expiresAt: Date.now() - 1 });
+  assert.equal(expired.status, "expired");
+  assert.equal(expired.recommendedAction, "login");
+});
+
+test("browser verification requires every required detector and returns no page content", () => {
+  const passed = verifyBrowserResult({
+    currentUrl: "https://shop.example.com/orders/123",
+    title: "Order confirmed",
+    text: "Thanks for your purchase",
+    detectors: [{ urlIncludes: "/orders/", required: true }, { titleIncludes: "order confirmed", required: true }],
+  });
+  assert.equal(passed.passed, true);
+  assert.deepEqual(passed.missing, []);
+  const failed = verifyBrowserResult({ currentUrl: "https://shop.example.com/cart", detectors: [{ textIncludes: "order confirmed", required: true }] });
+  assert.equal(failed.passed, false);
+  assert.match(failed.missing.join(" "), /order confirmed/i);
+  assert.equal(Object.hasOwn(failed, "text"), false);
 });

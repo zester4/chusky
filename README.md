@@ -406,6 +406,25 @@ status, branches, checkout, pull, add, commit, and push. Local operations stay p
 approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
 tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
 
+### Browser and vault operations
+
+Authenticated website work follows the `browser-pro` runtime skill. Chusky plans the user's goal,
+binds the operation to a clean HTTPS origin and optional account alias, checks session health, uses
+the narrowest accessible browser action, and verifies the result against bounded URL/title/text
+detectors. Saved playbooks are origin-scoped and contain only login labels, safe action names, and
+verification metadata; they never contain passwords, cookies, screenshots, or raw page content.
+
+Unknown or security-sensitive actions require owner approval. Checkout, payment, account changes,
+credential changes, sensitive downloads, and uncertain actions stop for approval. CAPTCHA, 2FA,
+SSO, passkeys, and device approvals use a private browser handoff in the same Daytona workspace.
+Replacing a saved identity logs out its prior browser identities, and aliases allow separate
+personal and work accounts for the same service.
+
+The private Telegram controls are `/browser`, `/browser health`, `/browser audit`, and
+`/browser logout <service> [account-alias]`. The agent can also use `CHUCK_BROWSER_PLAN`,
+`CHUCK_BROWSER_SESSION_HEALTH`, `CHUCK_BROWSER_PLAYBOOK_SAVE`, `CHUCK_BROWSER_PLAYBOOK_LIST`,
+`CHUCK_BROWSER_PLAYBOOK_REMOVE`, `CHUCK_BROWSER_VERIFY`, and `CHUCK_BROWSER_AUDIT_LIST`.
+
 ### Artifact Studio
 
 `CHUCK_ARTIFACT` gives Chusky a durable, user-owned deliverable registry backed by Daytona and

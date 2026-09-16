@@ -1,10 +1,10 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 
-export type VaultSetupRequest = { service: string; origin: string; loginUrl?: string; logoutUrl?: string; usernameFieldLabel?: string; passwordFieldLabel?: string; submitButtonLabel?: string };
-export type VaultSession = { id: string; service: string; origin: string; workspaceId: string; status: "authenticated" | "unknown" | "expired" | "logged_out" | "needs_reauth" | "awaiting_user_interaction"; lastAuthenticatedAt?: number; lastUsedAt?: number; expiresAt?: number };
-export type VaultCredentialMetadata = { id: string; service: string; origin: string; loginUrl: string; logoutUrl?: string; session?: VaultSession };
-export type VaultLease = { credential: { id: string; service: string; origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string } };
+export type VaultSetupRequest = { service: string; origin: string; accountAlias?: string; loginUrl?: string; logoutUrl?: string; usernameFieldLabel?: string; passwordFieldLabel?: string; submitButtonLabel?: string };
+export type VaultSession = { id: string; service: string; accountAlias?: string; origin: string; workspaceId: string; status: "authenticated" | "unknown" | "expired" | "logged_out" | "needs_reauth" | "awaiting_user_interaction"; lastAuthenticatedAt?: number; lastUsedAt?: number; expiresAt?: number };
+export type VaultCredentialMetadata = { id: string; service: string; origin: string; accountAlias: string; loginUrl: string; logoutUrl?: string; session?: VaultSession };
+export type VaultLease = { credential: { id: string; service: string; origin: string; accountAlias: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string } };
 
 export class VaultBrokerClient {
   private readonly baseUrl: string;
@@ -27,11 +27,11 @@ export class VaultBrokerClient {
       return result;
     } finally { clearTimeout(timeout); }
   }
-  beginSetup(accountId: string, request: VaultSetupRequest) { return this.request<{ service: string; origin: string; expiresAt: number; setupUrl: string }>("/v1/setup", { accountId, ...request }); }
+  beginSetup(accountId: string, request: VaultSetupRequest) { return this.request<{ service: string; origin: string; accountAlias: string; expiresAt: number; setupUrl: string }>("/v1/setup", { accountId, ...request }); }
   list(accountId: string) { return this.request<{ credentials: VaultCredentialMetadata[] }>("/v1/list", { accountId }); }
-  status(accountId: string, service?: string) { return this.request<{ sessions: VaultSession[] }>("/v1/status", { accountId, service }); }
-  lease(accountId: string, service: string, workspaceId: string) { return this.request<VaultLease>("/v1/lease", { accountId, service, workspaceId }); }
+  status(accountId: string, service?: string, accountAlias?: string) { return this.request<{ sessions: VaultSession[] }>("/v1/status", { accountId, ...(service ? { service } : {}), ...(accountAlias ? { accountAlias } : {}) }); }
+  lease(accountId: string, service: string, workspaceId: string, accountAlias = "default") { return this.request<VaultLease>("/v1/lease", { accountId, service, workspaceId, accountAlias }); }
   recordSession(accountId: string, input: Omit<VaultSession, "id"> & { credentialId: string }) { return this.request<{ session: VaultSession }>("/v1/session", { accountId, ...input }); }
-  logout(accountId: string, service: string) { return this.request<{ service: string; status: string; note: string }>("/v1/logout", { accountId, service }); }
+  logout(accountId: string, service: string, accountAlias?: string) { return this.request<{ service: string; status: string; note: string }>("/v1/logout", { accountId, service, ...(accountAlias ? { accountAlias } : {}) }); }
 }
 export const vaultBroker = new VaultBrokerClient();

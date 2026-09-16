@@ -14,7 +14,7 @@ import {
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
   setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
-  searchMemories, readScratchpad,
+  searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit,
 } from "./store.js";
 import { acquireUserLock, releaseUserLock } from "./store.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
@@ -39,6 +39,7 @@ import { MODEL_PROVIDER_LABELS, isModelProvider, modelsForProvider, type ModelPr
 import { listBlandCuratedVoices, type BlandSelectableVoice } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voiceSettings.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
+import { browserSessionHealth, logoutVault } from "./vault/vault.js";
 import {
   cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting,
   listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission,
@@ -401,7 +402,7 @@ async function showMcpWorkspace(ctx: Context, messageId?: number): Promise<void>
   const body = !config.mcpEnabled
     ? ["Third-party MCP is currently disabled for this deployment.", "No MCP server connections can be changed until it is enabled."]
     : servers.length
-      ? servers.map((server) => `${server.name} — ${server.enabled === false ? "unavailable" : connected.has(server.id) ? "connected" : "not connected"} · ${mcpAuthLabel(server.auth)}`)
+      ? [ ...(connections.length ? [] : ["No third-party MCP servers are currently connected."]), ...servers.map((server) => `${server.name} — ${server.enabled === false ? "unavailable" : connected.has(server.id) ? "connected" : "not connected"} · ${mcpAuthLabel(server.auth)}`) ]
       : ["No third-party MCP servers are currently published in Chusky's catalog."];
   const detail = !config.mcpEnabled
     ? "An operator must set MCP_ENABLED=true and publish approved server definitions in src/mcp/mcp.json."
@@ -913,6 +914,7 @@ export function registerHandlers(bot: Bot): void {
       `<b>Commands:</b>\n` +
       `  /home — open your Chusky workspace\n` +
       `  /mcp — view and manage third-party MCP servers\n` +
+      `  /browser — website playbooks, session health, and activity\n` +
       `  /connect <code>[toolkit]</code> — connect an app\n` +
       `  /apps — see connected apps\n` +
       `  /model — switch AI model\n` +
@@ -947,6 +949,7 @@ export function registerHandlers(bot: Bot): void {
       `<b>Chusky — Commands</b>\n\n` +
       `/home — connected apps, tasks, approvals, triggers, and call voice settings\n` +
       `/mcp — view and manage third-party MCP servers\n` +
+      `/browser — saved website playbooks, session health, and activity\n` +
       `/connect <code>github</code> — connect GitHub (or any other app)\n` +
       `/apps — list connected apps &amp; their status\n` +
       `/model — switch AI model (per-session)\n` +
@@ -1016,6 +1019,39 @@ export function registerHandlers(bot: Bot): void {
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from!.id }, "Could not render Telegram MCP workspace");
       await ctx.reply("❌ I could not load MCP connections right now. Please try /mcp again.");
+    }
+  });
+
+  bot.command("browser", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) { await ctx.reply("For privacy, browser identities and activity are available only in your private chat with Chusky."); return; }
+    const uid = ctx.from!.id;
+    const [subcommand] = String(ctx.match ?? "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    try {
+      if (subcommand === "audit") {
+        const entries = await listBrowserAudit(uid, 30);
+        await replyHtml(ctx, entries.length ? `<b>Browser activity</b>\n\n${entries.map((entry) => `• <code>${escapeTelegramHtml(entry.status)}</code> · ${escapeTelegramHtml(entry.summary)}\n  ${escapeTelegramHtml(entry.service ?? entry.origin ?? "browser")} · ${escapeTelegramHtml(new Date(entry.createdAt).toLocaleString("en-GB"))}`).join("\n")}` : "No browser activity recorded yet.");
+        return;
+      }
+      if (subcommand === "health") {
+        const health = await browserSessionHealth(uid);
+        await replyHtml(ctx, health.length ? `<b>Website session health</b>\n\n${health.map((item) => `• <b>${escapeTelegramHtml(item.service)}</b> · ${escapeTelegramHtml(item.status)}\n  ${escapeTelegramHtml(item.origin)} · next: ${escapeTelegramHtml(item.recommendedAction)}`).join("\n")}` : "No saved website sessions.");
+        return;
+      }
+      if (subcommand === "logout") {
+        const [, service, alias] = String(ctx.match ?? "").trim().split(/\s+/);
+        if (!service) {
+          await ctx.reply("Usage: /browser logout <service> [account-alias]");
+          return;
+        }
+        const result = await logoutVault(uid, service, alias);
+        await replyHtml(ctx, `<b>Browser session stopped</b>\n\n${escapeTelegramHtml(result.note)}`);
+        return;
+      }
+      const playbooks = await listBrowserPlaybooks(uid, 30);
+      await replyHtml(ctx, playbooks.length ? `<b>Browser playbooks</b>\n\n${playbooks.map((item) => `• <b>${escapeTelegramHtml(item.service)}</b> · ${escapeTelegramHtml(item.accountAlias)}\n  ${escapeTelegramHtml(item.origin)} · ${item.tasks.length} task recipe${item.tasks.length === 1 ? "" : "s"} · ${item.successCount} verified`).join("\n")}` : "No saved browser playbooks yet. Ask Chusky to save one after a verified website flow.\n\nUse /browser health or /browser audit for session and activity controls.");
+    } catch (error) {
+      await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
     }
   });
 

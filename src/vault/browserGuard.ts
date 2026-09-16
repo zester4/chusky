@@ -1,7 +1,8 @@
 import { config } from "../config.js";
 import { vaultBroker } from "./client.js";
 import { vaultStatus } from "./vault.js";
-import { classifyBrowserTarget, vaultActionPolicy, type VaultAction } from "./policy.js";
+import { vaultActionPolicy, type VaultAction } from "./policy.js";
+import { classifyBrowserIntent } from "./browserOps.js";
 
 type KnownNode = { label: string; origin: string; capturedAt: number };
 const knownNodes = new Map<string, KnownNode>();
@@ -48,14 +49,15 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
     if (nextOrigin && !activeSessions.some((session) => session.origin === nextOrigin)) throw new Error("Authenticated vault browsing is bound to its saved website origin. Start a separate site login before navigating to another origin.");
     // Navigation within the already-authenticated origin is ordinary browsing;
     // only a classified high-impact destination should require an action claim.
-    target = classifyBrowserTarget(String(args.url ?? "")) ?? "browse";
+    target = classifyBrowserIntent({ url: String(args.url ?? "") });
+    if (target === "unknown") target = "browse";
   }
   else {
     const nodeId = String(args.nodeId ?? ""); const known = knownNodes.get(key(userId, workspaceId, nodeId));
     if (!known || Date.now() - known.capturedAt > NODE_TTL_MS) { knownNodes.delete(key(userId, workspaceId, nodeId)); throw new Error("Authenticated vault interactions require a fresh CHUCK_DAYTONA_BROWSER find call so Chusky can verify the control safely."); }
     const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
     if (!currentOrigin || currentOrigin !== known.origin || !activeSessions.some((session) => session.origin === currentOrigin)) throw new Error("The discovered browser control is stale or belongs to a different website origin. Inspect the current page again before acting.");
-    target = classifyBrowserTarget(known.label);
+    target = classifyBrowserIntent({ label: known.label, url: currentOrigin });
   }
   target ??= "unknown";
   const decision = vaultActionPolicy(target);
