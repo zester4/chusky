@@ -1,6 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
+import { isSimpleTelegramGreeting, registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
+import { setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { addJob, addReminder, appendChannelConversationMessages, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
@@ -45,6 +46,39 @@ test("Telegram agent context marks groups as shared and keeps their conversation
   assert.equal(privateContext.scope, "private");
   assert.equal(privateContext.accountId, "account_840020");
   assert.equal(privateContext.provider, "telegram");
+});
+
+test("ordinary Telegram greetings bypass the progress/tool experience", () => {
+  assert.equal(isSimpleTelegramGreeting("hello"), true);
+  assert.equal(isSimpleTelegramGreeting("Hey!!!"), true);
+  assert.equal(isSimpleTelegramGreeting("good morning"), true);
+  assert.equal(isSimpleTelegramGreeting("hey, check my calendar"), false);
+  assert.equal(isSimpleTelegramGreeting("hello there"), false);
+});
+
+test("Telegram can privately disconnect an owner-scoped Composio account", async () => {
+  const deleted: string[] = [];
+  setAgentDependenciesForTests({ composio: {
+    create: async () => ({ sessionId: "disconnect-test-session", tools: async () => [], toolkits: async () => ({ items: [] }), execute: async () => undefined }),
+    connectedAccounts: {
+      list: async () => ({ items: [{ id: "conn_gmail_work", alias: "work", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }),
+      delete: async (id: string) => { deleted.push(id); },
+    },
+  } });
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840030;
+  const menu = context(userId);
+  await bot.commands.get("disconnect")!(menu);
+  assert.match(menu.sent.at(-1).text, /Disconnect gmail \(work\)/);
+
+  const callback = bot.callbacks.find((item) => item.pattern.source.startsWith("^acct:disconnect:"))!;
+  const confirm = context(userId);
+  confirm.callbackQuery = { message: { message_id: 1 } };
+  confirm.match = ["acct:disconnect:confirm:conn_gmail_work", "confirm", "conn_gmail_work"];
+  await callback.handler(confirm);
+  assert.deepEqual(deleted, ["conn_gmail_work"]);
+  assert.match(confirm.sent.at(-1).text, /Disconnected <b>gmail \(work\)<\/b>/);
 });
 
 test("clear history preserves the Composio session while clear session removes it", async () => {

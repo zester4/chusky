@@ -1,7 +1,7 @@
 import { Bot, Context, InlineKeyboard, InputFile } from "grammy";
 import { config } from "./config.js";
 import {
-  runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, invalidateSession, ApprovalRequiredError,
+  runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, disconnectConnectedAccount, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
   listTriggers, createTrigger, setTriggerState, deleteTrigger, listAvailableTriggerToolkits, listAvailableTriggerTypes, getAvailableTriggerType,
   searchTools, type AgentChannelContext,
@@ -690,6 +690,36 @@ function isTelegramShared(ctx: Context): boolean {
   return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
 }
 
+/** Exact greetings stay lightweight and conversational; requests such as
+ * "hey, check my calendar" still enter the normal agent path. */
+export function isSimpleTelegramGreeting(text: string): boolean {
+  return /^(?:hi|hello|hey|hiya|howdy|good\s+(?:morning|afternoon|evening))(?:[\s!,.?…]*)$/i.test(text.trim());
+}
+
+function disconnectAccountKeyboard(accounts: Array<{ id: string; toolkit: string; alias?: string }>): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const account of accounts.slice(0, 20)) {
+    const label = account.alias ? `${account.toolkit} · ${account.alias}` : account.toolkit;
+    keyboard.text(`Disconnect ${label}`.slice(0, 58), `acct:disconnect:select:${account.id}`).row();
+  }
+  return keyboard;
+}
+
+function disconnectAccountText(accounts: Array<{ id: string; toolkit: string; alias?: string }>): string {
+  if (!accounts.length) return "No connected Composio accounts to disconnect.";
+  return `<b>Disconnect a connected app</b>\n\nChoose the account to remove. This revokes Chusky’s access; you can reconnect it later with <code>/connect</code>.`;
+}
+
+function disconnectConfirmation(account: { id: string; toolkit: string; alias?: string }): { text: string; reply_markup: InlineKeyboard } {
+  const label = account.alias ? `${account.toolkit} (${account.alias})` : account.toolkit;
+  return {
+    text: `<b>Disconnect ${escapeTelegramHtml(label)}?</b>\n\nChusky will revoke this connected account. Existing memories and conversation history are not deleted.`,
+    reply_markup: new InlineKeyboard()
+      .text("Disconnect", `acct:disconnect:confirm:${account.id}`)
+      .text("Cancel", `acct:disconnect:cancel:${account.id}`),
+  };
+}
+
 /**
  * Keep Telegram's transport scope explicit at the agent boundary. The handler
  * already uses the shared conversation history for groups, but runAgent also
@@ -941,6 +971,7 @@ export function registerHandlers(bot: Bot): void {
       `  /video-status — check video generation jobs\n` +
       `  /connect <toolkit> [alias] — connect one or more app accounts\n` +
       `  /accounts [toolkit] — list connected Composio accounts\n` +
+      `  /disconnect [account-id] — revoke a connected Composio account\n` +
       `  /api — create and manage project API keys\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
       `  /meetings — meeting status, participants, calendar preparations, and contacts\n` +
@@ -987,6 +1018,7 @@ export function registerHandlers(bot: Bot): void {
       `/linkgroup — open the iMessage group-link menu\n` +
       `/connect <toolkit> [alias] — connect an app account, including multiple accounts\n` +
       `/accounts [toolkit] — list connected Composio accounts and aliases\n` +
+      `/disconnect [account-id] — revoke a connected Composio account\n` +
       `/api — create, rotate, revoke, or list your private project API keys\n` +
       `/channel list — show linked channel identities\n` +
       `Inside iMessage, send /link-group <code> to activate a generated group code\n` +
@@ -1553,10 +1585,89 @@ export function registerHandlers(bot: Bot): void {
       const body = lines.length
         ? `<b>Connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}</b>\n\n${lines.join("\n")}`
         : `No connected accounts${toolkit ? ` for ${escapeTelegramHtml(toolkit)}` : ""}.\n\nUse <code>/connect gmail work-gmail</code> to add one.`;
-      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, body, { parse_mode: "HTML" });
+      await ctx.api.editMessageText(ctx.chat!.id, status.message_id, body, {
+        parse_mode: "HTML",
+        ...(accounts.length ? { reply_markup: new InlineKeyboard().text("Disconnect an account", "acct:disconnect:list") } : {}),
+      });
     } catch (error) {
       logger.error({ err: error, userId: ctx.from!.id, toolkit }, "Failed to list Composio connected accounts");
       await ctx.api.editMessageText(ctx.chat!.id, status.message_id, `❌ Could not load connected accounts: ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  });
+
+  // /disconnect — revoke a connected Composio account from Telegram. This is
+  // deliberately a private, owner-checked flow; the agent does not need a
+  // separate tool for the owner to manage access directly.
+  bot.command("disconnect", async (ctx) => {
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) {
+      await ctx.reply("For your security, manage connected app access in your private chat with Chusky.");
+      return;
+    }
+    const target = (ctx.match?.trim() ?? "").toLowerCase();
+    try {
+      const accounts = await listConnectedAccounts(ctx.from!.id);
+      const matches = target
+        ? accounts.filter((account) => account.id.toLowerCase() === target || account.alias?.toLowerCase() === target || account.toolkit.toLowerCase() === target)
+        : accounts;
+      if (target && matches.length === 0) {
+        await ctx.reply("That connected account was not found. Use /accounts to see the current account IDs and aliases.");
+        return;
+      }
+      if (matches.length === 1) {
+        const confirmation = disconnectConfirmation(matches[0]!);
+        await ctx.reply(confirmation.text, { parse_mode: "HTML", reply_markup: confirmation.reply_markup });
+        return;
+      }
+      await ctx.reply(disconnectAccountText(matches), {
+        parse_mode: "HTML",
+        ...(matches.length ? { reply_markup: disconnectAccountKeyboard(matches) } : {}),
+      });
+    } catch (error) {
+      logger.error({ err: error, userId: ctx.from!.id }, "Failed to load accounts for disconnect");
+      await ctx.reply("❌ I could not load your connected accounts right now. Try /disconnect again shortly.");
+    }
+  });
+
+  bot.callbackQuery(/^acct:disconnect:(list|select|confirm|cancel)(?::([A-Za-z0-9_-]{1,200}))?$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    if (!(await guard(ctx))) return;
+    if (isTelegramShared(ctx)) {
+      await ctx.editMessageText("For your security, manage connected app access in your private chat with Chusky.");
+      return;
+    }
+    const action = ctx.match[1];
+    const accountId = ctx.match[2] ?? "";
+    try {
+      const accounts = await listConnectedAccounts(ctx.from!.id);
+      if (action === "list") {
+        await ctx.editMessageText(disconnectAccountText(accounts), {
+          parse_mode: "HTML",
+          ...(accounts.length ? { reply_markup: disconnectAccountKeyboard(accounts) } : {}),
+        });
+        return;
+      }
+      const account = accounts.find((item) => item.id === accountId);
+      if (!account) {
+        await ctx.editMessageText("That connected account is no longer available. Use /disconnect to refresh the list.");
+        return;
+      }
+      if (action === "cancel") {
+        await ctx.editMessageText("No connected account was disconnected.");
+        return;
+      }
+      if (action === "select") {
+        const confirmation = disconnectConfirmation(account);
+        await ctx.editMessageText(confirmation.text, { parse_mode: "HTML", reply_markup: confirmation.reply_markup });
+        return;
+      }
+      const removed = await disconnectConnectedAccount(ctx.from!.id, account.id);
+      await ctx.editMessageText(removed
+        ? `✅ Disconnected <b>${escapeTelegramHtml(account.toolkit)}${account.alias ? ` (${escapeTelegramHtml(account.alias)})` : ""}</b>.\n\nUse /connect to reconnect it later.`
+        : "That connected account was already removed. Use /disconnect to refresh the list.", { parse_mode: "HTML" });
+    } catch (error) {
+      logger.error({ err: error, userId: ctx.from!.id, action, accountId }, "Telegram connected account disconnect failed");
+      await ctx.editMessageText("❌ I could not disconnect that account. Use /disconnect to refresh the list.");
     }
   });
 
@@ -2426,6 +2537,21 @@ export function registerHandlers(bot: Bot): void {
       await ctx.reply("💳 Your usage cap has been reached. Ask an administrator to increase it.");
       return;
     }
+
+    // Keep ordinary greetings conversational. They do not need a model/tool
+    // round trip, and showing an internal progress card for "hello" makes the
+    // Telegram experience feel mechanical.
+    if (isSimpleTelegramGreeting(text)) {
+      const receivedAt = telegramMessageReceivedAt(ctx);
+      const response = /good\s+(?:morning|afternoon|evening)/i.test(text.trim())
+        ? `${text.trim().replace(/[!?.,…]+$/g, "")}! What can I help you with?`
+        : "Hey! What can I help you with?";
+      await saveTelegramConversation(ctx, userId, text, response, receivedAt);
+      await ctx.reply(response);
+      await sendVoiceReply(ctx, response, s.voiceReplies === true);
+      return;
+    }
+
     const controller = new AbortController();
     const lockToken = randomUUID();
     activeRequests.set(userId, controller);
