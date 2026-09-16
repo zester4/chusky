@@ -58,6 +58,17 @@ test("vault identity selectors stay origin-aware", () => {
   assert.match(migration, /UNIQUE\(account_id, service, account_alias, origin\)/);
 });
 
+test("vault setup form uses the polished light theme and protected password visibility control", () => {
+  const worker = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "src", "index.ts"), "utf8");
+  assert.match(worker, /--amber:#c88719/);
+  assert.match(worker, /--ink:#171717/);
+  assert.match(worker, /font-family:Georgia/);
+  assert.match(worker, /data-password-toggle/);
+  assert.match(worker, /type=\"password\"/);
+  assert.match(worker, /script-src 'nonce-\$\{nonce\}'/);
+  assert.doesNotMatch(worker, /background:#10131a/);
+});
+
 test("vault action policy keeps browsing/cart autonomous but interlocks payment and account destruction", () => {
   assert.equal(vaultActionPolicy("add_to_cart"), "auto");
   assert.equal(vaultActionPolicy("place_order"), "approval_required");
