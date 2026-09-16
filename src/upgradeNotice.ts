@@ -5,6 +5,28 @@ const DEFAULT_MANIFEST_PATH = path.resolve(process.cwd(), "agent-upgrade.json");
 const MAX_TITLE_LENGTH = 120;
 const MAX_BULLET_LENGTH = 240;
 
+/**
+ * Curated release highlights for capabilities that span several transports.
+ * Keep these claims aligned with the runtime and use them from the release
+ * writer so a major surface such as meetings is not accidentally omitted.
+ */
+export const AGENT_UPGRADE_PRESETS = {
+  meetings: [
+    "Added Recall-powered meeting participation for Zoom, Google Meet, Microsoft Teams, and Webex, with natural copilot and owner-scoped representative modes.",
+    "Meeting representatives can support sales and onboarding with approved connected-app tools, participant chat, contact capture, calendar availability, reminders, tasks, and follow-through.",
+    "Added optional screen-share understanding, Nova-3 live transcription, encrypted opt-in transcript retention, private outcomes, and scratchpad/Notion follow-through.",
+  ],
+} as const;
+
+export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;
+
+export function getAgentUpgradePreset(name: string): string[] {
+  if (!Object.hasOwn(AGENT_UPGRADE_PRESETS, name)) {
+    throw new Error(`Unknown upgrade preset: ${name}`);
+  }
+  return [...AGENT_UPGRADE_PRESETS[name as AgentUpgradePreset]];
+}
+
 export type AgentUpgradeNotice = {
   id: string;
   version: string;

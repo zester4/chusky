@@ -3,12 +3,22 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { formatAgentUpgradeNotice, loadAgentUpgrade, validateAgentUpgrade, writeAgentUpgrade } from "../src/upgradeNotice.js";
+import { AGENT_UPGRADE_PRESETS, formatAgentUpgradeNotice, getAgentUpgradePreset, loadAgentUpgrade, validateAgentUpgrade, writeAgentUpgrade } from "../src/upgradeNotice.js";
 
 test("validates and formats a bounded upgrade notice", () => {
   const notice = validateAgentUpgrade({ version: "3.1.0", id: "release-3.1.0", bullets: ["One", "Two"] });
   assert.equal(formatAgentUpgradeNotice(notice), "Chusky has been upgraded (v3.1.0)\n- One\n- Two");
   assert.throws(() => validateAgentUpgrade({ version: "3.1.0", bullets: ["1", "2", "3", "4"] }), /one to three/);
+});
+
+test("meeting upgrade preset contains bounded, accurate release highlights", () => {
+  const bullets = getAgentUpgradePreset("meetings");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.meetings]);
+  assert.match(bullets[0], /Zoom/);
+  assert.match(bullets[1], /sales and onboarding/);
+  assert.match(bullets[2], /screen-share/);
+  assert.throws(() => getAgentUpgradePreset("unknown"), /Unknown upgrade preset/);
 });
 
 test("loads and writes the release manifest", async () => {
@@ -24,11 +34,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the Cloudflare vault and Daytona release", async () => {
+test("current upgrade manifest announces the meeting release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.1.8");
-  assert.equal(notice?.version, "3.1.8");
-  assert.match(formatAgentUpgradeNotice(notice!), /Cloudflare D1/);
-  assert.match(formatAgentUpgradeNotice(notice!), /replay protection/);
-  assert.match(formatAgentUpgradeNotice(notice!), /trusted Daytona/);
+  assert.equal(notice?.id, "release-3.2.0");
+  assert.equal(notice?.version, "3.2.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Chusky meetings are now live/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Google Meet/);
+  assert.match(formatAgentUpgradeNotice(notice!), /sales and onboarding/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Nova-3/);
 });
