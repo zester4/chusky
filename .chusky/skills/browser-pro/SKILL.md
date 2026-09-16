@@ -59,6 +59,10 @@ For goal-level work, stop at the requested boundary—for example, “prepare th
 cart and stop before payment”—and report exactly what was verified. Use
 `CHUCK_BROWSER_AUDIT_LIST` for owner-visible activity history and
 `CHUCK_BROWSER_SESSION_HEALTH` before reusing a retained identity.
+When the owner asks to log out or revoke a retained identity, use
+`CHUCK_BROWSER_SESSION_REVOKE`; it attempts the configured site logout, pauses
+the shared workspace, and blocks generic browser reuse until a fresh vault login
+succeeds.
 
 ## Privacy
 

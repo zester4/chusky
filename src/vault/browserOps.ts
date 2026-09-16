@@ -97,6 +97,10 @@ export type BrowserVerificationResult = {
   missing: string[];
 };
 
+export function browserSessionIsRevoked(input: { status: string; expiresAt?: number }, now = Date.now()): boolean {
+  return ["logged_out", "expired", "needs_reauth"].includes(input.status) || (input.status === "authenticated" && Boolean(input.expiresAt && input.expiresAt <= now));
+}
+
 function bounded(value: unknown, max: number, field: string): string {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max) throw new Error(`${field} must be 1-${max} characters`);
   return value.trim();

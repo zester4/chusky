@@ -732,15 +732,25 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const service = text(args.service);
       const accountAlias = args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined;
       const saved = (await listVault(userId)).find((credential) => credential.service === service && (!accountAlias || credential.accountAlias === accountAlias));
-      const result = await logoutVault(userId, service, accountAlias);
-      if (!saved?.logoutUrl) return { ...result, browserLogout: { attempted: false, note: "No site logout URL was configured; Chusky stopped reusing the retained session." } };
-      try {
-        await daytonaEngine.browser(userId, { action: "open", url: saved.logoutUrl });
-        return { ...result, browserLogout: { attempted: true, completed: true } };
-      } catch (error) {
-        return { ...result, browserLogout: { attempted: true, completed: false, note: error instanceof Error ? error.message : "The site logout page could not be opened." } };
+      let browserLogout: { attempted: boolean; completed?: boolean; note?: string } = { attempted: false, note: "No site logout URL was configured." };
+      if (saved?.logoutUrl) {
+        try {
+          await daytonaEngine.browser(userId, { action: "open", url: saved.logoutUrl });
+          browserLogout = { attempted: true, completed: true };
+        } catch (error) {
+          browserLogout = { attempted: true, completed: false, note: error instanceof Error ? error.message : "The site logout page could not be opened." };
+        }
       }
+      const result = await logoutVault(userId, service, accountAlias);
+      let workspacePaused = false;
+      try {
+        await daytonaEngine.workspace(userId, "pause");
+        workspacePaused = true;
+      } catch { /* A missing workspace should not undo the broker revocation. */ }
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service, ...(saved?.origin ? { origin: saved.origin } : {}), status: "succeeded", summary: `Revoked the ${service}${accountAlias ? ` (${accountAlias})` : ""} browser session`, createdAt: Date.now() });
+      return { ...result, browserLogout, workspacePaused, note: "The saved session is revoked. Chusky will block browser reuse in this workspace until a fresh vault login succeeds." };
     })();
+    case "CHUCK_BROWSER_SESSION_REVOKE": return nativeTool(userId, "CHUCK_VAULT_LOGOUT", args, runtime);
     case "CHUCK_SHOPPING_START": return startShopping(userId, args);
     case "CHUCK_SHOPPING_LIST": return listShopping(userId, args.limit === undefined ? undefined : Number(args.limit));
     case "CHUCK_SHOPPING_SELECT_RETAILER": return selectShoppingRetailer(userId, args);

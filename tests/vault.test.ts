@@ -5,7 +5,7 @@ import { decryptCredential, encryptCredential } from "../src/vault/crypto.js";
 import { classifyBrowserTarget, vaultActionPolicy } from "../src/vault/policy.js";
 import { normaliseVaultOrigin, normaliseVaultService } from "../src/vault/vault.js";
 import { redactVaultAudit } from "../src/vault/audit.js";
-import { classifyBrowserIntent, createBrowserOperationPlan, normalizePlaybook, sessionHealth, verifyBrowserResult } from "../src/vault/browserOps.js";
+import { browserSessionIsRevoked, classifyBrowserIntent, createBrowserOperationPlan, normalizePlaybook, sessionHealth, verifyBrowserResult } from "../src/vault/browserOps.js";
 
 const masterKey = Buffer.alloc(32, 7).toString("base64url");
 
@@ -94,6 +94,14 @@ test("browser session health recommends rechecking stale identities and logging 
   const expired = sessionHealth({ service: "shop", origin: "https://shop.example.com", workspaceId: "ws", status: "authenticated", expiresAt: Date.now() - 1 });
   assert.equal(expired.status, "expired");
   assert.equal(expired.recommendedAction, "login");
+});
+
+test("revoked or expired browser identities require a fresh vault login", () => {
+  const now = Date.now();
+  assert.equal(browserSessionIsRevoked({ status: "logged_out" }, now), true);
+  assert.equal(browserSessionIsRevoked({ status: "needs_reauth" }, now), true);
+  assert.equal(browserSessionIsRevoked({ status: "authenticated", expiresAt: now - 1 }, now), true);
+  assert.equal(browserSessionIsRevoked({ status: "authenticated", expiresAt: now + 60_000 }, now), false);
 });
 
 test("browser verification requires every required detector and returns no page content", () => {

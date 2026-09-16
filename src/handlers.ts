@@ -39,7 +39,7 @@ import { MODEL_PROVIDER_LABELS, isModelProvider, modelsForProvider, type ModelPr
 import { listBlandCuratedVoices, type BlandSelectableVoice } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voiceSettings.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
-import { browserSessionHealth, logoutVault } from "./vault/vault.js";
+import { browserSessionHealth } from "./vault/vault.js";
 import {
   cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting,
   listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission,
@@ -1038,14 +1038,14 @@ export function registerHandlers(bot: Bot): void {
         await replyHtml(ctx, health.length ? `<b>Website session health</b>\n\n${health.map((item) => `• <b>${escapeTelegramHtml(item.service)}</b> · ${escapeTelegramHtml(item.status)}\n  ${escapeTelegramHtml(item.origin)} · next: ${escapeTelegramHtml(item.recommendedAction)}`).join("\n")}` : "No saved website sessions.");
         return;
       }
-      if (subcommand === "logout") {
+      if (subcommand === "logout" || subcommand === "revoke") {
         const [, service, alias] = String(ctx.match ?? "").trim().split(/\s+/);
         if (!service) {
-          await ctx.reply("Usage: /browser logout <service> [account-alias]");
+          await ctx.reply("Usage: /browser revoke <service> [account-alias]");
           return;
         }
-        const result = await logoutVault(uid, service, alias);
-        await replyHtml(ctx, `<b>Browser session stopped</b>\n\n${escapeTelegramHtml(result.note)}`);
+        const result = await nativeTool(uid, "CHUCK_BROWSER_SESSION_REVOKE", { service, ...(alias ? { accountAlias: alias } : {}) });
+        await replyHtml(ctx, `<b>Browser session revoked</b>\n\n${escapeTelegramHtml(String((result as { note?: string })?.note ?? "The session was revoked."))}`);
         return;
       }
       const playbooks = await listBrowserPlaybooks(uid, 30);

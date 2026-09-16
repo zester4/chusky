@@ -1893,11 +1893,11 @@ export class DaytonaEngine {
     return { sandboxId: sandbox.id, path, action, result };
   }
 
-  async browser(userId: number, args: Record<string, unknown>): Promise<unknown> {
+  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean } = {}): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const sandbox = await this.getOrCreateWorkspace(userId);
     const stored = await getDaytonaWorkspace(userId);
-    await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl });
+    if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl });
     if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args, { trustedVaultFlow: true });
     if (action === "status") {
       const stored = await getDaytonaWorkspace(userId);
@@ -1948,7 +1948,7 @@ export class DaytonaEngine {
   async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
     const login = new URL(input.loginUrl);
     if (login.origin !== input.origin || login.protocol !== "https:") throw new DaytonaInputError("Vault login URL does not match its authorised origin");
-    await this.browser(userId, { action: "open", url: login.toString() });
+    await this.browser(userId, { action: "open", url: login.toString() }, { vaultLoginFlow: true });
     const node = async (role: string, configuredName: string, fallbacks: string[]): Promise<string | undefined> => {
       const candidates = [...new Set([configuredName, ...fallbacks].map((value) => value.trim()).filter(Boolean))];
       for (const name of candidates) {

@@ -2,7 +2,7 @@ import { config } from "../config.js";
 import { vaultBroker } from "./client.js";
 import { vaultStatus } from "./vault.js";
 import { vaultActionPolicy, type VaultAction } from "./policy.js";
-import { classifyBrowserIntent } from "./browserOps.js";
+import { browserSessionIsRevoked, classifyBrowserIntent } from "./browserOps.js";
 
 type KnownNode = { label: string; origin: string; capturedAt: number };
 const knownNodes = new Map<string, KnownNode>();
@@ -32,10 +32,15 @@ export async function rememberVaultBrowserNodes(userId: number, workspaceId: str
 /** Enforces a narrow UI policy only while a matching retained identity is authenticated. */
 export async function guardVaultBrowserAction(userId: number, workspaceId: string, args: Record<string, unknown>): Promise<void> {
   if (!config.vaultEnabled || !vaultBroker.enabled()) return;
-  const activeSessions = (await vaultStatus(userId)).filter((session) => session.workspaceId === workspaceId && session.status === "authenticated" && (!session.expiresAt || session.expiresAt > Date.now()));
-  const active = activeSessions.length > 0;
-  if (!active) return;
   const action = String(args.action ?? "");
+  const workspaceSessions = (await vaultStatus(userId)).filter((session) => session.workspaceId === workspaceId);
+  const activeSessions = workspaceSessions.filter((session) => session.status === "authenticated" && (!session.expiresAt || session.expiresAt > Date.now()));
+  const active = activeSessions.length > 0;
+  if (!active) {
+    const hasRevokedIdentity = workspaceSessions.some(browserSessionIsRevoked);
+    if (hasRevokedIdentity && !["status", "start"].includes(action)) throw new Error("This Daytona workspace contains a revoked or expired website session. Log in again with CHUCK_VAULT_LOGIN or complete a private browser handoff before using the browser.");
+    return;
+  }
   if (["screenshot", "screenshot_region", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
   if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
   if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" });
