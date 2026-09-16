@@ -1945,12 +1945,13 @@ export class DaytonaEngine {
    * CHUCK_DAYTONA_BROWSER: it receives secrets only from the credential broker
    * and returns no accessibility tree, screenshot, or typed values.
    */
-  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
+  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: { steps?: Array<{ role?: string; name?: string; action?: string }>; failure?: Array<{ textIncludes?: string }> } }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
     const login = new URL(input.loginUrl);
     if (login.origin !== input.origin || login.protocol !== "https:") throw new DaytonaInputError("Vault login URL does not match its authorised origin");
     await this.browser(userId, { action: "open", url: login.toString() }, { vaultLoginFlow: true });
     const node = async (role: string, configuredName: string, fallbacks: string[]): Promise<string | undefined> => {
-      const candidates = [...new Set([configuredName, ...fallbacks].map((value) => value.trim()).filter(Boolean))];
+      const recipeNames = (input.loginRecipe?.steps ?? []).filter((step) => step.role === role && typeof step.name === "string" && step.action !== "verify" && step.action !== "handoff").map((step) => step.name!.trim()).filter(Boolean);
+      const candidates = [...new Set([...recipeNames, configuredName, ...fallbacks].map((value) => value.trim()).filter(Boolean))];
       for (const name of candidates) {
         const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }, { trustedVaultFlow: true }) as any;
         const matches = Array.isArray(result) ? result : Array.isArray(result?.matches) ? result.matches : [];
@@ -1991,7 +1992,8 @@ export class DaytonaEngine {
     const remaining = afterPasswordNode ? [afterPasswordNode] : [];
     const page = await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 8 }, { trustedVaultFlow: true });
     const failureText = JSON.stringify(page).toLowerCase();
-    const loginFailed = /(incorrect|invalid|wrong|unable to sign|could not sign|try again|failed to log|verification required)/.test(failureText);
+    const recipeFailure = (input.loginRecipe?.failure ?? []).some((detector) => typeof detector.textIncludes === "string" && failureText.includes(detector.textIncludes.toLowerCase()));
+    const loginFailed = recipeFailure || /(incorrect|invalid|wrong|unable to sign|could not sign|try again|failed to log|verification required)/.test(failureText);
     const challenge = /(captcha|security check|two.factor|one.time|verification code|approve sign.in|passkey|security key|magic link)/.test(failureText);
     return { workspaceId: sandbox.id, authenticated: remaining.length === 0 && !loginFailed && !challenge, ...(loginFailed || challenge ? { needsUserInteraction: true } : {}) };
   }

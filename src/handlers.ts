@@ -1039,12 +1039,12 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (subcommand === "logout" || subcommand === "revoke") {
-        const [, service, alias] = String(ctx.match ?? "").trim().split(/\s+/);
+        const [, service, alias, origin] = String(ctx.match ?? "").trim().split(/\s+/);
         if (!service) {
-          await ctx.reply("Usage: /browser revoke <service> [account-alias]");
+          await ctx.reply("Usage: /browser revoke <service> [account-alias] [origin]");
           return;
         }
-        const result = await nativeTool(uid, "CHUCK_BROWSER_SESSION_REVOKE", { service, ...(alias ? { accountAlias: alias } : {}) });
+        const result = await nativeTool(uid, "CHUCK_BROWSER_SESSION_REVOKE", { service, ...(alias ? { accountAlias: alias } : {}), ...(origin ? { origin } : {}) });
         await replyHtml(ctx, `<b>Browser session revoked</b>\n\n${escapeTelegramHtml(String((result as { note?: string })?.note ?? "The session was revoked."))}`);
         return;
       }

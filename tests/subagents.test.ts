@@ -2,13 +2,13 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
-test("validates capability registry manifests for all 7 worker capabilities", () => {
-  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora"] as const;
+test("validates capability registry manifests for all worker capabilities", () => {
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
   for (const w of workers) {
     const cap = WORKER_CAPABILITIES[w];
     assert.ok(cap);
@@ -31,6 +31,28 @@ test("declares the intended worker-to-skill map", () => {
   assert.deepEqual(WORKER_CAPABILITIES.dexter.skills.primary, ["computer-pro"]);
   assert.ok(WORKER_CAPABILITIES.elena.skills.primary.includes("project-pro"));
   assert.ok(WORKER_CAPABILITIES.chusky.skills.primary.includes("meeting-pro"));
+  assert.deepEqual(WORKER_CAPABILITIES.ivy.skills.primary, ["workspace-pro", "writing-pro"]);
+  assert.ok(WORKER_CAPABILITIES.quinn.skills.primary.includes("customer-research"));
+  assert.ok(WORKER_CAPABILITIES.aria.skills.primary.includes("meeting-pro"));
+  assert.ok(WORKER_CAPABILITIES.kai.skills.primary.includes("research-pro"));
+});
+
+test("routes business workflow objectives to their owning specialists", () => {
+  assert.deepEqual(classifyDelegationObjective("triage the Gmail inbox and draft priority replies"), ["ivy"]);
+  assert.deepEqual(classifyDelegationObjective("clean the sales pipeline and prepare qualified deal next steps"), ["quinn"]);
+  assert.deepEqual(classifyDelegationObjective("run customer onboarding and identify churn risk"), ["aria"]);
+  assert.deepEqual(classifyDelegationObjective("prepare the weekly KPI report and flag anomalies"), ["kai"]);
+});
+
+test("keeps business workers inside their intended connected-app families", () => {
+  assert.equal(isComposioToolAllowedForWorker("ivy", "GMAIL_SEARCH_EMAILS"), true);
+  assert.equal(isComposioToolAllowedForWorker("ivy", "SALESFORCE_UPDATE_OPPORTUNITY"), false);
+  assert.equal(isComposioToolAllowedForWorker("quinn", "HUBSPOT_UPDATE_DEAL"), true);
+  assert.equal(isComposioToolAllowedForWorker("quinn", "GOOGLESHEETS_UPDATE_SPREADSHEET"), false);
+  assert.equal(isComposioToolAllowedForWorker("aria", "GOOGLECALENDAR_CREATE_EVENT"), true);
+  assert.equal(isComposioToolAllowedForWorker("aria", "STRIPE_CREATE_PAYMENT_LINK"), false);
+  assert.equal(isComposioToolAllowedForWorker("kai", "GOOGLESHEETS_GET_SPREADSHEET"), true);
+  assert.equal(isComposioToolAllowedForWorker("kai", "GMAIL_SEND_EMAIL"), false);
 });
 
 test("gives Nora only scoped Composio research-provider families", () => {

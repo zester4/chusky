@@ -14,6 +14,15 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
+test("delegation tools expose every business workflow specialist", () => {
+  const delegate = chuckTools.find((tool) => tool.function.name === "CHUCK_DELEGATE_SUBAGENT");
+  const handoff = chuckTools.find((tool) => tool.function.name === "CHUCK_HANDOFF_SUBAGENT");
+  const expected = ["nora", "lucas", "maya", "leo", "sofia", "dexter", "elena", "ivy", "quinn", "aria", "kai"];
+  assert.deepEqual(delegate?.function.parameters.properties.worker.enum, expected);
+  assert.deepEqual(handoff?.function.parameters.properties.targetWorker.enum, expected);
+  assert.match(delegate?.function.description ?? "", /Ivy.*Quinn.*Aria.*Kai/);
+});
+
 test("Recall meeting tools require explicit join details and expose owner-scoped controls", () => {
   const tools = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_MEETING_CONTEXT_PREPARE", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE", "CHUCK_MEETING_TRANSCRIPT_SEARCH", "CHUCK_MEETING_TRANSCRIPT_DELETE"]) assert.equal(tools.has(name), true, name);

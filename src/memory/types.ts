@@ -37,7 +37,10 @@ export interface MemoryQueryOptions {
   includeSuperseded?: boolean;
 }
 
-export type CapabilityWorkerName = "lucas" | "maya" | "leo" | "sofia" | "dexter" | "elena" | "nora" | "chusky";
+export type CapabilityWorkerName =
+  | "lucas" | "maya" | "leo" | "sofia" | "dexter" | "elena" | "nora"
+  | "ivy" | "quinn" | "aria" | "kai"
+  | "chusky";
 
 export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, MemoryCategory[]> = {
   lucas: ["project", "procedural", "asset"],
@@ -49,5 +52,16 @@ export const CAPABILITY_MEMORY_ACCESS_MATRIX: Record<CapabilityWorkerName, Memor
   // Research may use project and business context, but never broad personal
   // history. Findings are evidence, not permanent memory by default.
   nora: ["project", "business", "procedural"],
+  // Communications workers may triage business relationships and approved
+  // operating playbooks, but never receive broad private history.
+  ivy: ["business", "relationship", "procedural", "project"],
+  // Revenue work needs relationship, business, project, and procedural facts;
+  // it does not need personal profile or episodic private history.
+  quinn: ["business", "relationship", "project", "procedural"],
+  // Customer-success work is relationship-led and may create project follow-up.
+  aria: ["business", "relationship", "project", "procedural", "episodic"],
+  // Analytics receives business/project facts and procedural reporting rules,
+  // but not personal or relationship memory by default.
+  kai: ["business", "project", "procedural", "asset"],
   chusky: ["profile", "relationship", "business", "project", "episodic", "procedural", "negative", "asset"],
 };

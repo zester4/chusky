@@ -25,6 +25,9 @@ adapt when a selector, label, layout, or login step changes.
 
 - Use Composio for supported OAuth app integrations.
 - Use `CHUCK_VAULT_LOGIN` for ordinary websites with a saved identity.
+- Vault identities are scoped by account, service label, alias, and exact HTTPS
+  origin. If a service and alias match multiple origins, require the exact origin
+  before login, status, logout, or revocation; never select by display name alone.
 - Treat login as a state machine: identify the current step, fill only the
   matching accessible field, submit one transition, and inspect the next state.
 - Multi-step login, SSO, passkeys, magic links, OTP, device approval, CAPTCHA,

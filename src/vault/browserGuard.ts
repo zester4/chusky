@@ -41,6 +41,14 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
     if (hasRevokedIdentity && !["status", "start"].includes(action)) throw new Error("This Daytona workspace contains a revoked or expired website session. Log in again with CHUCK_VAULT_LOGIN or complete a private browser handoff before using the browser.");
     return;
   }
+  const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
+  const pageBoundActions = new Set(["snapshot", "find", "focus", "invoke", "fill", "back", "forward", "refresh", "scroll"]);
+  if (pageBoundActions.has(action) && (!currentOrigin || !activeSessions.some((session) => session.origin === currentOrigin))) {
+    throw new Error("Authenticated browser work must stay on the current saved website origin. Open or inspect the authorised origin again before continuing.");
+  }
+  if (currentOrigin && !["status", "start", "open", "windows"].includes(action) && !activeSessions.some((session) => session.origin === currentOrigin)) {
+    throw new Error("The current browser page is outside every active saved website origin. Open the intended authorised origin before continuing.");
+  }
   if (["screenshot", "screenshot_region", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
   if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
   if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" });
@@ -60,9 +68,9 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   else {
     const nodeId = String(args.nodeId ?? ""); const known = knownNodes.get(key(userId, workspaceId, nodeId));
     if (!known || Date.now() - known.capturedAt > NODE_TTL_MS) { knownNodes.delete(key(userId, workspaceId, nodeId)); throw new Error("Authenticated vault interactions require a fresh CHUCK_DAYTONA_BROWSER find call so Chusky can verify the control safely."); }
-    const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
-    if (!currentOrigin || currentOrigin !== known.origin || !activeSessions.some((session) => session.origin === currentOrigin)) throw new Error("The discovered browser control is stale or belongs to a different website origin. Inspect the current page again before acting.");
-    target = classifyBrowserIntent({ label: known.label, url: currentOrigin });
+    const discoveredOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
+    if (!discoveredOrigin || discoveredOrigin !== known.origin || !activeSessions.some((session) => session.origin === discoveredOrigin)) throw new Error("The discovered browser control is stale or belongs to a different website origin. Inspect the current page again before acting.");
+    target = classifyBrowserIntent({ label: known.label, url: discoveredOrigin });
   }
   target ??= "unknown";
   const decision = vaultActionPolicy(target);

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
 import { decryptCredential, encryptCredential } from "../src/vault/crypto.js";
 import { classifyBrowserTarget, vaultActionPolicy } from "../src/vault/policy.js";
@@ -42,6 +44,17 @@ test("vault accepts only exact HTTPS origins and stable service names", () => {
   assert.throws(() => normaliseVaultOrigin("https://user:pass@example.com"), /clean HTTPS origin/);
   assert.equal(normaliseVaultService("Amazon Prime"), "amazon prime");
   assert.throws(() => normaliseVaultService("amazon<script>"), /unsupported/);
+});
+
+test("vault identity selectors stay origin-aware", () => {
+  for (const name of ["CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT", "CHUCK_BROWSER_SESSION_REVOKE"]) {
+    const tool = chuckTools.find((candidate) => candidate.function.name === name);
+    assert.ok(tool, `${name} is exposed`);
+    const properties = (tool!.function.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+    assert.ok(Object.hasOwn(properties, "origin"), `${name} must allow exact origin selection`);
+  }
+  const migration = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "migrations", "0004_vault_origin_identity.sql"), "utf8");
+  assert.match(migration, /UNIQUE\(account_id, service, account_alias, origin\)/);
 });
 
 test("vault action policy keeps browsing/cart autonomous but interlocks payment and account destruction", () => {

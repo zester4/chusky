@@ -13,7 +13,9 @@ This Worker is the production trust boundary for Chusky website identities.
 
 Run the D1 migrations before deploying the Worker. The second migration adds replay request IDs and
 rate-limit buckets; the third adds origin-safe personal/work account aliases and migrates existing
-credentials to the `default` alias:
+credentials to the `default` alias. The fourth migration makes the exact HTTPS
+origin part of the credential identity key, so one service label and alias can
+refer to multiple websites without overwriting one another:
 
 ```sh
 wrangler d1 migrations apply VAULT_DB --remote

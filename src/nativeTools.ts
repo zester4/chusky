@@ -27,7 +27,7 @@ import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObje
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
-import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, vaultStatus } from "./vault/vault.js";
+import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, normaliseVaultOrigin, normaliseVaultService, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserPlaybookRecord } from "./vault/browserOps.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
@@ -657,7 +657,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_BROWSER_SESSION_HEALTH": {
       const service = args.service ? text(args.service) : undefined;
-      const health = await browserSessionHealth(userId, service);
+      const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
+      const health = await browserSessionHealth(userId, service, origin);
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_health_checked", ...(service ? { service } : {}), status: "succeeded", summary: `Checked ${health.length} saved browser session${health.length === 1 ? "" : "s"}`, createdAt: Date.now() });
       return health;
     }
@@ -716,9 +717,19 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     });
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
-    case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined);
+    case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined, args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined);
     case "CHUCK_VAULT_LOGIN": return daytonaCall(runtime, async () => {
-      const login = await loginWithVault(userId, text(args.service), { workspaceId: (owner) => daytonaEngine.workspaceId(owner), login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : "default");
+      const service = normaliseVaultService(text(args.service));
+      const accountAlias = args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : "default";
+      const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
+      const saved = (await listVault(userId)).filter((credential) => credential.service === service && credential.accountAlias === accountAlias && (!origin || credential.origin === origin));
+      const loginRecipe = saved.length === 1 ? await findBrowserPlaybook(userId, saved[0]!.origin, accountAlias) : undefined;
+      const login = await loginWithVault(userId, service, { workspaceId: (owner) => daytonaEngine.workspaceId(owner), login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }, accountAlias, origin, loginRecipe?.login);
+      if (loginRecipe) {
+        const verifiedAt = login.authenticated ? Date.now() : loginRecipe.login.lastVerifiedAt;
+        await saveBrowserPlaybook(userId, normalizePlaybook({ ...loginRecipe, login: { ...loginRecipe.login, ...(verifiedAt ? { lastVerifiedAt: verifiedAt } : {}) }, successCount: login.authenticated ? loginRecipe.successCount + 1 : loginRecipe.successCount, failureCount: login.authenticated ? loginRecipe.failureCount : loginRecipe.failureCount + 1, lastUsedAt: Date.now() })).catch(() => undefined);
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "playbook_used", service, origin: login.origin, playbookId: loginRecipe.id, status: login.authenticated ? "succeeded" : login.needsUserInteraction ? "waiting" : "failed", summary: login.authenticated ? `Reused the verified ${service} login playbook` : `The ${service} login playbook needs review`, createdAt: Date.now() });
+      }
       // A CAPTCHA, 2FA prompt, or an unfamiliar login form must not fail the
       // entire sign-in or expose credentials. Give the owner a short-lived
       // direct browser handoff and retain the same browser session instead.
@@ -729,9 +740,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       };
     });
     case "CHUCK_VAULT_LOGOUT": return (async () => {
-      const service = text(args.service);
+      const service = normaliseVaultService(text(args.service));
       const accountAlias = args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined;
-      const saved = (await listVault(userId)).find((credential) => credential.service === service && (!accountAlias || credential.accountAlias === accountAlias));
+      const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
+      const saved = (await listVault(userId)).find((credential) => credential.service === service && (!accountAlias || credential.accountAlias === accountAlias) && (!origin || credential.origin === origin));
       let browserLogout: { attempted: boolean; completed?: boolean; note?: string } = { attempted: false, note: "No site logout URL was configured." };
       if (saved?.logoutUrl) {
         try {
@@ -741,7 +753,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           browserLogout = { attempted: true, completed: false, note: error instanceof Error ? error.message : "The site logout page could not be opened." };
         }
       }
-      const result = await logoutVault(userId, service, accountAlias);
+      const result = await logoutVault(userId, service, accountAlias, origin);
       let workspacePaused = false;
       try {
         await daytonaEngine.workspace(userId, "pause");

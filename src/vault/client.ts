@@ -29,9 +29,9 @@ export class VaultBrokerClient {
   }
   beginSetup(accountId: string, request: VaultSetupRequest) { return this.request<{ service: string; origin: string; accountAlias: string; expiresAt: number; setupUrl: string }>("/v1/setup", { accountId, ...request }); }
   list(accountId: string) { return this.request<{ credentials: VaultCredentialMetadata[] }>("/v1/list", { accountId }); }
-  status(accountId: string, service?: string, accountAlias?: string) { return this.request<{ sessions: VaultSession[] }>("/v1/status", { accountId, ...(service ? { service } : {}), ...(accountAlias ? { accountAlias } : {}) }); }
-  lease(accountId: string, service: string, workspaceId: string, accountAlias = "default") { return this.request<VaultLease>("/v1/lease", { accountId, service, workspaceId, accountAlias }); }
+  status(accountId: string, service?: string, accountAlias?: string, origin?: string) { return this.request<{ sessions: VaultSession[] }>("/v1/status", { accountId, ...(service ? { service } : {}), ...(accountAlias ? { accountAlias } : {}), ...(origin ? { origin } : {}) }); }
+  lease(accountId: string, service: string, workspaceId: string, accountAlias = "default", origin?: string) { return this.request<VaultLease>("/v1/lease", { accountId, service, workspaceId, accountAlias, ...(origin ? { origin } : {}) }); }
   recordSession(accountId: string, input: Omit<VaultSession, "id"> & { credentialId: string }) { return this.request<{ session: VaultSession }>("/v1/session", { accountId, ...input }); }
-  logout(accountId: string, service: string, accountAlias?: string) { return this.request<{ service: string; status: string; note: string }>("/v1/logout", { accountId, service, ...(accountAlias ? { accountAlias } : {}) }); }
+  logout(accountId: string, service: string, accountAlias?: string, origin?: string) { return this.request<{ service: string; status: string; note: string }>("/v1/logout", { accountId, service, ...(accountAlias ? { accountAlias } : {}), ...(origin ? { origin } : {}) }); }
 }
 export const vaultBroker = new VaultBrokerClient();
