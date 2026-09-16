@@ -227,7 +227,19 @@ export async function applyRecallParticipantWebhook(body: unknown): Promise<"upd
     if (!current || current.providerBotId !== event.providerBotId || !ACTIVE.has(current.status)) return "ignored";
     if (rosterEvent) {
       const existing = current.participantRoster ?? [];
-      const participant = { ...rosterEvent.participant, updatedAt: Date.now() };
+      const incoming = rosterEvent.participant;
+      const previous = existing.find((item) => item.id === incoming.id);
+      // Recall may send a lifecycle event before it has a usable display name.
+      // Preserve a previously named participant instead of downgrading it to
+      // "Unknown participant"; a later named update can still refine it.
+      const participant = {
+        ...incoming,
+        ...(incoming.identityStatus === "unknown" && previous?.identityStatus !== "unknown" && previous?.name
+          ? { name: previous.name, identityStatus: "named" as const }
+          : {}),
+        ...(incoming.isHost === undefined && previous?.isHost !== undefined ? { isHost: previous.isHost } : {}),
+        updatedAt: Date.now(),
+      };
       const roster = [participant, ...existing.filter((item) => item.id !== participant.id)].slice(0, 40);
       await updateRecallMeeting(event.userId, event.meetingId, { participantRoster: roster });
       return "updated";

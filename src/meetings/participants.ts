@@ -74,6 +74,10 @@ export function resolveRecallMeetingSpeaker(
   if (overlappingIds.size !== 1) return undefined;
   const participantId = [...overlappingIds][0];
   const participant = roster.find((item) => item.id === participantId);
+  // Never turn a provider's missing/anonymous identity into a confident name.
+  // Legacy records without identityStatus were created before this distinction
+  // existed and remain compatible as named records.
+  if (participant?.identityStatus === "unknown") return undefined;
   const name = participant?.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
   return name ? { participantId, name } : undefined;
 }

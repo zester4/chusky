@@ -152,6 +152,8 @@ export interface RecallMeetingFollowThrough {
 export interface RecallMeetingParticipant {
   id: string;
   name: string;
+  /** Recall supplied a non-empty display name, or the platform did not expose one. */
+  identityStatus?: "named" | "unknown";
   isHost?: boolean;
   status: "present" | "left";
   updatedAt: number;
@@ -2776,13 +2778,18 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
 function normalizeMeetingRoster(value: unknown): RecallMeetingParticipant[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
-    .map((item) => ({
+    .map((item) => {
+      const identityStatus = item.identityStatus === "unknown" ? "unknown" as const : "named" as const;
+      const name = typeof item.name === "string" ? item.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) : "";
+      return {
       id: typeof item.id === "string" ? item.id : "",
-      name: typeof item.name === "string" ? item.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) : "",
+      name: name || (identityStatus === "unknown" ? "Unknown participant" : ""),
+      ...(identityStatus === "unknown" ? { identityStatus } : {}),
       ...(typeof item.isHost === "boolean" ? { isHost: item.isHost } : {}),
       status: item.status === "left" ? "left" as const : "present" as const,
       updatedAt: typeof item.updatedAt === "number" && Number.isSafeInteger(item.updatedAt) ? item.updatedAt : Date.now(),
-    }))
+      };
+    })
     .filter((item) => /^[A-Za-z0-9_-]{1,128}$/.test(item.id) && Boolean(item.name))
     .slice(0, 40);
 }
@@ -3213,7 +3220,7 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   if (patch.transcriptErrorCode !== undefined && (typeof patch.transcriptErrorCode !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(patch.transcriptErrorCode))) throw new Error("Meeting transcript error code is invalid");
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
-  if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
+  if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.identityStatus !== undefined && participant.identityStatus !== "named" && participant.identityStatus !== "unknown") || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
   if (patch.speakerEvents && (patch.speakerEvents.length > 200 || patch.speakerEvents.some((event) => !event || (event.type !== "speech_on" && event.type !== "speech_off") || typeof event.participantId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(event.participantId) || !Number.isSafeInteger(event.at) || event.at <= 0))) throw new Error("Meeting speaker timeline is invalid");
   const effectivePatch = { ...patch };
   if (patch.status === "ended" && current.transcriptRetentionDays && !current.transcriptExpiresAt) {

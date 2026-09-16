@@ -378,7 +378,7 @@ async function main(): Promise<void> {
       ...(meeting.joinAt ? { joinAt: meeting.joinAt } : {}),
       ...(meeting.error ? { error: "The meeting assistant could not complete this step. Check the meeting link and provider status." } : {}),
       ...(meeting.mission ? { mission: { clientName: meeting.mission.clientName, objective: meeting.mission.objective, preparedAt: new Date(meeting.mission.preparedAt).toISOString() } } : {}),
-      participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({ id: person.id, name: person.name, ...(person.isHost ? { isHost: true } : {}), status: person.status, updatedAt: new Date(person.updatedAt).toISOString() })),
+      participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({ id: person.id, name: person.name, ...(person.identityStatus === "unknown" ? { identityStatus: "unknown" } : {}), ...(person.isHost ? { isHost: true } : {}), status: person.status, updatedAt: new Date(person.updatedAt).toISOString() })),
       speakerEvents: (meeting.speakerEvents ?? []).slice(-200).map((event: any) => ({ type: event.type, ...(event.participantId ? { participantId: event.participantId } : {}), at: new Date(event.at).toISOString() })),
       history: (meeting.history ?? []).filter((message: any) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message: any) => ({ role: message.role, content: String(message.content).slice(0, 3000), ...(message.createdAt ? { createdAt: new Date(message.createdAt).toISOString() } : {}) })),
       ...(meeting.outcome ? { outcome: meeting.outcome } : {}),
@@ -735,7 +735,7 @@ async function main(): Promise<void> {
             const meetingText = buildMeetingInput(
               context,
               transcript,
-              (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })),
+              (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}) })),
               currentSpeaker?.name,
             );
             let meetingMessage: string | ContentPart[] = meetingText;
@@ -2234,7 +2234,7 @@ async function main(): Promise<void> {
                 role: message.role === "assistant" ? "chusky" as const : "participant" as const,
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
-              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, isHost }) => ({ name, ...(isHost ? { isHost } : {}) })), event.senderName);
+              const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}) })), event.senderName);
               const result = await withCliLock(event.userId, undefined, () => runAgent(
                 event.userId,
                 prompt,

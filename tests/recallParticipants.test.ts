@@ -24,7 +24,9 @@ test("participant lifecycle events retain only a bounded display roster", () => 
   assert.deepEqual(parseRecallParticipantWebhook(participantEvent("participant_events.leave", { id: "456", name: "Avery Smith" }))?.participant, {
     id: "456", name: "Avery Smith", status: "left",
   });
-  assert.equal(parseRecallParticipantWebhook(participantEvent("participant_events.join", { id: 456, email: "private@example.com" })), undefined);
+  assert.deepEqual(parseRecallParticipantWebhook(participantEvent("participant_events.join", { id: 456, email: "private@example.com" }))?.participant, {
+    id: "456", name: "Unknown participant", identityStatus: "unknown", status: "present",
+  });
   assert.equal(parseRecallParticipantWebhook(participantEvent("participant_events.chat_message", { id: 456, name: "Avery Smith" })), undefined);
 });
 
@@ -93,6 +95,9 @@ test("ambiguous or missing speaker timing never guesses a participant", () => {
     { type: "speech_on", participantId: "456", at: 10_000 },
     { type: "speech_on", participantId: "789", at: 10_000 },
   ], roster, 10_000, 13_000), undefined, "same-time starts have no reliable speaker ordering");
+  assert.equal(resolveRecallMeetingSpeaker([
+    { type: "speech_on", participantId: "456", at: 10_000 },
+  ], [{ id: "456", name: "Unknown participant", identityStatus: "unknown", status: "present", updatedAt: 10_000 }], 10_000, 13_000), undefined, "an anonymous provider identity must never be presented as a named speaker");
 });
 
 test("meeting prompt uses speaker names as a cautious conversational cue", () => {

@@ -75,7 +75,7 @@ export interface ParsedRecallParticipantWebhook {
   providerBotId: string;
   meetingId: string;
   userId: number;
-  participant: { id: string; name: string; isHost?: boolean; status: "present" | "left" };
+  participant: { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; status: "present" | "left" };
 }
 
 export interface ParsedRecallSpeakerWebhook {
@@ -395,7 +395,7 @@ export function parseRecallChatWebhook(value: unknown): ParsedRecallChatWebhook 
   return { providerBotId, meetingId, userId, command, ...(senderName ? { senderName } : {}), ...(replyToParticipantId ? { replyToParticipantId } : {}) };
 }
 
-/** Extract a minimum, non-identifying live-roster update from a signed Recall event. */
+/** Extract a minimum live-roster update from a signed Recall event. Names are provider labels, not verified identities. */
 export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParticipantWebhook | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const body = value as Record<string, unknown>;
@@ -416,12 +416,12 @@ export function parseRecallParticipantWebhook(value: unknown): ParsedRecallParti
   const rawId = participant.id;
   const id = typeof rawId === "string" || typeof rawId === "number" ? String(rawId) : "";
   const name = typeof participant.name === "string" ? participant.name.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) : "";
-  if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !/^[A-Za-z0-9_-]{1,128}$/.test(id) || !name) return undefined;
+  if (!isValidRecallBotId(providerBotId) || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return undefined;
   return {
     providerBotId,
     meetingId,
     userId,
-    participant: { id, name, ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), status: event === "participant_events.leave" ? "left" : "present" },
+    participant: { id, name: name || "Unknown participant", ...(!name ? { identityStatus: "unknown" as const } : {}), ...(typeof participant.is_host === "boolean" ? { isHost: participant.is_host } : {}), status: event === "participant_events.leave" ? "left" : "present" },
   };
 }
 

@@ -92,7 +92,7 @@ export interface MeetingMission {
   preparedAt: number;
 }
 export interface MeetingMissionSummary { clientName: string; objective: string; preparedAt: string; }
-export interface MeetingParticipant { id: string; name: string; isHost?: boolean; status: "present" | "left"; updatedAt: string; }
+export interface MeetingParticipant { id: string; name: string; identityStatus?: "named" | "unknown"; isHost?: boolean; status: "present" | "left"; updatedAt: string; }
 export interface MeetingSpeakerEvent { type: "speech_on" | "speech_off"; participantId?: string; at: string; }
 export interface MeetingOutcomeActionItem { task: string; owner: string; dueDate?: string; }
 export interface MeetingOutcome { title: string; summary: string; decisions: string[]; actionItems: MeetingOutcomeActionItem[]; openQuestions: string[]; }
