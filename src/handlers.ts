@@ -4,7 +4,7 @@ import {
   runAgent, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, invalidateSession, ApprovalRequiredError,
   transcribeAudio, generateImage, generateSpeech,
   listTriggers, createTrigger, setTriggerState, deleteTrigger, listAvailableTriggerToolkits, listAvailableTriggerTypes, getAvailableTriggerType,
-  searchTools
+  searchTools, type AgentChannelContext,
 } from "./agent.js";
 import { requiredTriggerConfigFields, type TriggerCatalogueItem } from "./triggerCatalog.js";
 import type { ContentPart } from "./types.js";
@@ -689,6 +689,21 @@ function isTelegramShared(ctx: Context): boolean {
   return ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
 }
 
+/**
+ * Keep Telegram's transport scope explicit at the agent boundary. The handler
+ * already uses the shared conversation history for groups, but runAgent also
+ * needs this context to suppress private memory, knowledge, account metadata,
+ * and account-only native actions in the core loop.
+ */
+export function telegramAgentChannelContext(ctx: Context, userId: number): AgentChannelContext {
+  return {
+    accountId: `account_${userId}`,
+    provider: "telegram",
+    conversationId: telegramConversationId(ctx),
+    scope: isTelegramShared(ctx) ? "shared" : "private",
+  };
+}
+
 const SHARED_GROUP_TOOL_DENY = [
   "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY",
   "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
@@ -826,7 +841,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
   try {
     const s = await getSession(userId);
     const receivedAt = telegramMessageReceivedAt(ctx);
-    const result = await runAgent(userId, parts, await telegramConversationHistory(ctx, s.history), await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, undefined, telegramAgentOptions(ctx, receivedAt));
+    const result = await runAgent(userId, parts, await telegramConversationHistory(ctx, s.history), await telegramGroupModel(ctx, s.model), undefined, controller.signal, undefined, undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt));
     await saveTelegramConversation(ctx, userId, historyLabel, result.text, receivedAt);
     if (result.cost) await addUsage(userId, result.cost);
     await editMarkdown(ctx, status.message_id, result.text);
@@ -2397,7 +2412,7 @@ export function registerHandlers(bot: Bot): void {
             await editHtml(ctx, statusMsg.message_id, mdToTelegramHtml(streamedText));
           }
         },
-        undefined, undefined, telegramAgentOptions(ctx, receivedAt)
+        undefined, telegramAgentChannelContext(ctx, userId), telegramAgentOptions(ctx, receivedAt)
       );
       clearInterval(typingInterval);
 
