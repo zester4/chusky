@@ -235,6 +235,14 @@ test("computer-use actions start the desktop and return screenshots or structure
   assert.equal(screenshot.mediaType, "image/jpeg");
 });
 
+test("computer-use accessibility output redacts credential-shaped fields and values", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820006) as any;
+  sandbox.computerUse.accessibility.getTree = async () => ({ password: "secret", inputValue: "user@example.com", visibleText: "Call +1 (555) 123-4567" });
+  const tree = await e.computer(820006, { action: "accessibility_tree" }) as any;
+  assert.deepEqual(tree, { password: "[redacted]", inputValue: "[redacted]", visibleText: "Call [redacted phone]" });
+});
+
 test("computer process diagnostics use Daytona desktop names and a bare status defaults to noVNC", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820061) as any;

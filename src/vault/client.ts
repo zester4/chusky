@@ -3,7 +3,7 @@ import { config } from "../config.js";
 
 export type VaultSetupRequest = { service: string; origin: string; loginUrl?: string; logoutUrl?: string; usernameFieldLabel?: string; passwordFieldLabel?: string; submitButtonLabel?: string };
 export type VaultSession = { id: string; service: string; origin: string; workspaceId: string; status: "authenticated" | "unknown" | "expired" | "logged_out" | "needs_reauth" | "awaiting_user_interaction"; lastAuthenticatedAt?: number; lastUsedAt?: number; expiresAt?: number };
-export type VaultCredentialMetadata = { id: string; service: string; origin: string; loginUrl: string; session?: VaultSession };
+export type VaultCredentialMetadata = { id: string; service: string; origin: string; loginUrl: string; logoutUrl?: string; session?: VaultSession };
 export type VaultLease = { credential: { id: string; service: string; origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string } };
 
 export class VaultBrokerClient {

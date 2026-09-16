@@ -6,7 +6,7 @@ import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
-import { guardVaultBrowserAction, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
+import { guardVaultBrowserAction, guardVaultWorkspaceAccess, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
@@ -138,6 +138,24 @@ function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? "");
   if (!text || text.length > max) throw new DaytonaInputError(`${label} must be 1-${max} characters`);
   return text;
+}
+
+function redactBrowserData(value: unknown): unknown {
+  return redactBrowserValue(value);
+}
+
+function redactBrowserValue(value: unknown, field = ""): unknown {
+  if (typeof value === "string") {
+    if (/(?:password|passcode|secret|token|cookie|authorization|api[-_]?key|inputValue|textValue)/i.test(field)) return "[redacted]";
+    return value
+      .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted email]")
+      .replace(/(?:\+?\d[\d .()\-]{7,}\d)/g, "[redacted phone]")
+      .replace(/\b(?:\d[ -]*?){13,19}\b/g, "[redacted number]")
+      .replace(/\b\d{3}-\d{2}-\d{4}\b/g, "[redacted number]");
+  }
+  if (Array.isArray(value)) return value.map((item) => redactBrowserValue(item, field));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, redactBrowserValue(item, key)]));
+  return value;
 }
 
 /** Daytona Computer Use exposes desktop processes, not Chrome/browser names. */
@@ -1210,6 +1228,10 @@ export class DaytonaEngine {
 
   constructor(private readonly clientFactory: typeof getDaytonaClient = getDaytonaClient) {}
 
+  async workspaceId(userId: number): Promise<string> {
+    return (await this.getOrCreateWorkspace(userId)).id;
+  }
+
   /**
    * A sandbox can outlive a deployment configuration change. In particular,
    * an older Chusky workspace may retain `networkBlockAll: true` even after
@@ -1348,6 +1370,7 @@ export class DaytonaEngine {
     }
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedCwd = cwd ? safeDaytonaPath(cwd, "cwd") : undefined;
+    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalized}\n${normalizedCwd ?? ""}`, "command");
     const normalizedTimeout = boundedInt(timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS);
     let result: { exitCode?: number; result?: string; artifacts?: { stdout?: string } };
     try {
@@ -1375,7 +1398,9 @@ export class DaytonaEngine {
 
   async listFiles(userId: number, path?: string, depth?: number): Promise<DaytonaFileInfo[]> {
     const sandbox = await this.getOrCreateWorkspace(userId);
-    const files = await sandbox.fs.listFiles(path ? safeDaytonaPath(path) : ".", { depth: boundedInt(depth, 1, 5) });
+    const normalizedPath = path ? safeDaytonaPath(path) : ".";
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath);
+    const files = await sandbox.fs.listFiles(normalizedPath, { depth: boundedInt(depth, 1, 5) });
     return (files as FileInfo[]).map((file) => ({
       name: file.name,
       path: file.path ?? file.name,
@@ -1388,6 +1413,7 @@ export class DaytonaEngine {
   async readFile(userId: number, path: string, maxChars?: number): Promise<{ path: string; content: string; truncated: boolean }> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = safeDaytonaPath(path);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     const bytes = await sandbox.fs.downloadFile(normalizedPath);
     const binaryKind = isBinaryFile(normalizedPath, bytes);
     if (binaryKind) throw new DaytonaInputError(`${normalizedPath} is a ${binaryKind} file and cannot be read as text. Register it with CHUCK_ARTIFACT or inspect it with the Daytona computer tool.`);
@@ -1401,6 +1427,7 @@ export class DaytonaEngine {
     const normalizedContent = String(content ?? "");
     if (normalizedContent.length > DAYTONA_MAX_FILE_CONTENT) throw new DaytonaInputError(`content must be at most ${DAYTONA_MAX_FILE_CONTENT} characters`);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.uploadFile(Buffer.from(normalizedContent, "utf8"), normalizedPath);
     return { path: normalizedPath, bytes: Buffer.byteLength(normalizedContent, "utf8") };
   }
@@ -1410,6 +1437,7 @@ export class DaytonaEngine {
     if (!Buffer.isBuffer(content) || content.length < 1) throw new DaytonaInputError("binary content must not be empty");
     if (content.length > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`binary content must be at most ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.uploadFile(content, normalizedPath);
     return { path: normalizedPath, bytes: content.length };
   }
@@ -1418,24 +1446,31 @@ export class DaytonaEngine {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPattern = String(pattern ?? "").trim();
     if (!normalizedPattern || normalizedPattern.length > 200) throw new DaytonaInputError("pattern must be 1-200 characters");
-    return sandbox.fs.findFiles(path ? safeDaytonaPath(path) : ".", normalizedPattern);
+    const normalizedPath = path ? safeDaytonaPath(path) : ".";
+    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedPath}\n${normalizedPattern}`, "file search");
+    return sandbox.fs.findFiles(normalizedPath, normalizedPattern);
   }
 
   async searchFiles(userId: number, path: string | undefined, pattern: string): Promise<unknown> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPattern = String(pattern ?? "").trim();
     if (!normalizedPattern || normalizedPattern.length > 200) throw new DaytonaInputError("pattern must be 1-200 characters");
-    return sandbox.fs.searchFiles(path ? safeDaytonaPath(path) : ".", normalizedPattern);
+    const normalizedPath = path ? safeDaytonaPath(path) : ".";
+    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedPath}\n${normalizedPattern}`, "file search");
+    return sandbox.fs.searchFiles(normalizedPath, normalizedPattern);
   }
 
   async fileDetails(userId: number, path: string): Promise<unknown> {
     const sandbox = await this.getOrCreateWorkspace(userId);
-    return sandbox.fs.getFileDetails(safeDaytonaPath(path));
+    const normalizedPath = safeDaytonaPath(path);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
+    return sandbox.fs.getFileDetails(normalizedPath);
   }
 
   async createFolder(userId: number, path: string): Promise<{ path: string; created: boolean }> {
     const normalizedPath = safeDaytonaPath(path);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "folder path");
     await sandbox.fs.createFolder(normalizedPath, "755");
     return { path: normalizedPath, created: true };
   }
@@ -1444,6 +1479,7 @@ export class DaytonaEngine {
     const normalizedSource = safeDaytonaPath(source, "source");
     const normalizedDestination = safeDaytonaPath(destination, "destination");
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalizedSource}\n${normalizedDestination}`, "file move");
     await sandbox.fs.moveFiles(normalizedSource, normalizedDestination);
     return { source: normalizedSource, destination: normalizedDestination, moved: true };
   }
@@ -1451,6 +1487,7 @@ export class DaytonaEngine {
   async deleteFile(userId: number, path: string, recursive = false): Promise<{ path: string; deleted: boolean }> {
     const normalizedPath = safeDaytonaPath(path);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.deleteFile(normalizedPath, recursive);
     return { path: normalizedPath, deleted: true };
   }
@@ -1685,13 +1722,19 @@ export class DaytonaEngine {
     return { sandboxId: sandbox.id, name: normalizedName, created: true };
   }
 
-  async computer(userId: number, args: Record<string, unknown>): Promise<unknown> {
+  async computer(userId: number, args: Record<string, unknown>, internal: { trustedVaultFlow?: boolean } = {}): Promise<unknown> {
     const action = boundedText(args.action, "action", 40);
     const sandbox = await this.getOrCreateWorkspace(userId);
+    if (!internal.trustedVaultFlow) {
+      const stored = await getDaytonaWorkspace(userId);
+      const guardAction = action === "mouse_click" ? "click" : action === "keyboard_type" ? "type" : action === "keyboard_press" ? "press" : action === "accessibility_invoke" ? "accessibility_invoke" : action === "accessibility_set_value" ? "accessibility_set_value" : action;
+      await guardVaultBrowserAction(userId, sandbox.id, { ...args, action: guardAction, currentUrl: stored?.browser?.lastUrl });
+    }
     const computer = sandbox.computerUse;
     if (action === "status") return computer.getStatus();
     if (action === "stop") return computer.stop();
     if (action === "process_status") return computer.getProcessStatus(computerProcessName(args.processName, "novnc"));
+    if (action === "process_logs" || action === "process_errors") await guardVaultWorkspaceAccess(userId, sandbox.id, action, "desktop diagnostics");
     if (action === "recording_list") return computer.recording.list();
     if (action === "recording_get") return computer.recording.get(boundedText(args.recordingId, "recordingId", 200));
     if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
@@ -1749,11 +1792,13 @@ export class DaytonaEngine {
       case "keyboard_type": await computer.keyboard.type(boundedText(args.text, "text", 4000), Math.min(Math.max(Math.floor(Number(args.delayMs ?? 0)), 0), 1000)); return { typed: true };
       case "keyboard_press": await computer.keyboard.press(boundedText(args.key, "key", 40), Array.isArray(args.modifiers) ? args.modifiers.map((m) => boundedText(m, "modifier", 20)) : []); return { pressed: true };
       case "keyboard_hotkey": await computer.keyboard.hotkey(boundedText(args.keys, "keys", 100)); return { pressed: true };
-      case "accessibility_tree": return computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) });
+      case "accessibility_tree": return redactBrowserData(await computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) }));
       case "accessibility_find": {
         const nameMatch = args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined;
         if (nameMatch && !["exact", "substring", "regex"].includes(nameMatch)) throw new DaytonaInputError("nameMatch must be exact, substring, or regex");
-        return computer.accessibility.findNodes({ scope: "all", role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) });
+        const result = await computer.accessibility.findNodes({ scope: "all", role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) });
+        await rememberVaultBrowserNodes(userId, sandbox.id, result, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
+        return redactBrowserData(result);
       }
       case "accessibility_focus": await computer.accessibility.focusNode(boundedText(args.nodeId, "nodeId", 200)); return { focused: true };
       case "accessibility_invoke": await computer.accessibility.invokeNode(boundedText(args.nodeId, "nodeId", 200), args.nodeAction ? boundedText(args.nodeAction, "nodeAction", 80) : undefined); return { invoked: true };
@@ -1784,6 +1829,7 @@ export class DaytonaEngine {
     if (action === "create") {
       const id = requestedId ?? `chusky-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       if (known.has(id)) throw new DaytonaInputError("A PTY session with that id already exists");
+      await guardVaultWorkspaceAccess(userId, sandbox.id, `${args.cwd ?? ""}\n${args.input ?? ""}`, "terminal input");
       const output = collectPtyOutput();
       const handle = await sandbox.process.createPty({ id, cwd: args.cwd ? safeDaytonaPath(args.cwd, "cwd") : undefined, cols: boundedNumber(args.cols, 120, 300), rows: boundedNumber(args.rows, 30, 200), onData: output.onData });
       await handle.waitForConnection();
@@ -1804,6 +1850,7 @@ export class DaytonaEngine {
     }
     if (action !== "read" && action !== "write") throw new DaytonaInputError(`Unsupported PTY action: ${action}`);
     const output = collectPtyOutput();
+    await guardVaultWorkspaceAccess(userId, sandbox.id, args.action === "write" ? args.input : id, "terminal input");
     const handle = await sandbox.process.connectPty(id, { onData: output.onData });
     try {
       await handle.waitForConnection();
@@ -1849,11 +1896,12 @@ export class DaytonaEngine {
   async browser(userId: number, args: Record<string, unknown>): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const sandbox = await this.getOrCreateWorkspace(userId);
-    await guardVaultBrowserAction(userId, sandbox.id, args);
-    if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args);
+    const stored = await getDaytonaWorkspace(userId);
+    await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl });
+    if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args, { trustedVaultFlow: true });
     if (action === "status") {
       const stored = await getDaytonaWorkspace(userId);
-      return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, computer: await this.computer(userId, { action: "status" }), windows: await this.computer(userId, { action: "windows" }) };
+      return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, computer: await this.computer(userId, { action: "status" }, { trustedVaultFlow: true }), windows: await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true }) };
     }
     if (action === "open") {
       const url = boundedText(args.url, "url", 2000);
@@ -1861,33 +1909,33 @@ export class DaytonaEngine {
       try { parsed = new URL(url); } catch { throw new DaytonaInputError("Browser URL must be a valid http(s) URL"); }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new DaytonaInputError("Browser URL must use http:// or https://");
       if (parsed.username || parsed.password) throw new DaytonaInputError("Browser URLs cannot contain embedded credentials");
-      await this.computer(userId, { action: "keyboard_hotkey", keys: "CTRL+L" });
-      await this.computer(userId, { action: "keyboard_type", text: url });
-      await this.computer(userId, { action: "keyboard_press", key: "ENTER" });
+      await this.computer(userId, { action: "keyboard_hotkey", keys: "CTRL+L" }, { trustedVaultFlow: true });
+      await this.computer(userId, { action: "keyboard_type", text: url }, { trustedVaultFlow: true });
+      await this.computer(userId, { action: "keyboard_press", key: "ENTER" }, { trustedVaultFlow: true });
       const current = await getDaytonaWorkspace(userId);
       if (current) await saveDaytonaWorkspace(userId, { ...current, browser: { lastUrl: parsed.toString(), updatedAt: Date.now() }, updatedAt: Date.now() });
       return { sandboxId: sandbox.id, opened: url };
     }
     if (action === "snapshot") {
-      return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }) };
+      return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }, { trustedVaultFlow: true }) };
     }
     if (action === "find") {
-      const matches = await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) });
-      await rememberVaultBrowserNodes(userId, sandbox.id, matches);
+      const matches = await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) }, { trustedVaultFlow: true });
+      await rememberVaultBrowserNodes(userId, sandbox.id, matches, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
       return { sandboxId: sandbox.id, matches };
     }
-    if (action === "focus") return this.computer(userId, { action: "accessibility_focus", nodeId: args.nodeId });
-    if (action === "invoke") return this.computer(userId, { action: "accessibility_invoke", nodeId: args.nodeId, nodeAction: args.nodeAction });
-    if (action === "fill") return this.computer(userId, { action: "accessibility_set_value", nodeId: args.nodeId, value: args.value ?? args.text });
-    if (action === "windows") return this.computer(userId, { action: "windows" });
-    if (action === "screenshot") return this.computer(userId, { action: "screenshot", showCursor: false });
-    if (action === "click") return this.computer(userId, { action: "mouse_click", x: args.x, y: args.y, button: "left" });
-    if (action === "type") return this.computer(userId, { action: "keyboard_type", text: args.text, delayMs: 0 });
-    if (action === "press") return this.computer(userId, { action: "keyboard_press", key: args.key, modifiers: Array.isArray(args.modifiers) ? args.modifiers : [] });
-    if (action === "scroll") return this.computer(userId, { action: "mouse_scroll", x: args.x ?? 500, y: args.y ?? 400, direction: args.direction, amount: args.amount ?? 3 });
+    if (action === "focus") return this.computer(userId, { action: "accessibility_focus", nodeId: args.nodeId }, { trustedVaultFlow: true });
+    if (action === "invoke") return this.computer(userId, { action: "accessibility_invoke", nodeId: args.nodeId, nodeAction: args.nodeAction }, { trustedVaultFlow: true });
+    if (action === "fill") return this.computer(userId, { action: "accessibility_set_value", nodeId: args.nodeId, value: args.value ?? args.text }, { trustedVaultFlow: true });
+    if (action === "windows") return this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+    if (action === "screenshot") return this.computer(userId, { action: "screenshot", showCursor: false }, { trustedVaultFlow: true });
+    if (action === "click") return this.computer(userId, { action: "mouse_click", x: args.x, y: args.y, button: "left" }, { trustedVaultFlow: true });
+    if (action === "type") return this.computer(userId, { action: "keyboard_type", text: args.text, delayMs: 0 }, { trustedVaultFlow: true });
+    if (action === "press") return this.computer(userId, { action: "keyboard_press", key: args.key, modifiers: Array.isArray(args.modifiers) ? args.modifiers : [] }, { trustedVaultFlow: true });
+    if (action === "scroll") return this.computer(userId, { action: "mouse_scroll", x: args.x ?? 500, y: args.y ?? 400, direction: args.direction, amount: args.amount ?? 3 }, { trustedVaultFlow: true });
     if (action === "back" || action === "forward" || action === "refresh") {
       const key = action === "back" ? "ALT+LEFT" : action === "forward" ? "ALT+RIGHT" : "CTRL+R";
-      return this.computer(userId, { action: "keyboard_hotkey", keys: key });
+      return this.computer(userId, { action: "keyboard_hotkey", keys: key }, { trustedVaultFlow: true });
     }
     throw new DaytonaInputError(`Unsupported browser action: ${action}`);
   }
@@ -1904,7 +1952,7 @@ export class DaytonaEngine {
     const node = async (role: string, configuredName: string, fallbacks: string[]): Promise<string | undefined> => {
       const candidates = [...new Set([configuredName, ...fallbacks].map((value) => value.trim()).filter(Boolean))];
       for (const name of candidates) {
-        const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }) as any;
+        const result = await this.computer(userId, { action: "accessibility_find", role, name, nameMatch: "exact", limit: 2 }, { trustedVaultFlow: true }) as any;
         const matches = Array.isArray(result) ? result : Array.isArray(result?.matches) ? result.matches : [];
         if (matches.length !== 1) continue;
         const id = matches[0]?.nodeId ?? matches[0]?.id;
@@ -1922,15 +1970,18 @@ export class DaytonaEngine {
     if (!usernameNode || !passwordNode || !submitNode) {
       return { workspaceId: sandbox.id, authenticated: false, needsUserInteraction: true };
     }
-    await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username });
-    await this.computer(userId, { action: "accessibility_set_value", nodeId: passwordNode, value: input.password });
-    await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode });
+    await this.computer(userId, { action: "accessibility_set_value", nodeId: usernameNode, value: input.username }, { trustedVaultFlow: true });
+    await this.computer(userId, { action: "accessibility_set_value", nodeId: passwordNode, value: input.password }, { trustedVaultFlow: true });
+    await this.computer(userId, { action: "accessibility_invoke", nodeId: submitNode }, { trustedVaultFlow: true });
     // Never claim success merely because the form was submitted. A site that
     // still exposes its password field is treated as requiring re-auth.
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    const after = await this.computer(userId, { action: "accessibility_find", role: "textbox", name: input.passwordFieldLabel, nameMatch: "exact", limit: 1 }) as any;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const after = await this.computer(userId, { action: "accessibility_find", role: "textbox", name: input.passwordFieldLabel, nameMatch: "exact", limit: 1 }, { trustedVaultFlow: true }) as any;
     const remaining = Array.isArray(after) ? after : Array.isArray(after?.matches) ? after.matches : [];
-    return { workspaceId: sandbox.id, authenticated: remaining.length === 0 };
+    const page = await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 8 }, { trustedVaultFlow: true });
+    const failureText = JSON.stringify(page).toLowerCase();
+    const loginFailed = /(incorrect|invalid|wrong|unable to sign|could not sign|try again|failed to log)/.test(failureText);
+    return { workspaceId: sandbox.id, authenticated: remaining.length === 0 && !loginFailed, ...(loginFailed ? { needsUserInteraction: true } : {}) };
   }
 
   private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<void> {

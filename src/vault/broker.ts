@@ -1,10 +1,11 @@
 import { leaseVaultCredential, recordVaultSession } from "./vault.js";
 
-export type TrustedBrowserLogin = { login(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> };
+export type TrustedBrowserLogin = { workspaceId?: (userId: number) => Promise<string>; login(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> };
 
 /** The only secret-bearing operation in Railway. Its return value is always secret-free. */
 export async function loginWithVault(userId: number, service: string, browser: TrustedBrowserLogin) {
-  const credential = await leaseVaultCredential(userId, service, "pending");
+  const workspaceId = browser.workspaceId ? await browser.workspaceId(userId) : "pending";
+  const credential = await leaseVaultCredential(userId, service, workspaceId);
   const secret = { username: credential.username, password: credential.password };
   try {
     const result = await browser.login(userId, { ...credential, ...secret });

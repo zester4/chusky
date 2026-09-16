@@ -1,10 +1,10 @@
-export type VaultAction = "login" | "browse" | "search" | "add_to_cart" | "add_to_wishlist" | "checkout" | "place_order" | "purchase" | "change_address" | "add_payment_method" | "change_password" | "change_email" | "delete_account";
+export type VaultAction = "login" | "browse" | "search" | "add_to_cart" | "add_to_wishlist" | "checkout" | "place_order" | "purchase" | "change_address" | "add_payment_method" | "change_password" | "change_email" | "delete_account" | "unknown";
 export type VaultActionDecision = "auto" | "approval_required" | "blocked";
 
 const POLICY: Record<VaultAction, VaultActionDecision> = {
   login: "auto", browse: "auto", search: "auto", add_to_cart: "auto", add_to_wishlist: "auto",
   checkout: "approval_required", place_order: "approval_required", purchase: "approval_required", change_address: "approval_required", add_payment_method: "approval_required",
-  change_password: "blocked", change_email: "blocked", delete_account: "blocked",
+  change_password: "blocked", change_email: "blocked", delete_account: "blocked", unknown: "approval_required",
 };
 
 export function vaultActionPolicy(action: VaultAction): VaultActionDecision { return POLICY[action]; }

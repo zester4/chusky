@@ -50,6 +50,7 @@ test("vault action policy keeps browsing/cart autonomous but interlocks payment 
   assert.equal(classifyBrowserTarget("Add to cart"), "add_to_cart");
   assert.equal(classifyBrowserTarget("Proceed to checkout"), "place_order");
   assert.equal(classifyBrowserTarget("Delete my account"), "delete_account");
+  assert.equal(vaultActionPolicy("unknown"), "approval_required");
 });
 
 test("vault audit records retain identifiers and keys only, never raw values", () => {

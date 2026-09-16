@@ -53,7 +53,7 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   if (slug === "CHUCK_DAYTONA_BROWSER") {
-    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method"].includes(String(args.vaultAction ?? ""))) return "approval_required";
+    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method", "unknown"].includes(String(args.vaultAction ?? ""))) return "approval_required";
     return "private";
   }
   if (slug === "CHUCK_DAYTONA_GIT") {
