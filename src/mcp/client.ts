@@ -70,6 +70,15 @@ export interface McpToolRef {
 
 type RegistryResult = { servers: McpServerDefinition[]; errors: string[] };
 
+/**
+ * Built-in catalog entries are available to any account that explicitly
+ * connects them. The ownerIds field is only meaningful for the legacy
+ * environment-variable registry, where entries are server-side allowlists.
+ */
+export function isMcpServerAllowedForUser(server: Pick<McpServerDefinition, "ownerIds">, userId: number, legacyRegistry: boolean): boolean {
+  return !legacyRegistry || server.ownerIds.includes(userId);
+}
+
 function safeString(value: unknown, max: number): string {
   return typeof value === "string" ? value.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, max) : "";
 }
@@ -288,7 +297,7 @@ export class McpClientManager {
 
   private async definition(userId: number, serverId: string): Promise<{ server: McpServerDefinition; credential?: McpCredential }> {
     if (!config.mcpEnabled) throw new Error("Third-party MCP is disabled");
-    const server = this.registry.servers.find((candidate) => candidate.id === serverId && candidate.enabled && (this.legacyRegistry || candidate.ownerIds.includes(userId)));
+    const server = this.registry.servers.find((candidate) => candidate.id === serverId && candidate.enabled && isMcpServerAllowedForUser(candidate, userId, this.legacyRegistry));
     if (!server) throw new Error("MCP server is not in the Chusky catalog");
     if (this.legacyRegistry) return { server, credential: undefined };
     const connection = (await getSession(userId)).mcpConnections!.find((item) => item.serverId === serverId && item.enabled);

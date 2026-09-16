@@ -43,7 +43,7 @@ import {
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
-import { lookupMeetingBusinessKnowledge, lookupMeetingMission, prepareMeetingMission } from "./mission.js";
+import { hasMeetingMissionInput, lookupMeetingBusinessKnowledge, lookupMeetingMission, prepareMeetingMission } from "./mission.js";
 import { openCalendarMeetingUrl } from "./calendar.js";
 import { planCalendarAutoJoin } from "./calendarAutomation.js";
 import { openRecallVisualFrame, sealRecallVisualFrame } from "./visualFrames.js";
@@ -372,7 +372,7 @@ export async function joinRecallMeeting(userId: number, input: {
   }
   const joinAt = validateRecallJoinAt(input.joinAt);
   const representativeProfile = await getMeetingRepresentativeProfile(userId);
-  const hasMissionInput = input.clientName !== undefined || input.objective !== undefined || input.clientContext !== undefined;
+  const hasMissionInput = hasMeetingMissionInput(input);
   // A client brief is an explicit request for the representative workflow.
   // Models can otherwise carry over a prior copilot selection and create a
   // contradictory tool call. The profile-enabled check below still prevents
@@ -393,7 +393,7 @@ export async function joinRecallMeeting(userId: number, input: {
   if (inheritedMission && !inheritedMission.mission) throw new Error("The source meeting has no client context to carry forward");
   if (hasMissionInput && inheritedMission) throw new Error("A follow-up meeting cannot replace its inherited client context");
   if ((hasMissionInput || inheritedMission?.mission) && interactionMode !== "representative") throw new Error("Client meeting context requires representative mode");
-  if (hasMissionInput && input.clientName === undefined) throw new Error("clientName is required when adding client meeting context");
+  if (hasMissionInput && (typeof input.clientName !== "string" || !input.clientName.trim())) throw new Error("clientName is required when adding client meeting context");
   const mission = inheritedMission?.mission ?? (hasMissionInput
     ? prepareMeetingMission({ clientName: input.clientName, objective: input.objective, clientContext: input.clientContext }, (await getSession(userId)).memories)
     : undefined);

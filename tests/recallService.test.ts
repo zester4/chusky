@@ -108,6 +108,19 @@ test("meeting joins default to proactive copilot or the enabled representative p
   await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
 });
 
+test("empty optional client fields do not break an ordinary meeting join", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_empty_client_fields" }), { status: 201 });
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
+  const meeting = await joinRecallMeeting(ownerId, {
+    meetingUrl: "https://meet.google.com/empty-client-fields-room",
+    clientName: "",
+    objective: "",
+    clientContext: "",
+  });
+  assert.equal(meeting.interactionMode, "copilot");
+  assert.equal("mission" in meeting, false);
+});
+
 test("confirmed client context selects representative mode despite a stale copilot selection", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_client_context" }), { status: 201 });
   await updateMeetingRepresentativeProfile(ownerId, {

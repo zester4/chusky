@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { namespaceMcpTool, normalizeMcpResult, parseMcpRegistry, toOpenAITool, validateMcpArguments, validateMcpUrl } from "../src/mcp/client.js";
+import { isMcpServerAllowedForUser, listMcpCatalog, namespaceMcpTool, normalizeMcpResult, parseMcpRegistry, toOpenAITool, validateMcpArguments, validateMcpUrl } from "../src/mcp/client.js";
+
+test("built-in MCP catalog servers are available after account connection", () => {
+  const catalog = listMcpCatalog();
+  assert.ok(catalog.servers.some((server) => server.id === "context7"));
+  const placeholderOwner = { ownerIds: [1] };
+  assert.equal(isMcpServerAllowedForUser(placeholderOwner, 7906015891, false), true);
+  assert.equal(isMcpServerAllowedForUser(placeholderOwner, 7906015891, true), false);
+});
 
 test("MCP registry is owner scoped and rejects unsafe URLs", () => {
   const parsed = parseMcpRegistry(JSON.stringify([{ id: "linear", name: "Linear", url: "https://mcp.example.com/mcp", ownerIds: [42], auth: { type: "bearer", tokenEnv: "MCP_LINEAR_TOKEN" } }]), true);

@@ -24,6 +24,12 @@ function clean(value: unknown, maximum: number, field: string, required = false)
   return text;
 }
 
+/** Empty optional tool fields must not accidentally activate client mission mode. */
+export function hasMeetingMissionInput(input: { clientName?: unknown; objective?: unknown; clientContext?: unknown }): boolean {
+  return [input.clientName, input.objective, input.clientContext].some((value) =>
+    value !== undefined && value !== null && (typeof value !== "string" || value.trim().length > 0));
+}
+
 function tokenScore(memory: MemoryFact, query: string): number {
   const haystack = `${memory.key} ${memory.value} ${memory.personKey ?? ""} ${memory.projectId ?? ""}`.toLowerCase();
   return [...new Set(query.toLowerCase().split(/\s+/).filter((token) => token.length > 1))]

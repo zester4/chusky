@@ -31,6 +31,7 @@ import { beginVaultSetup, listVault, logoutVault, vaultStatus } from "./vault/va
 import { loginWithVault } from "./vault/broker.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
+import { hasMeetingMissionInput } from "./meetings/mission.js";
 import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 
 const MAX_TEXT = 1000;
@@ -521,7 +522,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw new Error("Searchable meeting transcript retention can be enabled only from a private owner conversation");
       }
       const profile = await getMeetingRepresentativeProfile(userId);
-      const hasClientMission = args.clientName !== undefined || args.objective !== undefined || args.clientContext !== undefined;
+      const hasClientMission = hasMeetingMissionInput(args);
       const interactionMode = hasClientMission ? "representative" : args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
         const transcriptRetentionDays = ownerExplicitlyRequestedTranscriptRetention(runtime.userRequest ?? "")
           ? args.transcriptRetentionDays

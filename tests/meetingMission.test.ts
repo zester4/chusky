@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { lookupMeetingBusinessKnowledge, lookupMeetingMission, meetingMissionInstructions, prepareMeetingMission } from "../src/meetings/mission.js";
+import { hasMeetingMissionInput, lookupMeetingBusinessKnowledge, lookupMeetingMission, meetingMissionInstructions, prepareMeetingMission } from "../src/meetings/mission.js";
 import type { MemoryFact } from "../src/store.js";
 
 const memories: MemoryFact[] = [
@@ -8,6 +8,12 @@ const memories: MemoryFact[] = [
   { id: "mem_acme_sensitive", category: "business", key: "Acme internal margin", value: "Do not disclose this margin.", confidence: 1, source: "owner", sensitivity: "sensitive", personKey: "acme", createdAt: 1, updatedAt: 11 },
   { id: "mem_other", category: "business", key: "Other client", value: "A separate customer has a different offer.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "other", createdAt: 1, updatedAt: 12 },
 ];
+
+test("empty optional client fields do not activate meeting mission mode", () => {
+  assert.equal(hasMeetingMissionInput({ clientName: "", objective: "", clientContext: "" }), false);
+  assert.equal(hasMeetingMissionInput({ clientName: "Acme" }), true);
+  assert.equal(hasMeetingMissionInput({ objective: "Close the deal" }), true);
+});
 
 test("meeting mission compiles only relevant normal-sensitivity relationship facts", () => {
   const mission = prepareMeetingMission({ clientName: "Acme", objective: "Close the onboarding package" }, memories, 100);
