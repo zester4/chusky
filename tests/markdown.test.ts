@@ -39,6 +39,25 @@ test("leaves ordinary Markdown on the existing formatter path", () => {
   assert.equal(markdownToTelegramRichHtml("not a table | just text").hasTable, false);
 });
 
+test("falls back without splitting multiline bullets around a table", () => {
+  const markdown = "| Area | Notes |\n| --- | --- |\n| Sales | - first\n- second |";
+  const result = markdownToTelegramRichHtml(markdown);
+  assert.equal(result.hasTable, false);
+  assert.equal(result.safe, false);
+  assert.equal(result.html, mdToTelegramHtml(markdown));
+  assert.match(result.html, /• second \|/);
+});
+
+test("keeps ordinary bullets intact when a valid table is separated from them", () => {
+  const markdown = "- before\n\n| Product | Price |\n| --- | --- |\n| Phone | $899 |\n\n- after";
+  const result = markdownToTelegramRichHtml(markdown);
+  assert.equal(result.hasTable, true);
+  assert.equal(result.safe, true);
+  assert.match(result.html, /• before/);
+  assert.match(result.html, /<table bordered striped>/);
+  assert.match(result.html, /• after/);
+});
+
 test("voice text removes Markdown syntax before speech", () => {
   const text = normalizeVoiceText("**Chusky** can help.\n\n# Next steps\n* one\n[Open](https://example.com)");
   assert.equal(text, "Chusky can help.\nNext steps\none\nOpen");
