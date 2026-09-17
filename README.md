@@ -383,8 +383,13 @@ default) for Elena, the workflow governor. Each run reviews bounded state, appli
 active standing-order authority, preserves normal approvals for risky actions, suppresses
 quiet/silent or daily-limit deliveries, and deduplicates unchanged digests. Ask Chusky:
 “Enable my proactive attention pulse,” “Disable my attention pulse,” or “What is my pulse
-status?” A custom CRON expression can be supplied when enabling it. Redis and QStash are
-required in production.
+status?” A custom CRON expression can be supplied when enabling it. Enabling creates a
+default private Telegram delivery preference only when one does not already exist; existing
+quiet-hour, silent, or disabled preferences are preserved. Daily limits count delivered pulse
+digests on the pulse job itself, and an open loop is not closed merely because it was mentioned
+in a digest—Elena must complete or explicitly snooze/update the loop. Pulse runs use a narrower
+task, reminder, and attention-state tool surface than ordinary Elena work; connected-app
+actions require an explicit capability expansion. Redis and QStash are required in production.
 
 ### Event-driven Composio triggers
 

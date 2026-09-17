@@ -12,7 +12,7 @@ import {
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  type AttentionEntityKind,
+  type AttentionEntityKind, type DeliveryPreferenceRecord,
   type TaskStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -312,12 +312,28 @@ function requireQStash(): string {
 
 const ATTENTION_PULSE_JOB_ID = (userId: number) => `pulse_${userId}`;
 const ATTENTION_PULSE_SCHEDULE_ID = (userId: number) => `chuck-attention-pulse-${userId}`;
+const ATTENTION_PULSE_TOOLS = [
+  "CHUCK_TASK_LIST",
+  "CHUCK_TASK_GET",
+  "CHUCK_TASK_CHECKPOINT",
+  "CHUCK_TASK_BLOCK",
+  "CHUCK_TASK_COMPLETE",
+  "CHUCK_SET_REMINDER",
+  "CHUCK_LIST_REMINDERS",
+  "CHUCK_CANCEL_REMINDER",
+  "CHUCK_ATTENTION_STATE",
+  "CHUCK_LIST_JOBS",
+  "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+];
 const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
   worker: "elena",
   objective: "Review the owner's attention state and act within standing-order authority.",
   expectedOutput: "A concise owner-facing attention digest, or NO_ACTION when nothing needs delivery.",
   model: config.defaultModel,
-  allowedTools: WORKER_CAPABILITIES.elena.allowedTools,
+  // Pulse runs are deliberately narrower than ordinary Elena work. They can
+  // inspect and update attention/task/reminder state, but cannot directly use
+  // connected-app actions without an explicit capability expansion.
+  allowedTools: ATTENTION_PULSE_TOOLS,
   allowedComposioTools: [],
   approvalPolicy: "require_chusky_approval",
   timeoutSeconds: 90,
@@ -326,9 +342,25 @@ const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
   budgetSeconds: 1800,
 };
 
+async function ensureAttentionPulseDeliveryPreference(userId: number, runtime: NativeToolRuntime): Promise<void> {
+  const conversationId = runtime.deliveryTarget?.provider === "telegram"
+    ? runtime.deliveryTarget.conversationId
+    : String(userId);
+  const preferences = await listAttentionRecords(userId, "delivery_preference", { limit: 50 }) as DeliveryPreferenceRecord[];
+  const existing = preferences.find((item) => item.provider === "telegram" && (!item.conversationId || item.conversationId === conversationId));
+  if (existing) return;
+  await createAttentionRecord(userId, "delivery_preference", {
+    provider: "telegram",
+    conversationId,
+    enabled: true,
+    mode: "immediate",
+  });
+}
+
 export async function configureAttentionPulse(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const action = String(args.action ?? "");
   if (!["enable", "disable", "status"].includes(action)) throw new Error("Attention pulse action must be enable, disable, or status");
+  if (runtime.sharedConversation && action === "enable") throw new Error("Attention pulse must be enabled from your private Chusky chat");
   const active = (await listJobs(userId)).filter((job) => job.kind === "attention_pulse");
   if (action === "status") return { enabled: active.length > 0, jobs: active };
   if (action === "disable") {
@@ -337,7 +369,9 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   }
   const existing = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
   if (existing) return existing;
+  const qstashToken = requireQStash();
   const cron = validateCronExpression(args.cron ? text(args.cron) : "0 * * * *");
+  await ensureAttentionPulseDeliveryPreference(userId, runtime);
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
   const job: JobRecord = {
     id: ATTENTION_PULSE_JOB_ID(userId), userId,
@@ -346,7 +380,7 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
     workerBinding: ATTENTION_PULSE_BINDING,
     ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now(),
   };
-  const client = new QStashClient({ token: requireQStash() });
+  const client = new QStashClient({ token: qstashToken });
   await addJob(userId, job);
   try {
     await client.schedules.create({

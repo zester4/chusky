@@ -35,7 +35,7 @@ import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { voiceProfileNativeTools } from "./calls/voiceProfile.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
-import { attentionPulseDeliveryDecision, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered } from "./attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
@@ -1736,10 +1736,9 @@ async function main(): Promise<void> {
           if (!binding) return { text: job.text };
           if (job.kind === "attention_pulse") {
             const preferences = await listAttentionRecords(payload.userId, "delivery_preference", { limit: 20 });
-            const candidates = await listAttentionRecords(payload.userId, "attention_candidate", { limit: 200 }) as AttentionCandidateRecord[];
-            const dayStart = new Date(); dayStart.setUTCHours(0, 0, 0, 0);
-            const deliveredToday = candidates.filter((item) => item.status === "delivered" && item.updatedAt >= dayStart.getTime()).length;
-            const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], Date.now(), deliveredToday);
+            const now = Date.now();
+            const deliveredToday = attentionPulseDeliveredToday(job.attentionPulse, now);
+            const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday);
             if (delivery.suppressed) return { text: "", suppressDelivery: true };
             const plan = await buildAttentionPulsePlan(payload.userId);
             if (!plan.hasWork) return { text: "", suppressDelivery: true };
@@ -1768,7 +1767,12 @@ async function main(): Promise<void> {
             const noAction = isNoActionPulseOutput(result.output);
             if (!noAction) {
               await markAttentionPulseDelivered(payload.userId, plan.candidateIds);
-              await updateJob(payload.userId, job.id, { attentionPulse: { ...job.attentionPulse, lastDigestKey: plan.dedupeKey, lastDeliveredAt: Date.now() } });
+              await updateJob(payload.userId, job.id, {
+                attentionPulse: {
+                  ...recordAttentionPulseDelivery(job.attentionPulse, Date.now()),
+                  lastDigestKey: plan.dedupeKey,
+                },
+              });
             }
             return { text: result.output, suppressDelivery: noAction };
           }

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attentionPulseDeliveryDecision, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput } from "../src/attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
+import { configureAttentionPulse } from "../src/nativeTools.js";
 import { createAttentionRecord, initStore, listAttentionRecords, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
 
 const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
@@ -23,10 +24,26 @@ test("attention pulse defaults to Telegram delivery and honors explicit controls
   assert.equal(attentionPulseDeliveryDecision([preference({ maxPerDay: 2 })], Date.UTC(2026, 0, 1, 12, 0), 2).reason, "daily_limit");
 });
 
+test("attention pulse counts delivered digests on the job and resets at UTC midnight", () => {
+  const first = recordAttentionPulseDelivery(undefined, Date.UTC(2026, 0, 1, 10, 0));
+  assert.equal(attentionPulseDeliveredToday(first, Date.UTC(2026, 0, 1, 11, 0)), 1);
+  const second = recordAttentionPulseDelivery(first, Date.UTC(2026, 0, 1, 12, 0));
+  assert.equal(attentionPulseDeliveredToday(second, Date.UTC(2026, 0, 1, 13, 0)), 2);
+  assert.equal(attentionPulseDeliveredToday(second, Date.UTC(2026, 0, 2, 0, 0)), 0);
+  assert.equal(attentionPulseDeliveredToday({ lastDeliveredAt: Date.UTC(2026, 0, 1, 10, 0) }, Date.UTC(2026, 0, 2, 0, 0)), 0);
+});
+
 test("attention pulse native contract and no-action sentinel are stable", () => {
   validateNativeToolArguments("CHUCK_ATTENTION_PULSE", { action: "enable" });
   assert.equal(isNoActionPulseOutput(" no_action\n"), true);
   assert.equal(isNoActionPulseOutput("There is an action"), false);
+});
+
+test("attention pulse cannot be enabled from a shared conversation", async () => {
+  await assert.rejects(
+    () => configureAttentionPulse(910006, { action: "enable" }, { sharedConversation: true }),
+    /private Chusky chat/,
+  );
 });
 
 test("attention pulse bounds context and deduplicates unchanged state", async () => {
@@ -40,6 +57,7 @@ test("attention pulse bounds context and deduplicates unchanged state", async ()
   assert.equal(first.hasWork, true);
   assert.equal(first.dedupeKey, second.dedupeKey);
   assert.equal(first.prompt.length <= 12_000, true);
+  assert.match(first.prompt, /Do not churn nextAction/);
   const record = (await listAttentionRecords(userId, "open_loop"))[0];
   if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
   const changed = await buildAttentionPulsePlan(userId);
