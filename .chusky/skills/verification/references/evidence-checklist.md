@@ -1,9 +1,10 @@
-# Evidence Checklist
+# Evidence checklist (universal)
 
-Before claiming done:
+Before saying done, answer:
 
-- [ ] Objective restated and matched
-- [ ] Primary artifact or action result inspected
-- [ ] Failures fixed and re-checked
-- [ ] Side effects (messages sent, files delivered, deploys) confirmed by tool result
-- [ ] Open risks stated if any remain
+1. What was the objective in one sentence?
+2. What evidence proves it (command output, file, API result, screenshot, message id)?
+3. What could still be wrong?
+4. Did I inspect the real artifact, not only the tool ack?
+
+If (2) is empty, it is not done.

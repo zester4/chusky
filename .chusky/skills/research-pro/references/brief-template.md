@@ -1,23 +1,9 @@
-# Research Brief Template
+# Decision-ready brief template
 
-Use this structure for final research outputs.
-
-## Bottom line
-2-4 sentences answering the decision question.
-
-## Key findings
-- Finding (source, date, confidence high/medium/low)
-
-## Facts vs inference
-- Fact: ...
-- Inference: ...
-
-## Gaps
-- What is unknown, outdated, or weakly sourced
-
-## Recommendation
-- What to do next
-- What would change this recommendation
-
-## Sources
-- Title/link — date if known
+1. **Question**
+2. **Answer** (short)
+3. **Key findings** (bullets with sources)
+4. **Evidence** (links/titles/dates)
+5. **Confidence** (high/medium/low + why)
+6. **Gaps / risks**
+7. **Recommended next action**
