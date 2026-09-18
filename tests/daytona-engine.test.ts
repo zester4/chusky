@@ -520,6 +520,27 @@ test("creates a structured PDF in Daytona before registering it", async () => {
   assert.match(visualScript, /require_renderer=True/);
 });
 
+test("makes optional PDF chrome non-fatal and emits hard smoke checks", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820029) as any;
+  let generatorScript = "";
+  sandbox.fs.uploadFile = async (contents: Buffer, path: string) => {
+    if (path.endsWith(".py")) generatorScript = Buffer.from(contents).toString("utf8");
+  };
+  sandbox.process.executeCommand = async () => ({ exitCode: 0, result: "ok" });
+  await e.createPdf(820029, {
+    title: "Long playbook",
+    sections: Array.from({ length: 8 }, (_, index) => ({ heading: `Section ${index + 1}`, body: "Substantive operational detail." })),
+    style: { logoPath: "workspace/missing-logo.png" },
+  });
+  assert.match(generatorScript, /def _noop\(canvas, document\):/);
+  assert.match(generatorScript, /on_first=draw_page if callable\(draw_page\) else _noop/);
+  assert.match(generatorScript, /PDF logo skipped/);
+  assert.doesNotMatch(generatorScript, /raise FileNotFoundError\('PDF logo does not exist/);
+  assert.match(generatorScript, /expected_min_pages=3 if len\(payload\.get\('sections'\) or \[\]\) >= 8 else 1/);
+  assert.match(generatorScript, /PDF page-count verification failed/);
+});
+
 test("treats blank optional brand fields as omitted", async () => {
   const e = engine();
   const result = await e.createPdf(820027, {
@@ -583,6 +604,34 @@ test("moves PDF generation to the isolated renderer when the workspace lacks Rep
   const result = await e.createPdf(820026, { title: "Renderer Fallback", sections: [{ body: "Generated in renderer" }] });
   assert.equal(result.generated, true);
   assert.equal(result.type, "pdf");
+  assert.equal(renderer.state, "destroyed");
+});
+
+test("surfaces isolated PDF renderer exceptions and preserves the canonical dependency path", async () => {
+  const source = fakeSandbox("source-pdf-error");
+  const renderer = fakeSandbox("renderer-pdf-error");
+  let rendererScript = "";
+  source.process.executeCommand = async (command: string) => command.includes("pdf-generator-")
+    ? { exitCode: 1, result: "ReportLab and pypdf are unavailable after install into workspace/.chusky/python-reportlab" }
+    : { exitCode: 0, result: "validated" };
+  renderer.fs.uploadFile = async (bytes: Buffer, path: string) => {
+    if (path.endsWith(".py")) rendererScript = Buffer.from(bytes).toString("utf8");
+  };
+  renderer.process.executeCommand = async () => ({ exitCode: 1, result: "Traceback\nFileNotFoundError: PDF logo does not exist" });
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async (params: any) => params.labels?.purpose === "artifact-pdf-generation" ? renderer : source,
+  } as any));
+  await assert.rejects(
+    () => e.createPdf(820030, { title: "Renderer Error", sections: [{ body: "Failure details" }] }),
+    (error: unknown) => {
+      assert.match(String(error), /PDF generation failed in isolated renderer/);
+      assert.match(String(error), /FileNotFoundError: PDF logo does not exist/);
+      return true;
+    },
+  );
+  assert.match(rendererScript, /workspace\/\.chusky\/python-reportlab/);
+  assert.doesNotMatch(rendererScript, /\/tmp\/chusky-reportlab/);
   assert.equal(renderer.state, "destroyed");
 });
 

@@ -26,6 +26,7 @@ const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;
 const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
+const REPORTLAB_DEPENDENCY_DIR = "workspace/.chusky/python-reportlab";
 const DAYTONA_MAX_EXECUTION_SECONDS = 900;
 const DAYTONA_PREVIEW_MIN_SECONDS = 60;
 const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
@@ -138,6 +139,18 @@ function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? "");
   if (!text || text.length > max) throw new DaytonaInputError(`${label} must be 1-${max} characters`);
   return text;
+}
+
+function commandOutput(result: unknown, max = 4000): string {
+  if (typeof result === "string") return result.slice(0, max);
+  if (result === null || result === undefined) return "";
+  if (typeof result !== "object") return String(result).slice(0, max);
+  const record = result as Record<string, unknown>;
+  return [record.result, record.stdout, record.stderr, record.error]
+    .filter((value) => value !== undefined && value !== null && String(value).length > 0)
+    .map((value) => String(value))
+    .join("\n")
+    .slice(0, max);
 }
 
 function redactBrowserData(value: unknown): unknown {
@@ -889,26 +902,31 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
   return [
     "import base64, importlib, json, os, re, shutil, subprocess, sys",
     `payload=json.loads(base64.b64decode(${JSON.stringify(payload)}))`,
-    "dependency_dir=os.path.abspath(os.path.join('workspace', '.chusky', 'python-reportlab'))",
+    `dependency_dir=os.path.abspath(${JSON.stringify(REPORTLAB_DEPENDENCY_DIR)})`,
     "if dependency_dir not in sys.path: sys.path.insert(0, dependency_dir)",
-    "def load_reportlab():",
+    "def load_dependencies():",
     "    try:",
     "        from reportlab.lib import colors",
-    "        return colors",
-    "    except ImportError:",
-    "        return None",
-    "colors=load_reportlab()",
+    "        from pypdf import PdfReader",
+    "        return colors, None",
+    "    except Exception as error:",
+    "        return None, error",
+    "colors, dependency_error=load_dependencies()",
+    "install_detail=''",
     "if colors is None:",
     "    os.makedirs(dependency_dir, exist_ok=True)",
     "    install_args=[sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--no-warn-script-location', '--target', dependency_dir, 'reportlab', 'pypdf']",
     "    install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
+    "    install_detail=(install.stderr or install.stdout or '').strip()[-2000:]",
     "    if install.returncode != 0 and ('No module named pip' in (install.stderr or '') or 'No module named pip' in (install.stdout or '')):",
-    "        subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'], text=True, capture_output=True, timeout=90)",
+    "        bootstrap=subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'], text=True, capture_output=True, timeout=90)",
+    "        install_detail=(bootstrap.stderr or bootstrap.stdout or install_detail).strip()[-2000:]",
     "        install=subprocess.run(install_args, text=True, capture_output=True, timeout=180)",
+    "        install_detail=(install.stderr or install.stdout or install_detail).strip()[-2000:]",
     "    importlib.invalidate_caches()",
-    "    colors=load_reportlab()",
+    "    colors, dependency_error=load_dependencies()",
     "if colors is None:",
-    "    raise RuntimeError('ReportLab is unavailable. Install reportlab and pypdf in the Daytona sandbox, then retry PDF generation.')",
+    `    raise RuntimeError('ReportLab and pypdf are unavailable after install into ${REPORTLAB_DEPENDENCY_DIR}: ' + (install_detail or repr(dependency_error)))`,
     "else:",
     "    from xml.sax.saxutils import escape",
     "    from reportlab.lib.enums import TA_LEFT, TA_CENTER",
@@ -940,16 +958,40 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "        value=re.sub(r'`([^`]+)`', r'<font name=\"' + style['monoFont'] + '\">\\1</font>', value)",
     "        return value",
     "    def para(value, paragraph_style='ChuskyBody'): return Paragraph(rich(value), styles[paragraph_style])",
+    "    def _noop(canvas, document):",
+    "        return None",
     "    def draw_page(canvas, document):",
-    "        canvas.saveState(); width,height=page_sizes[style['pageSize']]",
-    "        canvas.setStrokeColor(accent); canvas.setLineWidth(1.2); canvas.line(margin, height-margin-0.04*inch, width-margin, height-margin-0.04*inch)",
-    "        canvas.setFont(style['fontName'], 8); canvas.setFillColor(muted); header=style.get('header') or payload['title']; footer=style.get('footer') or ''; canvas.drawString(margin, height-margin+0.05*inch, str(header)[:120]); canvas.drawString(margin, 0.35*inch, str(footer)[:120]);",
-    "        logo=style.get('logoPath');",
-    "        if logo:",
-    "            if not os.path.isfile(logo): raise FileNotFoundError('PDF logo does not exist: ' + logo)",
-    "            canvas.drawImage(logo, width-margin-0.95*inch, height-margin+0.01*inch, width=0.9*inch, height=0.32*inch, preserveAspectRatio=True, anchor='ne', mask='auto')",
-    "        if style.get('includePageNumbers', True): canvas.drawRightString(width-margin, 0.35*inch, 'Page ' + str(document.page))",
-    "        canvas.restoreState()",
+    "        try:",
+    "            canvas.saveState()",
+    "            width,height=page_sizes[style['pageSize']]",
+    "            canvas.setStrokeColor(accent)",
+    "            canvas.setLineWidth(1.2)",
+    "            canvas.line(margin, height-margin-0.04*inch, width-margin, height-margin-0.04*inch)",
+    "            canvas.setFont(style['fontName'], 8)",
+    "            canvas.setFillColor(muted)",
+    "            header=style.get('header') or payload['title']",
+    "            footer=style.get('footer') or ''",
+    "            canvas.drawString(margin, height-margin+0.05*inch, str(header)[:120])",
+    "            canvas.drawString(margin, 0.35*inch, str(footer)[:120])",
+    "            logo=style.get('logoPath')",
+    "            if logo:",
+    "                try:",
+    "                    if os.path.isfile(logo):",
+    "                        canvas.drawImage(logo, width-margin-0.95*inch, height-margin+0.01*inch, width=0.9*inch, height=0.32*inch, preserveAspectRatio=True, anchor='ne', mask='auto')",
+    "                    else:",
+    "                        sys.stderr.write('PDF logo skipped: missing file: ' + str(logo) + '\\n')",
+    "                except Exception as logo_error:",
+    "                    sys.stderr.write('PDF logo skipped: ' + repr(logo_error) + '\\n')",
+    "            if style.get('includePageNumbers', True): canvas.drawRightString(width-margin, 0.35*inch, 'Page ' + str(document.page))",
+    "            canvas.restoreState()",
+    "        except Exception as page_error:",
+    "            try:",
+    "                canvas.restoreState()",
+    "            except Exception:",
+    "                pass",
+    "            sys.stderr.write('PDF page chrome error (non-fatal): ' + repr(page_error) + '\\n')",
+    "    on_first=draw_page if callable(draw_page) else _noop",
+    "    on_later=draw_page if callable(draw_page) else _noop",
     "    def add_image(story, section):",
     "        image_path=section['imagePath']",
     "        if not os.path.isfile(image_path): raise FileNotFoundError('PDF image does not exist: ' + image_path)",
@@ -983,25 +1025,20 @@ function pdfGenerationScript(title: string, sections: PdfSectionInput[], style: 
     "            table.setStyle(TableStyle(commands)); story.append(table); story.append(Spacer(1, 12))",
     "        if section.get('chart'): add_chart(story, section['chart'])",
     "        if section.get('imagePath'): add_image(story, section)",
-    "    doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)",
+    "    doc.build(story, onFirstPage=on_first, onLaterPages=on_later)",
     "path=payload['path']",
-    "if not os.path.isfile(path) or os.path.getsize(path) < 100: raise RuntimeError('PDF output was not written or is too small')",
-    "page_count=0",
+    "if not os.path.isfile(path): raise RuntimeError('PDF output was not written: ' + path)",
+    "output_bytes=os.path.getsize(path)",
+    "if output_bytes < 100: raise RuntimeError('PDF output was not written or is too small: ' + str(output_bytes) + ' bytes')",
     "try:",
     "    from pypdf import PdfReader",
-    "    check=PdfReader(path)",
-    "    page_count=len(check.pages)",
-    "except Exception: pass",
-    "if page_count < 1:",
-    "    try:",
-    "        with open(path, 'rb') as _f:",
-    "            _b=_f.read()",
-    "            page_count=len(re.findall(rb'/Type\\s*/Page\\b', _b))",
-    "            if not page_count:",
-    "                _m=re.search(rb'/Count\\s+(\\d+)', _b)",
-    "                if _m: page_count=int(_m.group(1))",
-    "    except Exception: pass",
-    "print(json.dumps({'path': path, 'pages': max(1, page_count), 'bytes': os.path.getsize(path)}))",
+    "    page_count=len(PdfReader(path).pages)",
+    "except Exception as error:",
+    "    raise RuntimeError('PDF page-count verification failed: ' + repr(error))",
+    "if page_count < 1: raise RuntimeError('PDF output has no readable pages')",
+    "expected_min_pages=3 if len(payload.get('sections') or []) >= 8 else 1",
+    "if page_count < expected_min_pages: raise RuntimeError('PDF page count ' + str(page_count) + ' is below expected minimum ' + str(expected_min_pages) + ' for ' + str(len(payload.get('sections') or [])) + ' sections')",
+    "print(json.dumps({'path': path, 'pages': page_count, 'bytes': output_bytes}))",
   ].join("\n");
 }
 
@@ -2175,11 +2212,11 @@ export class DaytonaEngine {
     try {
       const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, await sandbox.getUserHomeDir(), undefined, 240);
       if (result.exitCode !== 0) {
-        const output = String(result.result ?? "");
-        if (/ReportLab is unavailable|No module named ['"]?(reportlab|pypdf)/i.test(output)) {
+        const output = commandOutput(result);
+        if (/ReportLab.*unavailable|No module named ['"]?(reportlab|pypdf)|pypdf.*unavailable/i.test(output)) {
           await this.generatePdfInRenderer(sandbox, script, path);
         } else {
-          throw new DaytonaInputError(`PDF generation failed: ${output.slice(0, 800)}`);
+          throw new DaytonaInputError(`PDF generation failed: ${output || "unknown renderer error"}`);
         }
       }
     } finally {
@@ -2191,21 +2228,31 @@ export class DaytonaEngine {
 
   private async generatePdfInRenderer(source: Sandbox, script: string, path: string): Promise<void> {
     let renderer: Sandbox | undefined;
+    let rendererScriptPath: string | undefined;
     try {
       const params = { name: `chusky-pdf-${randomUUID()}`, language: "python", networkBlockAll: false, public: false, autoStopInterval: 15, autoDeleteInterval: 0, ttlMinutes: 30, labels: { agent: "chusky", purpose: "artifact-pdf-generation", source_sandbox: source.id } };
       renderer = config.daytonaRendererSnapshot
         ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
         : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 8 } }, { timeout: 900 });
-      const rendererScriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
-      const rendererScript = script.replace(/dependency_dir=os\.path\.abspath\(os\.path\.join\('workspace', '\.chusky', 'python-reportlab'\)\)/, "dependency_dir='/tmp/chusky-reportlab'");
+      rendererScriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
+      // Keep the renderer on the same canonical dependency path as the source
+      // sandbox. A second /tmp install made failures version- and path-dependent.
+      const rendererScript = script;
       await renderer.fs.uploadFile(Buffer.from(rendererScript, "utf8"), rendererScriptPath);
       const result = await renderer.process.executeCommand(`python3 ${rendererScriptPath}`, await renderer.getUserHomeDir(), undefined, 900);
-      if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed in isolated renderer: ${String(result.result ?? "unknown error").slice(0, 800)}`);
+      if (result.exitCode !== 0) throw new DaytonaInputError(`PDF generation failed in isolated renderer:\n${commandOutput(result) || "unknown renderer error"}`);
       const generated = Buffer.from(await renderer.fs.downloadFile(path));
       if (!generated.length) throw new DaytonaInputError("PDF renderer produced an empty file");
       await source.fs.uploadFile(generated, path);
+    } catch (error) {
+      if (error instanceof DaytonaInputError) throw error;
+      const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      throw new DaytonaInputError(`PDF generation failed in isolated renderer:\n${message.slice(0, 4000)}`);
     } finally {
       if (renderer) {
+        if (rendererScriptPath) {
+          try { await renderer.fs.deleteFile(rendererScriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
+        }
         try { await renderer.delete(); } catch { /* bounded by TTL if provider cleanup is unavailable */ }
       }
     }
