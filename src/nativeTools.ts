@@ -267,7 +267,7 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
   }
   const input = attentionInput(args);
   const requiredByKind: Partial<Record<AttentionEntityKind, string[]>> = {
-    observation: ["source", "eventType", "summary"], open_loop: ["title"], attention_candidate: ["candidateType", "reason"],
+    observation: ["source", "eventType", "summary"], open_loop: ["title", "nextAction"], attention_candidate: ["candidateType", "reason"],
     standing_order: ["name", "instruction", "authority"], delivery_preference: ["provider"], relationship: ["personKey"], project_state: ["projectKey", "name", "summary"],
   };
   for (const field of requiredByKind[kind] ?? []) if (!(field in input) || input[field] === undefined || input[field] === null || input[field] === "") throw new Error(`${field} is required for ${kind}`);
@@ -323,6 +323,7 @@ const ATTENTION_PULSE_TOOLS = [
   "CHUCK_CANCEL_REMINDER",
   "CHUCK_ATTENTION_STATE",
   "CHUCK_LIST_JOBS",
+  "CHUCK_HANDOFF_SUBAGENT",
   "CHUCK_REQUEST_ADDITIONAL_TOOLS",
 ];
 const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
@@ -524,7 +525,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
     case "CHUCK_SCRATCHPAD_READ": return readScratchpad(userId, args.query ? String(args.query) : undefined);
     case "CHUCK_SCRATCHPAD_CLEAR": await clearScratchpad(userId, args.key ? text(args.key) : undefined); return { cleared: true };
-    case "CHUCK_SAVE_MEMORY": return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity === "sensitive" ? "sensitive" : "normal", projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+    case "CHUCK_SAVE_MEMORY": {
+      if (args.sensitivity !== "normal" && args.sensitivity !== "sensitive") throw new Error("sensitivity is required when saving memory");
+      return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+    }
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
     case "CHUCK_UPDATE_MEMORY": {
       if (!args.id && !args.key) throw new Error("CHUCK_UPDATE_MEMORY requires id or key");
@@ -562,9 +566,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_START_PHONE_CALL": {
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
+      const callProfile = args.callProfile === "business" ? "business" : "personal";
       return config.blandVoiceEnabled
-        ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile })
-        : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile });
+        ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile, callProfile })
+        : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile, callProfile });
     }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_MEETING_CONTEXT_PREPARE": {

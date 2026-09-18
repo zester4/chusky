@@ -215,7 +215,7 @@ export async function executeDelegation(
     const continuationAcknowledgement = Boolean(options?.resume && !actionPayload && (contract.context?.previousToolRequest || existingHandoff?.status === "requires_tool_request"));
     const needsComposio = (canRunModel && !continuationAcknowledgement) || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
     const scopedComposio = needsComposio
-      ? await getScopedComposioTools(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools })
+      ? await getScopedComposioTools(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools, objective: contract.objective })
       : { tools: [], missing: starterComposioTools, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
     if (actionPayload) {

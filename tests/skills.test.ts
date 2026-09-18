@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
+import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
+
+test("routes sold business skills deterministically before fuzzy discovery", () => {
+  assert.deepEqual(routedSkillNames("Review overdue Stripe billing and hand off the churn-risk account"), ["composio-routing", "retention-pro", "billing-ops-pro"]);
+});
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "chusky-skills-"));

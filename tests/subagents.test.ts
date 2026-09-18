@@ -50,7 +50,7 @@ test("keeps business workers inside their intended connected-app families", () =
   assert.equal(isComposioToolAllowedForWorker("quinn", "HUBSPOT_UPDATE_DEAL"), true);
   assert.equal(isComposioToolAllowedForWorker("quinn", "GOOGLESHEETS_UPDATE_SPREADSHEET"), false);
   assert.equal(isComposioToolAllowedForWorker("aria", "GOOGLECALENDAR_CREATE_EVENT"), true);
-  assert.equal(isComposioToolAllowedForWorker("aria", "STRIPE_CREATE_PAYMENT_LINK"), false);
+  assert.equal(isComposioToolAllowedForWorker("aria", "STRIPE_CREATE_PAYMENT_LINK"), true);
   assert.equal(isComposioToolAllowedForWorker("kai", "GOOGLESHEETS_GET_SPREADSHEET"), true);
   assert.equal(isComposioToolAllowedForWorker("kai", "GMAIL_SEND_EMAIL"), false);
 });

@@ -1,11 +1,11 @@
 import { config } from "../config.js";
 import { addPhoneCall, getSession, updatePhoneCall, type PhoneCallRecord } from "../store.js";
 import { createBlandCallToken, isValidBlandToolSecret } from "./blandSecurity.js";
-import { normalizeVoiceCallProfile, voiceProfileInstructions, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeVoiceCallProfile, voiceProfileInstructions, type CallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
-export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; }
+export interface BlandCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; }
 export interface BlandCallDependencies {
   enabled: boolean;
   apiKey: string;
@@ -63,7 +63,8 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
   const purpose = text(input.purpose, "purpose", 2000);
   const profile = normalizeVoiceCallProfile(input.profile);
-  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const callProfile = input.callProfile === "business" ? "business" : "personal";
+  const call: PhoneCallRecord = { id: `blc_${crypto.randomUUID()}`, userId, provider: "bland", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   try {
     const callbackToken = createBlandCallToken({ userId, callId: call.id }, options.webhookSecret);

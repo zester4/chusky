@@ -17,6 +17,7 @@ test("Twilio inbound records are owner-scoped and idempotent by provider Call SI
   const first = await registerTwilioInboundCall(input);
   const replay = await registerTwilioInboundCall(input);
   assert.equal(first.id, replay.id);
+  assert.equal(first.callVerification, "verified");
   assert.equal(first.direction, "inbound");
   assert.equal(first.status, "bridging");
   assert.equal((await listPhoneCalls(71)).length, 1);

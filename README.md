@@ -734,7 +734,10 @@ Voice URL as `https://chusky.selithub.shop/twilio/inbound` (POST). Set
 `TWILIO_INBOUND_ENABLED=true`, `TWILIO_INBOUND_OWNER_USER_ID` to the owner’s
 Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
 E.164 allowlist. Unknown callers are rejected before they can access private
-memory or the agent.
+memory or the agent. Use `TWILIO_INBOUND_CALL_PROFILE=business` for a company
+line: inbound callers start at the identified tier and only numbers listed in
+`TWILIO_INBOUND_VERIFIED_CALLERS` reach the verified read-only tier. Outbound
+calls always use a bounded approved call brief, never the full owner memory.
 
 The private bridge routes are `/internal/twilio/turn`,
 `/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`, and

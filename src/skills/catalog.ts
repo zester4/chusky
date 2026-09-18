@@ -47,6 +47,44 @@ export type SkillBinding = {
   requiredReferences?: Record<string, string[]>;
 };
 
+/**
+ * Product skills that must be routable without relying on fuzzy catalogue
+ * search. The trigger list is intentionally small and business-oriented: it
+ * selects operating guidance, never permissions or tools.
+ */
+const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
+  { name: "attention-pulse", triggers: ["attention pulse", "standing order", "open loop", "proactive", "overdue loop", "next action", "digest"] },
+  { name: "composio-routing", triggers: ["composio", "connected app", "toolkit", "hubspot", "salesforce", "stripe", "shopify", "zendesk", "intercom"] },
+  { name: "onboarding-pro", triggers: ["onboarding", "implementation", "activate customer", "customer setup"] },
+  { name: "retention-pro", triggers: ["retention", "renewal", "churn", "churn risk", "customer health"] },
+  { name: "billing-ops-pro", triggers: ["billing", "invoice", "collections", "payment", "subscription", "stripe"] },
+  { name: "support-desk-pro", triggers: ["support", "ticket", "zendesk", "intercom", "incident", "customer issue"] },
+  { name: "launch-pro", triggers: ["launch", "go to market", "release campaign", "product launch"] },
+  { name: "hiring-pipeline-pro", triggers: ["hiring", "recruiting", "candidate", "interview", "job opening"] },
+  { name: "expansion-pro", triggers: ["expansion", "upsell", "cross-sell", "account growth", "renewal expansion"] },
+];
+
+function normalizedQuery(query: string): string {
+  return String(query ?? "").toLowerCase().replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Return deterministic business skill names for the current request. */
+export function routedSkillNames(query: string): string[] {
+  const text = normalizedQuery(query);
+  if (!text) return [];
+  return ROUTED_SKILLS.filter(({ name, triggers }) => text.includes(name) || triggers.some((trigger) => text.includes(trigger))).map(({ name }) => name);
+}
+
+/**
+ * Load deterministic business routing first, then the existing bounded fuzzy
+ * discovery fallback. This is used for the supervisor system prompt; workers
+ * continue to use their explicit SkillBinding.
+ */
+export async function routedSkillContext(query: string, root = DEFAULT_SKILLS_ROOT): Promise<string> {
+  const names = routedSkillNames(query);
+  return skillContextForBinding({ primary: names, supporting: [] }, query, root);
+}
+
 type CatalogCache = { signature: string; skills: SkillManifest[] };
 const cache = new Map<string, CatalogCache>();
 

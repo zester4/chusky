@@ -123,6 +123,10 @@ export interface PhoneCallRecord {
   /** Explicit provider keeps shared safe call storage transport-aware. */
   provider?: "legacy" | "twilio" | "bland";
   direction?: "inbound" | "outbound";
+  /** Separates a private personal call brief from a company/business brief. */
+  callProfile?: "personal" | "business";
+  /** Inbound business calls advance public -> identified -> verified. */
+  callVerification?: "public" | "identified" | "verified";
   phoneNumber: string;
   purpose: string;
   /** Approved representation details and read-only capability scope. */
@@ -2833,6 +2837,8 @@ export async function getSession(uid: number): Promise<UserSession> {
       id: item.id.slice(0, 128), userId: uid,
       provider: item.provider === "twilio" || item.provider === "bland" ? item.provider : "legacy",
       direction: item.direction === "inbound" ? "inbound" : "outbound",
+      ...(item.callProfile === "business" || item.callProfile === "personal" ? { callProfile: item.callProfile } : {}),
+      ...(item.callVerification === "public" || item.callVerification === "identified" || item.callVerification === "verified" ? { callVerification: item.callVerification } : {}),
       phoneNumber: item.phoneNumber.slice(0, 32), purpose: item.purpose.slice(0, 1000), status,
       ...(item.voiceProfile && typeof item.voiceProfile === "object" && !Array.isArray(item.voiceProfile) ? { voiceProfile: normalizeVoiceCallProfile(item.voiceProfile) } : {}),
       ...(typeof item.providerCallId === "string" ? { providerCallId: item.providerCallId.slice(0, 100) } : {}),

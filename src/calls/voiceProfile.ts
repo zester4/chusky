@@ -2,6 +2,7 @@
 export type VoiceCallCapability = "memory_lookup" | "scratchpad_lookup" | "schedule_lookup" | "task_lookup" | "call_history";
 export type VoiceCallTone = "professional" | "warm" | "direct" | "consultative";
 export type VoiceCallMode = "general" | "sales" | "onboarding" | "support" | "scheduling";
+export type CallProfile = "personal" | "business";
 
 export interface VoiceCallProfile {
   identity: string;
@@ -68,7 +69,9 @@ export function voiceProfileNativeTools(profile: VoiceCallProfile | undefined): 
 export function voiceProfileInstructions(profile: VoiceCallProfile | undefined, direction: "inbound" | "outbound" | undefined, purpose: string): string {
   const safe = profile ?? normalizeVoiceCallProfile(undefined);
   const identity = safe.organization ? `${safe.identity}, speaking on behalf of ${safe.organization}` : safe.identity;
-  const callContext = direction === "outbound" ? `Approved outbound call objective: ${purpose}.` : "This is an authorized inbound call. Help the caller with their question.";
+  const callContext = direction === "outbound"
+    ? `Approved outbound call objective: ${purpose}. Use only this call brief, never the owner's full memory.`
+    : "This is an authorized inbound call. Use public information first, then identify the caller, and disclose sensitive company or account details only after the configured verification tier is satisfied.";
   const facts = safe.facts.length ? `Relevant approved facts: ${safe.facts.join("; ")}.` : "";
   const guardrails = safe.guardrails.length ? `Owner communication preferences: ${safe.guardrails.join("; ")}.` : "";
   const opening = safe.opening ? `Use this opening only if it fits naturally: ${safe.opening}` : "";

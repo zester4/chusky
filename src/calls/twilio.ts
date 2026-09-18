@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import twilio from "twilio";
 import { config } from "../config.js";
 import { addPhoneCall, updatePhoneCall, type PhoneCallRecord } from "../store.js";
-import { normalizeVoiceCallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
+import { normalizeVoiceCallProfile, type CallProfile, type VoiceCallProfile, type VoiceCallProfileInput } from "./voiceProfile.js";
 
-export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; }
+export interface TwilioCallInput { phoneNumber: string; purpose: string; profile?: VoiceCallProfileInput; callProfile?: CallProfile; }
 export interface TwilioCallDependencies {
   enabled: boolean; accountSid: string; authToken: string; callerId: string; webhookBaseUrl: string; mediaStreamUrl: string;
   createCall?: (input: { to: string; from: string; url: string; statusCallback: string }) => Promise<{ sid: string }>;
@@ -36,10 +36,10 @@ export function isTwilioVoiceConfigured(options: Omit<TwilioCallDependencies, "c
 }
 
 /** Validates the exact user-reviewed arguments before an approval is created. */
-export function validateTwilioCallInput(input: TwilioCallInput): { phoneNumber: string; purpose: string; profile: VoiceCallProfile } {
+export function validateTwilioCallInput(input: TwilioCallInput): { phoneNumber: string; purpose: string; profile: VoiceCallProfile; callProfile: CallProfile } {
   const phoneNumber = text(input.phoneNumber, "phoneNumber", 16);
   if (!/^\+[1-9]\d{7,14}$/.test(phoneNumber)) throw new Error("phoneNumber must be an E.164 phone number, for example +14155550123");
-  return { phoneNumber, purpose: text(input.purpose, "purpose"), profile: normalizeVoiceCallProfile(input.profile) };
+  return { phoneNumber, purpose: text(input.purpose, "purpose"), profile: normalizeVoiceCallProfile(input.profile), callProfile: input.callProfile === "business" ? "business" : "personal" };
 }
 
 /** Creates an outbound Twilio call. Its signed TwiML callback connects the
@@ -49,8 +49,8 @@ export async function startTwilioCallForUser(userId: number, input: TwilioCallIn
   callerId: config.twilioCallerId, webhookBaseUrl: config.twilioWebhookBaseUrl, mediaStreamUrl: config.twilioMediaStreamUrl,
 }): Promise<PhoneCallRecord> {
   validate(options);
-  const { phoneNumber, purpose, profile } = validateTwilioCallInput(input);
-  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
+  const { phoneNumber, purpose, profile, callProfile } = validateTwilioCallInput(input);
+  const call: PhoneCallRecord = { id: `twc_${randomUUID()}`, userId, provider: "twilio", direction: "outbound", callProfile, phoneNumber, purpose, voiceProfile: profile, status: "starting", createdAt: Date.now(), updatedAt: Date.now() };
   await addPhoneCall(userId, call);
   const base = httpsUrl(options.webhookBaseUrl, "TWILIO_WEBHOOK_BASE_URL");
   const query = `callId=${encodeURIComponent(call.id)}&userId=${encodeURIComponent(String(userId))}`;

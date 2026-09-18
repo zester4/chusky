@@ -63,3 +63,10 @@ test("native attention tool validates and routes explicit state operations", asy
   assert.equal(changed.nextAction, "Add the attention engine");
   await assert.rejects(() => nativeTool(userId + 1, "CHUCK_ATTENTION_STATE", { action: "update", kind: "project_state", id: created.id, nextAction: "hijack" }));
 });
+
+test("native open loops require a concrete next action", async () => {
+  await initStore({ memoryOnly: true });
+  await assert.rejects(() => nativeTool(910007, "CHUCK_ATTENTION_STATE", { action: "create", kind: "open_loop", title: "Unclear loop" }), /nextAction is required/);
+  const loop = await nativeTool(910007, "CHUCK_ATTENTION_STATE", { action: "create", kind: "open_loop", title: "Follow up", nextAction: "Send the approved summary" }) as any;
+  assert.equal(loop.nextAction, "Send the approved summary");
+});

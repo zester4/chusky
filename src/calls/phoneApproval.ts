@@ -12,7 +12,7 @@ export async function requestPhoneCallApproval(
   return createApproval({
     userId,
     toolSlug: "CHUCK_START_PHONE_CALL",
-    args: { phoneNumber: call.phoneNumber, purpose: call.purpose, profile: call.profile },
+    args: { phoneNumber: call.phoneNumber, purpose: call.purpose, profile: call.profile, ...(input.callProfile ? { callProfile: call.callProfile } : {}) },
     request: request.trim().slice(0, 1200) || `/call ${call.phoneNumber} ${call.purpose}`,
     history: session.history,
     model: session.model,

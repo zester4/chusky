@@ -457,7 +457,9 @@ async function main(): Promise<void> {
         const to = String(form.To ?? "").trim();
         const callSid = String(form.CallSid ?? "").trim();
         if (!allowedCallers.includes(from)) return c.body("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Reject reason=\"rejected\"/></Response>", 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
-        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid });
+        const callProfile = config.twilioInboundCallProfile === "business" ? "business" : "personal";
+        const verifiedCallers = parseTwilioCallerAllowlist(config.twilioInboundVerifiedCallers);
+        const call = await registerTwilioInboundCall({ userId: ownerUserId, from, to, callSid, callProfile, verification: callProfile === "business" && verifiedCallers.includes(from) ? "verified" : "identified" });
         return c.body(await twilioStreamTwiML(call.id, ownerUserId), 200, { "Content-Type": "text/xml; charset=UTF-8", "Cache-Control": "no-store" });
       } catch (error) {
         logger.warn({ err: error }, "Rejected Twilio inbound call configuration or payload");
@@ -514,7 +516,7 @@ async function main(): Promise<void> {
           const session = await getSession(userId);
           return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
             instructions: twilioVoiceInstructions(call),
-            toolAllow: voiceProfileNativeTools(call.voiceProfile),
+            toolAllow: call.direction === "outbound" || (call.callProfile === "business" && call.callVerification !== "verified") ? [] : voiceProfileNativeTools(call.voiceProfile),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
           });
@@ -605,7 +607,7 @@ async function main(): Promise<void> {
               send({ type: "start", model: config.voiceModel, speculative });
               return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
                 instructions: twilioVoiceInstructions(call),
-                toolAllow: voiceProfileNativeTools(call.voiceProfile),
+                toolAllow: call.direction === "outbound" || (call.callProfile === "business" && call.callVerification !== "verified") ? [] : voiceProfileNativeTools(call.voiceProfile),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
               });

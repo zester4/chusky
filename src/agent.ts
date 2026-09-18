@@ -42,7 +42,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { relevantSkillContext } from "./skills/catalog.js";
+import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -50,6 +50,7 @@ import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
+import { missingComposioConnectionMessage, resolveComposioRoute } from "./composioRouting.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -512,7 +513,7 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
  * caller must still enforce its worker capability policy and approval gate;
  * this helper deliberately never exposes the entire ToolRouter catalogue.
  */
-export async function getScopedComposioTools(userId: number, allowedSlugs: string[], options?: { optionalSlugs?: string[] }): Promise<{
+export async function getScopedComposioTools(userId: number, allowedSlugs: string[], options?: { optionalSlugs?: string[]; objective?: string }): Promise<{
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools: any[];
   missing: string[];
@@ -548,6 +549,11 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   const missing = unique.filter((slug) => !byName.has(slug));
   const requiredMissing = missing.filter((slug) => !optional.has(slug));
   if (requiredMissing.length) {
+    if (options?.objective) {
+      const accounts = await listConnectedAccounts(userId).catch(() => []);
+      const route = resolveComposioRoute(options.objective, accounts.map((account) => account.toolkit));
+      if (route?.needsConnection) throw new Error(missingComposioConnectionMessage(route));
+    }
     // A typo or stale slug must never silently broaden worker access. This is
     // a read-only discovery hint; Chusky must still deliberately search and
     // delegate an exact replacement in a later worker contract.
@@ -845,6 +851,7 @@ export async function runAgent(
       : "",
   ].filter(Boolean).join("\n\n");
   let accountContext = "";
+  let composioRouteContext = "";
   // Connected-account metadata is private context. Never expose a user's
   // account aliases or tool access to a shared channel conversation.
   if (!voiceTurn && channelContext?.scope !== "shared") {
@@ -853,6 +860,10 @@ export async function runAgent(
       if (accounts.length) {
         accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
       }
+      const route = resolveComposioRoute(typeof userMessage === "string" ? userMessage : "", accounts.map((account) => account.toolkit));
+      if (route) composioRouteContext = route.needsConnection
+        ? `Composio route: ${route.domain}; preferred app families: ${route.preferredToolkits.join(", ")}. None is connected, so explain how to connect the mapped app and do not substitute an unrelated toolkit.`
+        : `Composio route: ${route.domain}; use connected mapped toolkit(s): ${route.connectedToolkits.join(", ")}. Inspect the exact action schema before executing; broad search is last resort.`;
     } catch (error) {
       logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
     }
@@ -867,7 +878,7 @@ export async function runAgent(
       const skillQuery = typeof userMessage === "string"
         ? userMessage
         : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
-      skillContext = await relevantSkillContext(skillQuery);
+      skillContext = await routedSkillContext(skillQuery);
     } catch (error) {
       logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
     }
@@ -877,7 +888,7 @@ export async function runAgent(
     : "";
   const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
   const staticSystemPrompt = `${config.chuckSystemPrompt}${!voiceTurn && channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}`;
-  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}`;
+  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}`;
   const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
   const messages: ApiMessage[] = [
     { role: "system", content: staticSystemPrompt },
