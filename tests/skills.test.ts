@@ -4,9 +4,26 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
+import { WORKER_CAPABILITIES } from "../src/subagents/capabilities.js";
 
 test("routes sold business skills deterministically before fuzzy discovery", () => {
   assert.deepEqual(routedSkillNames("Review overdue Stripe billing and hand off the churn-risk account"), ["composio-routing", "retention-pro", "billing-ops-pro"]);
+});
+
+test("loads Aria's onboarding and retention references for a customer-success objective", async () => {
+  const context = await skillContextForBinding(WORKER_CAPABILITIES.aria.skills, "Recover an onboarding milestone and review churn risk");
+  assert.match(context, /Reference: references\/01-client-onboarding\.md/);
+  assert.match(context, /Reference: references\/01-health\.md/);
+  assert.match(context, /Blockers become open loops/);
+  assert.match(context, /Do not average away a single red signal/);
+});
+
+test("loads Quinn's expansion and billing references for a revenue objective", async () => {
+  const context = await skillContextForBinding(WORKER_CAPABILITIES.quinn.skills, "Review expansion readiness and overdue invoices");
+  assert.match(context, /Reference: references\/01-readiness\.md/);
+  assert.match(context, /Reference: references\/01-invoices\.md/);
+  assert.match(context, /If blocked, route to retention\/onboarding first/);
+  assert.match(context, /Prefer source system of truth/);
 });
 
 async function fixture() {

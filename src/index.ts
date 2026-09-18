@@ -35,7 +35,7 @@ import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { voiceProfileNativeTools } from "./calls/voiceProfile.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery } from "./attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
@@ -1767,7 +1767,8 @@ async function main(): Promise<void> {
               return { text: `The attention pulse needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}.` };
             }
             const noAction = isNoActionPulseOutput(result.output);
-            if (!noAction) {
+            const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
+            if (!noAction && handled) {
               await markAttentionPulseDelivered(payload.userId, plan.candidateIds);
               await updateJob(payload.userId, job.id, {
                 attentionPulse: {
@@ -1776,7 +1777,10 @@ async function main(): Promise<void> {
                 },
               });
             }
-            return { text: result.output, suppressDelivery: noAction };
+            const text = !noAction && !handled
+              ? `The attention pulse did not complete or delegate an actionable step, so the loop remains open for the next run.\n\n${result.output}`
+              : result.output;
+            return { text, suppressDelivery: noAction };
           }
           const session = await getSession(payload.userId);
           try {

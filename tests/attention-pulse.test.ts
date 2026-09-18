@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery } from "../src/attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
-import { createAttentionRecord, initStore, listAttentionRecords, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
+import { createAttentionRecord, initStore, listAttentionRecords, listHandoffRecords, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
+import { executeDelegation } from "../src/subagents/executor.js";
 
 const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
   id: "pref_test", userId: 1, provider: "telegram", enabled: true, mode: "immediate", createdAt: 1, updatedAt: 1, ...patch,
@@ -37,6 +38,33 @@ test("attention pulse native contract and no-action sentinel are stable", () => 
   validateNativeToolArguments("CHUCK_ATTENTION_PULSE", { action: "enable" });
   assert.equal(isNoActionPulseOutput(" no_action\n"), true);
   assert.equal(isNoActionPulseOutput("There is an action"), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_READ_SKILL_FILE", status: "completed" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_HANDOFF_SUBAGENT", status: "completed" }]), true);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "completed" }]), true);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "failed" }]), false);
+});
+
+test("attention pulse executes Elena's real handle-or-delegate boundary", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910008;
+  const result = await executeDelegation(userId, {
+    worker: "elena",
+    objective: "Review the overdue onboarding open loop and handle it or delegate it before preparing a digest.",
+    context: {
+      attentionPulse: true,
+      toolCall: {
+        name: "CHUCK_HANDOFF_SUBAGENT",
+        args: {
+          targetWorker: "aria",
+          objective: "Review the onboarding open loop, identify the next milestone, and return a concrete owner handoff.",
+          expectedOutput: "A concise onboarding handoff with the next action and blocker.",
+        },
+      },
+    },
+  });
+  assert.equal(result.status, "success");
+  assert.ok(result.toolCallsLog.some((entry) => entry.tool === "CHUCK_HANDOFF_SUBAGENT" && entry.status === "completed"));
+  assert.ok((await listHandoffRecords(userId)).some((handoff) => handoff.to === "aria"));
 });
 
 test("attention pulse cannot be enabled from a shared conversation", async () => {

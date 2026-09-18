@@ -32,6 +32,29 @@ export interface AttentionPulseDeliveryState {
   deliveriesToday?: number;
 }
 
+export interface AttentionPulseToolEvidence {
+  tool: string;
+  status?: "started" | "completed" | "failed" | "cancelled";
+}
+
+const NON_HANDLING_PULSE_TOOLS = new Set([
+  "CHUCK_SEARCH_SKILLS",
+  "CHUCK_LIST_SKILL_FILES",
+  "CHUCK_READ_SKILL_FILE",
+  "COMPOSIO_SEARCH_TOOLS",
+  "COMPOSIO_SEARCH_TOOL",
+  "COMPOSIO_GET_TOOL_SCHEMAS",
+]);
+
+/**
+ * A pulse may only mark actionable state delivered after the worker actually
+ * handled something or delegated it. Skill lookup and schema discovery are
+ * preparation, not completion evidence.
+ */
+export function attentionPulseHasHandlingEvidence(tools: readonly AttentionPulseToolEvidence[]): boolean {
+  return tools.some((entry) => entry.status !== "failed" && entry.status !== "cancelled" && !NON_HANDLING_PULSE_TOOLS.has(entry.tool));
+}
+
 function utcDay(now: number): string {
   return new Date(now).toISOString().slice(0, 10);
 }
