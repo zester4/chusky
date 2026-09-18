@@ -1,6 +1,7 @@
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "../config.js";
 import { resolveWorkflowEndpoint } from "../workflowUrls.js";
+import { isValidWorkflowEventId, workflowEventId } from "../workflowIds.js";
 import { getHandoffRecord, saveHandoffRecord } from "../store.js";
 import { isComposioToolAllowedForWorker, WORKER_CAPABILITIES } from "./capabilities.js";
 
@@ -54,7 +55,7 @@ export async function enqueueSubagentToolContinuation(userId: number, handoffId:
   // notification until waitForEvent reaches the matching checkpoint.
   const decisionNumber = (record.resumeCount ?? 0) + 1;
   const workflowRunId = `subagent-tools-${handoffId}-${decisionNumber}`;
-  const toolRequestEventId = `subagent-tools:${handoffId}:${decisionNumber}`;
+  const toolRequestEventId = workflowEventId("subagent-tools", handoffId, decisionNumber);
   await saveHandoffRecord(userId, { ...record, workflowRunId, toolRequestEventId });
 
   const queued = await client().trigger({
@@ -72,9 +73,19 @@ export async function enqueueSubagentToolContinuation(userId: number, handoffId:
 
 /** Notify exactly the waiting run. workflowRunId enables Upstash lookback and closes the notify-before-wait race. */
 export async function resolveSubagentToolRequest(userId: number, handoffId: string, requestedTools: string[]): Promise<{ eventId: string; workflowRunId: string; allowedComposioTools: string[] }> {
-  const record = await getHandoffRecord(userId, handoffId);
+  let record = await getHandoffRecord(userId, handoffId);
   if (!record || record.status !== "requires_tool_request" || !record.workflowRunId || !record.toolRequestEventId) {
     throw new Error("This worker run is not waiting for a durable tool decision.");
+  }
+  // Repair records created by older builds that used ':' in the event ID.
+  // Upstash rejects those IDs before the waiter can resume, so queue a fresh
+  // safe waiter and notify that new event instead of leaving the handoff stuck.
+  if (!isValidWorkflowEventId(record.toolRequestEventId)) {
+    await enqueueSubagentToolContinuation(userId, handoffId);
+    record = await getHandoffRecord(userId, handoffId);
+    if (!record || !record.workflowRunId || !record.toolRequestEventId || !isValidWorkflowEventId(record.toolRequestEventId)) {
+      throw new Error("This worker run has a stale workflow decision and could not be repaired. Retry the worker task.");
+    }
   }
   const starter = WORKER_CAPABILITIES[record.to].starterComposioTools ?? [];
   const existing = record.delegation?.allowedComposioTools ?? [];

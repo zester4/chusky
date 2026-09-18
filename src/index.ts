@@ -50,6 +50,7 @@ import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
+import { workflowEventId } from "./workflowIds.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
@@ -2157,7 +2158,7 @@ async function main(): Promise<void> {
           const approval = await getApproval(event.userId, error.approvalId);
           const chatId = await getTelegramChatId(event.userId);
           if (chatId && approval) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
-          const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", `trigger-approval:${error.approvalId}`, { timeout: "24h" });
+          const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
             await updateTriggerEvent(event.eventId, { status: "completed", result: "The requested triggered action was denied or expired." });
             return;

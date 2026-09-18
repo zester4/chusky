@@ -1,0 +1,16 @@
+interface:
+  display_name: pdf generation
+  short_description: Create, convert, inspect, edit, extract, compare, redact, OCR,
+    preflight, and visually verify professional PDF artifacts. Use whenever the user
+    asks to create or modify a PDF, convert a document to PDF, review PDF layout,
+    extract PDF content, fill or debug PDF forms, redact sensitive content, or verify
+    a generated PDF before delivery.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

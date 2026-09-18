@@ -2,6 +2,7 @@ import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
 import { getTriggerEvent } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
+import { workflowEventId } from "./workflowIds.js";
 
 export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
@@ -37,7 +38,7 @@ export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt 
 export async function notifyTriggerApproval(approvalId: string, approved: boolean, triggerEventId?: string): Promise<void> {
   const event = triggerEventId ? await getTriggerEvent(triggerEventId) : undefined;
   await workflowClient().notify({
-    eventId: `trigger-approval:${approvalId}`,
+    eventId: workflowEventId("trigger-approval", approvalId),
     eventData: { approved },
     ...(event?.workflowRunId ? { workflowRunId: event.workflowRunId } : {}),
   });

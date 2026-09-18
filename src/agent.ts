@@ -96,8 +96,19 @@ MEETING REPRESENTATION
 - After the meeting, use the captured contact cards and structured outcome to complete the agreed CRM/calendar/task/reminder/email work using the exact connected actions already granted in the representative profile. Tailor follow-up to each person's recorded interest and preferred contact method. These ordinary pre-granted actions do not need a second owner approval prompt; never claim success unless a tool confirms it.
 - If the meeting needs to be rescheduled, use an available already-granted calendar action and confirm its result before scheduling a follow-up Chusky meeting with the returned supported URL and a join time at least ten minutes ahead. Do not invent availability, a meeting link, invitees, or a successful booking.`;
 
-function requestSignal(signal?: AbortSignal): AbortSignal {
-  const timeout = AbortSignal.timeout(config.openRouterTimeoutMs);
+/**
+ * Give a transient provider timeout a bounded second chance without allowing
+ * one model turn to run indefinitely. The first attempt uses the configured
+ * deadline; the retry gets one larger window for slow but valid tool-call
+ * responses. QStash/Workflow still owns the outer retry boundary.
+ */
+export function openRouterAttemptTimeoutMs(attempt: number): number {
+  const retry = Math.max(0, Math.floor(attempt));
+  return Math.min(config.openRouterTimeoutMs * (retry + 1), 120_000);
+}
+
+function requestSignal(signal?: AbortSignal, timeoutMs = config.openRouterTimeoutMs): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
@@ -332,7 +343,8 @@ export async function orChat(
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     try {
-      const attemptSignal = requestSignal(signal);
+      const attemptTimeoutMs = openRouterAttemptTimeoutMs(attempt);
+      const attemptSignal = requestSignal(signal, attemptTimeoutMs);
       const res = await fetch(OR_URL, {
         method: "POST",
         headers: {
@@ -355,6 +367,7 @@ export async function orChat(
       lastError = e;
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
+      logger.debug({ model, attempt: attempt + 1, timeoutMs: openRouterAttemptTimeoutMs(attempt + 1) }, "Retrying OpenRouter request after a transient failure");
       await new Promise((resolve) => setTimeout(resolve, 400 * 2 ** attempt + Math.random() * 250));
     }
   }
@@ -770,6 +783,10 @@ export async function runAgent(
     const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);
   });
+  const structuredArtifactRequest = typeof userMessage === "string"
+    && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
+    && availableTools.some((tool) => ["CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(toolName(tool)));
+  let malformedToolCallPending = false;
 
   if (!options?.ephemeral && !voiceTurn) {
     const capabilityModel = model.replace(/^~/, "");
@@ -972,7 +989,7 @@ export async function runAgent(
         maxTokens: config.voiceMaxTokens,
         sessionId: options?.voiceSessionId,
         latencyOptimized: true,
-      } : undefined);
+      } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       const modality = requiredModality(userMessage);
@@ -987,7 +1004,7 @@ export async function runAgent(
           maxTokens: config.voiceMaxTokens,
           sessionId: options?.voiceSessionId,
           latencyOptimized: true,
-        } : undefined);
+        } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
       } else {
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;
@@ -1263,6 +1280,7 @@ export async function runAgent(
         if (e instanceof ApprovalRequiredError) throw e;
         if (signal?.aborted) throw e;
         toolFailed = true;
+        if (String(e).includes("Tool arguments are malformed or truncated JSON")) malformedToolCallPending = true;
         logger.warn(safeToolAudit({ tool: slug, args: effectiveAuditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
         result = String(e).includes("Tool arguments are malformed or truncated JSON")
           ? malformedToolArgumentsResult(slug)

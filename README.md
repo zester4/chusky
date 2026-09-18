@@ -854,6 +854,9 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
 | `MAX_TOOL_ROUNDS` | — | `10` | Max agentic loop iterations |
+| `OPENROUTER_TIMEOUT_MS` | — | `45000` | First-attempt OpenRouter timeout in milliseconds; transient retries expand up to 120s |
+| `OPENROUTER_MAX_ATTEMPTS` | — | `2` | Maximum OpenRouter attempts for a model turn |
+| `OPENROUTER_ARTIFACT_MAX_TOKENS` | — | `12000` | Output budget for structured PDF/document/artifact tool calls |
 | `RATE_LIMIT` | — | `10` | Messages per window |
 | `RATE_WINDOW_SECONDS` | — | `60` | Rate window |
 | `ALLOWED_USERS` | — | (all) | Telegram user IDs allowlist |

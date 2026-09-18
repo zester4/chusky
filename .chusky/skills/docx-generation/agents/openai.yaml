@@ -1,0 +1,15 @@
+interface:
+  display_name: docx generation
+  short_description: Create, edit, review, redline, comment on, merge, validate, render,
+    and visually verify professional Microsoft Word DOCX artifacts. Use whenever the
+    user asks to create or modify a Word document, report, proposal, contract, letter,
+    manual, template, form, redline, tracked-change document, or DOCX conversion.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

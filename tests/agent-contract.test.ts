@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
 
@@ -67,6 +67,38 @@ test("agent uses the selected model for a normal text response", async () => {
     assert.equal(result.text, "done");
     assert.deepEqual(requests.map((request) => request.model), ["test/model"]);
     assert.deepEqual(requests[0]?.provider, { allow_fallbacks: true, preferred_max_latency: { p90: 45 } });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("gives a transient OpenRouter retry a bounded larger timeout", () => {
+  const original = config.openRouterTimeoutMs;
+  config.openRouterTimeoutMs = 45_000;
+  try {
+    assert.equal(openRouterAttemptTimeoutMs(0), 45_000);
+    assert.equal(openRouterAttemptTimeoutMs(1), 90_000);
+    assert.equal(openRouterAttemptTimeoutMs(2), 120_000);
+  } finally {
+    config.openRouterTimeoutMs = original;
+  }
+});
+
+test("raises the output budget for structured artifact calls", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830054);
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, unknown>> = [];
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "artifact-budget-session", tools: async () => [], execute: async () => undefined }) } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    requests.push(JSON.parse(String(init?.body)));
+    return requests.length === 1
+      ? toolResponse("CHUCK_CREATE_PDF", "{\"title\":\"truncated")
+      : chatResponse({ role: "assistant", content: "I could not complete the PDF call." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(830054, "Create a PDF playbook with charts", [], "test/model");
+    assert.match(result.text, /could not complete/);
+    assert.equal(requests[0]?.max_tokens, config.openRouterArtifactMaxTokens);
   } finally { globalThis.fetch = originalFetch; }
 });
 

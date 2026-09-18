@@ -388,6 +388,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // still choose a healthy provider/model fallback within that deadline.
   openRouterTimeoutMs: positiveInt("OPENROUTER_TIMEOUT_MS", 45_000),
   openRouterMaxAttempts: positiveInt("OPENROUTER_MAX_ATTEMPTS", 2),
+  // Structured artifact tool calls can contain many sections and otherwise
+  // hit the provider's default output ceiling while serializing JSON.
+  openRouterArtifactMaxTokens: positiveInt("OPENROUTER_ARTIFACT_MAX_TOKENS", 12_000),
   openRouterFallbackModels: optional("OPENROUTER_FALLBACK_MODELS", "")
     .split(",").map((model) => model.trim()).filter(Boolean),
   // This is a routing preference, not a hard client timeout. Set 0 to omit it.

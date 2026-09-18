@@ -1,0 +1,16 @@
+interface:
+  display_name: xlsx generation
+  short_description: Create, edit, analyze, format, validate, recalculate, chart,
+    dashboard, compare, and visually verify professional Microsoft Excel XLSX workbooks.
+    Use whenever the user asks to create or modify a spreadsheet, financial model,
+    tracker, dashboard, table, chart, budget, schedule, calculator, data-cleaning
+    workbook, or Excel export.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

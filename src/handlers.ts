@@ -2516,7 +2516,15 @@ export function registerHandlers(bot: Bot): void {
     }
     await editApprovalOutcome(ctx, "✅ Approved. Chusky is executing the action…");
     if (approval.triggerEventId) {
-      await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
+      try {
+        await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
+      } catch (error) {
+        // The approval is durable, but its waiting workflow may have expired
+        // or been cancelled. Keep the callback from bubbling into the generic
+        // post-ack Telegram error and give the owner a recoverable explanation.
+        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id }, "Trigger approval workflow notification failed");
+        await editApprovalOutcome(ctx, "⚠️ Approval saved, but the original triggered workflow is no longer active. Please retry the trigger.");
+      }
       return;
     }
     try {
