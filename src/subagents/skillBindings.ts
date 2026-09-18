@@ -2,7 +2,7 @@ import type { SkillBinding } from "../skills/catalog.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
 
 /** Deterministic skill preload map per specialist. */
-export const WORKER_SKILL_BINDINGS: Record<CapabilityWorkerName, SkillBinding> = {
+export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky">, SkillBinding> = {
   lucas: {
       primary: ["fullstack-dev", "computer-pro"],
       supporting: ["senior-fullstack", "codebase-design", "code-review", "tdd", "verification", "handoff", "fullstack-guardian"],
@@ -33,7 +33,7 @@ export const WORKER_SKILL_BINDINGS: Record<CapabilityWorkerName, SkillBinding> =
       primary: ["computer-pro"],
       supporting: ["agent-browser", "browser-pro", "verification", "handoff"],
       requiredReferences: {
-        "computer-pro": ["references/03-browser-automation.md", "references/05-tickets-qa.md"],
+        "computer-pro": ["references/03-browser-automation.md", "references/05-artifacts-qa.md"],
       },
     },
   elena: {

@@ -1,5 +1,6 @@
 import type { CapabilityWorkerName, MemoryCategory } from "../memory/types.js";
 import type { SkillBinding } from "../skills/catalog.js";
+import { WORKER_SKILL_BINDINGS } from "./skillBindings.js";
 
 export interface CapabilityManifest {
   name: CapabilityWorkerName;
@@ -67,14 +68,7 @@ export const WORKER_CAPABILITIES: Record<CapabilityWorkerName, CapabilityManifes
     allowedComposioPrefixes: ["GITHUB_", "GITLAB_", "VERCEL_", "CLOUDFLARE_", "LINEAR_", "JIRA_", "SENTRY_"],
     starterComposioTools: [...NORA_COMPOSIO_META_TOOLS],
     allowedMemoryCategories: ["project", "procedural", "asset"],
-    skills: {
-      primary: ["fullstack-dev", "computer-pro"],
-      supporting: ["verification", "handoff", "code-review", "fullstack-guardian"],
-      requiredReferences: {
-        "fullstack-dev": ["references/testing-strategy.md", "references/release-checklist.md"],
-        "computer-pro": ["references/01-workspace-hygiene.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.lucas,
     systemPrompt: `You are Lucas, Chusky's Software Engineering & Systems Specialist.
 Your focus is technical execution in Daytona sandboxes: writing clean code, running builds, executing test suites, debugging, and compiling PDFs/presentations.
 Operating Rules:
@@ -113,13 +107,7 @@ Operating Rules:
       "LINKEDIN_CREATE_LINKED_IN_POST",
     ],
     allowedMemoryCategories: ["business", "relationship", "procedural"],
-    skills: {
-      primary: ["writing-pro", "workspace-pro"],
-      supporting: ["content-strategy", "cold-email", "verification"],
-      requiredReferences: {
-        "workspace-pro": ["references/08-triage-decision.md", "references/10-voice-and-style.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.maya,
     systemPrompt: `You are Maya, Chusky's Social Media & Integrations Specialist.
 Your focus is platform-specific social media publishing, API payload formatting, and automated trigger configuration.
 Operating Rules:
@@ -154,10 +142,7 @@ Operating Rules:
     allowedComposioPrefixes: ["CANVA_", "FIGMA_", "GOOGLEDRIVE_", "DROPBOX_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "asset", "profile"],
-    skills: {
-      primary: ["writing-pro", "imagine", "openrouter-video-editing"],
-      supporting: ["marketing-ideas", "marketing-psychology", "media"],
-    },
+    skills: WORKER_SKILL_BINDINGS.leo,
     systemPrompt: `You are Leo, Chusky's Marketing & Visual Studio Specialist.
 Your focus is creative copywriting (AIDA, PAS frameworks), brand positioning, AI image/video prompt engineering, and visual asset management.
 Operating Rules:
@@ -187,13 +172,7 @@ Operating Rules:
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "CALENDLY_", "HUBSPOT_", "SALESFORCE_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["relationship", "business"],
-    skills: {
-      primary: ["voice-call-pro"],
-      supporting: ["workspace-pro", "verification", "decision-pro"],
-      requiredReferences: {
-        "voice-call-pro": ["references/03-lead-qualification.md", "references/04-appointment-booking.md", "references/05-follow-up.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.sofia,
     systemPrompt: `You are Sofia, Chusky's Voice Operations & Real-World Negotiator.
 Your focus is executing outbound Twilio phone calls, formulating call scripts, conducting voice interactions, and logging call outcomes.
 Operating Rules:
@@ -221,13 +200,7 @@ Operating Rules:
     allowedComposioPrefixes: [],
     starterComposioTools: [],
     allowedMemoryCategories: ["project"],
-    skills: {
-      primary: ["computer-pro"],
-      supporting: ["agent-browser", "browser-pro", "verification"],
-      requiredReferences: {
-        "computer-pro": ["references/03-browser-automation.md", "references/05-artifacts-qa.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.dexter,
     systemPrompt: `You are Dexter, Chusky's Desktop & Computer Use Specialist.
 Your focus is operating virtual desktop GUIs: inspecting window accessibility trees, performing coordinate mouse clicks/drags, typing text, and automating web UI workflows when direct APIs do not exist.
 Operating Rules:
@@ -269,16 +242,7 @@ Operating Rules:
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "LINEAR_", "JIRA_", "SLACK_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["project", "procedural", "episodic"],
-    skills: {
-      primary: ["attention-pulse", "project-pro"],
-      supporting: ["workspace-pro", "handoff", "verification"],
-      requiredReferences: {
-        "attention-pulse": ["references/07-handle-and-delegate.md"],
-        "project-pro": ["references/status-update.md"],
-        "workspace-pro": ["references/07-reminders-recurring.md"],
-        "handoff": ["references/packet.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.elena,
     systemPrompt: `You are Elena, Chusky's Task Operations & Workflow Governor.
 Your focus is governing durable background tasks, recording task checkpoints, managing recurring cron jobs, and tracking active attention loops.
 Operating Rules:
@@ -312,14 +276,7 @@ Operating Rules:
     allowedComposioPrefixes: ["TAVILY_", "EXA_", "FIRECRAWL_", "GOOGLEDRIVE_", "NOTION_", "GITHUB_", "GMAIL_", "SLACK_", "GOOGLECALENDAR_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["project", "business", "procedural"],
-    skills: {
-      primary: ["research-pro"],
-      supporting: ["customer-research", "workspace-pro", "verification"],
-      requiredReferences: {
-        "research-pro": ["references/brief-template.md"],
-        "verification": ["references/evidence-checklist.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.nora,
     systemPrompt: `You are Nora, Chusky's Research & Intelligence Specialist.
 Your focus is rigorous, source-backed technical, market, competitive, product, and operational research.
 Operating Rules:
@@ -359,15 +316,7 @@ Operating Rules:
     allowedComposioPrefixes: ["GMAIL_", "SLACK_", "DISCORD_", "LINKEDIN_", "TWITTER_", "X_", "ZENDESK_", "INTERCOM_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "relationship", "procedural", "project"],
-    skills: {
-      primary: ["workspace-pro", "writing-pro"],
-      supporting: ["support-desk-pro", "verification", "project-pro"],
-      requiredReferences: {
-        "support-desk-pro": ["references/01-triage.md", "references/02-replies.md", "references/03-escalation.md"],
-        "workspace-pro": ["references/01-email-inbound.md", "references/02-email-drafting.md", "references/08-triage-decision.md"],
-        "project-pro": ["references/status-update.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.ivy,
     systemPrompt: `You are Ivy, Chusky's Inbox & Communications Governor.
 Your focus is turning incoming email, Slack, and other connected-channel events into an ordered, useful communications queue.
 Operating Rules:
@@ -406,17 +355,7 @@ Operating Rules:
     allowedComposioPrefixes: ["HUBSPOT_", "SALESFORCE_", "PIPEDRIVE_", "GMAIL_", "GOOGLECALENDAR_", "LINKEDIN_", "STRIPE_", "SHOPIFY_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "relationship", "project", "procedural"],
-    skills: {
-      primary: ["customer-research", "decision-pro"],
-      supporting: ["expansion-pro", "billing-ops-pro", "meeting-pro", "workspace-pro", "verification"],
-      requiredReferences: {
-        "expansion-pro": ["references/01-readiness.md", "references/02-plays.md", "references/04-handoffs.md"],
-        "billing-ops-pro": ["references/01-invoices.md", "references/02-dunning.md"],
-        "customer-research": ["references/source-guides.md"],
-        "meeting-pro": ["references/03-deal.md", "references/09-discovery.md", "references/10-negotiation.md"],
-        "workspace-pro": ["references/03-calendar.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.quinn,
     systemPrompt: `You are Quinn, Chusky's Sales & Revenue Specialist.
 Your focus is qualified pipeline movement: understanding the account, preparing the next conversation, keeping CRM facts current, and making agreed next steps happen.
 Operating Rules:
@@ -457,17 +396,7 @@ Operating Rules:
     allowedComposioPrefixes: ["HUBSPOT_", "SALESFORCE_", "GMAIL_", "SLACK_", "GOOGLECALENDAR_", "NOTION_", "LINEAR_", "JIRA_", "STRIPE_", "SHOPIFY_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "relationship", "project", "procedural", "episodic"],
-    skills: {
-      primary: ["meeting-pro", "customer-research"],
-      supporting: ["onboarding-pro", "retention-pro", "workspace-pro", "project-pro", "verification"],
-      requiredReferences: {
-        "onboarding-pro": ["references/01-client-onboarding.md", "references/04-milestones.md", "references/06-risks.md"],
-        "retention-pro": ["references/01-health.md", "references/02-churn-risk.md", "references/04-renewals.md"],
-        "meeting-pro": ["references/04-onboarding.md", "references/12-customer-success.md"],
-        "workspace-pro": ["references/08-triage-decision.md", "references/07-reminders-recurring.md"],
-        "project-pro": ["references/status-update.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.aria,
     systemPrompt: `You are Aria, Chusky's Customer Success Specialist.
 Your focus is turning customer commitments into successful onboarding, adoption, renewal, and recovery loops.
 Operating Rules:
@@ -506,15 +435,7 @@ Operating Rules:
     allowedComposioPrefixes: ["GOOGLESHEETS_", "GOOGLEDRIVE_", "BIGQUERY_", "SNOWFLAKE_", "POSTGRES_", "HUBSPOT_", "SALESFORCE_"],
     starterComposioTools: [],
     allowedMemoryCategories: ["business", "project", "procedural", "asset"],
-    skills: {
-      primary: ["research-pro", "workspace-pro"],
-      supporting: ["verification", "decision-pro"],
-      requiredReferences: {
-        "research-pro": ["references/brief-template.md"],
-        "workspace-pro": ["references/06-spreadsheets-data.md", "references/07-reminders-recurring.md"],
-        "verification": ["references/evidence-checklist.md"],
-      },
-    },
+    skills: WORKER_SKILL_BINDINGS.kai,
     systemPrompt: `You are Kai, Chusky's Data & Analytics Specialist.
 Your focus is producing trustworthy recurring metrics, explaining what changed, identifying meaningful anomalies, and turning data into decisions.
 Operating Rules:

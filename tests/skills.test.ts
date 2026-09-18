@@ -34,6 +34,11 @@ test("skillBindings preloads expanded library skills", () => {
   assert.ok(WORKER_SKILL_BINDINGS.aria.primary.includes("retention-pro"));
 });
 
+test("runtime worker manifests use the expanded shared skill bindings", () => {
+  const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
+  for (const worker of workers) assert.equal(WORKER_CAPABILITIES[worker].skills, WORKER_SKILL_BINDINGS[worker]);
+});
+
 test("loads Aria's onboarding and retention references for a customer-success objective", async () => {
   const context = await skillContextForBinding(WORKER_SKILL_BINDINGS.aria, "Recover an onboarding milestone and review churn risk");
   assert.match(context, /Reference: references\/01-client-onboarding\.md/);
