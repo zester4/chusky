@@ -192,6 +192,14 @@ export interface CreateThreadParams {
   metadata?: JsonObject;
 }
 
+export interface RunArtifact {
+  id: string;
+  name: string;
+  type: Artifact["type"];
+  contentType: string;
+  size: number;
+}
+
 export interface Run {
   id: string;
   threadId: string;
@@ -201,6 +209,8 @@ export interface Run {
   agentName?: string;
   model?: string;
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
+  /** Generated file metadata. Download through the artifacts resource using this id. */
+  artifacts?: RunArtifact[];
   output?: string;
   cost?: number;
   taskId?: string;

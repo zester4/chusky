@@ -132,7 +132,7 @@ async function sdkTaskSkillInstructions(skills: string[] | undefined): Promise<s
   return blocks.length ? blocks.join("\n\n").slice(0, 24000) : undefined;
 }
 function sdkDurationSeconds(value: string | undefined): number | undefined { return ({ "5m": 300, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600, "3d": 259200, "1w": 604800 } as Record<string, number>)[value ?? ""]; }
-import { persistSdkCompanyRun, registerSdkApi } from "./sdkApi.js";
+import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts } from "./sdkApi.js";
 import { recoverSdkWebhooks } from "./lib/webhookOutbox.js";
 import type { ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { registerAuthRoutes } from "./authRoutes.js";
@@ -1907,7 +1907,7 @@ async function main(): Promise<void> {
               if (task.sdkRunId && task.sdkThreadId) {
                 if (result.cost) await addUsage(task.userId, result.cost);
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-                if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.cost = result.cost; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+                if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.artifacts = sdkRunArtifacts(result.generatedFiles); sdkRun.cost = result.cost; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
                 await completeTask(task.userId, task.id, result.text);
               }
               if (task.meetingFollowUp) {

@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { persistSdkCompanyRun, registerSdkApi, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
+import { daytonaEngine } from "../src/lib/daytona/engine.js";
 import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getApproval, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
@@ -18,6 +19,33 @@ beforeEach(async () => {
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
+
+test("SDK run artifacts expose downloadable metadata without workspace paths or bytes", () => {
+  const artifacts = sdkRunArtifacts([{ artifactId: "artifact_pdf_1", name: "proposal.pdf", contentType: "application/pdf", type: "pdf", data: Buffer.from("pdf-bytes") }]);
+  assert.deepEqual(artifacts, [{ id: "artifact_pdf_1", name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9 }]);
+  assert.equal("data" in (artifacts?.[0] ?? {}), false);
+  assert.equal("path" in (artifacts?.[0] ?? {}), false);
+});
+
+test("SDK artifact download returns the owner-scoped binary with download headers", async () => {
+  const originalDownloadArtifact = daytonaEngine.downloadArtifact;
+  let receivedUserId: number | undefined;
+  (daytonaEngine as any).downloadArtifact = async (userId: number, id: string) => {
+    receivedUserId = userId;
+    assert.equal(id, "artifact_pdf_1");
+    return { id, name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.from("pdf-bytes") };
+  };
+  try {
+    const response = await app().fetch(new Request("http://local/v1/artifacts/artifact_pdf_1/download", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "download-owner" } }));
+    assert.equal(response.status, 200);
+    assert.equal(typeof receivedUserId, "number");
+    assert.equal(response.headers.get("content-type"), "application/pdf");
+    assert.equal(response.headers.get("content-disposition"), 'attachment; filename="proposal.pdf"');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from("pdf-bytes"));
+  } finally {
+    (daytonaEngine as any).downloadArtifact = originalDownloadArtifact;
+  }
+});
 
 test("SDK thread creation is authenticated, replay-safe, and rejects key/body mismatches", async () => {
   const api = app();

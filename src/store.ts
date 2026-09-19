@@ -310,6 +310,15 @@ export interface SdkProjectRecord {
   revokedAt?: number;
 }
 
+export interface SdkRunArtifact {
+  /** Safe metadata only; the artifact path, sandbox, and bytes never leave the server. */
+  id: string;
+  name: string;
+  type: ArtifactType;
+  contentType: string;
+  size: number;
+}
+
 export interface SdkRunRecord {
   id: string;
   /** Set only for runs submitted through a project key; used for company-level status reporting. */
@@ -323,6 +332,8 @@ export interface SdkRunRecord {
   agentInstructions?: string;
   /** Verified R2 uploads used for this run. Keys are intentionally never exposed. */
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
+  /** Generated artifacts made available by this run. Only safe metadata is persisted. */
+  artifacts?: SdkRunArtifact[];
   output?: string;
   cost?: number;
   approvalId?: string;
