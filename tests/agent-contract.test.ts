@@ -4,6 +4,7 @@ import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRe
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
+import { daytonaEngine } from "../src/lib/daytona/index.js";
 
 // Agent contract tests mock provider HTTP calls; never send their fetch stubs
 // to a developer's configured Upstash Vector instance.
@@ -14,8 +15,8 @@ function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
-function toolResponse(name: string, args: string) {
-  return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
+function toolResponse(name: string, args: string, id = "call-1") {
+  return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
 test("preview links are included exactly once even when the model omits them", () => {
@@ -100,6 +101,59 @@ test("raises the output budget for structured artifact calls", async () => {
     assert.match(result.text, /could not complete/);
     assert.equal(requests[0]?.max_tokens, config.openRouterArtifactMaxTokens);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+test("emails a generated artifact through the exact connected Composio action", async () => {
+  const userId = 830055;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const originalCreatePdf = daytonaEngine.createPdf;
+  const originalDownloadArtifact = daytonaEngine.downloadArtifact;
+  let sentArguments: Record<string, unknown> | undefined;
+  const session = {
+    sessionId: "artifact-email-session",
+    tools: async () => [{
+      type: "function",
+      function: {
+        name: "GMAIL_SEND_EMAIL",
+        description: "Send an email",
+        parameters: { type: "object", properties: {
+          recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+          attachment: { type: "array", items: { type: "object", properties: { file_name: { type: "string" }, file_data: { type: "string" }, mime_type: { type: "string" } } } },
+        } },
+      },
+    }],
+    execute: async (name: string, args: Record<string, unknown>) => {
+      assert.equal(name, "GMAIL_SEND_EMAIL");
+      sentArguments = args;
+      return { ok: true };
+    },
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session } });
+  (daytonaEngine as any).createPdf = async () => ({ __chuskyArtifactReady: true, id: "art_email_1", name: "proposal.pdf", type: "pdf", contentType: "application/pdf" });
+  (daytonaEngine as any).downloadArtifact = async (_owner: number, id: string) => ({ id, name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.from("pdf-bytes") });
+  let responseIndex = 0;
+  globalThis.fetch = (async (input) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const responses = [
+      toolResponse("CHUCK_CREATE_PDF", JSON.stringify({ title: "Proposal", sections: [{ heading: "Summary", body: "Approved proposal" }] }), "call-create-pdf"),
+      toolResponse("CHUCK_EMAIL_ARTIFACT", JSON.stringify({ emailTool: "GMAIL_SEND_EMAIL", arguments: { recipient_email: "client@example.com", subject: "Proposal", body: "Attached." }, artifactIds: ["art_email_1"] }), "call-email-artifact"),
+      chatResponse({ role: "assistant", content: "The proposal was emailed with the generated PDF attached." }),
+    ];
+    return responses[responseIndex++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Create the proposal PDF and email it to the client.", [], "test/model");
+    assert.match(result.text, /emailed/);
+    assert.equal(result.generatedFiles?.[0]?.artifactId, "art_email_1");
+    assert.equal((sentArguments?.attachment as Array<Record<string, string>>)?.[0]?.file_name, "proposal.pdf");
+    assert.equal((sentArguments?.attachment as Array<Record<string, string>>)?.[0]?.file_data, Buffer.from("pdf-bytes").toString("base64"));
+  } finally {
+    (daytonaEngine as any).createPdf = originalCreatePdf;
+    (daytonaEngine as any).downloadArtifact = originalDownloadArtifact;
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("shared current-information requests are nudged into live web search", async () => {

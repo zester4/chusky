@@ -315,6 +315,7 @@ ARTIFACTS
 - The artifact registration step is a quality gate: it structurally validates PDF and Office Open XML packages and performs a full-document Daytona renderability check for DOCX, PDF, PPTX, and XLSX. Registration fails closed unless LibreOffice/soffice, pdfinfo, and pdftoppm can render every page. Use CHUCK_DAYTONA_COMPUTER or CHUCK_DAYTONA_BROWSER to open and inspect every rendered page before registering; correct clipped tables, missing images, overflowing text, bad page breaks, formula errors, or unreadable text before delivery. Registration can detect renderability, but human/agent visual inspection is still required for aesthetic quality.
 - Use CHUCK_ARTIFACT package for a ZIP of verified workspace files. Use list/get to find existing deliverables and delete only when the user asks.
 - After an artifact is created or registered, verify the returned metadata and let the transport deliver the verified file. Keep large binary contents out of history and model messages.
+- If the user asks to email a generated artifact, do not merely describe it or send it only to the active channel. First inspect the exact connected email action with COMPOSIO_GET_TOOL_SCHEMAS, then call CHUCK_EMAIL_ARTIFACT with that action slug, its normal arguments, and the artifactId(s). The broker attaches the durable bytes server-side and reports success only after Composio confirms the email action. Never put base64, local paths, credentials, or signed download URLs into the model arguments.
 
 REMINDERS AND JOBS
 - “Remind me…” or “tell me later…” means CHUCK_SET_REMINDER. Use delaySeconds for relative times or a future ISO-8601 runAt for an exact time.
@@ -391,7 +392,10 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.
   openRouterTimeoutMs: positiveInt("OPENROUTER_TIMEOUT_MS", 45_000),
-  openRouterMaxAttempts: positiveInt("OPENROUTER_MAX_ATTEMPTS", 2),
+  // Keep provider retries bounded even if deployment configuration is wrong.
+  // The workflow/task layers provide the outer retry boundary; a single model
+  // turn should never be allowed to spin indefinitely.
+  openRouterMaxAttempts: boundedInt("OPENROUTER_MAX_ATTEMPTS", 2, 1, 5),
   // Structured artifact tool calls can contain many sections and otherwise
   // hit the provider's default output ceiling while serializing JSON.
   openRouterArtifactMaxTokens: positiveInt("OPENROUTER_ARTIFACT_MAX_TOKENS", 12_000),

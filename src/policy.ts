@@ -8,6 +8,7 @@ export type ToolApprovalPolicy = "private" | "approval_required";
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
+  "CHUCK_EMAIL_ARTIFACT",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
   "CHUCK_LIST_PHONE_CALLS",
   // Meeting participation is available only after the user's explicit join
@@ -146,6 +147,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_SHOPPING_LIST_SITES: "🛒 I’m checking your saved shopping sites…",
   CHUCK_SHOPPING_REMOVE_SITE: "🛒 I’m removing that saved shopping site…",
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
+  CHUCK_EMAIL_ARTIFACT: "✉️ I’m attaching the deliverable to your email…",
   CHUCK_CREATE_PDF: "📄 I’m building and checking your PDF…",
   CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking your presentation…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",

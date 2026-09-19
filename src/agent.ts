@@ -51,6 +51,7 @@ import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { missingComposioConnectionMessage, resolveComposioRoute } from "./composioRouting.js";
+import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -453,6 +454,49 @@ function composioExecute(sessionObj: any, slug: string, args: Record<string, unk
   const selected = splitAccountSelector(args);
   const executeOptions = selected.account || signal ? { ...(selected.account ? { account: selected.account } : {}), ...(signal ? { signal } : {}) } : undefined;
   return abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
+}
+
+function toolSchemaName(tool: any): string {
+  return String(tool?.function?.name ?? tool?.name ?? "");
+}
+
+async function sendArtifactEmail(
+  userId: number,
+  sessionObj: any,
+  availableComposioTools: any[],
+  args: Record<string, unknown>,
+  generatedFiles: NonNullable<AgentResult["generatedFiles"]>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (!sessionObj) throw new Error("Email attachments require an active connected-app session.");
+  const emailTool = typeof args.emailTool === "string" ? args.emailTool.trim() : "";
+  if (!emailTool || emailTool.startsWith("CHUCK_") || emailTool.startsWith("COMPOSIO_")) throw new Error("emailTool must be an exact connected email action slug, not a Chusky or Composio meta-tool.");
+  const emailArguments = args.arguments;
+  if (!emailArguments || typeof emailArguments !== "object" || Array.isArray(emailArguments)) throw new Error("CHUCK_EMAIL_ARTIFACT.arguments must be an object matching the selected email action schema.");
+  const artifactIds = Array.isArray(args.artifactIds) ? [...new Set(args.artifactIds.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim()))] : [];
+  if (!artifactIds.length) throw new Error("CHUCK_EMAIL_ARTIFACT requires at least one artifact ID.");
+
+  const directTool = availableComposioTools.find((tool) => toolSchemaName(tool) === emailTool)
+    ?? (await sessionObj.tools()).find((tool: any) => toolSchemaName(tool) === emailTool);
+  if (!directTool) throw new Error(`The connected email action ${emailTool} is not available in this user's Composio session.`);
+
+  const files: ArtifactEmailFile[] = [];
+  for (const artifactId of artifactIds) {
+    const inTurn = generatedFiles.find((file) => file.artifactId === artifactId);
+    if (inTurn) {
+      files.push(inTurn);
+      continue;
+    }
+    // Approval resumes and trigger replays may start a fresh agent run. The
+    // artifact remains owner-scoped in Daytona, so reload it by ID instead of
+    // losing the attachment between workflow slices.
+    const downloaded = await abortable(daytonaEngine.downloadArtifact(userId, artifactId), signal);
+    files.push({ data: downloaded.data, name: downloaded.name, contentType: downloaded.contentType, artifactId: downloaded.id });
+  }
+
+  const providerArguments = buildArtifactEmailArguments(directTool, emailArguments as Record<string, unknown>, files);
+  await composioExecute(sessionObj, emailTool, providerArguments, signal);
+  return { emailSent: true, emailTool, artifactIds, note: "The connected email action confirmed delivery with the generated attachment(s)." };
 }
 
 const sessionCache = new Map<number, ComposioSession>();
@@ -1136,7 +1180,9 @@ export async function runAgent(
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
-        if (slug === "CHUCK_GENERATE_IMAGE") {
+        if (slug === "CHUCK_EMAIL_ARTIFACT") {
+          execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
+        } else if (slug === "CHUCK_GENERATE_IMAGE") {
           const imageRuntime = currentImageRuntime(userMessage);
           const mode = args.mode === "edit" || args.mode === "reference_variations" ? args.mode : "generate";
           const references = await resolveImageReferences(userId, args.references, mode === "edit" && !args.references ? ["current:0"] : undefined, imageRuntime.currentImages, generatedReferenceImages);
@@ -1247,7 +1293,7 @@ export async function runAgent(
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
             const delivered = await abortable(daytonaEngine.downloadArtifact(userId, artifact.id), signal);
             generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
-            execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact was delivered to the user." };
+            execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
           }
           if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };

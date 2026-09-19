@@ -28,6 +28,7 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PDF"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_DOCUMENT"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_SPREADSHEET"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_EMAIL_ARTIFACT"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_UPDATE_MEMORY"), "private");
   for (const name of ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(toolApprovalPolicy(name), "private", name);
   for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {

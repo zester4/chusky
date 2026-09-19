@@ -321,6 +321,20 @@ function artifactNameForType(value: unknown, type: ArtifactType): string {
   return `${name.slice(0, maxBaseLength)}${extension}`;
 }
 
+/**
+ * Generated artifacts are written to an attempt-specific path first. The
+ * validated file is promoted to the requested logical path only after both
+ * structural and visual QA pass, so a failed replay cannot damage the last
+ * known-good artifact.
+ */
+function artifactAttemptPath(finalPath: string): string {
+  const normalized = finalPath.replace(/\\/g, "/");
+  const separator = normalized.lastIndexOf("/");
+  const directory = separator >= 0 ? normalized.slice(0, separator) : "artifacts";
+  const name = separator >= 0 ? normalized.slice(separator + 1) : normalized;
+  return safeDaytonaPath(`${directory}/.chusky/attempt-${randomUUID()}-${name}`, "artifact staging path");
+}
+
 function isBinaryFile(path: string, bytes: Buffer): string | undefined {
   const lowerPath = path.toLowerCase();
   const knownBinaryExtensions = [".pdf", ".docx", ".pptx", ".xlsx", ".zip", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp3", ".m4a", ".wav", ".ogg", ".mp4"];
@@ -2035,10 +2049,18 @@ export class DaytonaEngine {
     return { workspaceId: sandbox.id, authenticated: remaining.length === 0 && !loginFailed && !challenge, ...(loginFailed || challenge ? { needsUserInteraction: true } : {}) };
   }
 
-  private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<void> {
+  private async saveArtifact(userId: number, artifact: ArtifactRecord): Promise<ArtifactRecord> {
     const session = await getSession(userId);
-    session.artifacts = [...(session.artifacts ?? []).filter((item) => item.id !== artifact.id), artifact].slice(-100);
+    const existing = (session.artifacts ?? []).find((item) => item.userId === userId && item.sandboxId === artifact.sandboxId && item.path === artifact.path);
+    const persisted: ArtifactRecord = existing
+      ? { ...artifact, id: existing.id, createdAt: existing.createdAt }
+      : artifact;
+    session.artifacts = [
+      ...(session.artifacts ?? []).filter((item) => item.id !== persisted.id && !(item.userId === userId && item.sandboxId === persisted.sandboxId && item.path === persisted.path)),
+      persisted,
+    ].slice(-100);
     await saveSession(userId, session);
+    return persisted;
   }
 
   private async validateArtifactStructure(sandbox: Sandbox, path: string, type: ArtifactType): Promise<void> {
@@ -2146,8 +2168,9 @@ export class DaytonaEngine {
       }
     }
     const doc = new Document({ creator: style.author ?? "Chusky", title, sections: [{ properties: {}, headers: headerChildren.length ? { default: new Header({ children: headerChildren }) } : undefined, footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: style.footer ?? "Created by Chusky", color: color(style.muted), size: 16 }), ...(style.includePageNumbers ? [new TextRun({ text: "  •  Page " }), new TextRun({ children: [PageNumber.CURRENT] })] : [])] })] }) }, children: body }] });
-    await sandbox.fs.uploadFile(Buffer.from(await Packer.toBuffer(doc)), path);
-    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx);
+    const attemptPath = artifactAttemptPath(path);
+    await sandbox.fs.uploadFile(Buffer.from(await Packer.toBuffer(doc)), attemptPath);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx, path);
     return { ...artifact, generated: true };
   }
 
@@ -2192,8 +2215,9 @@ export class DaytonaEngine {
       spec.rows[0]!.forEach((_cell, index) => { sheet.getColumn(index + 1).width = Math.min(42, Math.max(13, ...spec.rows.map((row) => String(row[index] ?? "").length + 2))); });
       sheet.addTable({ name: `ChuskyTable${workbook.worksheets.length}`, ref: `A3:${String.fromCharCode(64 + spec.rows[0]!.length)}${spec.rows.length + 2}`, headerRow: true, style: { theme: "TableStyleMedium2", showRowStripes: true }, columns: spec.rows[0]!.map((name) => ({ name })), rows: spec.rows.slice(1) });
     }
-    await sandbox.fs.uploadFile(Buffer.from(await workbook.xlsx.writeBuffer()), path);
-    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet);
+    const attemptPath = artifactAttemptPath(path);
+    await sandbox.fs.uploadFile(Buffer.from(await workbook.xlsx.writeBuffer()), attemptPath);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet, path);
     return { ...artifact, generated: true };
   }
 
@@ -2207,14 +2231,15 @@ export class DaytonaEngine {
     const path = requestedPath.toLowerCase().endsWith(".pdf") ? requestedPath : `${requestedPath}.pdf`;
     const sandbox = await this.getOrCreateWorkspace(userId);
     const scriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
-    const script = pdfGenerationScript(title, sections, style, path);
+    const attemptPath = artifactAttemptPath(path);
+    const script = pdfGenerationScript(title, sections, style, attemptPath);
     await sandbox.fs.uploadFile(Buffer.from(script, "utf8"), scriptPath);
     try {
       const result = await sandbox.process.executeCommand(`python3 ${scriptPath}`, await sandbox.getUserHomeDir(), undefined, 240);
       if (result.exitCode !== 0) {
         const output = commandOutput(result);
         if (/ReportLab.*unavailable|No module named ['"]?(reportlab|pypdf)|pypdf.*unavailable/i.test(output)) {
-          await this.generatePdfInRenderer(sandbox, script, path);
+          await this.generatePdfInRenderer(sandbox, script, attemptPath);
         } else {
           throw new DaytonaInputError(`PDF generation failed: ${output || "unknown renderer error"}`);
         }
@@ -2222,7 +2247,7 @@ export class DaytonaEngine {
     } finally {
       try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
     }
-    const artifact = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf, path);
     return { ...artifact, generated: true };
   }
 
@@ -2268,8 +2293,9 @@ export class DaytonaEngine {
     const path = requestedPath.toLowerCase().endsWith(".pptx") ? requestedPath : `${requestedPath}.pptx`;
     const sandbox = await this.getOrCreateWorkspace(userId);
     const bytes = await presentationBytes(sandbox, title, slides, style);
-    await sandbox.fs.uploadFile(bytes, path);
-    const result = await this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation);
+    const attemptPath = artifactAttemptPath(path);
+    await sandbox.fs.uploadFile(bytes, attemptPath);
+    const result = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "presentation.pptx"), "presentation", ARTIFACT_MIME.presentation, path);
     return { ...result, generated: true, slideCount: slides.length + 1 };
   }
 
@@ -2297,11 +2323,12 @@ export class DaytonaEngine {
       if (!files.length || files.length > 100) throw new DaytonaInputError("files must contain 1-100 workspace-relative paths");
       const name = artifactNameForType(args.name ?? "chusky-project.zip", "zip");
       const path = safeDaytonaPath(`artifacts/${name}`, "output path");
-      const script = `import zipfile\nz=zipfile.ZipFile(${JSON.stringify(path)},'w',zipfile.ZIP_DEFLATED)\n[z.write(p) for p in ${JSON.stringify(files)}]\nz.close()`;
+      const attemptPath = artifactAttemptPath(path);
+      const script = `import zipfile\nz=zipfile.ZipFile(${JSON.stringify(attemptPath)},'w',zipfile.ZIP_DEFLATED)\n[z.write(p) for p in ${JSON.stringify(files)}]\nz.close()`;
       const encoded = Buffer.from(script, "utf8").toString("base64");
       const result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, undefined, undefined, 120);
       if (result.exitCode !== 0) throw new DaytonaInputError(`ZIP creation failed: ${String(result.result ?? "unknown error").slice(0, 500)}`);
-      return this.registerArtifact(userId, sandbox, path, name, "zip", "application/zip");
+      return this.registerArtifact(userId, sandbox, attemptPath, name, "zip", "application/zip", path);
     }
     const type = artifactType(args.type);
     if (action === "create") {
@@ -2314,8 +2341,9 @@ export class DaytonaEngine {
       if (args.content.length > DAYTONA_MAX_FILE_CONTENT) throw new DaytonaInputError(`content must be at most ${DAYTONA_MAX_FILE_CONTENT} characters`);
       const name = artifactNameForType(args.name ?? (type === "website" ? "website.html" : "report.md"), type);
       const path = safeDaytonaPath(`artifacts/${name}`, "output path");
-      await sandbox.fs.uploadFile(Buffer.from(args.content, "utf8"), path);
-      return this.registerArtifact(userId, sandbox, path, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type]);
+      const attemptPath = artifactAttemptPath(path);
+      await sandbox.fs.uploadFile(Buffer.from(args.content, "utf8"), attemptPath);
+      return this.registerArtifact(userId, sandbox, attemptPath, name, type, args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type], path);
     }
     if (action === "register") {
       const path = safeDaytonaPath(args.path, "path");
@@ -2324,9 +2352,16 @@ export class DaytonaEngine {
     throw new DaytonaInputError(`Unsupported artifact action: ${action}`);
   }
 
-  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
+  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string, destinationPath?: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
     const extension = `.${ARTIFACT_EXTENSION[type]}`;
     let normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
+    const normalizedDestination = destinationPath === undefined
+      ? undefined
+      : (() => {
+        const safeDestination = safeDaytonaPath(destinationPath, "destination path");
+        return safeDestination.toLowerCase().endsWith(extension) ? safeDestination : `${safeDestination}${extension}`;
+      })();
+    const stagingPath = normalizedPath;
     const normalizedName = artifactNameForType(name, type);
     let details: { size?: number; isDir?: boolean } | undefined;
     // Preserve the historical extension-normalization behavior for files
@@ -2360,12 +2395,25 @@ export class DaytonaEngine {
     const size = Number(details.size ?? 0);
     if (details.isDir) throw new DaytonaInputError("Artifact path must be a file, not a directory");
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
-    await this.validateArtifactStructure(sandbox, normalizedPath, type);
-    await this.validateArtifactVisual(sandbox, normalizedPath, type);
+    try {
+      await this.validateArtifactStructure(sandbox, normalizedPath, type);
+      await this.validateArtifactVisual(sandbox, normalizedPath, type);
+      if (normalizedDestination && normalizedDestination !== normalizedPath) {
+        // Daytona's same-workspace move is the promotion boundary. The final
+        // logical path is untouched until the fully validated attempt is
+        // ready, so failed replays cannot overwrite a known-good file.
+        await sandbox.fs.moveFiles(normalizedPath, normalizedDestination);
+        normalizedPath = normalizedDestination;
+      }
+    } finally {
+      if (normalizedDestination && stagingPath !== normalizedPath) {
+        try { await sandbox.fs.deleteFile(stagingPath, false); } catch { /* a successful move already removed it */ }
+      }
+    }
     const now = Date.now();
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
-    await this.saveArtifact(userId, artifact);
-    return { ...artifact, __chuskyArtifactReady: true };
+    const persisted = await this.saveArtifact(userId, artifact);
+    return { ...persisted, __chuskyArtifactReady: true };
   }
 
   private async findUniqueArtifactPath(sandbox: Sandbox, requestedPath: string, extension: string): Promise<{ path: string; details: { size?: number; isDir?: boolean } } | undefined> {

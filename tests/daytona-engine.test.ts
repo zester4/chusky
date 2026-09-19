@@ -588,7 +588,7 @@ test("moves PDF generation to the isolated renderer when the workspace lacks Rep
     : { exitCode: 0, result: "validated" };
   source.fs.uploadFile = async (bytes: Buffer, path: string) => {
     if (path.endsWith(".py")) return;
-    assert.equal(path, "artifacts/Renderer_Fallback.pdf");
+    assert.match(path, /^artifacts\/\.chusky\/attempt-[0-9a-f-]+-Renderer_Fallback\.pdf$/);
     assert.deepEqual(bytes, generated);
   };
   renderer.process.executeCommand = async () => ({ exitCode: 0, result: "generated" });
@@ -776,6 +776,62 @@ test("QA failure leaves no record and retries the same file from SDK home", asyn
   failVisual = false;
   await e.artifact(820030, args);
   assert.equal((await getSession(820030)).artifacts?.length, 1);
+});
+
+test("successful artifact registration replay reuses the logical artifact identity", async () => {
+  const e = engine();
+  const first = await e.artifact(820041, { action: "register", type: "image", path: "workspace/logo.png" }) as any;
+  const replay = await e.artifact(820041, { action: "register", type: "image", path: "workspace/logo.png" }) as any;
+  assert.equal(replay.id, first.id);
+  const artifacts = (await getSession(820041)).artifacts ?? [];
+  assert.equal(artifacts.length, 1);
+  assert.equal(artifacts[0]?.path, "workspace/logo.png");
+});
+
+test("failed generated replacement preserves the last known-good artifact", async () => {
+  const sandbox = fakeSandbox("source-preserve");
+  const files = new Map<string, Buffer>();
+  sandbox.fs.uploadFile = async (bytes: Buffer, path: string) => { files.set(path, Buffer.from(bytes)); };
+  sandbox.fs.downloadFile = async (path: string) => {
+    const bytes = files.get(path);
+    if (!bytes) throw new Error(`not found: ${path}`);
+    return Buffer.from(bytes);
+  };
+  sandbox.fs.getFileDetails = async (path: string) => {
+    const bytes = files.get(path);
+    if (!bytes) throw new Error(`not found: ${path}`);
+    return { size: bytes.length, isDir: false };
+  };
+  sandbox.fs.moveFiles = async (source: string, destination: string) => {
+    const bytes = files.get(source);
+    if (!bytes) throw new Error(`not found: ${source}`);
+    files.set(destination, Buffer.from(bytes));
+    files.delete(source);
+  };
+  let failVisual = false;
+  sandbox.process.executeCommand = async (command: string) => {
+    const encoded = command.match(/base64\.b64decode\('([^']+)'\)/)?.[1];
+    const script = encoded ? Buffer.from(encoded, "base64").toString("utf8") : "";
+    return script.includes("require_renderer") && failVisual
+      ? { exitCode: 2, result: "invalid rendered output" }
+      : { exitCode: 0, result: "validated" };
+  };
+  const e = new DaytonaEngine(() => ({
+    get: async () => sandbox,
+    create: async () => sandbox,
+  } as any));
+
+  const first = await e.createPresentation(820042, { title: "Stable deck", slides: [{ title: "Version A", body: "Known good" }] });
+  const originalBytes = Buffer.from(files.get(first.path)!);
+  failVisual = true;
+  await assert.rejects(
+    () => e.createPresentation(820042, { title: "Stable deck", slides: [{ title: "Version B", body: "Invalid replacement" }] }),
+    /visual QA failed/,
+  );
+  assert.deepEqual(files.get(first.path), originalBytes);
+  const artifacts = (await getSession(820042)).artifacts ?? [];
+  assert.equal(artifacts.length, 1);
+  assert.equal(artifacts[0]?.id, first.id);
 });
 
 test("recovers an omitted workspace prefix before validation and delivery", async () => {
