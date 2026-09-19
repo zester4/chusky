@@ -5,7 +5,7 @@ import type { CapabilityWorkerName } from "../memory/types.js";
 export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky">, SkillBinding> = {
   lucas: {
       primary: ["fullstack-dev", "computer-pro"],
-      supporting: ["senior-fullstack", "codebase-design", "code-review", "tdd", "verification", "handoff", "fullstack-guardian"],
+      supporting: ["senior-fullstack", "codebase-design", "code-review", "tdd", "verification", "handoff", "fullstack-guardian", "better-ui", "ui-ux-pro-max", "auth", "better-auth-best-practices", "supabase", "neon", "pdf-generation", "pptx"],
       requiredReferences: {
         "fullstack-dev": ["references/testing-strategy.md", "references/release-checklist.md"],
         "computer-pro": ["references/01-workspace-hygiene.md"],
@@ -48,7 +48,7 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
     },
   nora: {
       primary: ["research-pro"],
-      supporting: ["customer-research", "workspace-pro", "verification", "grill-me", "decision-pro"],
+      supporting: ["customer-research", "workspace-pro", "verification", "grill-me", "decision-pro", "pdf-generation", "docx-generation", "xlsx-generation"],
       requiredReferences: {
         "research-pro": ["references/brief-template.md"],
         "verification": ["references/evidence-checklist.md"],
@@ -56,7 +56,7 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
     },
   ivy: {
       primary: ["workspace-pro", "writing-pro"],
-      supporting: ["support-desk-pro", "cold-email", "triage", "verification", "project-pro"],
+      supporting: ["support-desk-pro", "cold-email", "triage", "verification", "project-pro", "hiring-pipeline-pro"],
       requiredReferences: {
         "support-desk-pro": ["references/01-triage.md", "references/02-replies.md", "references/03-escalation.md"],
         "workspace-pro": ["references/01-email-inbound.md", "references/02-email-drafting.md", "references/08-triage-decision.md"],
@@ -87,7 +87,7 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
     },
   kai: {
       primary: ["research-pro", "workspace-pro"],
-      supporting: ["verification", "decision-pro", "xlsx", "grill-me"],
+      supporting: ["verification", "decision-pro", "xlsx", "xlsx-generation", "grill-me"],
       requiredReferences: {
         "research-pro": ["references/brief-template.md"],
         "workspace-pro": ["references/06-spreadsheets-data.md", "references/07-reminders-recurring.md"],

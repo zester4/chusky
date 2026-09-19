@@ -72,6 +72,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "frontend-design", triggers: ["frontend design", "ui design", "landing page ui"] },
   { name: "design-ui", triggers: ["design system", "component ui", "polish ui"] },
   { name: "better-ui", triggers: ["better ui", "ui polish", "interface quality"] },
+  { name: "ui-ux-pro-max", triggers: ["ui ux", "ux audit", "responsive layout", "accessibility review", "mobile layout"] },
   { name: "supabase", triggers: ["supabase"] },
   { name: "neon", triggers: ["neon postgres", "neon database"] },
   { name: "auth", triggers: ["authentication", "auth flow", "login signup"] },
@@ -88,8 +89,11 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "media", triggers: ["media asset", "brand media"] },
   { name: "pptx", triggers: ["powerpoint", "pptx", "slide deck", "presentation slides"] },
   { name: "pdf", triggers: ["pdf document", "create pdf"] },
+  { name: "pdf-generation", triggers: ["pdf generation", "pdf artifact", "pdf layout", "render pdf"] },
   { name: "docx", triggers: ["word document", "docx"] },
+  { name: "docx-generation", triggers: ["docx generation", "word artifact", "render docx"] },
   { name: "xlsx", triggers: ["spreadsheet", "xlsx", "excel"] },
+  { name: "xlsx-generation", triggers: ["xlsx generation", "workbook artifact", "excel chart"] },
   { name: "find-skills", triggers: ["what skills", "list skills", "find skill"] },
   { name: "grill-me", triggers: ["grill me", "challenge assumptions", "stress test the plan"] },
   { name: "brainstorming", triggers: ["brainstorm", "ideate", "ideas for"] },
@@ -104,6 +108,11 @@ export function routedSkillNames(query: string): string[] {
   const text = normalizedQuery(query);
   if (!text) return [];
   return ROUTED_SKILLS.filter(({ name, triggers }) => text.includes(name) || triggers.some((trigger) => text.includes(trigger))).map(({ name }) => name);
+}
+
+/** Names in the explicit high-confidence supervisor route table. */
+export function listRoutedSkillNames(): string[] {
+  return ROUTED_SKILLS.map(({ name }) => name);
 }
 
 export async function routedSkillContext(query: string, root = DEFAULT_SKILLS_ROOT): Promise<string> {
@@ -214,6 +223,19 @@ async function loadCatalog(root = DEFAULT_SKILLS_ROOT): Promise<SkillManifest[]>
   }
   cache.set(resolvedRoot, { signature, skills });
   return skills;
+}
+
+/** Installed trusted skills, using their frontmatter names. */
+export async function listInstalledSkillNames(root = DEFAULT_SKILLS_ROOT): Promise<string[]> {
+  return (await loadCatalog(root)).map((skill) => skill.name).sort((a, b) => a.localeCompare(b));
+}
+
+/** Stable identifiers for audits: bindings use the installed directory name,
+ * while third-party skills may expose a different frontmatter name. */
+export async function listInstalledSkillIdentifiers(root = DEFAULT_SKILLS_ROOT): Promise<Array<{ name: string; directory: string }>> {
+  return (await loadCatalog(root))
+    .map((skill) => ({ name: skill.name, directory: path.basename(skill.directory) }))
+    .sort((a, b) => a.directory.localeCompare(b.directory));
 }
 
 function terms(query: string): string[] {

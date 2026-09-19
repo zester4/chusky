@@ -6,6 +6,7 @@ import path from "node:path";
 import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
 import { WORKER_CAPABILITIES } from "../src/subagents/capabilities.js";
 import { WORKER_SKILL_BINDINGS } from "../src/subagents/skillBindings.js";
+import { getSkillCoverage } from "../src/subagents/skillCoverage.js";
 
 test("routes sold business skills deterministically before fuzzy discovery", () => {
   assert.deepEqual(routedSkillNames("Review overdue Stripe billing and hand off the churn-risk account"), ["composio-routing", "retention-pro", "billing-ops-pro"]);
@@ -32,6 +33,21 @@ test("skillBindings preloads expanded library skills", () => {
   assert.ok(WORKER_SKILL_BINDINGS.maya.supporting.includes("seo-audit"));
   assert.ok(WORKER_SKILL_BINDINGS.aria.primary.includes("onboarding-pro"));
   assert.ok(WORKER_SKILL_BINDINGS.aria.primary.includes("retention-pro"));
+  assert.ok(WORKER_SKILL_BINDINGS.lucas.supporting.includes("ui-ux-pro-max"));
+  assert.ok(WORKER_SKILL_BINDINGS.lucas.supporting.includes("pdf-generation"));
+  assert.ok(WORKER_SKILL_BINDINGS.ivy.supporting.includes("hiring-pipeline-pro"));
+  assert.ok(WORKER_SKILL_BINDINGS.kai.supporting.includes("xlsx-generation"));
+});
+
+test("skill coverage reports invalid bindings and distinguishes routing from preloads", async () => {
+  const report = await getSkillCoverage();
+  assert.deepEqual(report.invalidBindings, []);
+
+  const byName = new Map(report.entries.map((entry) => [entry.name, entry]));
+  assert.equal(byName.get("hiring-pipeline-pro")?.status, "bound-and-routed");
+  assert.ok(byName.get("ui-ux-pro-max")?.workers.includes("lucas"));
+  assert.equal(byName.get("composio-routing")?.status, "routed-only");
+  assert.equal(byName.get("building-games")?.status, "dynamic-only");
 });
 
 test("runtime worker manifests use the expanded shared skill bindings", () => {

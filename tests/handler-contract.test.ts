@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { isSimpleTelegramGreeting, registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
-import { addJob, addReminder, appendChannelConversationMessages, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
+import { addJob, addReminder, appendChannelConversationMessages, consumeCliPairing, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
 class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
@@ -18,13 +18,15 @@ class FakeBot {
 
 function context(userId: number, match = "") {
   const sent: any[] = [];
+  let callbackAnswerCount = 0;
   return {
     from: { id: userId }, chat: { id: userId + 1000 }, match,
     reply: async (text: string, options?: unknown) => { sent.push({ method: "reply", text, options }); return { message_id: 1 }; },
     editMessageText: async (text: string) => { sent.push({ method: "edit", text }); },
-    answerCallbackQuery: async () => undefined,
+    answerCallbackQuery: async () => { callbackAnswerCount += 1; },
     api: { editMessageText: async (_chatId: number, _messageId: number, text: string, options?: unknown) => { sent.push({ method: "edit", text, options }); } },
     sent,
+    get callbackAnswerCount() { return callbackAnswerCount; },
   };
 }
 
@@ -54,6 +56,45 @@ test("ordinary Telegram greetings bypass the progress/tool experience", () => {
   assert.equal(isSimpleTelegramGreeting("good morning"), true);
   assert.equal(isSimpleTelegramGreeting("hey, check my calendar"), false);
   assert.equal(isSimpleTelegramGreeting("hello there"), false);
+});
+
+test("channel menu CLI button emits a matching callback and returns a pairing code", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840025;
+  const menu = context(userId);
+  await bot.commands.get("channel")!(menu);
+  const keyboard = menu.sent.at(-1).options.reply_markup.inline_keyboard as Array<Array<{ text: string; callback_data: string }>>;
+  const cliButton = keyboard.flat().find((button) => button.text.includes("CLI"));
+  assert.equal(cliButton?.callback_data, `chlink:cli:${userId}`);
+
+  const callback = bot.callbacks.find((item) => item.pattern.test(cliButton!.callback_data));
+  assert.ok(callback, "CLI menu payload must match a registered callback");
+  const clicked = context(userId);
+  clicked.callbackQuery = { message: { message_id: 1 } };
+  clicked.match = cliButton!.callback_data.match(callback!.pattern)!;
+  await callback!.handler(clicked);
+
+  assert.equal(clicked.callbackAnswerCount, 1);
+  const reply = clicked.sent.find((item) => item.method === "reply");
+  assert.match(reply.text, /Terminal pairing code/);
+  const code = reply.text.match(/<code>(\d{6})<\/code>/)?.[1];
+  assert.ok(code);
+  assert.equal((await consumeCliPairing(code!))?.userId, userId);
+});
+
+test("/cli link returns a one-time pairing code", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840026;
+  const cli = context(userId, "link");
+  await bot.commands.get("cli")!(cli);
+
+  const reply = cli.sent.at(-1);
+  assert.match(reply.text, /Terminal pairing code/);
+  const code = reply.text.match(/<code>(\d{6})<\/code>/)?.[1];
+  assert.ok(code);
+  assert.equal((await consumeCliPairing(code!))?.userId, userId);
 });
 
 test("Telegram can privately disconnect an owner-scoped Composio account", async () => {

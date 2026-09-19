@@ -2086,11 +2086,8 @@ export function registerHandlers(bot: Bot): void {
     );
   });
 
-  bot.callbackQuery(/^chlink:(p|g|t|cli):([a-z-]+):(\d+)$/, async (ctx) => {
-    const kind = ctx.match[1];
-    const target = ctx.match[2];
-    const ownerId = Number(ctx.match[3]);
-    if (ctx.from.id !== ownerId) {
+  const handleChannelLinkCallback = async (ctx: Context, kind: "p" | "g" | "t" | "cli", target: string, ownerId: number): Promise<void> => {
+    if (ctx.from?.id !== ownerId) {
       await ctx.answerCallbackQuery({ text: "This channel menu belongs to another user.", show_alert: true });
       return;
     }
@@ -2117,6 +2114,17 @@ export function registerHandlers(bot: Bot): void {
     } catch (error) {
       await ctx.editMessageText(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
     }
+  };
+
+  // External providers and group links include a target segment. Telegram
+  // and CLI are direct channel actions and intentionally carry only the owner
+  // ID: chlink:t:<userId> and chlink:cli:<userId>.
+  bot.callbackQuery(/^chlink:(p|g):([a-z-]+):(\d+)$/, async (ctx) => {
+    await handleChannelLinkCallback(ctx, ctx.match[1] as "p" | "g", ctx.match[2], Number(ctx.match[3]));
+  });
+
+  bot.callbackQuery(/^chlink:(t|cli):(\d+)$/, async (ctx) => {
+    await handleChannelLinkCallback(ctx, ctx.match[1] as "t" | "cli", ctx.match[1] === "cli" ? "cli" : "telegram", Number(ctx.match[2]));
   });
 
   // Workspace card actions. They deliberately reuse the existing command
