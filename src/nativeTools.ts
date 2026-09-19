@@ -23,7 +23,7 @@ import { daytonaEngine } from "./lib/daytona/index.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, planDelegationObjective } from "./subagents/capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
@@ -168,6 +168,7 @@ async function runPlannedDelegation(
   contract: Parameters<typeof executeDelegation>[1],
   runtime: NativeToolRuntime,
 ): Promise<unknown> {
+  contract = { ...contract, ...normalizeDelegationToolScopes(contract) };
   if (runtime.worker) return runDelegationWithDurableContinuation(userId, contract, runtime);
   const plan = planDelegationObjective(contract.objective, contract.allowedTools ?? []);
   if (plan.length < 2) return runDelegationWithDurableContinuation(userId, contract, runtime);

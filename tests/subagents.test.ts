@@ -2,7 +2,7 @@ import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -73,6 +73,30 @@ test("gives Nora only scoped Composio research-provider families", () => {
   }
   assert.match(nora.systemPrompt, /Tavily or Exa/);
   assert.match(nora.systemPrompt, /Firecrawl/);
+});
+
+test("normalizes generic web search aliases into the canonical Composio scope", () => {
+  assert.deepEqual(
+    normalizeDelegationToolScopes({
+      allowedTools: ["web_search", "CHUCK_SCRATCHPAD_READ"],
+      allowedComposioTools: ["web_search", "COMPOSIO_SEARCH_WEB"],
+    }),
+    {
+      allowedTools: ["CHUCK_SCRATCHPAD_READ"],
+      allowedComposioTools: ["COMPOSIO_SEARCH_WEB"],
+    },
+  );
+});
+
+test("does not let the web search alias bypass another worker's Composio boundary", async () => {
+  await assert.rejects(
+    () => executeDelegation(991016, {
+      worker: "ivy",
+      objective: "Triage the inbox and identify urgent communications",
+      allowedTools: ["web_search"],
+    }),
+    /Composio tool\(s\).*not permitted/,
+  );
 });
 
 test("routes a focused research objective to Nora", () => {

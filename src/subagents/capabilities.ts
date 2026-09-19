@@ -20,6 +20,51 @@ export interface CapabilityManifest {
 
 const SKILL_TOOLS = ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"];
 
+/**
+ * A small compatibility boundary for external agent/tool vocabularies.
+ *
+ * `web_search` is used by some generic agent frameworks (including Foundry),
+ * but it is not a Chusky native tool. Keep the alias mapping explicit and
+ * narrow: the canonical Chusky capability is the scoped Composio action.
+ */
+const DELEGATION_TOOL_ALIASES: Record<string, { kind: "composio"; slug: string }> = {
+  web_search: { kind: "composio", slug: "COMPOSIO_SEARCH_WEB" },
+};
+
+export function normalizeDelegationToolScopes(input: {
+  allowedTools?: readonly string[];
+  allowedComposioTools?: readonly string[];
+}): { allowedTools?: string[]; allowedComposioTools?: string[] } {
+  const nativeTools: string[] = [];
+  const composioTools: string[] = [];
+
+  const collectNative = (tools: readonly string[] | undefined): void => {
+    for (const tool of tools ?? []) {
+      const value = String(tool);
+      const alias = DELEGATION_TOOL_ALIASES[value.trim().toLowerCase()];
+      if (alias?.kind === "composio") composioTools.push(alias.slug);
+      else nativeTools.push(value);
+    }
+  };
+  const collectComposio = (tools: readonly string[] | undefined): void => {
+    for (const tool of tools ?? []) {
+      const value = String(tool).trim();
+      const alias = DELEGATION_TOOL_ALIASES[value.toLowerCase()];
+      composioTools.push(alias?.kind === "composio" ? alias.slug : value);
+    }
+  };
+
+  collectNative(input.allowedTools);
+  collectComposio(input.allowedComposioTools);
+
+  const normalized: { allowedTools?: string[]; allowedComposioTools?: string[] } = {};
+  if (input.allowedTools !== undefined) normalized.allowedTools = [...new Set(nativeTools)];
+  if (input.allowedComposioTools !== undefined || composioTools.length) {
+    normalized.allowedComposioTools = [...new Set(composioTools)];
+  }
+  return normalized;
+}
+
 // Composio's session meta-tools are deliberately scoped to Nora rather than
 // exposed to every specialist. They provide discovery, web search/fetch, and
 // bounded remote processing without granting Nora arbitrary connected-app

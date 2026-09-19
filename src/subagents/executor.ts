@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, validateDelegationTarget } from "./capabilities.js";
+import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, validateDelegationTarget } from "./capabilities.js";
 import { cancelSubagentWorkflow, enqueueSubagentContinuation } from "./workflow.js";
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
@@ -68,6 +68,12 @@ export async function executeDelegation(
   if (workerName === "chusky") {
     throw new Error("Subagent delegation must target a specialist worker, not the Chusky supervisor.");
   }
+
+  // Normalize known external vocabulary before enforcing Chusky's strict
+  // native-vs-Composio contract boundary. Unknown names remain untouched and
+  // are rejected by the existing manifest checks below.
+  const normalizedScopes = normalizeDelegationToolScopes(contractInput);
+  contractInput = { ...contractInput, ...normalizedScopes };
 
   // Reject invalid requested tools that are not in the manifest allowlist
   if (contractInput.allowedTools && contractInput.allowedTools.length > 0) {
