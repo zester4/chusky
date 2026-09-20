@@ -226,6 +226,7 @@ Current native capabilities include:
 - `CHUCK_GENERATE_IMAGE`: generate an image and return it for Telegram delivery.
 - `CHUCK_GENERATE_VIDEO`: enqueue asynchronous video generation through Upstash Workflow.
 - `CHUCK_CREATE_TRIGGER`: create an owned Composio trigger.
+- `CHUCK_LIST_CONNECTED_ACCOUNTS`: list owner-scoped Composio account metadata without exposing credentials or raw provider payloads.
 - `CHUCK_SET_REMINDER`, `CHUCK_LIST_REMINDERS`, `CHUCK_CANCEL_REMINDER`: durable one-time reminders.
 - `CHUCK_SCHEDULE_JOB`, `CHUCK_LIST_JOBS`, `CHUCK_CANCEL_JOB`: recurring QStash CRON schedules.
 - `CHUCK_SCRATCHPAD_WRITE`, `CHUCK_SCRATCHPAD_READ`, `CHUCK_SCRATCHPAD_CLEAR`: private working notes.

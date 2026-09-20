@@ -401,6 +401,44 @@ test("lists only safe connected-account metadata", async () => {
   assert.equal(JSON.stringify(accounts).includes("secret"), false);
 });
 
+test("agent uses the native account boundary and hides the raw Composio account tool", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830017);
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const session = {
+    sessionId: "account-boundary-session",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_CONNECTED_ACCOUNTS", parameters: { type: "object" } } }],
+    execute: async () => { throw new Error("raw Composio account tool should not execute"); },
+  };
+  setAgentDependenciesForTests({
+    composio: {
+      create: async () => session,
+      connectedAccounts: {
+        list: async () => ({ items: [{ id: "ca_work", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "ACTIVE", data: { access_token: "secret" } }] }),
+      },
+    },
+  });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const body = JSON.parse(String(init?.body)) as Record<string, any>;
+    requests.push(body);
+    return requests.length === 1
+      ? toolResponse("CHUCK_LIST_CONNECTED_ACCOUNTS", JSON.stringify({ toolkit: "gmail" }))
+      : chatResponse({ role: "assistant", content: "I found your connected Gmail account." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(830017, "Which Gmail accounts are connected?", [], "test/model");
+    assert.equal(result.text, "I found your connected Gmail account.");
+    const offered = (requests[0].tools as Array<any>).map((tool) => tool.function.name);
+    assert.equal(offered.includes("COMPOSIO_GET_CONNECTED_ACCOUNTS"), false);
+    assert.equal(offered.includes("CHUCK_LIST_CONNECTED_ACCOUNTS"), true);
+    const toolMessage = requests[1].messages.find((message: any) => message.role === "tool");
+    assert.deepEqual(JSON.parse(toolMessage.content), [{ id: "ca_work", alias: "work-gmail", toolkit: "gmail", status: "ACTIVE" }]);
+    assert.equal(toolMessage.content.includes("secret"), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("materially risky tool calls stop before execution and approved exact calls execute once", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830003);

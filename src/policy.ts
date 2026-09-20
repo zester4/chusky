@@ -11,7 +11,7 @@ const COMPOSIO_AUTONOMOUS_PATTERN = /(^|_)(SEND_EMAIL|SEND_CAMPAIGN|POST_MESSAGE
 export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
-  "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE",
+  "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
   "CHUCK_EMAIL_ARTIFACT",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
@@ -105,6 +105,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_READ_SKILL_FILE: "📖 I’m reviewing the relevant guidance…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",
   CHUCK_LIST_PHONE_CALLS: "📞 I’m checking my phone-call history…",
+  CHUCK_LIST_CONNECTED_ACCOUNTS: "🔌 I’m checking your connected apps…",
   CHUCK_MEETING_JOIN: "🎥 I’m joining the meeting...",
   CHUCK_MEETING_PREPARATION_LIST: "🗓️ I’m checking the prepared calendar meetings…",
   CHUCK_MEETING_PREPARATION_JOIN: "🎥 I’m preparing to join that calendar meeting…",

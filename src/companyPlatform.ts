@@ -1,6 +1,7 @@
 /** Company-level agent templates and policies shared by the API and dashboard. */
 
 export const COMPANY_TOOL_STARTER_ALLOWLIST = [
+  "CHUCK_LIST_CONNECTED_ACCOUNTS",
   "COMPOSIO_SEARCH_TOOL",
   "COMPOSIO_SEARCH_TOOLS",
   "COMPOSIO_GET_TOOL_SCHEMAS",

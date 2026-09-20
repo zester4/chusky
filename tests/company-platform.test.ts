@@ -44,3 +44,9 @@ test("company agent creation rejects unsupported templates and tools outside tem
   assert.equal(defaulted.budget.maxToolCalls, 40);
   assert.ok(defaulted.tools.requireApproval.includes("COMPOSIO_EXECUTE_TOOL"));
 });
+
+test("company templates include owner-scoped connected-account discovery", () => {
+  const agent = createCompanyAgentProfile({ template: "sales-development" }, "agt_sales_accounts");
+  assert.ok(agent);
+  assert.equal(agent.tools.allow.includes("CHUCK_LIST_CONNECTED_ACCOUNTS"), true);
+});

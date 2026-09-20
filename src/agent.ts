@@ -68,6 +68,7 @@ const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
+const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
   "CHUCK_SCRATCHPAD_READ",
@@ -824,7 +825,9 @@ export async function runAgent(
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
   const composioTools = (fullComposioTools.length > 80
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
-    : fullComposioTools).map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
+    : fullComposioTools)
+    .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
+    .map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
   const mcpTools = (!toolsDisabled && !voiceTurn) ? await mcpClient.toolsForUser(userId, signal) : [];
   const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
@@ -1273,6 +1276,13 @@ export async function runAgent(
           });
         } else if (slug.startsWith("MCP_")) {
           execResult = await mcpClient.callTool(userId, slug, executionArgs, signal);
+        } else if (slug === "CHUCK_LIST_CONNECTED_ACCOUNTS") {
+          const toolkit = args.toolkit === undefined ? undefined : String(args.toolkit).trim().slice(0, 120);
+          if (toolkit === "") throw new Error("toolkit must not be empty when provided");
+          const rawLimit = args.limit === undefined ? 20 : Number(args.limit);
+          const limit = Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 50 ? rawLimit : (() => { throw new Error("limit must be an integer from 1 to 50"); })();
+          const accounts = await listConnectedAccounts(userId, toolkit || undefined);
+          execResult = accounts.slice(0, limit).map(({ id, alias, toolkit: connectedToolkit, status, createdAt, updatedAt }) => ({ id, alias, toolkit: connectedToolkit, status, ...(createdAt ? { createdAt } : {}), ...(updatedAt ? { updatedAt } : {}) }));
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
           execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined });

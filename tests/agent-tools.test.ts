@@ -9,9 +9,16 @@ test("native tool catalog has unique names", () => {
 
 test("native catalog includes core agent capabilities", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
-  for (const name of ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_SET_REMINDER", "CHUCK_SCHEDULE_JOB", "CHUCK_SAVE_MEMORY", "CHUCK_SCRATCHPAD_WRITE", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO", "CHUCK_VIDEO_STATUS", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET"]) {
+  for (const name of ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS", "CHUCK_SET_REMINDER", "CHUCK_SCHEDULE_JOB", "CHUCK_SAVE_MEMORY", "CHUCK_SCRATCHPAD_WRITE", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO", "CHUCK_VIDEO_STATUS", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET"]) {
     assert.equal(names.has(name), true, name);
   }
+});
+
+test("connected-account discovery is bounded and supports optional toolkit filtering", () => {
+  const tool = chuckTools.find((item) => item.function.name === "CHUCK_LIST_CONNECTED_ACCOUNTS");
+  assert.deepEqual(tool?.function.parameters.properties.toolkit?.type, "string");
+  assert.deepEqual(tool?.function.parameters.properties.limit?.maximum, 50);
+  assert.equal(tool?.function.parameters.required, undefined);
 });
 
 test("delegation tools expose every business workflow specialist", () => {
