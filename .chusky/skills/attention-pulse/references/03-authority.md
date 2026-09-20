@@ -28,7 +28,7 @@ Regardless of standing order wording:
 - Destructive deletes
 - Permission changes
 - Production deploy / git push remote
-- High-impact outbound (public posts, cold bulk mail, live calls) unless product policy already allows and tools are granted
+- High-impact outbound (public posts, cold bulk mail) unless product policy already allows and tools are granted. Validated outbound calls are autonomous under the current policy.
 
 Standing orders cannot override approval policy.
 

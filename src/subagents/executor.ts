@@ -351,7 +351,9 @@ ${memorySnippet}
 ${options?.historySummary ? `Parent Conversation History Summary:\n${options.historySummary}\n` : ""}Delegated Native Tools: ${contract.allowedTools.join(", ") || "none"}
 Delegated Composio Actions: ${scopedComposio.tools.map((tool: any) => String(tool?.function?.name ?? tool?.name ?? "")).filter(Boolean).join(", ") || "none"}
 Unavailable starter actions (connection required): ${scopedComposio.missing.filter((slug) => starterComposioTools.includes(slug)).join(", ") || "none"}
-Do not attempt a tool outside those lists. External actions remain approval-gated.
+Do not attempt a tool outside those lists. Destructive, financial, permission-changing,
+deployment, remote Git push, and other high-impact external actions remain
+approval-gated; validated outbound calls are autonomous under the current policy.
 For research, use the scoped COMPOSIO_SEARCH_WEB and COMPOSIO_SEARCH_FETCH_URL_CONTENT
 tools directly when available. If an integration action is unavailable or its slug
 appears wrong, do not guess or retry variants. Use COMPOSIO_SEARCH_TOOLS (or the

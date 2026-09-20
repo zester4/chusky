@@ -30,7 +30,6 @@ import { notifyTriggerApproval } from "./triggerWorkflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
-import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { createTelegramProject, listTelegramProjects, revokeTelegramProject, rotateTelegramProjectKey } from "./developerProjects.js";
 import { conversationIdFor } from "./channels/contracts.js";
 import { sharedGroupInstructions } from "./channels/groupInstructions.js";
@@ -1015,7 +1014,7 @@ export function registerHandlers(bot: Bot): void {
       `/agents — list recent worker delegations\n` +
       `/agent-status <code>handoff-id</code> — inspect one worker run\n` +
       `/agent-cancel <code>handoff-id</code> — cancel a queued worker run\n` +
-      `/call <code>+number purpose</code> — request an approval-gated phone call\n` +
+      `/call <code>+number purpose</code> — start a validated phone call\n` +
       `/cancel — cancel the active request\n` +
       `/channel — choose a private channel or iMessage group to link securely\n` +
       `/linkgroup — open the iMessage group-link menu\n` +
@@ -1332,18 +1331,13 @@ export function registerHandlers(bot: Bot): void {
     const phoneNumber = split < 0 ? raw : raw.slice(0, split);
     const purpose = split < 0 ? "" : raw.slice(split).trim();
     if (!phoneNumber || !purpose) {
-      await ctx.reply("Usage: /call +14155550123 <purpose>. I will always ask for approval before placing the call.");
+      await ctx.reply("Usage: /call +14155550123 <purpose>. I’ll validate the destination and start the call when voice is configured.");
       return;
     }
     try {
-      const approval = await requestPhoneCallApproval(ctx.from!.id, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`);
-      const card = approvalCard(approval.toolSlug, approval.id);
-      if (isTelegramShared(ctx)) {
-        await ctx.reply("⚠️ This phone call needs its owner's private review. I sent the approval card privately.");
-        await deliverGroupApproval(ctx, card);
-      } else {
-        await replyCard(ctx, card);
-      }
+      const call = await nativeTool(ctx.from!.id, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal" });
+      const callId = call && typeof call === "object" && "id" in call ? String((call as { id?: unknown }).id ?? "") : "";
+      await ctx.reply(`📞 Call started${callId ? ` · ${escapeTelegramHtml(callId)}` : ""}. I’m joining the call now.`, { parse_mode: "HTML" });
     } catch (error) {
       await ctx.reply(`❌ ${escapeTelegramHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
     }
@@ -2536,10 +2530,8 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     try {
-      // A phone call is a real external side effect. Re-running the model
-      // after approval can produce semantically similar but JSON-different
-      // arguments, causing an unnecessary second approval. Execute precisely
-      // the reviewed native request instead.
+      // Preserve exact execution for any historical phone-call approval that
+      // is still pending after the policy change. New calls do not create one.
       if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         validateNativeToolArguments(approval.toolSlug, approval.args);
         await nativeTool(ctx.from.id, approval.toolSlug, approval.args);

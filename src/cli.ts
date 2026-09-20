@@ -311,7 +311,8 @@ async function chat(): Promise<void> {
         const phoneNumber = split < 0 ? raw : raw.slice(0, split); const purpose = split < 0 ? "" : raw.slice(split).trim();
         if (!phoneNumber || !purpose) { console.log(formatError("Usage: /call <E.164 phone number> <purpose>", color)); continue; }
         const result = await client.call(phoneNumber, purpose);
-        console.log(result.ok && result.approval ? formatWarning(`Approval required: ${result.approval.toolSlug} — /approve ${result.approval.id}`, color) : formatError(result.error || "Could not request phone call.", color));
+        const callId = result.call && typeof result.call === "object" ? String((result.call as { id?: unknown }).id ?? "") : "";
+        console.log(result.ok ? formatSuccess(result.text || `Phone call started${callId ? ` · ${callId}` : ""}.`, color) : formatError(result.error || "Could not start phone call.", color));
         continue;
       }
       if (line === "/usage") { const result = await client.usage(); console.log(result.ok ? `${formatStatus("Usage", `${result.totalMessages} messages  •  $${Number(result.totalCost || 0).toFixed(5)}`, color)}\n${formatStatus("Context", `${result.historyTurns}/${result.maxHistory} turns`, color)}\n${formatStatus("Voice", result.voiceReplies ? "on" : "off", color)}` : formatError(result.error || "Could not load usage.", color)); continue; }

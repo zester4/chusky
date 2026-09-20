@@ -63,7 +63,7 @@ paths:
     post: { summary: Create a Telegram linking code for the account, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Linking code } } }
   /account/calls:
     get: { summary: List account voice calls with redacted destinations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
-    post: { summary: Create an approval-gated outbound voice call request, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Pending approval } } }
+    post: { summary: Validate and start an outbound voice call, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Started call record } } }
   /meetings:
     get: { summary: List owner-scoped Recall meeting preparations, meetings, participants, and contacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Join or schedule a Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Meeting lifecycle record } } }

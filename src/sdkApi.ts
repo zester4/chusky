@@ -14,7 +14,6 @@ import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import type { ContentPart } from "./types.js";
-import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { createLinkCode, identityFingerprint, unlinkChannelIdentity, updateLinkedChannelIdentity } from "./channels/identity.js";
@@ -1123,8 +1122,11 @@ export function registerSdkApi(app: Hono): void {
     try {
       const phoneNumber = String(body.phoneNumber ?? "").trim();
       const purpose = String(body.purpose ?? "").trim();
-      const approval = await requestPhoneCallApproval(owner.userId, { phoneNumber, purpose, ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}) }, `/call ${phoneNumber} ${purpose}`);
-      const response = { id: approval.id, toolSlug: approval.toolSlug, args: approval.args, status: approval.status, expiresAt: new Date(approval.expiresAt).toISOString() };
+      const call = await nativeTool(owner.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal", ...(body.profile ? { profile: body.profile as VoiceCallProfileInput } : {}) });
+      if (!call || typeof call !== "object") throw new Error("Phone call did not return a call record");
+      const record = call as { id?: unknown; provider?: unknown; direction?: unknown; phoneNumber?: unknown; purpose?: unknown; status?: unknown; error?: unknown; summary?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      if (typeof record.id !== "string" || typeof record.phoneNumber !== "string" || typeof record.purpose !== "string" || typeof record.status !== "string" || typeof record.createdAt !== "number" || typeof record.updatedAt !== "number") throw new Error("Phone call returned an invalid record");
+      const response = callView({ id: record.id, provider: typeof record.provider === "string" ? record.provider : undefined, direction: typeof record.direction === "string" ? record.direction : undefined, phoneNumber: record.phoneNumber, purpose: record.purpose, status: record.status, error: typeof record.error === "string" ? record.error : undefined, summary: typeof record.summary === "string" ? record.summary : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt });
       if (prior.key) {
         session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
         await saveSession(owner.userId, session);

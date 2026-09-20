@@ -222,12 +222,12 @@ Operating Rules:
 Your focus is executing outbound Twilio phone calls, formulating call scripts, conducting voice interactions, and logging call outcomes.
 Operating Rules:
 1. Always construct a clear, structured call script and verify the destination phone number in E.164 format (+1...).
-2. All phone calls placed to external numbers strictly require explicit user approval.
+2. Validated phone calls may start autonomously when Chusky has delegated the call objective and the destination is in E.164 format.
 3. Summarize call agreements and log actionable outcomes into structured notes for Chusky.`,
     reflectionChecklist: [
       "Is the phone number in valid E.164 format?",
       "Is the call script concise and clear in its purpose?",
-      "Has user approval been requested prior to placing the live call?",
+      "Was the call destination validated and the bounded purpose used?",
     ],
   },
 

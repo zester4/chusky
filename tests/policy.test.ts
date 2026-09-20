@@ -4,13 +4,22 @@ import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, toolApprovalPoli
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 
 test("recognizes materially risky tools", () => {
-  for (const slug of ["GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "AWS_UPDATE_PERMISSION", "GITHUB_DEPLOY_PRODUCTION"]) {
+  for (const slug of [
+    "GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "STRIPE_SUBSCRIBE_CUSTOMER", "SHOPIFY_CHECKOUT_ORDER",
+    "AWS_UPDATE_PERMISSION", "GITHUB_DEPLOY_PRODUCTION", "GITHUB_PUSH_COMMITS",
+  ]) {
     assert.equal(isRiskyToolSlug(slug), true, slug);
   }
 });
 
 test("allows routine autonomous communication and content actions", () => {
   for (const slug of ["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "X_PUBLISH_POST", "NEWSLETTER_SEND_CAMPAIGN"]) {
+    assert.equal(isRiskyToolSlug(slug), false, slug);
+  }
+});
+
+test("allows ordinary reversible provider writes without an approval prompt", () => {
+  for (const slug of ["HUBSPOT_UPDATE_CONTACT", "NOTION_CREATE_PAGE", "GOOGLECALENDAR_CREATE_EVENT", "SLACK_UPDATE_MESSAGE", "TWILIO_CREATE_CALL"]) {
     assert.equal(isRiskyToolSlug(slug), false, slug);
   }
 });
@@ -23,7 +32,7 @@ test("does not gate read-only tools", () => {
 
 test("uses explicit native policies and gates only side-effecting Composio batches", () => {
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_TRIGGER"), "private");
-  assert.equal(toolApprovalPolicy("CHUCK_START_PHONE_CALL"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_START_PHONE_CALL"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_LIST_PHONE_CALLS"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PRESENTATION"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_PDF"), "private");
@@ -31,6 +40,12 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_CREATE_SPREADSHEET"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_EMAIL_ARTIFACT"), "private");
   assert.equal(toolApprovalPolicy("CHUCK_UPDATE_MEMORY"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TASK_WAIT"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_ATTENTION_PULSE"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_DAYTONA_MOVE_FILES"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_FORGET_MEMORY"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_BROWSER_PLAYBOOK_REMOVE"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_MEETING_PROFILE_UPDATE"), "approval_required");
   for (const name of ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_LEAVE"]) assert.equal(toolApprovalPolicy(name), "private", name);
   for (const name of ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE"]) {
     assert.equal(toolApprovalPolicy(name), "private", name);
@@ -39,7 +54,7 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
-  for (const name of ["CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE", "CHUCK_DAYTONA_MOVE_FILES"]) {
+  for (const name of ["CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE"]) {
     assert.equal(toolApprovalPolicy(name), "approval_required", name);
   }
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
@@ -54,8 +69,10 @@ test("provider metadata classifies dynamic Composio tools before heuristic fallb
   clearComposioToolMetadata();
   registerComposioToolMetadata({ name: "MYSTERY_READ", annotations: { readOnlyHint: true } });
   registerComposioToolMetadata({ name: "MYSTERY_ACTION", annotations: { destructiveHint: true } });
+  registerComposioToolMetadata({ name: "HUBSPOT_UPDATE_CONTACT", annotations: { readOnlyHint: false, destructiveHint: false } });
   assert.equal(toolApprovalPolicy("MYSTERY_READ"), "private");
   assert.equal(toolApprovalPolicy("MYSTERY_ACTION"), "approval_required");
+  assert.equal(toolApprovalPolicy("HUBSPOT_UPDATE_CONTACT"), "private");
   clearComposioToolMetadata();
 });
 

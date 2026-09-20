@@ -66,6 +66,14 @@ export interface NativeToolRuntime {
   requestTaskWait?: (request: TaskWaitRequest) => void;
 }
 
+type PhoneCallLauncherForTests = (userId: number, input: Record<string, unknown>) => Promise<unknown>;
+let phoneCallLauncherForTests: PhoneCallLauncherForTests | undefined;
+
+/** Test seam for authenticated call routes; production uses the configured provider below. */
+export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTests): void {
+  phoneCallLauncherForTests = launcher;
+}
+
 function text(value: unknown): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > MAX_TEXT) throw new Error(`Text must be 1-${MAX_TEXT} characters`);
@@ -573,10 +581,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_START_PHONE_CALL": {
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
-      const callProfile = args.callProfile === "business" ? "business" : "personal";
+      const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
+      const input = { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), ...(profile ? { profile } : {}), callProfile };
+      if (phoneCallLauncherForTests) return phoneCallLauncherForTests(userId, input);
       return config.blandVoiceEnabled
-        ? startBlandCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile, callProfile })
-        : startTwilioCallForUser(userId, { phoneNumber: text(args.phoneNumber), purpose: text(args.purpose), profile, callProfile });
+        ? startBlandCallForUser(userId, input)
+        : startTwilioCallForUser(userId, input);
     }
     case "CHUCK_LIST_PHONE_CALLS": return listPhoneCalls(userId);
     case "CHUCK_MEETING_CONTEXT_PREPARE": {

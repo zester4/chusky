@@ -1,6 +1,6 @@
 ---
 title: Calls and live voice
-description: Request approval-gated outbound calls and configure Chusky's live voices.
+description: Start validated outbound calls and configure Chusky's live voices.
 ---
 
 ## Providers
@@ -27,11 +27,11 @@ Set `voice: null` to restore the deployment default.
 
 ## Requesting a call
 
-Call creation creates the same exact, one-time approval used by Chusky's other
-surfaces. It does not place the call until an authenticated owner approves it.
+Call creation validates the E.164 destination and purpose, then starts the call
+through the configured provider. It does not require a separate approval step.
 
 ```ts
-const approval = await chusky.calls.request({
+const call = await chusky.calls.request({
   phoneNumber: "+14155550123",
   purpose: "Confirm the test-drive appointment and answer final questions.",
   profile: {
@@ -41,12 +41,7 @@ const approval = await chusky.calls.request({
   },
 }, { idempotencyKey: "test-drive-call-2026-09-15" });
 
-if (approval.status === "pending") {
-  // Show the exact recipient, purpose, and profile to your authenticated owner.
-  await chusky.approvals.decide(approval.id, "approve", {
-    idempotencyKey: "approve-test-drive-call-2026-09-15",
-  });
-}
+console.log(call.id, call.status);
 ```
 
 Use `chusky.calls.list()` to inspect safe call metadata. Phone numbers are not

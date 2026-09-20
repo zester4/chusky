@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import test, { beforeEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
 import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
+import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getApproval, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -15,7 +16,10 @@ beforeEach(async () => {
   setOrganizationAccessResolverForTests();
   setSdkTaskWorkflowEnqueuerForTests();
   await initStore({ memoryOnly: true });
+  setPhoneCallLauncherForTests(async (userId, input) => ({ id: `twc_test_${userId}`, userId, provider: "twilio", direction: "outbound", callProfile: input.callProfile, phoneNumber: input.phoneNumber, purpose: input.purpose, status: "bridging", createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }));
 });
+
+afterEach(() => setPhoneCallLauncherForTests());
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
@@ -422,12 +426,9 @@ test("linked verified dashboard users can request and list phone calls without e
   const headers = { "X-Test-Web-User": "alice", "Content-Type": "application/json" };
   const create = await api.fetch(new Request("http://local/v1/account/calls", { method: "POST", headers, body: JSON.stringify({ phoneNumber: "+15550001", purpose: "Confirm appointment", profile: { identity: "Harvey's assistant", organization: "Harvey Motors", mode: "sales", tone: "warm", facts: ["Test drives are available by appointment."], capabilities: ["schedule_lookup"] } }) }));
   assert.equal(create.status, 201);
-  const approval = await create.json() as { id: string; args: { phoneNumber: string; profile: { identity: string; organization?: string; mode: string; capabilities: string[] } } };
-  assert.equal(approval.args.phoneNumber, "+15550001");
-  assert.equal(approval.args.profile.identity, "Harvey's assistant");
-  assert.equal(approval.args.profile.organization, "Harvey Motors");
-  assert.deepEqual(approval.args.profile.capabilities, ["schedule_lookup"]);
-  assert.equal((await getApproval(810099, approval.id))?.toolSlug, "CHUCK_START_PHONE_CALL");
+  const call = await create.json() as { id: string; phoneNumber: string; status: string };
+  assert.equal(call.phoneNumber, "+••••0001");
+  assert.equal(call.status, "bridging");
   const listed = await api.fetch(new Request("http://local/v1/account/calls", { headers }));
   assert.equal(listed.status, 200);
   const body = await listed.json() as { available: boolean; provider: string | null; data: unknown[] };

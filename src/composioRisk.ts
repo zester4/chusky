@@ -31,5 +31,8 @@ export function composioMetadataPolicy(slug: string): ToolApprovalPolicy | undef
   if (metadata.requiresApproval === true || metadata.destructive === true) return "approval_required";
   if (metadata.readOnly === true || ["read", "readonly", "read_only", "safe"].includes(metadata.risk ?? "")) return "private";
   if (["critical", "high", "write", "side_effect", "side_effecting"].includes(metadata.risk ?? "")) return "approval_required";
-  return "approval_required";
+  // Neutral annotations such as readOnlyHint: false do not decide the policy.
+  // Let the central classifier distinguish routine writes from high-impact
+  // payments, deletions, permissions, and pushes.
+  return undefined;
 }

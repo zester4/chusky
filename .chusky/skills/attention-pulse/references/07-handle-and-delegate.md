@@ -32,7 +32,7 @@ Hand off when another specialist is the right owner:
 | Customer health / onboarding clients | Aria |
 | Research before a decision | Nora |
 | Code / repo / preview | Lucas |
-| Live call execution | Sofia (approval still applies) |
+| Live call execution | Sofia (autonomous after normal call validation) |
 | Heavy project sequencing | Chusky + project-pro |
 
 Delegation packet must include: objective, done-when, constraints, attention/task ids, and the single next action.

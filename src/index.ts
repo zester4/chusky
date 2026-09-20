@@ -41,7 +41,6 @@ import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import twilio from "twilio";
 import { inboundTwilioOwner, parseTwilioCallerAllowlist, registerTwilioInboundCall } from "./calls/twilioInbound.js";
-import { requestPhoneCallApproval } from "./calls/phoneApproval.js";
 import { answerBlandQuestion } from "./calls/blandBrain.js";
 import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.js";
 import { isBlandVoiceConfigured } from "./calls/bland.js";
@@ -1476,8 +1475,9 @@ async function main(): Promise<void> {
       try {
         const phoneNumber = String(body.phoneNumber ?? "").trim();
         const purpose = String(body.purpose ?? "").trim();
-        const approval = await withCliLock(device.userId, c.req.raw.signal, () => requestPhoneCallApproval(device.userId, { phoneNumber, purpose }, `/call ${phoneNumber} ${purpose}`));
-        return c.json({ ok: true, approval: { id: approval.id, toolSlug: approval.toolSlug, args: approval.args }, text: "Approval required before Chusky places this phone call." });
+        const call = await withCliLock(device.userId, c.req.raw.signal, () => nativeTool(device.userId, "CHUCK_START_PHONE_CALL", { phoneNumber, purpose, callProfile: "personal" }, { signal: c.req.raw.signal }));
+        const record = call && typeof call === "object" ? call as { id?: unknown; provider?: unknown; direction?: unknown; status?: unknown; summary?: unknown; error?: unknown; createdAt?: unknown; updatedAt?: unknown } : {};
+        return c.json({ ok: true, call: { id: record.id, provider: record.provider, direction: record.direction, status: record.status, summary: record.summary, error: record.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: record.createdAt, updatedAt: record.updatedAt }, text: "Phone call started." }, 201);
       } catch (error) {
         return c.json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 400);
       }

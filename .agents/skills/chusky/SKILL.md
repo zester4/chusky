@@ -134,7 +134,7 @@ Sendblue-specific rules:
 Keep telephone providers and their credentials/webhook contracts separate.
 
 - **Twilio telephone calls** handle inbound calls and default outbound calls.
-  `CHUCK_START_PHONE_CALL` is always approval-gated. Twilio outbound calls use
+  `CHUCK_START_PHONE_CALL` starts after normal destination and purpose validation. Twilio outbound calls use
   the REST API and signed `/twilio/twiml` and `/twilio/status` callbacks.
   Incoming calls enter only through `POST /twilio/inbound`; reject unknown
   callers before any history, memory, agent, or tool access.
@@ -197,7 +197,7 @@ Keep telephone providers and their credentials/webhook contracts separate.
    `fluxStt`, and `fluxTts` as configured. Use its aggregate latency,
    interruption, queue-drop, and failure counters; never add transcript/audio
    logging just to troubleshoot a call.
-5. Test one approval-gated outbound call and one allowlisted inbound call.
+5. Test one validated outbound call and one allowlisted inbound call.
    Check Twilio's debugger and the two PM2 logs for provider errors; redact
    all credentials if sharing output.
 

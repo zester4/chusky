@@ -1,7 +1,9 @@
 import { createApproval, getSession, type ApprovalRecord } from "../store.js";
 import { validateTwilioCallInput, type TwilioCallInput } from "./twilio.js";
 
-/** Creates the same one-time approval record used by model-initiated calls. */
+/** Legacy compatibility helper for already-supported approval flows. New call
+ * routes and model-initiated calls start through CHUCK_START_PHONE_CALL after
+ * normal validation and do not create an approval. */
 export async function requestPhoneCallApproval(
   userId: number,
   input: TwilioCallInput,

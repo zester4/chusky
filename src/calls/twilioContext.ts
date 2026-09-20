@@ -3,7 +3,7 @@ import { voiceProfileInstructions } from "./voiceProfile.js";
 
 /**
  * Trusted call context for the private Chusky-to-voice bridge. The purpose is
- * captured when an owner approves an outbound call; it is context for a
+ * captured for an outbound call; it is context for a
  * conversation, never authority to execute an external action.
  */
 export function twilioVoiceInstructions(call: PhoneCallRecord): string {

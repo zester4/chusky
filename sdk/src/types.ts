@@ -72,13 +72,6 @@ export interface CallRecord {
   createdAt: string;
   updatedAt: string;
 }
-export interface CallApproval {
-  id: string;
-  toolSlug: "CHUCK_START_PHONE_CALL";
-  args: JsonObject;
-  status: "pending" | "approved" | "denied" | "consumed";
-  expiresAt: string;
-}
 export interface CallsResponse { available: boolean; provider: CallProvider | null; data: CallRecord[]; }
 
 export type MeetingPlatform = "zoom" | "google_meet" | "microsoft_teams" | "webex";

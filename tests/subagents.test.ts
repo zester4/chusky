@@ -1,11 +1,16 @@
-import test, { beforeEach } from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
-import { nativeTool } from "../src/nativeTools.js";
+import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
 import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
 
-beforeEach(async () => { await initStore({ memoryOnly: true }); });
+beforeEach(async () => {
+  await initStore({ memoryOnly: true });
+  setPhoneCallLauncherForTests(async (userId, input) => ({ id: `twc_test_${userId}`, userId, provider: "twilio", direction: "outbound", callProfile: input.callProfile, phoneNumber: input.phoneNumber, purpose: input.purpose, status: "bridging", createdAt: Date.now(), updatedAt: Date.now() }));
+});
+
+afterEach(() => setPhoneCallLauncherForTests());
 
 test("validates capability registry manifests for all worker capabilities", () => {
   const workers = ["lucas", "maya", "leo", "sofia", "dexter", "elena", "nora", "ivy", "quinn", "aria", "kai"] as const;
@@ -341,7 +346,7 @@ test("supports five-minute worker budgets for simple tasks", async () => {
   assert.equal(result.handoffRecord?.delegation?.budgetSeconds, 5 * 60);
 });
 
-test("creates pre-execution approval record and pauses delegation when worker attempts a risky tool call", async () => {
+test("lets a delegated worker start a validated outbound call without an approval pause", async () => {
   const userId = 991004;
   // Sofia attempts risky tool CHUCK_START_PHONE_CALL
   const result = await executeDelegation(userId, {
@@ -350,22 +355,16 @@ test("creates pre-execution approval record and pauses delegation when worker at
     context: {
       toolCall: {
         name: "CHUCK_START_PHONE_CALL",
-        args: { phoneNumber: "+14155550123", purpose: "Vendor price negotiation" },
+        args: { phoneNumber: "+14155550123", purpose: "Vendor price negotiation", callProfile: "personal" },
       },
     },
   });
 
-  assert.equal(result.status, "requires_approval");
-  assert.ok(result.approvalId);
-  assert.ok(result.proposal);
-  assert.equal(result.proposal.actionName, "CHUCK_START_PHONE_CALL");
-
-  // Verify approval record exists in user session store
+  assert.equal(result.status, "success");
+  assert.equal(result.approvalId, undefined);
+  assert.equal(result.proposal, undefined);
   const session = await getSession(userId);
-  const record = session.approvals.find((a) => a.id === result.approvalId);
-  assert.ok(record);
-  assert.equal(record.toolSlug, "CHUCK_START_PHONE_CALL");
-  assert.equal(record.status, "pending");
+  assert.equal(session.approvals.some((a) => a.toolSlug === "CHUCK_START_PHONE_CALL"), false);
 });
 
 test("allows safe read-only tools to execute automatically even under strict approvalPolicy", async () => {
