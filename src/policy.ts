@@ -1,7 +1,12 @@
+import { composioMetadataPolicy } from "./composioRisk.js";
+
 // Routine communications and content publishing are autonomous. Keep the
 // approval boundary for destructive, financial, permission-changing, and
 // deployment actions that can cause material or irreversible harm.
 export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|CREATE_PAYMENT|CHARGE|TRANSFER|INVITE|REVOKE|UPDATE_PERMISSION|MERGE|DEPLOY)(_|$)/i;
+const COMPOSIO_READ_ONLY_PATTERN = /(^|_)(GET|LIST|SEARCH|FETCH|READ|LOOKUP|CHECK|VERIFY|DESCRIBE|FIND|RETRIEVE|COUNT|VIEW|PREVIEW|VALIDATE)(_|$)/i;
+const COMPOSIO_WRITE_PATTERN = /(^|_)(CREATE|UPDATE|SET|ADD|SEND|POST|PUBLISH|WRITE|UPLOAD|MOVE|ARCHIVE|CLOSE|ENABLE|DISABLE|CHANGE|MODIFY|SUBSCRIBE|UNSUBSCRIBE)(_|$)/i;
+const COMPOSIO_AUTONOMOUS_PATTERN = /(^|_)(SEND_EMAIL|SEND_CAMPAIGN|POST_MESSAGE|PUBLISH_POST|CREATE_DRAFT|UPDATE_DRAFT|CREATE_ISSUE|CREATE_NOTE|ADD_COMMENT)(_|$)/i;
 
 export type ToolApprovalPolicy = "private" | "approval_required";
 
@@ -47,11 +52,22 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
   "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS",
 ]);
 
+function composioActionPolicy(slug: string): ToolApprovalPolicy {
+  const metadataPolicy = composioMetadataPolicy(slug);
+  if (metadataPolicy) return metadataPolicy;
+  if (!slug || RISKY_TOOL_PATTERN.test(slug)) return "approval_required";
+  if (COMPOSIO_READ_ONLY_PATTERN.test(slug) || COMPOSIO_AUTONOMOUS_PATTERN.test(slug)) return "private";
+  // Composio's provider catalogue is dynamic. Until provider risk metadata is
+  // available at this boundary, unknown write-shaped actions fail closed.
+  return COMPOSIO_WRITE_PATTERN.test(slug) ? "approval_required" : "private";
+}
+
 /**
  * The explicit registry protects Chusky-native contracts. Composio provider
- * tools remain classified conservatively by their externally-visible action
- * name because their catalogue is dynamic. New CHUCK_* tools fail closed until
- * they are deliberately added here.
+ * tools remain classified by their externally-visible action name because the
+ * catalogue is dynamic; unknown write-shaped actions fail closed until
+ * provider risk metadata is available at this boundary. New CHUCK_* tools
+ * fail closed until they are deliberately added here.
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   if (slug === "CHUCK_DAYTONA_BROWSER") {
@@ -62,6 +78,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     // Daytona is Chusky's private workspace; only pushing leaves it.
     return String(args.action ?? "") === "push" ? "approval_required" : "private";
   }
+  if (["CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE", "CHUCK_DAYTONA_MOVE_FILES"].includes(slug)) return "approval_required";
   if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
@@ -70,16 +87,16 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     const nested = Array.isArray(args.tools) ? args.tools : [];
     const hasSideEffect = nested.some((item) => {
       const name = item && typeof item === "object" ? String((item as Record<string, unknown>).tool_slug ?? (item as Record<string, unknown>).name ?? "") : "";
-      return RISKY_TOOL_PATTERN.test(name);
+      return composioActionPolicy(name) === "approval_required";
     });
     return hasSideEffect ? "approval_required" : "private";
   }
   if (slug === "COMPOSIO_EXECUTE_TOOL") {
     const nestedSlug = String(args.tool_slug ?? args.slug ?? "");
-    return RISKY_TOOL_PATTERN.test(nestedSlug) ? "approval_required" : "private";
+    return composioActionPolicy(nestedSlug);
   }
   if (slug.startsWith("CHUCK_")) return "approval_required";
-  return RISKY_TOOL_PATTERN.test(slug) ? "approval_required" : "private";
+  return composioActionPolicy(slug);
 }
 
 const STATUSES: Record<string, string> = {

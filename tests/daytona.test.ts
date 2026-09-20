@@ -42,10 +42,10 @@ test("artifact tool exposes DOCX and its validation contract", () => {
   assert.match(artifact.function.description, /structural validation/);
 });
 
-test("private Daytona computer and sandbox tools do not require approval", () => {
+test("ordinary Daytona work is autonomous while destructive actions require approval", () => {
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_EXECUTE"), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_WRITE_FILE"), false);
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_DELETE_WORKSPACE"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_DELETE_WORKSPACE"), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "keyboard_type", text: "hello" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "screenshot" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "accessibility_tree" }), false);

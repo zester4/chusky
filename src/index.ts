@@ -17,6 +17,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
+import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
 import { registerChannelRoutes } from "./channels/routes.js";
@@ -1835,7 +1836,7 @@ async function main(): Promise<void> {
             try {
               const prompt = task.sdkRunId ? await sdkTaskMessage(task) : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. Do not perform risky external actions without the normal approval flow.`;
               const session = await getSession(task.userId);
-              const durationSeconds = sdkDurationSeconds(task.sdkBudget?.duration);
+              const durationSeconds = task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
@@ -1931,12 +1932,13 @@ async function main(): Promise<void> {
             }
           },
         });
-        return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt };
+        return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt, taskId: run.task?.id };
       });
       // Each execution/retry is a named durable step. Completed steps are not
       // repeated if QStash retries the workflow after a transport interruption.
       for (let attempt = 0; attempt < 10; attempt++) {
-        const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number };
+        const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string };
+        if (run.taskId) await onComposerTaskSettled(payload.userId, run.taskId).catch((error) => logger.warn({ err: error, taskId: run.taskId }, "Composer stage reconciliation failed"));
         if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
       }

@@ -66,7 +66,7 @@ Chusky's own implementation and must not be described as the `chat` package.
 | Slack | Implemented | Signed Events API and interaction routes, DMs, mentions, threads, OAuth installation, and Block Kit approval buttons. |
 | WhatsApp | Implemented | Signed Cloud API webhook, text/media normalization, media hydration, debounce, receipts, and opt-in proactive notifications. |
 | Sendblue | Implemented | Signed iMessage webhook, durable workflow dispatch, direct/group delivery, media hydration, typing indicators, Markdown-to-plain-text formatting, and durable receipts. |
-| SMS | Boundary only | A provider-neutral adapter and normalizer exist; no live sender/webhook is registered. |
+| SMS | Implemented | Twilio SMS/MMS adapter, one-time account linking, signed inbound webhook, outbound delivery, and shared durable channel handling. |
 | Voice | Implemented | Twilio inbound/outbound telephone calls use a private Deepgram voice bridge; Bland is an optional outbound provider. |
 
 The normalized contracts are in `src/channels/contracts.ts`. Adapters verify raw
@@ -96,9 +96,9 @@ Channel invariants:
 Channel onboarding and commands:
 
 1. Configure Redis and the provider's HTTPS webhook credentials.
-2. Run `/channel link slack` or `/channel link whatsapp` from the owning Telegram
+2. Run `/channel link slack`, `/channel link whatsapp`, or `/channel link sms` from the owning Telegram
    account.
-3. Complete Slack OAuth, or send the WhatsApp/Sendblue one-time code with `/link <code>`.
+3. Complete Slack OAuth, or send the WhatsApp/Sendblue/SMS one-time code with `/link <code>`.
 4. Verify `/channel list`, then test a private message and an approval interaction.
 5. Use `/channel notify whatsapp|sendblue on|off` to control proactive channel delivery.
 

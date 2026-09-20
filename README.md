@@ -131,10 +131,13 @@ The service exposes three account-scoped endpoints:
   `tokenType`, and `expiresAt`). The response never contains credentials.
 - `DELETE /v1/mcp/connections/:serverId` disconnects the current user's server.
 
-This is the secure backend seam for a future one-click OAuth screen: the
-catalog is product-controlled, while credentials belong to the user. A generic
-OAuth consent/callback flow still needs provider metadata and redirect setup
-before it can replace the token handoff for every MCP vendor.
+For OAuth servers, the dashboard starts the official MCP SDK authorization-code
+flow with PKCE and opens the configured callback. Set `MCP_OAUTH_CALLBACK_URL`
+to `${WEBHOOK_URL}/mcp/oauth/callback` (or use that derived default), keep
+`MCP_CONNECTION_ENCRYPTION_KEY` stable, and never expose the callback or key to
+the browser. The short-lived state, client metadata, verifier, and refresh
+tokens are encrypted and account-bound. Providers that require unusual client
+registration or non-standard consent still need an explicit catalog entry.
 
 The agent discovers tools with the official MCP TypeScript SDK, exposes them
 under stable `MCP_<server>_<tool>_<hash>` names, validates arguments against
@@ -142,7 +145,18 @@ the server's input schema, bounds returned data, and reconnects transient HTTP
 sessions. MCP calls require approval by default so a newly connected server
 cannot silently send mail, change records, spend money, or delete data. Keep
 the server allowlist narrow and only set `requireApproval=false` for a server
-whose side effects have been reviewed.
+ whose side effects have been reviewed.
+
+### Workflow Composer
+
+The authenticated `/v1/workflows/composer` API and `/app/composer` dashboard
+provide a persisted dependency graph. Starting a workflow creates independent
+durable tasks for ready stages, fans out parallel branches, joins only after
+dependencies complete, carries bounded stage results forward, enforces retry
+limits and per-stage time budgets, and creates a Chusky approval checkpoint for
+approval-gated stages. Task settlement advances the next eligible stages; a
+failed, cancelled, or denied stage stops the graph. Use Redis and QStash in
+production so stage state and enqueue operations survive process restarts.
 
 ---
 
@@ -184,7 +198,7 @@ The pairing code is one-time and expires after 10 minutes. The terminal stores a
 
 CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/meetings [id]`, `/meeting profile`, `/meeting prepare <client> | <objective> | <context>`, `/meeting join <url> | <client> | <objective> | <context>`, `/meeting join-prepared <preparation-id>`, `/meeting context <meeting-id> [question]`, `/meeting leave <meeting-id>`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Meeting commands share the Recall lifecycle with Telegram and the dashboard: prepared calendar meetings, participant rosters, bounded conversation history, outcomes, and captured follow-up contacts remain owner-scoped. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` creates a one-time approval and cannot place the call until that approval is explicitly granted. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
 
-Routine email, messaging, publishing, artifact creation, triggers, reminders, and memory maintenance are autonomous. Deletion, payment, permission changes, production deployment, remote Git push, outbound calls, and other materially risky actions use the approval picker before execution. Chusky's private Daytona computer and sandbox are agent-controlled and do not prompt for approval. `COMPOSIO_MULTI_EXECUTE_TOOL` pauses only when one of its nested actions is materially risky. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
+Routine email, messaging, publishing, artifact creation, triggers, reminders, and memory maintenance are autonomous. Deletion, payment, permission changes, production deployment, remote Git push, outbound calls, and other materially risky actions use the approval picker before execution. Daytona's private computer and sandbox are agent-controlled for ordinary workspace work, while destructive file/workspace actions and remote pushes still use the approval boundary. `COMPOSIO_MULTI_EXECUTE_TOOL` pauses when one of its nested actions is materially risky or cannot be classified safely. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
 `/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
 `/cli/collection/jobs`. Each accepts `page`, `pageSize` (capped server-side), and an optional
 `query`, and returns `total`/`totalPages`; `/cli/session?page=&pageSize=` provides the same
@@ -890,6 +904,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `MCP_ENABLED` | — | `false` | Enable Chusky as a client of configured third-party Streamable HTTP MCP servers |
 | `MCP_SERVERS_JSON` | legacy MCP | `[]` | Temporary backwards-compatible server registry; prefer `src/mcp/mcp.json` |
 | `MCP_CONNECTION_ENCRYPTION_KEY` | MCP connections | — | Stable base64url-encoded 32-byte key used to encrypt connected-account tokens |
+| `MCP_OAUTH_CALLBACK_URL` | MCP OAuth | derived from `WEBHOOK_URL` | Public HTTPS `/mcp/oauth/callback` URL used for authorization-code + PKCE callbacks |
 | `MCP_TOOL_TIMEOUT_MS` | — | `20000` | Maximum time for one third-party MCP tool call |
 | `MCP_MAX_SERVERS` | — | `20` | Maximum configured MCP servers loaded at startup |
 | `MCP_MAX_TOOLS_PER_SERVER` | — | `100` | Maximum discovered tools exposed from each MCP server |

@@ -3,7 +3,7 @@ import { getSession, saveSession, type SdkProjectRecord } from "./store.js";
 
 /** Public project-key scopes. Root/admin access is intentionally absent. */
 export const SELF_SERVICE_PROJECT_SCOPES = [
-  "*", "threads:read", "threads:write", "tasks:read", "tasks:write",
+  "*", "threads:read", "threads:write", "tasks:read", "tasks:write", "workflows:read", "workflows:write",
   "agents:read", "agents:write",
   "approvals:read", "approvals:write", "files:read", "files:write",
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",

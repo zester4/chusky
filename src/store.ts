@@ -7,7 +7,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { config } from "./config.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
-import { recordFailure } from "./monitoring.js";
+import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
@@ -63,6 +63,9 @@ export interface UserSession {
   shoppingSites?: ShoppingSite[];
   /** Per-user third-party MCP connections. Credentials are encrypted at rest. */
   mcpConnections?: McpConnectionRecord[];
+  /** Short-lived encrypted MCP OAuth/PKCE handshakes. Never expose this to clients. */
+  mcpOAuthStates?: McpOAuthStateRecord[];
+  workflowComposers?: WorkflowComposerRecord[];
   /** Per-origin browser operating recipes; never contains credentials or cookies. */
   browserPlaybooks?: BrowserPlaybookRecord[];
   /** Bounded, owner-visible browser operation history with safe summaries only. */
@@ -80,6 +83,15 @@ export interface McpConnectionRecord {
   enabled: boolean;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface McpOAuthStateRecord {
+  state: string;
+  serverId: string;
+  redirectUri: string;
+  secret: EncryptedCredential;
+  createdAt: number;
+  expiresAt: number;
 }
 
 /** Contact information a participant shared for an agreed meeting follow-up. Kept outside general memory. */
@@ -553,6 +565,36 @@ export interface TaskRecord {
     emailTool: string;
     state: "scheduled" | "claimed" | "completed" | "ambiguous";
   };
+  /** Link a durable task to one independently executable Composer stage. */
+  composerWorkflowId?: string;
+  composerStageId?: string;
+  composerBudgetSeconds?: number;
+}
+
+export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+export interface ComposerStage {
+  id: string;
+  title: string;
+  objective: string;
+  dependsOn: string[];
+  status: ComposerStageStatus;
+  requiresApproval: boolean;
+  retryLimit: number;
+  budgetSeconds?: number;
+  taskId?: string;
+  approvalId?: string;
+  result?: string;
+}
+export interface WorkflowComposerRecord {
+  id: string;
+  name: string;
+  description?: string;
+  stages: ComposerStage[];
+  status: "draft" | "queued" | "running" | "completed" | "failed" | "cancelled";
+  taskId?: string;
+  workflowRunId?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ReminderRecord {
@@ -2738,7 +2780,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -4241,7 +4283,7 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
     const vector = new UpstashKnowledgeStore();
     void vector.upsertMemory({ userId: String(uid), id: value.id, category: value.category, key: value.key, value: value.value, projectId: value.projectId, personKey: value.personKey }).then(async () => {
       if (existing?.projectId && existing.projectId !== value.projectId) await vector.deleteMemory(String(uid), existing.id, existing.projectId);
-    }).catch((error) => logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"));
+    }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
   }
   return value;
 }
@@ -4279,6 +4321,7 @@ export async function searchMemories(uid: number, query?: string, options: { cat
       const allMemories = (await getSession(uid)).memories;
       void new UpstashKnowledgeStore().upsertMemories(allMemories.map((memory) => ({ userId: String(uid), id: memory.id, category: memory.category, key: memory.key, value: memory.value, projectId: memory.projectId, personKey: memory.personKey }))).catch((error) => {
         memoryVectorBackfillUsers.delete(uid);
+        recordVectorFailure(error, { phase: "memory_backfill", errorClass: "vector_backfill" });
         logger.warn({ err: error, userId: uid }, "Memory vector backfill unavailable; structured search remains authoritative");
       });
     }
@@ -4292,7 +4335,7 @@ export async function searchMemories(uid: number, query?: string, options: { cat
         const current = ranked.get(memory.id);
         ranked.set(memory.id, { memory, score: (current?.score ?? 0) + semanticScore + Math.max(0, limit - index) / limit });
       }
-    } catch (error) { logger.warn({ err: error, userId: uid }, "Semantic memory search unavailable; using structured search"); }
+    } catch (error) { recordVectorFailure(error, { phase: "memory_search", errorClass: "vector_query" }); logger.warn({ err: error, userId: uid }, "Semantic memory search unavailable; using structured search"); }
   }
   return [...ranked.values()].sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt).slice(0, limit).map((item) => item.memory);
 }

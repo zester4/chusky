@@ -33,6 +33,7 @@ import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession,
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
 import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.js";
+import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -52,6 +53,7 @@ import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { missingComposioConnectionMessage, resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
+import { composeSystemPrompt } from "./prompt.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -84,9 +86,9 @@ const GROUP_ARTIFACT_TOOLS = new Set([
   "CHUCK_CREATE_SPREADSHEET",
 ]);
 
-// This remains outside SYSTEM_PROMPT deliberately: deployments can customize
-// Chusky's personality, but cannot accidentally remove the execution protocol
-// that keeps private client context bounded before it enters a live meeting.
+// These remain mandatory runtime sections: deployments can customize Chusky's
+// personality, but cannot accidentally remove the execution protocol that
+// keeps private client context bounded before it enters a live meeting.
 const MEETING_MISSION_PLAYBOOK = `
 MEETING REPRESENTATION
 - When the owner asks you to represent them to a named client in a meeting, prepare the compact private brief with CHUCK_MEETING_CONTEXT_PREPARE, then join with clientName and the relevant objective/context. Do not require a separate confirmation merely to generate or use the brief; ask only when a genuinely decision-critical fact or authority boundary is missing.
@@ -595,6 +597,7 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   let available: any[];
   try {
     available = await sessionObj.tools();
+    available.forEach((tool: unknown) => registerComposioToolMetadata(tool));
   } catch (error) {
     if (unique.every((slug) => optional.has(slug))) {
       return { tools: [], missing: unique, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
@@ -818,6 +821,7 @@ export async function runAgent(
   // through COMPOSIO_SEARCH_TOOL and execute it through the session.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
+  fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
   const composioTools = (fullComposioTools.length > 80
     ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
     : fullComposioTools).map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
@@ -948,7 +952,11 @@ export async function runAgent(
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
   const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
-  const staticSystemPrompt = `${config.chuckSystemPrompt}${!voiceTurn && channelContext?.scope !== "shared" ? `\n\n${SHOPPING_AGENT_PLAYBOOK}\n\n${MEETING_MISSION_PLAYBOOK}` : ""}${options?.instructions ? `\n\nDeveloper instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : ""}`;
+  const staticSystemPrompt = composeSystemPrompt({
+    customizablePrompt: config.chuckSystemPrompt,
+    mandatorySections: !voiceTurn && channelContext?.scope !== "shared" ? [SHOPPING_AGENT_PLAYBOOK, MEETING_MISSION_PLAYBOOK] : [],
+    developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
+  });
   const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}`;
   const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
   const messages: ApiMessage[] = [

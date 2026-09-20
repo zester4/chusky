@@ -5,7 +5,7 @@ import { config } from "../src/config.js";
 import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getApproval, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getApproval, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -570,6 +570,29 @@ test("dashboard channel controls create one-time link codes, update notification
   assert.deepEqual((await api.fetch(new Request("http://local/v1/channels", { headers })).then((response) => response.json()) as { data: unknown[] }).data, []);
   const primary = await api.fetch(new Request("http://local/v1/channels/telegram/0000000000000000", { method: "DELETE", headers }));
   assert.equal(primary.status, 409);
+});
+
+test("linked dashboard memory and account overview share one active, owner-scoped projection", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const link = await createWebTelegramLinkCode("memory-owner");
+  assert.equal(await redeemWebTelegramLinkCode(link.code, 820006), "linked");
+  await upsertMemory(820006, { category: "fact", key: "preferred_crm", value: "HubSpot", confidence: 1, sensitivity: "normal", source: "telegram" });
+  await upsertMemory(820006, { category: "fact", key: "expired_fact", value: "must not be shown", confidence: 1, sensitivity: "normal", source: "telegram", expiresAt: Date.now() - 1 });
+
+  const api = app();
+  const headers = { "X-Test-Web-User": "memory-owner" };
+  const listed = await api.fetch(new Request("http://local/v1/memory", { headers }));
+  const overview = await api.fetch(new Request("http://local/v1/account/overview", { headers }));
+  assert.equal(listed.status, 200);
+  assert.equal(overview.status, 200);
+  const listData = (await listed.json() as { data: Array<{ id: string; key: string; source?: string }> }).data;
+  const overviewBody = await overview.json() as { memory: Array<{ id: string; key: string; source?: string }>; telegramLink: { linked: boolean } };
+  const overviewData = overviewBody.memory;
+  assert.equal(overviewBody.telegramLink.linked, true);
+  assert.deepEqual(overviewData.map(({ id, key, source }) => ({ id, key, source })), listData.map(({ id, key, source }) => ({ id, key, source })));
+  assert.equal(listData.some((item) => item.key === "expired_fact"), false);
+  assert.equal(overviewData.some((item) => item.key === "expired_fact"), false);
 });
 
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {

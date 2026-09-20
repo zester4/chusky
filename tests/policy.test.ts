@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
+import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 
 test("recognizes materially risky tools", () => {
   for (const slug of ["GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "AWS_UPDATE_PERMISSION", "GITHUB_DEPLOY_PRODUCTION"]) {
@@ -38,10 +39,24 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_NEW_NATIVE_TOOL"), "approval_required");
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
+  for (const name of ["CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE", "CHUCK_DAYTONA_MOVE_FILES"]) {
+    assert.equal(toolApprovalPolicy(name), "approval_required", name);
+  }
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: {} }] }), true);
-  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), true);
+  assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "UNKNOWN_PROVIDER_UPDATE_RECORD" }), true);
+  assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "GMAIL_LIST_MESSAGES" }), false);
+});
+
+test("provider metadata classifies dynamic Composio tools before heuristic fallback", () => {
+  clearComposioToolMetadata();
+  registerComposioToolMetadata({ name: "MYSTERY_READ", annotations: { readOnlyHint: true } });
+  registerComposioToolMetadata({ name: "MYSTERY_ACTION", annotations: { destructiveHint: true } });
+  assert.equal(toolApprovalPolicy("MYSTERY_READ"), "private");
+  assert.equal(toolApprovalPolicy("MYSTERY_ACTION"), "approval_required");
+  clearComposioToolMetadata();
 });
 
 test("renders human tool progress", () => {

@@ -441,7 +441,10 @@ decision at the approval boundary authorizes an external action.
 
 ## 11. Composio connection behavior
 
-MCP does not manage OAuth itself. The connection sequence is:
+The Cloudflare MCP Worker does not manage Composio OAuth itself; Composio owns
+those connected accounts. The Chusky runtime can separately connect approved
+third-party MCP servers through its `/v1/mcp/oauth/start` PKCE flow. For the
+Cloudflare Worker/Composio path, the connection sequence is:
 
 1. Host calls `chusky_composio_apps_list` to see toolkits and existing connections.
 2. Host calls `chusky_composio_connect_app` with a toolkit name if needed.

@@ -32,6 +32,8 @@ import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
+import { beginMcpOAuth, finishMcpOAuth } from "./mcp/oauth.js";
+import { createComposerWorkflow, listComposerWorkflows, reconcileComposerWorkflow, rejectComposerApproval, startComposerWorkflow, updateComposerWorkflow, type ComposerStageInput } from "./workflows/composer.js";
 import {
   COMPANY_AGENT_TEMPLATES,
   COMPANY_APPROVAL_BEFORE_EXTERNAL_ACTION,
@@ -169,7 +171,7 @@ function accountProjectScopes(value: unknown): string[] | undefined {
 }
 
 const COMPANY_PROJECT_DEFAULT_SCOPES = [
-  "threads:read", "threads:write", "agents:read", "agents:write",
+  "threads:read", "threads:write", "agents:read", "agents:write", "workflows:read", "workflows:write",
   "tasks:read", "tasks:write", "approvals:read",
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
   "apps:read", "apps:write", "triggers:read", "triggers:write",
@@ -304,6 +306,27 @@ function callView(call: { id: string; provider?: string; direction?: string; pho
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, summary: call.summary, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+}
+function memoryView(memory: {
+  id: string; category: string; key: string; value: string; confidence: number; source?: string;
+  sensitivity: string; projectId?: string; personKey?: string; createdAt: number; updatedAt: number;
+  reviewAt?: number; expiresAt?: number;
+}) {
+  return {
+    id: memory.id,
+    category: memory.category,
+    key: memory.key,
+    value: memory.value,
+    confidence: memory.confidence,
+    source: memory.source,
+    sensitivity: memory.sensitivity,
+    projectId: memory.projectId,
+    personKey: memory.personKey,
+    reviewAt: memory.reviewAt ? new Date(memory.reviewAt).toISOString() : undefined,
+    expiresAt: memory.expiresAt ? new Date(memory.expiresAt).toISOString() : undefined,
+    createdAt: new Date(memory.createdAt).toISOString(),
+    updatedAt: new Date(memory.updatedAt).toISOString(),
+  };
 }
 function approvalView(approval: { id: string; status: string; toolSlug: string; args: Record<string, unknown>; request?: string; channelProvider?: string; handoffId?: string; createdAt: number; expiresAt: number }) {
   return { id: approval.id, status: approval.status, toolSlug: approval.toolSlug, args: approval.args, request: approval.request, channelProvider: approval.channelProvider, handoffId: approval.handoffId, createdAt: new Date(approval.createdAt).toISOString(), expiresAt: new Date(approval.expiresAt).toISOString() };
@@ -482,6 +505,21 @@ function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fi
 
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
+  app.get("/mcp/oauth/callback", async (c) => {
+    const state = c.req.query("state") ?? "";
+    const code = c.req.query("code") ?? "";
+    const providerError = c.req.query("error");
+    if (providerError) return c.html("<!doctype html><title>Chusky connection not completed</title><p>Chusky authorization was not completed. You can close this window and try again.</p>", 400);
+    if (!state || !code) return c.html("<!doctype html><title>Chusky connection not completed</title><p>The authorization response was incomplete. You can close this window and try again.</p>", 400);
+    try {
+      await finishMcpOAuth(state, code);
+      return c.html("<!doctype html><title>Chusky connected</title><main><h1>Chusky is connected</h1><p>You can close this window and return to Chusky.</p></main>");
+    } catch (error) {
+      logger.warn({ err: error }, "MCP OAuth callback failed");
+      return c.html("<!doctype html><title>Chusky connection failed</title><main><h1>Chusky could not connect</h1><p>The authorization could not be completed. Return to Chusky and try again.</p></main>", 400);
+    }
+  });
+
   // Public and intentionally minimal: this is the safe branding payload used
   // by a customer-owned domain before a dashboard session exists.
   app.get("/public/company-branding", async (c) => {
@@ -549,20 +587,25 @@ export function registerSdkApi(app: Hono): void {
       telegram: "configured",
     } as const;
     const ok = checks.redis === "ok" && Object.values(checks).every((value) => value !== "misconfigured");
-    return c.json({ ok, status: ok ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() });
+    const monitoring = monitoringSnapshot();
+    const vectorCheck = !vectorConfigured() ? "disabled" : monitoring.vector.degraded ? "degraded" : "configured";
+    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring });
   });
 
   app.get("/v1/account/overview", async (c) => {
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
     const session = await getSession(owner.userId);
-    const [channels, devices, reminders, jobs, workspace, deliveries] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memory] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminders(owner.userId),
       listJobs(owner.userId),
       getDaytonaWorkspace(owner.userId),
       listOutbox(undefined, 100, owner.userId),
+      // Keep the overview's memory projection identical to /v1/memory:
+      // expired facts must not reappear in another dashboard surface.
+      searchMemories(owner.userId, undefined, { limit: 20 }),
     ]);
     return c.json({
       model: session.model,
@@ -572,21 +615,7 @@ export function registerSdkApi(app: Hono): void {
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
-      memory: session.memories.map((item) => ({
-        id: item.id,
-        category: item.category,
-        key: item.key,
-        value: item.value,
-        confidence: item.confidence,
-        source: item.source,
-        sensitivity: item.sensitivity,
-        projectId: item.projectId,
-        personKey: item.personKey,
-        reviewAt: item.reviewAt ? new Date(item.reviewAt).toISOString() : undefined,
-        expiresAt: item.expiresAt ? new Date(item.expiresAt).toISOString() : undefined,
-        createdAt: new Date(item.createdAt).toISOString(),
-        updatedAt: new Date(item.updatedAt).toISOString(),
-      })),
+      memory: memory.map(memoryView),
       scratchpad: Object.entries(session.scratchpad).map(([key, item]) => ({ key, content: item.content, updatedAt: new Date(item.updatedAt).toISOString() })),
       triggers: session.triggerIds,
       devices: devices.filter((item) => !item.revokedAt).map(({ tokenHash, ...item }) => ({ ...item, id: createHash("sha256").update(tokenHash).digest("hex").slice(0, 24), createdAt: new Date(item.createdAt).toISOString(), lastSeenAt: new Date(item.lastSeenAt).toISOString() })),
@@ -758,6 +787,31 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/mcp/catalog", async (c) => {
     const catalog = listMcpCatalog();
     return c.json({ data: catalog.servers, ...(catalog.errors.length ? { errors: catalog.errors } : {}) });
+  });
+
+  app.get("/v1/workflows/composer", async (c) => c.json({ data: await listComposerWorkflows(sdkUser(c)!.userId) }));
+  app.post("/v1/workflows/composer", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    if (typeof body.name !== "string" || !Array.isArray(body.stages)) return apiError(c, 400, "invalid_workflow", "name and stages are required.");
+    try { return c.json(await createComposerWorkflow(sdkUser(c)!.userId, { name: body.name, description: typeof body.description === "string" ? body.description : undefined, stages: body.stages as ComposerStageInput[] }), 201); }
+    catch (error) { return apiError(c, 400, "invalid_workflow", error instanceof Error ? error.message : "Workflow could not be created."); }
+  });
+  app.patch("/v1/workflows/composer/:workflowId", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    try { const workflow = await updateComposerWorkflow(sdkUser(c)!.userId, c.req.param("workflowId"), { name: typeof body.name === "string" ? body.name : undefined, description: typeof body.description === "string" ? body.description : undefined, stages: Array.isArray(body.stages) ? body.stages as ComposerStageInput[] : undefined }); return workflow ? c.json(workflow) : apiError(c, 404, "workflow_not_found", "Workflow not found."); }
+    catch (error) { return apiError(c, 400, "workflow_update_failed", error instanceof Error ? error.message : "Workflow could not be updated."); }
+  });
+  app.post("/v1/workflows/composer/:workflowId/start", async (c) => {
+    try { const userId = sdkUser(c)!.userId; const started = await startComposerWorkflow(userId, c.req.param("workflowId")); const workflow = await reconcileComposerWorkflow(userId, c.req.param("workflowId"), sdkTaskWorkflowEnqueuer); const firstTask = started.tasks[0]; const workflowRunId = firstTask ? (await getTask(userId, firstTask.id))?.workflowRunId : undefined; return c.json({ ...(workflow ?? started.workflow), ...(firstTask ? { taskId: firstTask.id } : {}), ...(workflowRunId ? { workflowRunId } : {}) }, 202); }
+    catch (error) { return apiError(c, 400, "workflow_start_failed", error instanceof Error ? error.message : "Workflow could not be started."); }
+  });
+
+  app.post("/v1/mcp/oauth/start", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const serverId = typeof body.serverId === "string" ? body.serverId.trim() : "";
+    if (!/^[A-Za-z0-9_-]{1,48}$/.test(serverId)) return apiError(c, 400, "invalid_mcp_server", "serverId must contain 1-48 letters, numbers, underscores, or hyphens.");
+    try { return c.json(await beginMcpOAuth(sdkUser(c)!.userId, serverId)); }
+    catch (error) { return apiError(c, 400, "mcp_oauth_start_failed", error instanceof Error ? error.message : "MCP OAuth could not be started."); }
   });
 
   app.get("/v1/mcp/connections", async (c) => {
@@ -1406,8 +1460,8 @@ export function registerSdkApi(app: Hono): void {
   app.put("/v1/scratchpad/:key", async (c) => { const key = decodeURIComponent(c.req.param("key")).trim(); const body = await c.req.json().catch(() => ({})) as { content?: string }; const content = String(body.content ?? ""); if (!key || key.length > 120 || content.length > 20_000) return apiError(c, 400, "invalid_scratchpad", "key and content are required; content must be 20000 characters or fewer."); await writeScratchpad(sdkUser(c)!.userId, key, content); return c.json({ key, content, updatedAt: new Date().toISOString() }); });
   app.delete("/v1/scratchpad", async (c) => { await clearScratchpad(sdkUser(c)!.userId, c.req.query("key")); return c.body(null, 204); });
   app.delete("/v1/scratchpad/:key", async (c) => { await clearScratchpad(sdkUser(c)!.userId, decodeURIComponent(c.req.param("key"))); return c.body(null, 204); });
-  app.get("/v1/memory", async (c) => { const data = (await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { limit: 20 })).map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(), expiresAt: item.expiresAt ? new Date(item.expiresAt).toISOString() : undefined, reviewAt: item.reviewAt ? new Date(item.reviewAt).toISOString() : undefined })); return c.json({ data }); });
-  app.post("/v1/memory", async (c) => { const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const categories = new Set(["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"]); const category = String(body.category ?? "fact"); const key = String(body.key ?? "").trim(); const value = String(body.value ?? "").trim(); const sensitivity = body.sensitivity; if (!categories.has(category) || !key || !value || key.length > 200 || value.length > 20_000 || (sensitivity !== "normal" && sensitivity !== "sensitive")) return apiError(c, 400, "invalid_memory", "category, key, value, and sensitivity (normal or sensitive) are required."); try { const memory = await upsertMemory(sdkUser(c)!.userId, { category: category as any, key, value, confidence: Number(body.confidence ?? 1), source: String(body.source ?? "web_dashboard"), sensitivity, projectId: typeof body.projectId === "string" ? body.projectId : undefined, personKey: typeof body.personKey === "string" ? body.personKey : undefined, reviewAt: typeof body.reviewAt === "number" ? body.reviewAt : undefined, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : undefined }); return c.json({ ...memory, createdAt: new Date(memory.createdAt).toISOString(), updatedAt: new Date(memory.updatedAt).toISOString() }, 201); } catch (error) { return apiError(c, 400, "memory_save_failed", error instanceof Error ? error.message : "Memory could not be saved."); } });
+  app.get("/v1/memory", async (c) => { const data = (await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { limit: 20 })).map(memoryView); return c.json({ data }); });
+  app.post("/v1/memory", async (c) => { const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const categories = new Set(["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"]); const category = String(body.category ?? "fact"); const key = String(body.key ?? "").trim(); const value = String(body.value ?? "").trim(); const sensitivity = body.sensitivity; if (!categories.has(category) || !key || !value || key.length > 200 || value.length > 20_000 || (sensitivity !== "normal" && sensitivity !== "sensitive")) return apiError(c, 400, "invalid_memory", "category, key, value, and sensitivity (normal or sensitive) are required."); try { const memory = await upsertMemory(sdkUser(c)!.userId, { category: category as any, key, value, confidence: Number(body.confidence ?? 1), source: String(body.source ?? "web_dashboard"), sensitivity, projectId: typeof body.projectId === "string" ? body.projectId : undefined, personKey: typeof body.personKey === "string" ? body.personKey : undefined, reviewAt: typeof body.reviewAt === "number" ? body.reviewAt : undefined, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : undefined }); return c.json(memoryView(memory), 201); } catch (error) { return apiError(c, 400, "memory_save_failed", error instanceof Error ? error.message : "Memory could not be saved."); } });
   app.delete("/v1/memory/:id", async (c) => { const removed = await forgetMemory(sdkUser(c)!.userId, decodeURIComponent(c.req.param("id"))); return removed ? c.body(null, 204) : apiError(c, 404, "memory_not_found", "Memory not found."); });
   app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await sdkTaskWorkflowEnqueuer(userId, task.id, task.runAt ?? Date.now()); const updated = await setTaskWorkflowRunId(userId, task.id, workflowRunId); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
@@ -1450,7 +1504,7 @@ export function registerSdkApi(app: Hono): void {
     const pending = await getApproval(owner.userId, c.req.param("approvalId"));
     if (!pending || pending.status !== "pending" || pending.expiresAt <= Date.now()) return apiError(c, 404, "not_found", "Pending approval not found.");
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
-    if (body.decision === "deny") { await setApprovalStatus(owner.userId, pending.id, "denied"); return c.json({ id: pending.id, status: "denied" }); }
+    if (body.decision === "deny") { await setApprovalStatus(owner.userId, pending.id, "denied"); await rejectComposerApproval(owner.userId, pending.id); return c.json({ id: pending.id, status: "denied" }); }
     const approval = await claimApproval(owner.userId, pending.id);
     if (!approval) return apiError(c, 409, "approval_unavailable", "Approval was already decided, expired, or consumed.");
     const token = randomUUID();
@@ -1461,6 +1515,12 @@ export function registerSdkApi(app: Hono): void {
       return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     }
     try {
+      if (approval.toolSlug === "CHUCK_WORKFLOW_STAGE") {
+        const workflowId = typeof approval.args.workflowId === "string" ? approval.args.workflowId : "";
+        const workflow = workflowId ? await reconcileComposerWorkflow(owner.userId, workflowId, sdkTaskWorkflowEnqueuer) : undefined;
+        if (!workflow) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 404, "workflow_not_found", "The workflow stage no longer exists."); }
+        return c.json({ id: approval.id, status: "consumed", workflow });
+      }
       if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
         try {
           validateNativeToolArguments(approval.toolSlug, approval.args);
