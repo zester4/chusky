@@ -634,3 +634,26 @@ test("connected-app disconnect is scoped to an account-owned Composio connection
   assert.equal(removed.status, 204);
   assert.deepEqual(deleted, [account.id]);
 });
+
+test("meeting capabilities expose safe exact actions with connected-account state", async () => {
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: {
+      list: async () => ({ items: [{ id: "conn_gmail_1", alias: "Work Gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }),
+    },
+    create: async () => ({ sessionId: "meeting-capabilities-session", tools: async () => [
+      { function: { name: "GMAIL_SEND_EMAIL", description: "Send an email" } },
+      { function: { name: "GOOGLECALENDAR_FIND_EVENT", description: "Find a calendar event" } },
+      { function: { name: "GITHUB_DELETE_REPOSITORY", description: "Delete a repository" } },
+      { function: { name: "COMPOSIO_EXECUTE_TOOL", description: "Execute a dynamic tool" } },
+    ] }),
+  } });
+  const api = app();
+  const response = await api.fetch(new Request("http://local/v1/meetings/capabilities", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "capability-owner" } }));
+  assert.equal(response.status, 200);
+  const payload = await response.json() as { composioAvailable: boolean; connections: Array<{ id: string; alias?: string }>; composioTools: Array<{ slug: string; connected: boolean }> };
+  assert.equal(payload.composioAvailable, true);
+  assert.deepEqual(payload.connections, [{ id: "conn_gmail_1", alias: "Work Gmail", toolkit: "gmail", status: "ACTIVE" }]);
+  assert.deepEqual(payload.composioTools.map((tool) => tool.slug), ["GMAIL_SEND_EMAIL", "GOOGLECALENDAR_FIND_EVENT"]);
+  assert.equal(payload.composioTools.find((tool) => tool.slug === "GMAIL_SEND_EMAIL")?.connected, true);
+  assert.equal(payload.composioTools.find((tool) => tool.slug === "GOOGLECALENDAR_FIND_EVENT")?.connected, false);
+});

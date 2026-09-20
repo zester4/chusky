@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
@@ -31,6 +31,7 @@ import { daytonaEngine } from "./lib/daytona/engine.js";
 import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
+import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
 import { beginMcpOAuth, finishMcpOAuth } from "./mcp/oauth.js";
 import { createComposerWorkflow, listComposerWorkflows, reconcileComposerWorkflow, rejectComposerApproval, startComposerWorkflow, updateComposerWorkflow, type ComposerStageInput } from "./workflows/composer.js";
@@ -722,6 +723,21 @@ export function registerSdkApi(app: Hono): void {
       return c.json({ ...updated, ...(autoJoinReconciliation ? { autoJoinReconciliation } : {}) });
     }
     catch (error) { return apiError(c, 400, "invalid_meeting_profile", error instanceof Error ? error.message : "Meeting representative profile is invalid."); }
+  });
+  app.get("/v1/meetings/capabilities", async (c) => {
+    const owner = sdkUser(c)!;
+    const query = (c.req.query("query") ?? "").trim().slice(0, 120);
+    const limit = Math.max(1, Math.min(500, Number(c.req.query("limit") ?? 250) || 250));
+    const nativeTools = MEETING_REPRESENTATIVE_NATIVE_TOOLS.map((slug) => {
+      const definition = chuckTools.find((tool) => tool.function.name === slug);
+      return { slug, description: definition?.function.description ?? slug };
+    });
+    let connections = [] as Awaited<ReturnType<typeof listConnectedAccounts>>;
+    let composioTools = [] as Awaited<ReturnType<typeof listMeetingComposioCapabilities>>;
+    let composioAvailable = true;
+    try { connections = await listConnectedAccounts(owner.userId); } catch { composioAvailable = false; }
+    try { composioTools = await listMeetingComposioCapabilities(owner.userId, { query, limit }); } catch { composioAvailable = false; }
+    return c.json({ nativeTools, composioTools, connections, composioAvailable });
   });
 
   app.get("/v1/meetings", async (c) => {

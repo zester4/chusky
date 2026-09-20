@@ -48,7 +48,7 @@ import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, l
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
-import { applyMeetingComposioAccountAlias } from "./meetings/representative.js";
+import { applyMeetingComposioAccountAlias, isMeetingRepresentativeComposioTool } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { missingComposioConnectionMessage, resolveComposioRoute } from "./composioRouting.js";
@@ -1450,6 +1450,58 @@ export async function searchTools(userId: number, query: string): Promise<unknow
   const { sessionObj } = await getOrCreateComposioSession(userId);
   const result = await sessionObj.search({ query });
   return Array.isArray(result) ? result : (result.items ?? []);
+}
+
+export type MeetingComposioCapability = {
+  slug: string;
+  description: string;
+  toolkit?: string;
+  toolkitPrefix: string;
+  connected: boolean;
+};
+
+function composioCapabilityToolkit(tool: any, slug: string, accounts: ConnectedComposioAccount[]): { toolkit?: string; toolkitPrefix: string; connected: boolean } {
+  const metadata = tool && typeof tool === "object" ? (tool.metadata ?? tool.function?.metadata) : undefined;
+  const rawToolkit = tool?.toolkit?.slug ?? tool?.toolkit?.name ?? tool?.toolkitSlug ?? tool?.appName ?? metadata?.toolkit ?? metadata?.app;
+  const toolkit = typeof rawToolkit === "string" && rawToolkit.trim() ? rawToolkit.trim() : undefined;
+  const normalized = (value: string) => value.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  const matchingAccount = accounts.find((account) => {
+    const prefix = normalized(account.toolkit);
+    return prefix && slug.startsWith(`${prefix}_`);
+  });
+  const toolkitPrefix = normalized(toolkit ?? matchingAccount?.toolkit ?? slug.split("_")[0] ?? "") || slug.split("_")[0];
+  const connected = accounts.some((account) => {
+    const accountToolkit = normalized(account.toolkit);
+    const candidateToolkit = normalized(toolkit ?? "");
+    return (candidateToolkit && accountToolkit === candidateToolkit) || (accountToolkit && slug.startsWith(`${accountToolkit}_`));
+  });
+  return { toolkit, toolkitPrefix, connected };
+}
+
+/**
+ * Return only safe, exact actions that a meeting representative may be granted.
+ * The dashboard uses this instead of asking users to guess provider slugs.
+ * Credentials and raw Composio payloads never leave the server.
+ */
+export async function listMeetingComposioCapabilities(userId: number, options?: { query?: string; limit?: number }): Promise<MeetingComposioCapability[]> {
+  const accounts = (await listConnectedAccounts(userId)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+  const query = options?.query?.trim() ?? "";
+  const { sessionObj } = await getOrCreateComposioSession(userId);
+  const rawTools: any[] = query
+    ? await searchTools(userId, query)
+    : await sessionObj.tools();
+  const seen = new Set<string>();
+  const capabilities: MeetingComposioCapability[] = [];
+  for (const tool of rawTools) {
+    const slug = String(tool?.function?.name ?? tool?.name ?? tool?.slug ?? "").trim();
+    if (!slug || seen.has(slug) || !isMeetingRepresentativeComposioTool(slug)) continue;
+    const description = String(tool?.function?.description ?? tool?.description ?? tool?.name ?? slug).trim().slice(0, 600);
+    const resolved = composioCapabilityToolkit(tool, slug, accounts);
+    seen.add(slug);
+    capabilities.push({ slug, description, ...resolved });
+  }
+  capabilities.sort((left, right) => Number(right.connected) - Number(left.connected) || left.slug.localeCompare(right.slug));
+  return capabilities.slice(0, Math.max(1, Math.min(500, options?.limit ?? 250)));
 }
 
 export async function listTriggers(userId: number): Promise<unknown[]> {
