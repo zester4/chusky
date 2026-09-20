@@ -10,6 +10,14 @@ export interface ToolCall {
   function: { name: string; arguments: string };
 }
 
+/** A durable task continuation requested by the agent while it is waiting on an external system. */
+export interface TaskWaitRequest {
+  runAt: number;
+  checkpoint: string;
+  nextAction: string;
+  reason?: string;
+}
+
 export interface ApiMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string | ContentPart[] | null;

@@ -8,6 +8,7 @@ export interface TaskRunResult {
   message: string;
   checkpoint?: string;
   nextAction?: string;
+  runAt?: number;
   result?: string;
 }
 

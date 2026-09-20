@@ -34,6 +34,8 @@ import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, re
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
 import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
+import type { TaskWaitRequest } from "./types.js";
+import { createTaskWaitRequest } from "./taskWait.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -58,6 +60,10 @@ export interface NativeToolRuntime {
   sharedConversation?: boolean;
   /** Current owner request, used for explicit-opt-in checks at native boundaries. */
   userRequest?: string;
+  /** The durable task currently executing; absent for interactive turns. */
+  taskId?: string;
+  /** Set by the internal task-wait tool; the workflow settles the run after the agent turn ends. */
+  requestTaskWait?: (request: TaskWaitRequest) => void;
 }
 
 function text(value: unknown): string {
@@ -742,6 +748,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       await scheduleTask(userId, id, runAt);
       await setTaskWorkflowRunId(userId, id, await enqueueTaskWorkflow(userId, id, runAt));
       return await getTask(userId, id);
+    }
+    case "CHUCK_TASK_WAIT": {
+      if (!runtime.taskId || !runtime.requestTaskWait) throw new Error("CHUCK_TASK_WAIT is only available inside an active durable task");
+      const request: TaskWaitRequest = createTaskWaitRequest(args);
+      runtime.requestTaskWait(request);
+      return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
     case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));

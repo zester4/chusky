@@ -4041,7 +4041,7 @@ export async function claimTask(userId: number, id: string, workerId: string, le
   return backend.claimTask(userId, id, workerId.slice(0, 120), Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; result?: string }): Promise<TaskRecord | undefined> {
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
   if (["cancel_requested", "cancelled"].includes(task.status)) {
@@ -4057,7 +4057,7 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     nextAction: outcome.nextAction,
     result: outcome.result,
     error: outcome.status === "failed" ? outcome.message : undefined,
-    runAt: retryable ? Date.now() + (delayMs ?? 0) : undefined,
+    runAt: retryable ? Date.now() + (delayMs ?? 0) : outcome.status === "queued" ? outcome.runAt : undefined,
   }, taskEvent(eventType, outcome.message, task.attempt));
 }
 

@@ -388,6 +388,15 @@ Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/r
 Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
 Chusky checks ownership and cancellation state before delivering a notification.
 
+For a durable task that is waiting on an external provider, Chusky can pause the
+same task without notifying the user or creating a recurring schedule. The agent
+uses `CHUCK_TASK_WAIT` with a verified `checkpoint`, an exact `nextAction`, and
+either `delaySeconds` or a future `runAt` timestamp. The delay is bounded to 60
+seconds through 7 days. QStash sleeps the existing task workflow, then resumes
+the same task and checkpoint; normal approvals, ownership checks, budgets, and
+cancellation behavior still apply. This is for internal polling of work already
+in progress, not for user reminders or periodic jobs.
+
 ### Proactive attention pulse
 
 The attention state is an owner-scoped substrate for open loops, attention candidates,

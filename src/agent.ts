@@ -35,7 +35,7 @@ import { nativeTool, type NativeToolRuntime } from "./nativeTools.js";
 import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
-import type { ApiMessage, ContentPart, ToolCall } from "./types.js";
+import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
@@ -657,6 +657,8 @@ export interface AgentResult {
   speech?: { data: Buffer; mediaType: string };
   /** Short-lived bearer links are delivered separately and excluded from history. */
   privateLinks?: { url: string; expiresAt?: number; label: string }[];
+  /** Internal durable continuation request; never delivered as a user reminder. */
+  taskWait?: TaskWaitRequest;
 }
 
 export interface AgentChannelContext {
@@ -692,6 +694,8 @@ export interface AgentRunOptions {
   /** Reuse a durable run when a queued workflow resumes. */
   runId?: string;
   parentRunId?: string;
+  /** Bind the internal task-wait tool to the task currently being executed. */
+  taskId?: string;
 }
 
 const VOICE_HISTORY_MAX_MESSAGES = 12;
@@ -981,6 +985,7 @@ export async function runAgent(
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
+  let taskWaitRequest: TaskWaitRequest | undefined;
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
   const addUpgradeNotice = async (text: string): Promise<string> => {
@@ -1285,7 +1290,7 @@ export async function runAgent(
           execResult = accounts.slice(0, limit).map(({ id, alias, toolkit: connectedToolkit, status, createdAt, updatedAt }) => ({ id, alias, toolkit: connectedToolkit, status, ...(createdAt ? { createdAt } : {}), ...(updatedAt ? { updatedAt } : {}) }));
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, requestTaskWait: (request) => { taskWaitRequest = request; } });
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
@@ -1362,6 +1367,7 @@ export async function runAgent(
         content: result,
       });
       await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed });
+      if (taskWaitRequest) break;
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
         const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
@@ -1376,6 +1382,11 @@ export async function runAgent(
           messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: `data:${mediaType};base64,${bytes.toString("base64")}` } }] });
         }
       }
+    }
+    if (taskWaitRequest) {
+      const message = "I’m waiting for the external task to finish, then I’ll check its status and continue.";
+      await persistRun("paused", "run.waiting_for_task", message, { runAt: taskWaitRequest.runAt, checkpoint: taskWaitRequest.checkpoint, nextAction: taskWaitRequest.nextAction });
+      return { text: message, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, taskWait: taskWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
     }
   }
 

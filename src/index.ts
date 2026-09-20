@@ -118,8 +118,9 @@ function boundedRecallChatReply(value: string, maxCharacters: number): string {
 }
 
 async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>): Promise<string | ContentPart[]> {
-  if (!task?.sdkAttachments?.length) return task?.sdkInput ?? task?.objective ?? "Continue the durable task.";
-  const parts: ContentPart[] = [{ type: "text", text: task.sdkInput || "Please analyze the attached file(s)." }];
+  const continuationGuidance = "\n\nDurable task control: if an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action. This pauses the same task without notifying the user and wakes it once; do not use a user reminder for internal polling. Do not perform risky external actions without the normal approval flow.";
+  if (!task?.sdkAttachments?.length) return `${task?.sdkInput ?? task?.objective ?? "Continue the durable task."}${continuationGuidance}`;
+  const parts: ContentPart[] = [{ type: "text", text: `${task.sdkInput || "Please analyze the attached file(s)."}${continuationGuidance}` }];
   const session = await getSession(task.userId);
   for (const reference of task.sdkAttachments) {
     const file = session.sdkFiles?.find((candidate) => candidate.id === reference.id && candidate.status === "available");
@@ -1840,7 +1841,7 @@ async function main(): Promise<void> {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
           execute: async (task) => {
             try {
-              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. Do not perform risky external actions without the normal approval flow.`;
+              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`;
               const session = await getSession(task.userId);
               const durationSeconds = task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
@@ -1863,7 +1864,7 @@ async function main(): Promise<void> {
                   if (!task.meetingFollowUp) {
                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
                     const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId });
+                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id });
                   }
 
                   const followUp = task.meetingFollowUp;
@@ -1911,6 +1912,13 @@ async function main(): Promise<void> {
                 throw error;
               }
               finally { if (budgetTimer) clearTimeout(budgetTimer); clearInterval(cancellationPoll); }
+              if (result.taskWait) {
+                if (task.sdkRunId && task.sdkThreadId) {
+                  const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
+                  if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+                }
+                return { status: "queued" as const, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
+              }
               if (task.sdkRunId && task.sdkThreadId) {
                 if (result.cost) await addUsage(task.userId, result.cost);
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
