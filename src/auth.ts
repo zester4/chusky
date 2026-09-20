@@ -90,6 +90,7 @@ function authConfig(database: AuthDatabase) {
       organization({
         ac: organizationAc,
         roles: { owner: organizationOwner, admin: organizationAdmin, member: organizationMember },
+        teams: { enabled: true },
         allowUserToCreateOrganization: true,
         organizationLimit: 10,
         membershipLimit: 100,

@@ -568,9 +568,26 @@ Apple inline voice notes arrive as Opus-in-CAF (`audio/x-caf`). Chusky accepts t
 
 #### Interactive meeting assistant (optional)
 
+For company meetings, use the Meetings page inside an authenticated Better Auth
+organization. Workspace administrators can create a meeting room for the whole
+organization or attach it to a Better Auth team such as Marketing, Finance,
+Sales, or Support. A room defines visibility, default interaction mode,
+transcript retention, screen-understanding policy, and exact connected-app or
+native action grants. Paste a supported meeting link and select the room before
+joining. Chusky stores the Recall bot and live transcript under the owner who
+started the join, while the workspace registry stores only a safe room pointer
+and exposes sanitized status, participants, history, and durable outcomes to
+authorized organization/team members. It never shares the owner's private
+memories, credentials, unrelated files, or private chat history. Better Auth
+membership is checked for room operations; project API keys can use
+organization-wide rooms but cannot impersonate a human team membership. Run
+`npm run auth:migrate` after enabling the Better Auth teams plugin so production
+has the required team tables.
+
 Chusky can join meeting links on Zoom, Google Meet, Microsoft Teams, and Webex.
-Ask Chusky to join and provide the meeting URL; there is no automatic calendar
-scan or auto-join in this release. A host may still need to admit the bot, and
+Ask Chusky to join and provide the meeting URL. An explicitly enabled meeting
+representative profile may also auto-join eligible Google Calendar events; a
+normal calendar trigger is never blanket join authorization. A host may still need to admit the bot, and
 platform-specific setup can apply. Chusky requests the name **Chusky Meeting
 Assistant**, but authenticated Google Meet bots display the connected Google
 account name and ignore Recall's `bot_name`; use an appropriately branded

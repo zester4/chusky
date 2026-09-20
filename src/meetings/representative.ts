@@ -189,17 +189,20 @@ export function applyMeetingComposioAccountAlias(
   return routed;
 }
 
-export function meetingRepresentativeToolAllowlist(profile: MeetingRepresentativeProfile | undefined, mission?: MeetingMission): string[] {
-  const native = profile?.enabled ? profile.allowedNativeTools : [];
+export function meetingRepresentativeToolAllowlist(profile: MeetingRepresentativeProfile | undefined, mission?: MeetingMission, roomPolicy?: { allowedComposioTools: string[]; allowedNativeTools: string[] }): string[] {
+  const native = profile?.enabled ? profile.allowedNativeTools.filter((tool) => !roomPolicy || roomPolicy.allowedNativeTools.includes(tool)) : [];
+  const composio = profile?.enabled ? profile.allowedComposioTools.filter((tool) => !roomPolicy || roomPolicy.allowedComposioTools.includes(tool)) : [];
+  const allowsNative = (tool: string) => !roomPolicy || roomPolicy.allowedNativeTools.includes(tool);
   // Leaving is always available as a first-class meeting control; the platform
   // also ends the bot automatically when the meeting itself ends.
   return [...new Set([
     "CHUCK_MEETING_LEAVE",
-    ...(profile?.enabled ? ["CHUCK_MEETING_JOIN"] : []),
-    ...(profile?.enabled ? ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE"] : []),
-    ...(profile?.enabled && profile.allowedComposioTools.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
+    ...(profile?.enabled && allowsNative("CHUCK_MEETING_JOIN") ? ["CHUCK_MEETING_JOIN"] : []),
+    ...(profile?.enabled && allowsNative("CHUCK_MEETING_CONTEXT_LOOKUP") ? ["CHUCK_MEETING_CONTEXT_LOOKUP"] : []),
+    ...(profile?.enabled && allowsNative("CHUCK_MEETING_CONTACT_CAPTURE") ? ["CHUCK_MEETING_CONTACT_CAPTURE"] : []),
+    ...(profile?.enabled && allowsNative("CHUCK_MEETING_FOLLOWUP_SCHEDULE") && composio.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
     ...native,
-    ...(profile?.enabled ? profile.allowedComposioTools : []),
+    ...composio,
   ])];
 }
 

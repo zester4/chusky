@@ -9,7 +9,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createTask, createWebTelegramLinkCode, deleteMeetingContact, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listRecallMeetings, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyBranding, type CompanyRunSummary, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -272,6 +272,41 @@ async function organizationAccessForRequest(c: any, organizationId: string): Pro
   catch { return undefined; }
 }
 
+/**
+ * Resolve the organization/team boundary for a workspace meeting request.
+ * Better Auth remains the source of truth for membership; the Chusky control
+ * session only stores the room policy and safe pointers to owner records.
+ */
+async function meetingWorkspaceAccessForRequest(c: any, organizationId: string, teamId?: string): Promise<OrganizationAccess> {
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(organizationId)) return undefined;
+  const principal = c.get("sdkPrincipal") as SdkPrincipal | undefined;
+  if (principal?.organizationId) {
+    // A project key identifies a workspace, but not a Better Auth team member.
+    // Do not let it impersonate a team-scoped human membership.
+    return principal.organizationId === organizationId && !teamId ? { id: organizationId, role: "api" } : undefined;
+  }
+  const access = await organizationAccessForRequest(c, organizationId);
+  if (!access) return undefined;
+  if (!teamId) return access;
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(teamId)) return undefined;
+  try {
+    const teams = await (getAuth().api as any).listUserTeams({ headers: c.req.raw.headers, query: { organizationId } });
+    return Array.isArray(teams) && teams.some((team) => team && team.id === teamId && team.organizationId === organizationId) ? access : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function meetingRoomAccessForRequest(c: any, room: MeetingRoomRecord, manage = false): Promise<OrganizationAccess> {
+  const access = await meetingWorkspaceAccessForRequest(c, room.organizationId, room.teamId);
+  if (!access) return undefined;
+  const webOwner = webProjectOwner(c);
+  if (room.policy.visibility === "private" && access.role !== "api" && room.createdByWebAuthUserId !== webOwner?.id) return undefined;
+  if (manage && access.role !== "owner" && access.role !== "admin" && access.role !== "api") return undefined;
+  if (manage && room.policy.visibility === "private" && room.createdByWebAuthUserId !== webOwner?.id && access.role !== "api") return undefined;
+  return access;
+}
+
 async function accountCanAccessProject(c: any, project: SdkProjectRecord, manage: boolean): Promise<boolean> {
   const owner = webProjectOwner(c);
   if (!owner?.verified) return false;
@@ -307,6 +342,88 @@ function callView(call: { id: string; provider?: string; direction?: string; pho
   const digits = call.phoneNumber.replace(/\D/g, "");
   const phoneNumber = digits.length > 4 ? `${call.phoneNumber.slice(0, Math.max(2, call.phoneNumber.length - 4)).replace(/\d/g, "•")}${digits.slice(-4)}` : "••••";
   return { id: call.id, provider: call.provider ?? "twilio", direction: call.direction ?? "outbound", phoneNumber, purpose: call.purpose, status: call.status, summary: call.summary, error: call.error ? "The call could not be completed. Check voice diagnostics and try again." : undefined, createdAt: new Date(call.createdAt).toISOString(), updatedAt: new Date(call.updatedAt).toISOString() };
+}
+
+function meetingRoomView(room: MeetingRoomRecord) {
+  return {
+    id: room.id,
+    organizationId: room.organizationId,
+    ...(room.teamId ? { teamId: room.teamId } : {}),
+    ...(room.projectId ? { projectId: room.projectId } : {}),
+    name: room.name,
+    description: room.description,
+    policy: {
+      defaultMode: room.policy.defaultMode,
+      visibility: room.policy.visibility,
+      transcriptRetentionDays: room.policy.transcriptRetentionDays,
+      allowScreenUnderstanding: room.policy.allowScreenUnderstanding,
+      requireApprovalForExternalActions: room.policy.requireApprovalForExternalActions,
+      allowedComposioTools: room.policy.allowedComposioTools,
+      allowedNativeTools: room.policy.allowedNativeTools,
+    },
+    meetingCount: room.meetingPointers?.length ?? 0,
+    createdAt: new Date(room.createdAt).toISOString(),
+    updatedAt: new Date(room.updatedAt).toISOString(),
+  };
+}
+
+function meetingView(meeting: any) {
+  return {
+    id: meeting.id,
+    ...(meeting.roomId ? { roomId: meeting.roomId } : {}),
+    ...(meeting.organizationId ? { organizationId: meeting.organizationId } : {}),
+    ...(meeting.teamId ? { teamId: meeting.teamId } : {}),
+    ...(meeting.projectId ? { projectId: meeting.projectId } : {}),
+    ...(meeting.visibility ? { visibility: meeting.visibility } : {}),
+    platform: meeting.platform,
+    interactionMode: meeting.interactionMode ?? "addressed",
+    status: meeting.status,
+    title: meeting.title,
+    joinAt: meeting.joinAt,
+    error: meeting.error ? "The meeting assistant could not complete this step. Check the meeting link and provider status." : undefined,
+    providerStatusAt: meeting.providerStatusAt ? new Date(meeting.providerStatusAt).toISOString() : undefined,
+    participantRoster: (meeting.participantRoster ?? []).map((person: any) => ({ ...person, updatedAt: new Date(person.updatedAt).toISOString() })),
+    speakerEvents: (meeting.speakerEvents ?? []).map((entry: any) => ({ ...entry, at: new Date(entry.at).toISOString() })),
+    history: (meeting.history ?? []).filter((message: any) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message: any) => ({ role: message.role, content: String(message.content).slice(0, 3_000), createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : undefined })),
+    outcome: meeting.outcome,
+    outcomeFollowThrough: meeting.outcomeFollowThrough,
+    outcomeStatus: meeting.outcomeStatus,
+    outcomeNotificationStatus: meeting.outcomeNotificationStatus,
+    createdAt: new Date(meeting.createdAt).toISOString(),
+    updatedAt: new Date(meeting.updatedAt).toISOString(),
+  };
+}
+
+function meetingRoomPolicyInput(value: unknown, fallback?: MeetingRoomPolicy): MeetingRoomPolicy | undefined {
+  if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) return undefined;
+  const body = (value ?? {}) as Record<string, unknown>;
+  const current = fallback ?? {
+    defaultMode: "addressed" as const,
+    visibility: "private" as const,
+    allowScreenUnderstanding: false,
+    requireApprovalForExternalActions: true,
+    allowedComposioTools: [],
+    allowedNativeTools: [],
+  };
+  const defaultMode = body.defaultMode === undefined ? current.defaultMode : body.defaultMode;
+  const visibility = body.visibility === undefined ? current.visibility : body.visibility;
+  const retention = body.transcriptRetentionDays === undefined ? current.transcriptRetentionDays : body.transcriptRetentionDays;
+  if (defaultMode !== "addressed" && defaultMode !== "copilot" && defaultMode !== "representative") return undefined;
+  if (visibility !== "private" && visibility !== "team" && visibility !== "organization") return undefined;
+  if (retention !== undefined && retention !== 1 && retention !== 7 && retention !== 30) return undefined;
+  const list = (input: unknown, previous: string[], max: number) => input === undefined ? previous : Array.isArray(input) && input.every((item) => typeof item === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,150}$/.test(item)) ? [...new Set(input)].slice(0, max) : undefined;
+  const allowedComposioTools = list(body.allowedComposioTools, current.allowedComposioTools, 100);
+  const allowedNativeTools = list(body.allowedNativeTools, current.allowedNativeTools, 50);
+  if (!allowedComposioTools || !allowedNativeTools) return undefined;
+  return {
+    defaultMode,
+    visibility,
+    ...(retention !== undefined ? { transcriptRetentionDays: retention } : {}),
+    allowScreenUnderstanding: body.allowScreenUnderstanding === undefined ? current.allowScreenUnderstanding : body.allowScreenUnderstanding === true,
+    requireApprovalForExternalActions: body.requireApprovalForExternalActions === undefined ? current.requireApprovalForExternalActions : body.requireApprovalForExternalActions !== false,
+    allowedComposioTools,
+    allowedNativeTools,
+  };
 }
 function memoryView(memory: {
   id: string; category: string; key: string; value: string; confidence: number; source?: string;
@@ -707,6 +824,69 @@ export function registerSdkApi(app: Hono): void {
     return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies), voicePreferences: session.voicePreferences ?? {} });
   });
 
+  app.get("/v1/meetings/rooms", async (c) => {
+    const organizationId = (c.req.query("organizationId") ?? "").trim();
+    if (!organizationId) return apiError(c, 400, "organization_required", "organizationId is required to list meeting rooms.");
+    if (!(await meetingWorkspaceAccessForRequest(c, organizationId))) return apiError(c, 404, "workspace_not_found", "Workspace not found or you are not a member.");
+    const rooms = await listMeetingRooms(organizationId, 100);
+    const visible = [] as MeetingRoomRecord[];
+    for (const room of rooms) if (await meetingRoomAccessForRequest(c, room)) visible.push(room);
+    return c.json({ data: visible.map(meetingRoomView) });
+  });
+
+  app.post("/v1/meetings/rooms", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const organizationId = typeof body.organizationId === "string" ? body.organizationId.trim() : "";
+    const teamId = typeof body.teamId === "string" ? body.teamId.trim() : undefined;
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!organizationId || !name) return apiError(c, 400, "invalid_meeting_room", "organizationId and name are required.");
+    const access = await meetingWorkspaceAccessForRequest(c, organizationId, teamId);
+    if (!access || (access.role !== "owner" && access.role !== "admin" && access.role !== "api")) return apiError(c, 403, "meeting_room_forbidden", "Only workspace administrators can create meeting rooms.");
+    const policy = meetingRoomPolicyInput(body.policy);
+    if (!policy) return apiError(c, 400, "invalid_meeting_room_policy", "Meeting room policy is invalid.");
+    if (policy.visibility === "team" && !teamId) return apiError(c, 400, "team_required", "A team-scoped room must be assigned to a Better Auth team.");
+    if (teamId && !/^[A-Za-z0-9_-]{1,128}$/.test(teamId)) return apiError(c, 400, "invalid_team", "teamId is invalid.");
+    try {
+      const room = await createMeetingRoom({ id: `room_${randomUUID()}`, organizationId, ...(teamId ? { teamId } : {}), ...(typeof body.projectId === "string" && body.projectId.trim() ? { projectId: body.projectId.trim() } : {}), name, ...(typeof body.description === "string" && body.description.trim() ? { description: body.description.trim() } : {}), createdByWebAuthUserId: webProjectOwner(c)?.id ?? `api:${owner.projectId}`, policy, createdAt: Date.now(), updatedAt: Date.now() });
+      return c.json(meetingRoomView(room), 201);
+    } catch (error) { return apiError(c, 400, "meeting_room_create_failed", error instanceof Error ? error.message : "Meeting room could not be created."); }
+  });
+
+  app.patch("/v1/meetings/rooms/:roomId", async (c) => {
+    if (!/^room_[A-Za-z0-9_-]{1,96}$/.test(c.req.param("roomId"))) return apiError(c, 400, "invalid_meeting_room", "Invalid meeting room ID.");
+    const room = await getMeetingRoom(c.req.param("roomId"));
+    if (!room || !(await meetingRoomAccessForRequest(c, room, true))) return apiError(c, 404, "meeting_room_not_found", "Meeting room not found or you do not have permission to manage it.");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const policy = body.policy === undefined ? undefined : meetingRoomPolicyInput(body.policy, room.policy);
+    if (body.policy !== undefined && !policy) return apiError(c, 400, "invalid_meeting_room_policy", "Meeting room policy is invalid.");
+    const teamId = body.teamId === null ? undefined : typeof body.teamId === "string" ? body.teamId.trim() : room.teamId;
+    if (teamId && !(await meetingWorkspaceAccessForRequest(c, room.organizationId, teamId))) return apiError(c, 403, "team_forbidden", "You are not a member of that workspace team.");
+    if (policy?.visibility === "team" && !teamId) return apiError(c, 400, "team_required", "A team-scoped room must be assigned to a Better Auth team.");
+    try {
+      const updated = await updateMeetingRoom(room.id, {
+        ...(typeof body.name === "string" ? { name: body.name.trim() } : {}),
+        ...(body.description === null ? { description: undefined } : typeof body.description === "string" ? { description: body.description.trim() } : {}),
+        ...(teamId ? { teamId } : { teamId: undefined }),
+        ...(typeof body.projectId === "string" ? { projectId: body.projectId.trim() || undefined } : {}),
+        ...(policy ? { policy } : {}),
+      });
+      return updated ? c.json(meetingRoomView(updated)) : apiError(c, 404, "meeting_room_not_found", "Meeting room not found.");
+    } catch (error) { return apiError(c, 400, "meeting_room_update_failed", error instanceof Error ? error.message : "Meeting room could not be updated."); }
+  });
+
+  app.delete("/v1/meetings/rooms/:roomId", async (c) => {
+    if (!/^room_[A-Za-z0-9_-]{1,96}$/.test(c.req.param("roomId"))) return apiError(c, 400, "invalid_meeting_room", "Invalid meeting room ID.");
+    const room = await getMeetingRoom(c.req.param("roomId"));
+    if (!room || !(await meetingRoomAccessForRequest(c, room, true))) return apiError(c, 404, "meeting_room_not_found", "Meeting room not found or you do not have permission to manage it.");
+    const activePointers = await Promise.all((room.meetingPointers ?? []).map(async (pointer) => {
+      const meeting = await getRecallMeeting(pointer.ownerUserId, pointer.meetingId);
+      return meeting && ["creating", "scheduled", "joining", "waiting_room", "in_call"].includes(meeting.status);
+    }));
+    if (activePointers.some(Boolean)) return apiError(c, 409, "meeting_room_active", "Leave active meetings before deleting this room.");
+    return (await deleteMeetingRoom(room.id)) ? c.body(null, 204) : apiError(c, 404, "meeting_room_not_found", "Meeting room not found.");
+  });
+
   app.get("/v1/meetings/profile", async (c) => c.json(await getMeetingRepresentativeProfile(sdkUser(c)!.userId)));
   app.patch("/v1/meetings/profile", async (c) => {
     const body = await c.req.json().catch(() => undefined);
@@ -742,6 +922,20 @@ export function registerSdkApi(app: Hono): void {
 
   app.get("/v1/meetings", async (c) => {
     const owner = sdkUser(c)!;
+    const organizationId = (c.req.query("organizationId") ?? "").trim();
+    if (organizationId) {
+      if (!(await meetingWorkspaceAccessForRequest(c, organizationId))) return apiError(c, 404, "workspace_not_found", "Workspace not found or you are not a member.");
+      const rooms = await listMeetingRooms(organizationId, 100);
+      const visibleRooms = [] as MeetingRoomRecord[];
+      for (const room of rooms) if (await meetingRoomAccessForRequest(c, room)) visibleRooms.push(room);
+      const visibleRoomIds = new Set(visibleRooms.map((room) => room.id));
+      const pointers = (await listWorkspaceMeetingPointers(organizationId, 100)).filter((pointer) => visibleRoomIds.has(pointer.roomId));
+      const meetings = (await Promise.all(pointers.map(async (pointer) => {
+        const meeting = await getRecallMeeting(pointer.ownerUserId, pointer.meetingId);
+        return meeting ? meetingView(meeting) : undefined;
+      }))).filter(Boolean);
+      return c.json({ rooms: visibleRooms.map(meetingRoomView), preparations: [], meetings, contacts: [] });
+    }
     const [preparations, records, contacts] = await Promise.all([
       listCalendarMeetingPreparations(owner.userId, 20), listRecallMeetings(owner.userId, 20), listMeetingContacts(owner.userId, 50),
     ]);
@@ -754,17 +948,7 @@ export function registerSdkApi(app: Hono): void {
         createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(),
       };
     }));
-    const meetings = records.map((meeting) => ({
-      id: meeting.id, platform: meeting.platform, interactionMode: meeting.interactionMode ?? "addressed", status: meeting.status,
-      title: meeting.title, joinAt: meeting.joinAt, error: meeting.error ? "The meeting assistant could not complete this step. Check the meeting link and provider status." : undefined,
-      providerStatusAt: meeting.providerStatusAt ? new Date(meeting.providerStatusAt).toISOString() : undefined,
-      participantRoster: (meeting.participantRoster ?? []).map((person) => ({ ...person, updatedAt: new Date(person.updatedAt).toISOString() })),
-      speakerEvents: (meeting.speakerEvents ?? []).map((entry) => ({ ...entry, at: new Date(entry.at).toISOString() })),
-      history: meeting.history.filter((message) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string").slice(-20).map((message) => ({ role: message.role, content: String(message.content).slice(0, 3_000), createdAt: message.createdAt ? new Date(message.createdAt).toISOString() : undefined })),
-      outcome: meeting.outcome, outcomeFollowThrough: meeting.outcomeFollowThrough, outcomeStatus: meeting.outcomeStatus,
-      outcomeNotificationStatus: meeting.outcomeNotificationStatus, createdAt: new Date(meeting.createdAt).toISOString(), updatedAt: new Date(meeting.updatedAt).toISOString(),
-    }));
-    return c.json({ preparations: prepared, meetings, contacts: contacts.map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() })) });
+    return c.json({ preparations: prepared, meetings: records.map(meetingView), contacts: contacts.map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() })) });
   });
 
   app.delete("/v1/meetings/contacts/:contactId", async (c) => {
@@ -968,13 +1152,22 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/meetings", async (c) => {
     const owner = sdkUser(c)!;
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const roomId = typeof body.roomId === "string" ? body.roomId.trim() : undefined;
+    let room: MeetingRoomRecord | undefined;
+    if (roomId) {
+      room = await getMeetingRoom(roomId);
+      if (!room || !(await meetingRoomAccessForRequest(c, room))) return apiError(c, 404, "meeting_room_not_found", "Meeting room not found or you are not a member of its team.");
+      if (body.organizationId !== undefined && body.organizationId !== room.organizationId) return apiError(c, 400, "meeting_room_scope_mismatch", "organizationId does not match the selected meeting room.");
+    } else if (body.organizationId !== undefined) {
+      return apiError(c, 400, "meeting_room_required", "Select a meeting room when starting an organization-scoped meeting.");
+    }
     const session = await getSession(owner.userId);
     const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
     const prior = idempotency(c, session, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     try {
-      const result = await joinRecallMeeting(owner.userId, body as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string });
+      const result = await joinRecallMeeting(owner.userId, { ...body, ...(room ? { meetingRoom: { roomId: room.id, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.policy.visibility, policy: room.policy } } : {}) } as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string; meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy } });
       if (prior.key) {
         session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
         await saveSession(owner.userId, session);

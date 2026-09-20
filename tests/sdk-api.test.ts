@@ -657,3 +657,21 @@ test("meeting capabilities expose safe exact actions with connected-account stat
   assert.equal(payload.composioTools.find((tool) => tool.slug === "GMAIL_SEND_EMAIL")?.connected, true);
   assert.equal(payload.composioTools.find((tool) => tool.slug === "GOOGLECALENDAR_FIND_EVENT")?.connected, false);
 });
+
+test("workspace meeting rooms are organization-scoped and do not expose private meeting state", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  setOrganizationAccessResolverForTests(async (_headers, organizationId, userId) => userId === "workspace-admin" ? { id: organizationId, role: "owner" } : undefined);
+  const api = app();
+  const headers = { "X-Test-Web-User": "workspace-admin", "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/meetings/rooms", { method: "POST", headers, body: JSON.stringify({ organizationId: "better-auth-org", name: "Marketing", policy: { defaultMode: "addressed", visibility: "organization", allowedComposioTools: [], allowedNativeTools: [], requireApprovalForExternalActions: true, allowScreenUnderstanding: false } }) }));
+  assert.equal(created.status, 201);
+  const room = await created.json() as { id: string; organizationId: string; policy: { visibility: string } };
+  assert.equal(room.organizationId, "better-auth-org");
+  assert.equal(room.policy.visibility, "organization");
+  const listed = await api.fetch(new Request("http://local/v1/meetings?organizationId=better-auth-org", { headers }));
+  assert.equal(listed.status, 200);
+  const body = await listed.json() as { rooms: Array<{ id: string }>; meetings: unknown[] };
+  assert.deepEqual(body.rooms.map((item) => item.id), [room.id]);
+  assert.deepEqual(body.meetings, []);
+});

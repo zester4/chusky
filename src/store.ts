@@ -72,6 +72,8 @@ export interface UserSession {
   browserAudit?: BrowserAuditRecord[];
   /** Durable owner-scoped CAPTCHA/2FA handoff state; never contains the handoff URL or challenge data. */
   browserHandoffs?: BrowserHandoffRecord[];
+  /** Organization-owned meeting rooms live in the control session (uid 0). */
+  meetingRooms?: MeetingRoomRecord[];
   handoffRecords?: HandoffRecord[];
   createdAt: number;
   updatedAt: number;
@@ -107,6 +109,34 @@ export interface MeetingContactRecord {
   nextStep?: string;
   followUpAt?: number;
   followUpTaskId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type MeetingRoomVisibility = "private" | "team" | "organization";
+export type MeetingRoomMode = "addressed" | "copilot" | "representative";
+
+export interface MeetingRoomPolicy {
+  defaultMode: MeetingRoomMode;
+  visibility: MeetingRoomVisibility;
+  transcriptRetentionDays?: 1 | 7 | 30;
+  allowScreenUnderstanding: boolean;
+  requireApprovalForExternalActions: boolean;
+  allowedComposioTools: string[];
+  allowedNativeTools: string[];
+}
+
+/** Organization-owned meeting policy. Live provider state remains in the owner session. */
+export interface MeetingRoomRecord {
+  id: string;
+  organizationId: string;
+  teamId?: string;
+  projectId?: string;
+  name: string;
+  description?: string;
+  createdByWebAuthUserId: string;
+  policy: MeetingRoomPolicy;
+  meetingPointers?: Array<{ meetingId: string; ownerUserId: number; createdAt: number }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -214,6 +244,14 @@ interface StoredRecallTranscriptSegment {
 export interface RecallMeetingRecord {
   id: string;
   userId: number;
+  /** Optional workspace scope; absent means a private owner meeting. */
+  roomId?: string;
+  organizationId?: string;
+  teamId?: string;
+  projectId?: string;
+  visibility?: MeetingRoomVisibility;
+  roomAllowedComposioTools?: string[];
+  roomAllowedNativeTools?: string[];
   platform: "zoom" | "google_meet" | "microsoft_teams" | "webex";
   /** addressed is conservative default; copilot is explicit per-meeting opt-in. */
   interactionMode?: "addressed" | "copilot" | "representative";
@@ -2780,7 +2818,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -2839,6 +2877,44 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
     expiresAt: typeof memory.expiresAt === "number" ? memory.expiresAt : undefined,
     createdAt: typeof memory.createdAt === "number" ? memory.createdAt : (typeof memory.updatedAt === "number" ? memory.updatedAt : now),
     updatedAt: typeof memory.updatedAt === "number" ? memory.updatedAt : now,
+  };
+}
+
+function normalizeMeetingRoom(value: unknown): MeetingRoomRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Record<string, unknown>;
+  const id = typeof item.id === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(item.id) ? item.id : "";
+  // Better Auth IDs are deployment-configurable and are not required to carry
+  // a Chusky-specific prefix. Keep the control-plane identifier bounded and
+  // opaque rather than rejecting valid organization/team IDs.
+  const organizationId = typeof item.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(item.organizationId) ? item.organizationId : "";
+  const createdByWebAuthUserId = typeof item.createdByWebAuthUserId === "string" && item.createdByWebAuthUserId.length <= 200 ? item.createdByWebAuthUserId : "";
+  const policy = item.policy && typeof item.policy === "object" && !Array.isArray(item.policy) ? item.policy as Record<string, unknown> : {};
+  const defaultMode = policy.defaultMode === "copilot" || policy.defaultMode === "representative" ? policy.defaultMode : "addressed";
+  const visibility = policy.visibility === "team" || policy.visibility === "organization" ? policy.visibility : "private";
+  const retention = [1, 7, 30].includes(Number(policy.transcriptRetentionDays)) ? Number(policy.transcriptRetentionDays) as 1 | 7 | 30 : undefined;
+  const safeSlugs = (input: unknown, max: number) => Array.isArray(input) ? [...new Set(input.filter((entry): entry is string => typeof entry === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,150}$/.test(entry)).slice(0, max))] : [];
+  if (!id || !organizationId || !createdByWebAuthUserId || typeof item.name !== "string" || !item.name.trim()) return undefined;
+  return {
+    id,
+    organizationId,
+    ...(typeof item.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(item.teamId) ? { teamId: item.teamId } : {}),
+    ...(typeof item.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(item.projectId) ? { projectId: item.projectId } : {}),
+    name: item.name.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 120),
+    ...(typeof item.description === "string" && item.description.trim() ? { description: item.description.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 1_000) } : {}),
+    createdByWebAuthUserId,
+    policy: {
+      defaultMode,
+      visibility,
+      ...(retention ? { transcriptRetentionDays: retention } : {}),
+      allowScreenUnderstanding: policy.allowScreenUnderstanding === true,
+      requireApprovalForExternalActions: policy.requireApprovalForExternalActions !== false,
+      allowedComposioTools: safeSlugs(policy.allowedComposioTools, 100),
+      allowedNativeTools: safeSlugs(policy.allowedNativeTools, 50),
+    },
+    meetingPointers: Array.isArray(item.meetingPointers) ? item.meetingPointers.filter((pointer): pointer is { meetingId: string; ownerUserId: number; createdAt: number } => Boolean(pointer) && typeof pointer === "object" && /^mtg_[A-Za-z0-9_-]{1,80}$/.test(String((pointer as Record<string, unknown>).meetingId ?? "")) && Number.isSafeInteger((pointer as Record<string, unknown>).ownerUserId) && Number((pointer as Record<string, unknown>).ownerUserId) > 0).slice(-100).map((pointer) => ({ meetingId: pointer.meetingId, ownerUserId: pointer.ownerUserId, createdAt: Number.isFinite(pointer.createdAt) ? pointer.createdAt : Date.now() })) : [],
+    createdAt: typeof item.createdAt === "number" && Number.isFinite(item.createdAt) ? item.createdAt : Date.now(),
+    updatedAt: typeof item.updatedAt === "number" && Number.isFinite(item.updatedAt) ? item.updatedAt : Date.now(),
   };
 }
 
@@ -2915,12 +2991,83 @@ export async function getSession(uid: number): Promise<UserSession> {
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
     return true;
   }).slice(-20) : [];
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 80) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+function assertMeetingRoomId(id: string): void {
+  if (!/^room_[A-Za-z0-9_-]{1,96}$/.test(id)) throw new Error("Meeting room ID is invalid");
+}
+
+export async function createMeetingRoom(record: MeetingRoomRecord): Promise<MeetingRoomRecord> {
+  const normalized = normalizeMeetingRoom(record);
+  if (!normalized) throw new Error("Meeting room is invalid");
+  const control = await getSession(0);
+  const rooms = control.meetingRooms ?? [];
+  if (rooms.some((room) => room.id === normalized.id)) throw new Error("Meeting room already exists");
+  if (rooms.filter((room) => room.organizationId === normalized.organizationId).length >= 100) throw new Error("This workspace has reached its meeting room limit");
+  control.meetingRooms = [normalized, ...rooms].slice(0, 200);
+  await saveSession(0, control);
+  return normalized;
+}
+
+export async function getMeetingRoom(id: string): Promise<MeetingRoomRecord | undefined> {
+  assertMeetingRoomId(id);
+  return (await getSession(0)).meetingRooms?.find((room) => room.id === id);
+}
+
+export async function listMeetingRooms(organizationId: string, limit = 50): Promise<MeetingRoomRecord[]> {
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(organizationId)) throw new Error("Organization ID is invalid");
+  return (await getSession(0)).meetingRooms?.filter((room) => room.organizationId === organizationId).slice(0, Math.max(1, Math.min(100, Math.floor(limit)))) ?? [];
+}
+
+export async function updateMeetingRoom(id: string, patch: Partial<Pick<MeetingRoomRecord, "name" | "description" | "teamId" | "projectId" | "policy">>): Promise<MeetingRoomRecord | undefined> {
+  assertMeetingRoomId(id);
+  const control = await getSession(0);
+  const room = control.meetingRooms?.find((candidate) => candidate.id === id);
+  if (!room) return undefined;
+  const next = normalizeMeetingRoom({ ...room, ...patch, id, updatedAt: Date.now(), policy: patch.policy ? { ...room.policy, ...patch.policy } : room.policy });
+  if (!next) throw new Error("Meeting room update is invalid");
+  Object.assign(room, next);
+  await saveSession(0, control);
+  return room;
+}
+
+export async function attachMeetingToRoom(roomId: string, meetingId: string, ownerUserId: number): Promise<MeetingRoomRecord | undefined> {
+  assertMeetingRoomId(roomId);
+  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(ownerUserId) || ownerUserId <= 0) throw new Error("Meeting room pointer is invalid");
+  const control = await getSession(0);
+  const room = control.meetingRooms?.find((candidate) => candidate.id === roomId);
+  if (!room) return undefined;
+  room.meetingPointers = [{ meetingId, ownerUserId, createdAt: Date.now() }, ...(room.meetingPointers ?? []).filter((pointer) => pointer.meetingId !== meetingId)].slice(0, 100);
+  room.updatedAt = Date.now();
+  await saveSession(0, control);
+  return room;
+}
+
+export async function deleteMeetingRoom(id: string): Promise<boolean> {
+  assertMeetingRoomId(id);
+  const control = await getSession(0);
+  const rooms = control.meetingRooms ?? [];
+  const next = rooms.filter((room) => room.id !== id);
+  if (next.length === rooms.length) return false;
+  control.meetingRooms = next;
+  await saveSession(0, control);
+  return true;
+}
+
+/** Find meetings registered to a workspace without exposing private provider state. */
+export async function listWorkspaceMeetingPointers(organizationId: string, limit = 50): Promise<Array<{ meetingId: string; ownerUserId: number; roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: MeetingRoomVisibility }>> {
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(organizationId)) throw new Error("Organization ID is invalid");
+  const control = await getSession(0);
+  const rooms = new Map((control.meetingRooms ?? []).filter((room) => room.organizationId === organizationId).map((room) => [room.id, room]));
+  const pointers: Array<{ meetingId: string; ownerUserId: number; roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: MeetingRoomVisibility }> = [];
+  for (const room of rooms.values()) for (const pointer of room.meetingPointers ?? []) pointers.push({ meetingId: pointer.meetingId, ownerUserId: pointer.ownerUserId, roomId: room.id, organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.policy.visibility });
+  return pointers.sort((a, b) => b.meetingId.localeCompare(a.meetingId)).slice(0, Math.max(1, Math.min(100, Math.floor(limit))));
 }
 
 /** Read one durable execution record without loading the owner's chat session. */

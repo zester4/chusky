@@ -81,6 +81,12 @@ function redactMeetingLinks(text: string): string {
   return text.replace(/https:\/\/[^\s<>()]+/gi, (url) => /(?:meet\.google\.com|\.zoom\.us|teams\.microsoft\.com|\.teams\.microsoft\.com|\.webex\.com)/i.test(url) ? "[private meeting link]" : url);
 }
 
+function meetingRoomToolPolicy(meeting: { roomAllowedComposioTools?: string[]; roomAllowedNativeTools?: string[] }) {
+  return meeting.roomAllowedComposioTools || meeting.roomAllowedNativeTools
+    ? { allowedComposioTools: meeting.roomAllowedComposioTools ?? [], allowedNativeTools: meeting.roomAllowedNativeTools ?? [] }
+    : undefined;
+}
+
 async function persistCalendarMeetingPreparation(userId: number, eventId: string, triggerSlug: string, payload: Record<string, unknown>) {
   const candidate = parseGoogleCalendarMeetingTrigger(triggerSlug, payload);
   if (!candidate) return undefined;
@@ -768,7 +774,7 @@ async function main(): Promise<void> {
                 instructions: representativeActive
                   ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
                   : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : meetingConversationToolAllowlist(),
+                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission, meetingRoomToolPolicy(meeting)) : meetingConversationToolAllowlist(),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
                   meetingId,
                 maxToolCalls: representativeActive ? 8 : 4,
@@ -2307,7 +2313,7 @@ async function main(): Promise<void> {
                       meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
                       "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
                     ].join("\n\n"),
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission) : ["CHUCK_MEETING_LEAVE"],
+                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission, meetingRoomToolPolicy(meeting)) : ["CHUCK_MEETING_LEAVE"],
                   meetingId: event.meetingId,
                   meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
                   maxToolCalls: representativeActive ? 8 : 1,
@@ -2466,13 +2472,17 @@ async function main(): Promise<void> {
           },
           followThrough: async ({ userId: ownerId, meeting, outcome, notionTool, allowedComposioTools, allowedNativeTools, contacts }) => {
             const profile = await getMeetingRepresentativeProfile(ownerId);
+            const roomPolicy = meetingRoomToolPolicy(meeting);
+            const effectiveComposioTools = roomPolicy ? allowedComposioTools.filter((tool) => roomPolicy.allowedComposioTools.includes(tool)) : allowedComposioTools;
+            const effectiveNativeTools = roomPolicy ? allowedNativeTools.filter((tool) => roomPolicy.allowedNativeTools.includes(tool)) : allowedNativeTools;
+            const effectiveNotionTool = notionTool && effectiveComposioTools.includes(notionTool) ? notionTool : undefined;
             const tools = [...new Set([
-              ...allowedComposioTools,
-              ...allowedNativeTools,
-              ...(profile.enabled && profile.allowedComposioTools.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
+              ...effectiveComposioTools,
+              ...effectiveNativeTools,
+              ...(profile.enabled && effectiveNativeTools.includes("CHUCK_MEETING_FOLLOWUP_SCHEDULE") && effectiveComposioTools.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
             ])];
             if (!tools.length) return {};
-            const followThroughPrompt = buildMeetingFollowThroughPrompt({ meeting, outcome, profile, notionTool, contacts });
+            const followThroughPrompt = buildMeetingFollowThroughPrompt({ meeting, outcome, profile, notionTool: effectiveNotionTool, contacts });
             const session = await getSession(ownerId);
             const result = await withCliLock(ownerId, undefined, () => runAgent(
               ownerId,
@@ -2497,7 +2507,7 @@ async function main(): Promise<void> {
             ));
             if (result.cost) await addUsage(ownerId, result.cost);
             return {
-              notionSaved: Boolean(notionTool && result.toolsSucceeded.includes(notionTool)),
+              notionSaved: Boolean(effectiveNotionTool && result.toolsSucceeded.includes(effectiveNotionTool)),
               notionUrl: extractMeetingNotionUrl(result.text),
               completedTools: result.toolsSucceeded.filter((tool) => tools.includes(tool)),
             };

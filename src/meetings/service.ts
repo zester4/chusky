@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import {
   addRecallMeeting,
+  attachMeetingToRoom,
   claimRecallMeetingCreation,
   getRecallMeeting,
   getSession,
@@ -20,6 +21,7 @@ import {
   type RecallMeetingRecord,
   type RecallMeetingSpeakerEvent,
   type RecallMeetingStatus,
+  type MeetingRoomPolicy,
 } from "../store.js";
 import {
   buildRecallCreateBotRequest,
@@ -323,6 +325,11 @@ function assertUserId(userId: number): void {
 function safeMeeting(record: RecallMeetingRecord) {
   return {
     id: record.id,
+    ...(record.roomId ? { roomId: record.roomId } : {}),
+    ...(record.organizationId ? { organizationId: record.organizationId } : {}),
+    ...(record.teamId ? { teamId: record.teamId } : {}),
+    ...(record.projectId ? { projectId: record.projectId } : {}),
+    ...(record.visibility ? { visibility: record.visibility } : {}),
     platform: record.platform,
     status: record.status,
     interactionMode: record.interactionMode === "copilot" || record.interactionMode === "representative" ? record.interactionMode : "addressed",
@@ -362,12 +369,15 @@ export async function joinRecallMeeting(userId: number, input: {
   inheritMeetingId?: string;
   /** Internal-only marker preventing an automatic calendar join from adopting a manual bot. */
   calendarPreparationId?: string;
+  /** Internal-only workspace policy resolved by the authenticated API boundary. */
+  meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy };
 }, signal?: AbortSignal) {
   requireRecall();
   assertUserId(userId);
   const meeting = validateMeetingUrl(input.meetingUrl);
   if (input.analyzeScreenShare !== undefined && typeof input.analyzeScreenShare !== "boolean") throw new Error("analyzeScreenShare must be true or false");
-  const transcriptRetentionDays = input.transcriptRetentionDays;
+  const room = input.meetingRoom;
+  const transcriptRetentionDays = input.transcriptRetentionDays ?? room?.policy.transcriptRetentionDays;
   if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) {
     throw new Error("Transcript retention must be explicitly set to 1, 7, or 30 days");
   }
@@ -377,7 +387,7 @@ export async function joinRecallMeeting(userId: number, input: {
   if (transcriptRetentionDays !== undefined && Buffer.byteLength(config.recallTranscriptEncryptionKey, "utf8") < 32) {
     throw new Error("Searchable transcript retention requires RECALL_TRANSCRIPT_ENCRYPTION_KEY with at least 32 bytes; keep it stable until retained transcripts expire");
   }
-  const analyzeScreenShare = input.analyzeScreenShare === true;
+  const analyzeScreenShare = input.analyzeScreenShare === true || (input.analyzeScreenShare === undefined && room?.policy.allowScreenUnderstanding === true);
   if (analyzeScreenShare) {
     if (meeting.platform === "webex") throw new Error("Shared-screen understanding is supported for Zoom, Google Meet, and Microsoft Teams; Recall does not provide it for Webex");
     await assertRecallVisualServiceReady();
@@ -390,7 +400,7 @@ export async function joinRecallMeeting(userId: number, input: {
   // contradictory tool call. The profile-enabled check below still prevents
   // this from granting representative access by itself.
   const interactionMode = hasMissionInput ? "representative" : input.interactionMode === undefined
-    ? representativeProfile.enabled ? "representative" : "copilot"
+    ? room?.policy.defaultMode ?? (representativeProfile.enabled ? "representative" : "copilot")
     : input.interactionMode;
   if (interactionMode !== "addressed" && interactionMode !== "copilot" && interactionMode !== "representative") throw new Error("interactionMode must be addressed, copilot, or representative");
   if (interactionMode === "representative" && !representativeProfile.enabled) {
@@ -433,6 +443,7 @@ export async function joinRecallMeeting(userId: number, input: {
   const record: RecallMeetingRecord = {
     id,
     userId,
+    ...(room ? { roomId: room.roomId, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.visibility, roomAllowedComposioTools: [...room.policy.allowedComposioTools], roomAllowedNativeTools: [...room.policy.allowedNativeTools] } : {}),
     platform: meeting.platform,
     interactionMode,
     visualContextEnabled: analyzeScreenShare,
@@ -455,6 +466,7 @@ export async function joinRecallMeeting(userId: number, input: {
       if (analyzeScreenShare && stored.visualContextEnabled !== true) throw new Error("A matching meeting is already active without shared-screen access. Ask Chusky to leave, then rejoin with screen understanding enabled.");
       return { ...safeMeeting(stored), alreadyActive: true };
     }
+    if (room) await attachMeetingToRoom(room.roomId, id, userId);
 
     const mediaBase = new URL(config.recallMediaPageUrl);
     if (mediaBase.protocol !== "https:" || mediaBase.username || mediaBase.password || mediaBase.searchParams.has("session") || mediaBase.hash) {
