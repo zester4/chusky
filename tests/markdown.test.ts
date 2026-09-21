@@ -53,9 +53,32 @@ test("keeps ordinary bullets intact when a valid table is separated from them", 
   const result = markdownToTelegramRichHtml(markdown);
   assert.equal(result.hasTable, true);
   assert.equal(result.safe, true);
-  assert.match(result.html, /• before/);
+  assert.match(result.html, /<ul><li>before<\/li><\/ul>/);
   assert.match(result.html, /<table bordered striped>/);
-  assert.match(result.html, /• after/);
+  assert.match(result.html, /<ul><li>after<\/li><\/ul>/);
+});
+
+test("renders surrounding bullets as real rich list blocks instead of collapsed text", () => {
+  const markdown = [
+    "- **Handle retries and replanning**",
+    "  Failed or changed steps can be retried while preserving completed work.",
+    "- **Track budgets and limits**",
+    "  Each mission has bounded duration, steps, tool calls, and cost.",
+    "",
+    "| Feature | Best for |",
+    "| --- | --- |",
+    "| Reminder | Check this in 5 minutes. |",
+    "",
+    "- **Keep approvals intact**",
+    "  High-impact actions remain gated.",
+  ].join("\n");
+  const result = markdownToTelegramRichHtml(markdown);
+  assert.equal(result.hasTable, true);
+  assert.equal(result.safe, true);
+  assert.match(result.html, /<ul><li><b>Handle retries and replanning<\/b><br>Failed or changed steps/);
+  assert.match(result.html, /<ul><li><b>Keep approvals intact<\/b><br>High-impact actions remain gated\.<\/li><\/ul>/);
+  assert.doesNotMatch(result.html, /• Track budgets/);
+  assert.match(result.html, /<table bordered striped>/);
 });
 
 test("voice text removes Markdown syntax before speech", () => {

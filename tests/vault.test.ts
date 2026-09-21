@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
 import { decryptCredential, encryptCredential } from "../src/vault/crypto.js";
@@ -60,9 +60,22 @@ test("vault identity selectors stay origin-aware", () => {
 
 test("vault setup form uses the polished light theme and protected password visibility control", () => {
   const worker = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "src", "index.ts"), "utf8");
-  assert.match(worker, /--amber:#c88719/);
-  assert.match(worker, /--ink:#171717/);
-  assert.match(worker, /font-family:Georgia/);
+  const config = readFileSync(join(process.cwd(), "cloudflare", "vault-worker", "wrangler.jsonc"), "utf8");
+  assert.match(worker, /--amber:#f6a400/);
+  assert.match(worker, /--background:oklch\(0\.985 0\.002 90\)/);
+  assert.match(worker, /--foreground:oklch\(0\.12 0\.01 60\)/);
+  assert.match(worker, /--card:#fff/);
+  assert.match(worker, /--font-display:"Instrument Serif",Georgia/);
+  assert.match(worker, /font-src 'self'/);
+  assert.match(worker, /instrument-sans-400\.woff2/);
+  assert.match(worker, /instrument-sans-600\.woff2/);
+  assert.match(worker, /instrument-sans-700\.woff2/);
+  assert.match(worker, /instrument-serif-400\.woff2/);
+  assert.match(worker, /jetbrains-mono-400\.woff2/);
+  assert.match(config, /"assets"\s*:\s*\{\s*"directory"\s*:\s*"\.\/public"\s*\}/);
+  for (const file of ["instrument-sans-400.woff2", "instrument-sans-600.woff2", "instrument-sans-700.woff2", "instrument-serif-400.woff2", "jetbrains-mono-400.woff2"]) {
+    assert.equal(existsSync(join(process.cwd(), "cloudflare", "vault-worker", "public", "fonts", file)), true, `${file} is bundled`);
+  }
   assert.match(worker, /data-password-toggle/);
   assert.match(worker, /type=\"password\"/);
   assert.match(worker, /script-src 'nonce-\$\{nonce\}'/);
