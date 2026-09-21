@@ -15,6 +15,9 @@ try {
     { signal: controller.signal },
   )) {
     switch (event.type) {
+      case "run.status":
+        console.error(`\n${event.text}`);
+        break;
       case "run.delta":
         process.stdout.write(event.text);
         break;

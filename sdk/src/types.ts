@@ -326,6 +326,8 @@ export interface Delivery { id: string; provider: string; status: string; kind: 
 export type RunStreamEvent =
   | { type: "run.queued"; run: Run }
   | { type: "run.started"; run: Run }
+  /** Policy-owned human progress text shared with Telegram and the dashboard. */
+  | { type: "run.status"; runId: string; text: string }
   | { type: "run.delta"; runId: string; text: string }
   | { type: "run.tool_started"; runId: string; toolSlug: string }
   | { type: "run.approval_required"; run: Run; approval: Approval }

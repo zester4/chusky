@@ -1681,7 +1681,12 @@ export function registerSdkApi(app: Hono): void {
       const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
-        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions));
+        const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, (text) => {
+          // Reuse the policy-owned status vocabulary that Telegram already
+          // presents. Web and SDK consumers should not have to infer meaning
+          // from internal CHUCK_/COMPOSIO_ tool slugs.
+          send({ type: "run.status", runId: run.id, text: text.slice(0, 4000) });
+        }, abort.signal, (text) => { run.events.push(event("run.delta", text)); send({ type: "run.delta", runId: run.id, text }); }, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions));
         run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }

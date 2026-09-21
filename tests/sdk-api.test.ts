@@ -63,6 +63,34 @@ test("SDK thread creation is authenticated, replay-safe, and rejects key/body mi
   assert.equal(forbidden.status, 401);
 });
 
+test("SDK run streams the same human-readable tool progress used by Telegram", async () => {
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "status-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    chatCalls += 1;
+    const chunks = chatCalls === 1
+      ? [{ choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_search_skills", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] } }] }]
+      : [{ choices: [{ delta: { role: "assistant", content: "Done." } }] }];
+    return new Response(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n`).join("")}data: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    const api = app();
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner", "Content-Type": "application/json", "Idempotency-Key": "status-thread" }, body: JSON.stringify({}) }));
+    const thread = await created.json() as { id: string };
+    const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner", "Content-Type": "application/json" }, body: JSON.stringify({ input: "Find the relevant sales guidance." }) }));
+    assert.equal(response.status, 200);
+    const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string; text?: string });
+    assert.equal(events.some((item) => item.type === "run.status" && item.text === "🧭 I’m bringing in the relevant guidance…"), true);
+    assert.equal(events.some((item) => item.type === "run.completed"), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("SDK autonomous missions are idempotent, owner-scoped, and controllable", async () => {
   setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-mission-test");
   const api = app();
