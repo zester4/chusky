@@ -44,6 +44,37 @@ const NON_HANDLING_PULSE_TOOLS = new Set([
   "COMPOSIO_SEARCH_TOOLS",
   "COMPOSIO_SEARCH_TOOL",
   "COMPOSIO_GET_TOOL_SCHEMAS",
+  "COMPOSIO_GET_CONNECTED_ACCOUNTS",
+  "COMPOSIO_MANAGE_CONNECTIONS",
+  "CHUCK_CONTEXT_SEARCH",
+  "CHUCK_SEARCH_MEMORY",
+  "CHUCK_LIST_TASKS",
+  "CHUCK_TASK_LIST",
+  "CHUCK_TASK_GET",
+  "CHUCK_LIST_REMINDERS",
+  "CHUCK_LIST_JOBS",
+]);
+
+const HANDLING_PULSE_TOOLS = new Set([
+  "CHUCK_DELEGATE_SUBAGENT",
+  "CHUCK_HANDOFF_SUBAGENT",
+  "CHUCK_DEPARTMENT_HANDOFF",
+  "CHUCK_TASK_CHECKPOINT",
+  "CHUCK_TASK_BLOCK",
+  "CHUCK_TASK_COMPLETE",
+  "CHUCK_TASK_WAIT",
+  "CHUCK_MISSION_CHECKPOINT",
+  "CHUCK_MISSION_STEP_COMPLETE",
+  "CHUCK_MISSION_WAIT_EVENT",
+  "CHUCK_MISSION_BLOCK",
+  "CHUCK_MISSION_REPAIR",
+  "CHUCK_MISSION_REPLAN",
+  "CHUCK_MISSION_COMPLETE",
+  "CHUCK_SET_REMINDER",
+  "CHUCK_SCHEDULE_JOB",
+  "CHUCK_START_PHONE_CALL",
+  "CHUCK_DAYTONA_BROWSER_HANDOFF",
+  "CHUCK_BROWSER_HANDOFF_COMPLETE",
 ]);
 
 /**
@@ -52,7 +83,14 @@ const NON_HANDLING_PULSE_TOOLS = new Set([
  * preparation, not completion evidence.
  */
 export function attentionPulseHasHandlingEvidence(tools: readonly AttentionPulseToolEvidence[]): boolean {
-  return tools.some((entry) => entry.status !== "failed" && entry.status !== "cancelled" && !NON_HANDLING_PULSE_TOOLS.has(entry.tool));
+  return tools.some((entry) => {
+    if (entry.status === "failed" || entry.status === "cancelled" || NON_HANDLING_PULSE_TOOLS.has(entry.tool)) return false;
+    if (HANDLING_PULSE_TOOLS.has(entry.tool)) return true;
+    // A direct, approved Composio action is concrete external work. Search,
+    // schema, connection, and account-management meta-tools are explicitly
+    // excluded above so discovery cannot masquerade as handling.
+    return entry.tool.startsWith("COMPOSIO_") && !/(SEARCH|SCHEMA|CONNECTED_ACCOUNTS|MANAGE_CONNECTIONS|LIST_|GET_|FIND_|FETCH_|READ_|LOOKUP_|DESCRIBE_|RETRIEVE_)/.test(entry.tool);
+  });
 }
 
 function utcDay(now: number): string {

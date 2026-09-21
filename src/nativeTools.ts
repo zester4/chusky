@@ -1,6 +1,7 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
@@ -10,7 +11,7 @@ import {
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
-  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
@@ -811,7 +812,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (task.status === "completed" || task.status === "cancelled") throw new Error("This delayed follow-up task is already closed");
       if (!task.workflowRunId) {
         await scheduleTask(userId, task.id, runAt);
-        await setTaskWorkflowRunId(userId, task.id, await enqueueTaskWorkflow(userId, task.id, runAt));
+        const workflowRunId = await enqueueTaskWithClaim(userId, task.id, runAt);
+        if (!workflowRunId) throw new Error("This follow-up task is already being queued");
       }
       await updateMeetingContact(userId, contact.id, { followUpTaskId: task.id, followUpAt: runAt });
       return { scheduled: true, taskId: task.id, participantName: contact.participantName, runAt: new Date(runAt).toISOString(), emailTool };
@@ -916,7 +918,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!task) throw new Error("Task not found or not owned by you");
       const runAt = futureTimestamp(args);
       await scheduleTask(userId, id, runAt);
-      await setTaskWorkflowRunId(userId, id, await enqueueTaskWorkflow(userId, id, runAt));
+      const workflowRunId = await enqueueTaskWithClaim(userId, id, runAt);
+      if (!workflowRunId) throw new Error("This task is already being queued");
       return await getTask(userId, id);
     }
     case "CHUCK_TASK_WAIT": {
@@ -1009,7 +1012,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_VERIFY": {
-      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: args.verifiedBy === "human" || args.verifiedBy === "agent" ? args.verifiedBy : "system" });
+      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: args.verifiedBy === "human" || args.verifiedBy === "agent" ? args.verifiedBy : "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");
       return mission;
     }

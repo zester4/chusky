@@ -702,6 +702,8 @@ export interface AgentRunOptions {
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
   missionId?: string;
+  /** Bind trusted external-action receipts to the exact mission step. */
+  missionStepId?: string;
   /** Link approval recovery to the exact autonomous reminder/job occurrence. */
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
@@ -1217,8 +1219,8 @@ export async function runAgent(
         if (slug.startsWith("CHUCK_") && executionArgs !== args) validateNativeToolArguments(slug, executionArgs);
         const autonomySource = options?.autonomyResume
           ? { kind: options.autonomyResume.kind, id: options.autonomyResume.sourceId, occurrenceId: options.autonomyResume.occurrenceId }
-          : options?.missionId
-            ? { kind: "mission", id: options.missionId }
+            : options?.missionId
+            ? { kind: "mission", id: options.missionId, missionStepId: options.missionStepId }
             : options?.taskId
               ? { kind: "task", id: options.taskId }
               : undefined;

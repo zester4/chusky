@@ -1,5 +1,6 @@
 import {
   getMission,
+  getChannelConversation,
   getSession,
   getTask,
   listAttentionRecords,
@@ -56,18 +57,30 @@ export async function buildAutonomyContextBundle(userId: number, input: {
   };
 
   const session = await getSession(userId);
-  const [task, mission, memories, openLoops] = await Promise.all([
+  const [task, mission, memories, openLoops, channelConversation] = await Promise.all([
     links.taskId ? getTask(userId, links.taskId) : Promise.resolve(undefined),
     links.missionId ? getMission(userId, links.missionId) : Promise.resolve(undefined),
-    objective ? searchMemories(userId, objective, { projectId: links.projectId, limit: 6 }) : Promise.resolve([]),
-    listAttentionRecords(userId, "open_loop", { limit: 8 }),
+    objective ? searchMemories(userId, objective, { projectId: links.projectId, sensitivity: "normal", limit: 6 }) : Promise.resolve([]),
+    listAttentionRecords(userId, "open_loop", { limit: 200 }),
+    links.conversationId ? getChannelConversation(links.conversationId) : Promise.resolve(undefined),
   ]);
 
-  const conversation = input.includeHistory === false
-    ? []
-    : session.history.slice(-8).map((message) => ({ role: message.role, content: safeText(message.content, 2_000), ...(message.createdAt ? { createdAt: message.createdAt } : {}) }));
+  // A conversation id is an untrusted link supplied by a caller. Never let a
+  // valid id expose another owner's history; an invalid/mismatched link must
+  // produce an empty context rather than falling back to the caller's chat.
+  const conversationSource = links.conversationId
+    ? channelConversation?.userId === userId ? channelConversation.history : []
+    : (input.includeHistory === true ? session.history : []);
+  const conversation = input.includeHistory === false ? [] : conversationSource.slice(-8).map((message) => ({ role: message.role, content: safeText(message.content, 2_000), ...(message.createdAt ? { createdAt: message.createdAt } : {}) }));
   const safeMemories = memories.map((memory) => ({ key: memory.key, value: safeText(memory.value, 1_000), category: memory.category, confidence: memory.confidence, sensitivity: memory.sensitivity, ...(memory.projectId ? { projectId: memory.projectId } : {}) }));
-  const relevantLoops = (openLoops as OpenLoopRecord[]).filter((loop) => !links.openLoopId || loop.id === links.openLoopId);
+  const linkIds = Object.values(links).filter(Boolean) as string[];
+  const objectiveTerms = new Set(objective.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length >= 4));
+  const relevantLoops = (openLoops as OpenLoopRecord[]).filter((loop) => {
+    if (links.openLoopId) return loop.id === links.openLoopId;
+    if (loop.relatedEntityIds?.some((id) => linkIds.includes(id))) return true;
+    const loopTerms = `${loop.title} ${loop.objective ?? ""} ${loop.nextAction ?? ""}`.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length >= 4);
+    return [...new Set(loopTerms)].filter((term) => objectiveTerms.has(term)).length >= 2;
+  });
   const summary = [
     input.snapshot?.summary,
     task ? `Task ${task.title}: ${task.status}${task.nextAction ? `; next: ${task.nextAction}` : ""}` : undefined,

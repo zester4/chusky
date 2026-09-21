@@ -21,6 +21,7 @@ export interface WorkflowDependencies {
   getJobOccurrence?(userId: number, jobId: string, occurrenceId: string): Promise<JobOccurrenceRecord | undefined>;
   createJobOccurrence?(record: JobOccurrenceRecord): Promise<JobOccurrenceRecord>;
   updateJobOccurrence?(userId: number, id: string, patch: Partial<JobOccurrenceRecord>, expectedVersion?: number): Promise<JobOccurrenceRecord | undefined>;
+  confirmDelivery?(userId: number, job: JobRecord, confirmation: { kind: "attention_pulse"; candidateIds: string[]; dedupeKey: string }): Promise<void>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery?(key: string, ttlSeconds: number): Promise<void>;
 }
@@ -34,6 +35,7 @@ export interface WorkflowExecutionResult {
   nextAction?: string;
   waitReason?: string;
   retryAt?: number;
+  deliveryConfirmation?: { kind: "attention_pulse"; candidateIds: string[]; dedupeKey: string };
 }
 
 export function parseReminderWorkflowPayload(value: unknown): ReminderWorkflowPayload {
@@ -92,9 +94,12 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
       if (!chatId) throw new Error("No Telegram mapping");
       await deps.sendMessage(chatId, `⏰ <b>Chusky reminder</b>\n\n${mdToTelegramHtml(response)}`, { parse_mode: "HTML" });
     }
+    // Commit the delivery dedupe marker immediately after the provider send.
+    // Confirmation/status bookkeeping below may fail; retries must not send
+    // the same reminder again after the provider already accepted it.
+    if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "sent" });
     posthog?.capture({ distinctId: String(payload.userId), event: "reminder_delivered", properties: { reminder_id: payload.reminderId } });
-    if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
   } catch (error) {
     await deps.updateReminder(payload.userId, payload.reminderId, { status: "failed", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
     throw error;
@@ -164,8 +169,12 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
         await deps.sendMessage(chatId!, `${header}${chunk}`, { parse_mode: "HTML" });
       }
     }
-    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "completed", completedAt: Date.now() }, occurrence.version);
+    // Mark the provider send complete before confirmation and occurrence
+    // persistence. Those operations are retried independently and must not
+    // cause a second external delivery.
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
+    if (result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, job, result.deliveryConfirmation);
+    if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "completed", completedAt: Date.now() }, occurrence.version);
   } catch (error) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500), completedAt: Date.now() }, occurrence.version);
     await deps.updateJob(payload.userId, payload.jobId, { deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });

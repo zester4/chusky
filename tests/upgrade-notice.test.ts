@@ -21,6 +21,15 @@ test("meeting upgrade preset contains bounded, accurate release highlights", () 
   assert.throws(() => getAgentUpgradePreset("unknown"), /Unknown upgrade preset/);
 });
 
+test("mission upgrade preset contains bounded, accurate release highlights", () => {
+  const bullets = getAgentUpgradePreset("missions");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.missions]);
+  assert.match(bullets[0], /dependency-aware steps/);
+  assert.match(bullets[1], /provider events/);
+  assert.match(bullets[2], /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -34,12 +43,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the meeting release", async () => {
+test("current upgrade manifest announces the mission release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.2.0");
-  assert.equal(notice?.version, "3.2.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Chusky meetings are now live/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Google Meet/);
-  assert.match(formatAgentUpgradeNotice(notice!), /sales and onboarding/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Nova-3/);
+  assert.equal(notice?.id, "release-3.3.0");
+  assert.equal(notice?.version, "3.3.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Chusky autonomous missions are now live/);
+  assert.match(formatAgentUpgradeNotice(notice!), /dependency-aware steps/);
+  assert.match(formatAgentUpgradeNotice(notice!), /provider events/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
 });

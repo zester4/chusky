@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, setTaskWorkflowRunId, listApprovals, listJobs, listReminders, listTasks, listMissions, pauseMission, resumeMission, cancelMission,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, pauseMission, resumeMission, cancelMission,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
   searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
@@ -27,7 +27,7 @@ import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval, enqueueAutonomyApprovalResume } from "./triggerWorkflow.js";
-import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
+import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
@@ -2381,7 +2381,7 @@ export function registerHandlers(bot: Bot): void {
             if (action === "pause" || action === "cancel") { if (updated.rootTaskId) await cancelTask(uid, updated.rootTaskId); }
             if (action === "resume" && updated.rootTaskId) {
               const task = await retryTask(uid, updated.rootTaskId);
-              if (task) await setTaskWorkflowRunId(uid, task.id, await enqueueTaskWorkflow(uid, task.id, task.runAt ?? Date.now()));
+              if (task) await enqueueTaskWithClaim(uid, task.id, task.runAt ?? Date.now());
             }
             await replyHtml(ctx, `<b>Mission ${escapeTelegramHtml(action)}d</b>\n\n<code>${escapeTelegramHtml(updated.id)}</code> · ${escapeTelegramHtml(updated.status)}\n${escapeTelegramHtml(updated.nextAction ?? updated.error ?? "State updated.")}`);
             return;

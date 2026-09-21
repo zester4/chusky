@@ -10,7 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, acquireMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -32,6 +32,7 @@ import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./chann
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
@@ -133,8 +134,7 @@ async function resumeMissionsFromComposioEvent(userId: number, providerEventId: 
       ? await updateTask(userId, existingTask.id, { runAt: Date.now(), error: undefined })
       : await retryTask(userId, resumed.rootTaskId);
     if (!task) continue;
-    const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
-    await setTaskWorkflowRunId(userId, task.id, workflowRunId);
+    await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now());
     resumedCount += 1;
   }
   return resumedCount;
@@ -1182,7 +1182,7 @@ async function main(): Promise<void> {
     app.post("/cli/missions/:id/verify", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: body.verifiedBy === "human" || body.verifiedBy === "agent" ? body.verifiedBy : "system" });
+      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: body.verifiedBy === "human" || body.verifiedBy === "agent" ? body.verifiedBy : "agent" });
       return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
     });
     app.post("/cli/missions/:id/steps/:stepId/complete", async (c) => {
@@ -1337,7 +1337,7 @@ async function main(): Promise<void> {
       try {
         const task = await createTask(device.userId, { title: input.slice(0, 120), objective: input, runAt: now, maxAttempts: 10, sdkRunId: runId, sdkThreadId: threadId, sdkInput: input, sdkModel: run.model, sdkBudget: run.budget, sdkStartedAt: now });
         run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
-        const workflowRunId = await enqueueTaskWorkflow(device.userId, task.id, now); await updateTask(device.userId, task.id, { workflowRunId });
+        const workflowRunId = await enqueueTaskWithClaim(device.userId, task.id, now); if (!workflowRunId) throw new Error("This run is already being queued");
         run.events.push({ id: `evt_${randomUUID()}`, type: "run.scheduled", at: Date.now(), text: workflowRunId }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session);
         return c.json({ ok: true, run: cliRunView(run, threadId, task.id) }, 202);
       } catch (error) {
@@ -1362,7 +1362,7 @@ async function main(): Promise<void> {
     });
     app.post("/cli/runs/:id/resume", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const session = await getSession(device.userId);
-      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (!["failed", "cancelled", "requires_approval"].includes(run.status)) return c.json({ ok: false, error: "only failed, cancelled, or approval-paused runs can be resumed" }, 409); if (!run.taskId) return c.json({ ok: false, error: "run has no durable task" }, 409); const task = await retryTask(device.userId, run.taskId); if (!task) return c.json({ ok: false, error: "run task is not retryable" }, 409); run.status = "queued"; run.error = undefined; run.events.push({ id: `evt_${randomUUID()}`, type: "run.resumed", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); try { const workflowRunId = await enqueueTaskWorkflow(device.userId, task.id, Date.now()); await updateTask(device.userId, task.id, { workflowRunId }); return c.json({ ok: true, run: cliRunView(run, thread.id, task.id) }, 202); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "run could not be resumed" }, 503); } }
+      for (const thread of session.sdkThreads ?? []) { const run = thread.runs.find((item) => item.id === c.req.param("id")); if (!run) continue; if (!["failed", "cancelled", "requires_approval"].includes(run.status)) return c.json({ ok: false, error: "only failed, cancelled, or approval-paused runs can be resumed" }, 409); if (!run.taskId) return c.json({ ok: false, error: "run has no durable task" }, 409); const task = await retryTask(device.userId, run.taskId); if (!task) return c.json({ ok: false, error: "run task is not retryable" }, 409); run.status = "queued"; run.error = undefined; run.events.push({ id: `evt_${randomUUID()}`, type: "run.resumed", at: Date.now() }); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(device.userId, session); try { const workflowRunId = await enqueueTaskWithClaim(device.userId, task.id, task.runAt ?? Date.now()); if (!workflowRunId) return c.json({ ok: false, error: "run is already being queued" }, 409); return c.json({ ok: true, run: cliRunView(run, thread.id, task.id) }, 202); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "run could not be resumed" }, 503); } }
       return c.json({ ok: false, error: "run not found" }, 404);
     });
 
@@ -1951,6 +1951,11 @@ async function main(): Promise<void> {
       await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, {
         getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
         getJobOccurrence, createJobOccurrence, updateJobOccurrence,
+        confirmDelivery: async (userId, job, confirmation) => {
+          if (confirmation.kind !== "attention_pulse") return;
+          await markAttentionPulseDelivered(userId, confirmation.candidateIds, Date.now());
+          await updateJob(userId, job.id, { attentionPulse: { ...recordAttentionPulseDelivery(job.attentionPulse, Date.now()), lastDigestKey: confirmation.dedupeKey } });
+        },
         runAgent: async (job) => withCliLock(payload.userId, undefined, async () => {
           const session = await getSession(payload.userId);
           const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });
@@ -2006,19 +2011,13 @@ async function main(): Promise<void> {
             }
             const noAction = isNoActionPulseOutput(result.output);
             const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
-            if (!noAction && handled) {
-              await markAttentionPulseDelivered(payload.userId, plan.candidateIds);
-              await updateJob(payload.userId, job.id, {
-                attentionPulse: {
-                  ...recordAttentionPulseDelivery(job.attentionPulse, Date.now()),
-                  lastDigestKey: plan.dedupeKey,
-                },
-              });
-            }
+            const deliveryConfirmation = !noAction && handled
+              ? { kind: "attention_pulse" as const, candidateIds: plan.candidateIds, dedupeKey: plan.dedupeKey }
+              : undefined;
             const text = !noAction && !handled
               ? `The attention pulse did not complete or delegate an actionable step, so the loop remains open for the next run.\n\n${result.output}`
               : result.output;
-            return { text, suppressDelivery: noAction };
+            return { text, suppressDelivery: noAction, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
           }
           const session = await getSession(payload.userId);
           const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });
@@ -2069,7 +2068,7 @@ async function main(): Promise<void> {
       const execute = async (attempt: number) => workflow.run(`execute-task-${attempt}`, async () => {
         const run = await executeDurableTask(payload, {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
-          execute: async (task) => {
+          execute: async (task, leaseSignal) => {
             let mission: Awaited<ReturnType<typeof getMission>>;
             try {
               mission = task.missionId ? await getMission(task.userId, task.missionId) : undefined;
@@ -2112,13 +2111,37 @@ async function main(): Promise<void> {
                 mission = leased;
                 missionLeaseToken = leased.lease.token;
               }
+              const missionLeaseLost = mission ? new AbortController() : undefined;
+              let missionLeaseRenewalFailures = 0;
+              const missionLeaseRenewal = mission?.id && missionLeaseToken
+                ? setInterval(() => {
+                  void renewMissionLease(task.userId, mission!.id, missionLeaseToken!, 60_000).then((renewed) => {
+                    if (renewed) {
+                      missionLeaseRenewalFailures = 0;
+                      return;
+                    }
+                    missionLeaseRenewalFailures += 1;
+                    if (missionLeaseRenewalFailures >= 2) missionLeaseLost?.abort(new Error("Mission lease was lost while the worker was executing."));
+                  }).catch((error) => {
+                    missionLeaseRenewalFailures += 1;
+                    logger.warn({ err: error, missionId: mission!.id, consecutiveFailures: missionLeaseRenewalFailures }, "Mission lease renewal failed");
+                    if (missionLeaseRenewalFailures >= 2) missionLeaseLost?.abort(new Error("Mission lease renewal failed repeatedly; stopping before another worker can continue."));
+                  });
+                }, 20_000)
+                : undefined;
+              if (missionLeaseRenewal && typeof missionLeaseRenewal === "object" && "unref" in missionLeaseRenewal) missionLeaseRenewal.unref();
               const durationSeconds = mission ? Math.max(1, Math.floor((mission.budget.maxDurationSeconds * 1000 - (Date.now() - (mission.startedAt ?? Date.now()))) / 1000)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
                 if (sdkRun && sdkRun.status === "queued") { sdkRun.status = "running"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.started", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
               }
-              const budgetAbort = new AbortController(); const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
+              const budgetAbort = new AbortController();
+              const onLeaseLost = () => budgetAbort.abort(new Error("Durable task lease lost; stopping before another worker can continue."));
+              const onMissionLeaseLost = () => budgetAbort.abort(new Error("Mission lease lost; stopping before another worker can continue."));
+              leaseSignal?.addEventListener("abort", onLeaseLost, { once: true });
+              missionLeaseLost?.signal.addEventListener("abort", onMissionLeaseLost, { once: true });
+              const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
               const cancellationPoll = setInterval(() => {
                 void getTask(task.userId, task.id).then((latest) => {
                   if (latest?.status === "cancel_requested" || latest?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));
@@ -2133,7 +2156,7 @@ async function main(): Promise<void> {
                   if (!task.meetingFollowUp) {
                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
                     const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId });
+                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId });
                   }
 
                   const followUp = task.meetingFollowUp;
@@ -2182,7 +2205,10 @@ async function main(): Promise<void> {
               }
               finally {
                 if (budgetTimer) clearTimeout(budgetTimer);
+                leaseSignal?.removeEventListener("abort", onLeaseLost);
+                missionLeaseLost?.signal.removeEventListener("abort", onMissionLeaseLost);
                 clearInterval(cancellationPoll);
+                if (missionLeaseRenewal) clearInterval(missionLeaseRenewal);
                 if (mission?.id && missionLeaseToken) await releaseMissionLease(task.userId, mission.id, missionLeaseToken);
               }
               if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
@@ -2257,8 +2283,7 @@ async function main(): Promise<void> {
         const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string; missionId?: string };
         if (run.taskId) await onComposerTaskSettled(payload.userId, run.taskId).catch((error) => logger.warn({ err: error, taskId: run.taskId }, "Composer stage reconciliation failed"));
         if (run.missionId && run.status === "queued" && run.runAt) {
-          const workflowRunId = await enqueueTaskWorkflow(payload.userId, run.taskId!, run.runAt);
-          await setTaskWorkflowRunId(payload.userId, run.taskId!, workflowRunId);
+          await enqueueTaskWithClaim(payload.userId, run.taskId!, run.runAt);
           break;
         }
         if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;

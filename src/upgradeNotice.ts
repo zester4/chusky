@@ -8,9 +8,15 @@ const MAX_BULLET_LENGTH = 240;
 /**
  * Curated release highlights for capabilities that span several transports.
  * Keep these claims aligned with the runtime and use them from the release
- * writer so a major surface such as meetings is not accidentally omitted.
+ * writer so a major surface such as missions or meetings is not accidentally
+ * omitted.
  */
 export const AGENT_UPGRADE_PRESETS = {
+  missions: [
+    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, and restart-safe execution.",
+    "Missions can fan out independent work, wait for timers or exact provider events, pause, resume, repair, replan, and attach evidence before verification and completion.",
+    "Mission status, proof, controls, and owner isolation are available across Telegram, the CLI, SDK/API, dashboard, and MCP through the same persisted runtime.",
+  ],
   meetings: [
     "Added Recall-powered meeting participation for Zoom, Google Meet, Microsoft Teams, and Webex, with natural copilot and owner-scoped representative modes.",
     "Meeting representatives can support sales and onboarding with approved connected-app tools, participant chat, contact capture, calendar availability, reminders, tasks, and follow-through.",

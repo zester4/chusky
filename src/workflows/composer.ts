@@ -8,14 +8,14 @@ import {
   getTask,
   saveSession,
   setApprovalStatus,
-  setTaskWorkflowRunId,
   type ComposerStage,
   type TaskRecord,
   type WorkflowComposerRecord,
 } from "../store.js";
+import { enqueueTaskWithClaim } from "../taskEnqueue.js";
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-type TaskEnqueuer = (userId: number, taskId: string, runAt?: number) => Promise<string>;
+type TaskEnqueuer = (userId: number, taskId: string, runAt: number) => Promise<string>;
 
 export type ComposerStageInput = {
   id: string;
@@ -171,9 +171,11 @@ export async function reconcileComposerWorkflow(userId: number, id: string, enqu
     for (const stage of record.stages) {
       if (!stage.taskId) continue;
       const task = await getTask(userId, stage.taskId);
-      if (!task || task.status !== "queued" || task.workflowRunId) continue;
-      const workflowRunId = await enqueuer(userId, task.id, task.runAt ?? Date.now());
-      await setTaskWorkflowRunId(userId, task.id, workflowRunId);
+      if (!task || task.status !== "queued") continue;
+      const pendingClaimExpired = task.workflowRunId?.startsWith("pending:") === true
+        && (!task.enqueueClaim || task.enqueueClaim.expiresAt <= Date.now());
+      if (task.workflowRunId && !pendingClaimExpired) continue;
+      await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), enqueuer);
     }
   }
   return view(record);

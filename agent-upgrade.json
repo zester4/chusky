@@ -1,11 +1,11 @@
 {
-  "id": "release-3.2.0",
-  "version": "3.2.0",
-  "title": "Chusky meetings are now live",
+  "id": "release-3.3.0",
+  "version": "3.3.0",
+  "title": "Chusky autonomous missions are now live",
   "bullets": [
-    "Added Recall-powered meeting participation for Zoom, Google Meet, Microsoft Teams, and Webex, with natural copilot and owner-scoped representative modes.",
-    "Meeting representatives can support sales and onboarding with approved connected-app tools, participant chat, contact capture, calendar availability, reminders, tasks, and follow-through.",
-    "Added optional screen-share understanding, Nova-3 live transcription, encrypted opt-in transcript retention, private outcomes, and scratchpad/Notion follow-through."
+    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, and restart-safe execution.",
+    "Missions can fan out independent work, wait for timers or exact provider events, pause, resume, repair, replan, and attach evidence before verification and completion.",
+    "Mission status, proof, controls, and owner isolation are available across Telegram, the CLI, SDK/API, dashboard, and MCP through the same persisted runtime."
   ],
-  "createdAt": "2026-09-16T00:00:00.000Z"
+  "createdAt": "2026-09-21T21:14:08.860Z"
 }

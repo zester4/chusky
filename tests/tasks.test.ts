@@ -1,9 +1,18 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { nativeTool } from "../src/nativeTools.js";
-import { getTask, initStore } from "../src/store.js";
+import { claimTask, claimTaskEnqueue, createTask, getTask, initStore, renewTaskLease, updateTask } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("expired enqueue claims can be recovered after a publisher crash", async () => {
+  const userId = 830000;
+  const task = await createTask(userId, { id: "task_enqueue_recovery", title: "Publish", objective: "Publish exactly once" });
+  assert.ok(await claimTaskEnqueue(userId, task.id, "crashed-publisher", 1_000));
+  assert.equal(await claimTaskEnqueue(userId, task.id, "concurrent-publisher", 1_000), undefined);
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  assert.ok(await claimTaskEnqueue(userId, task.id, "recovery-publisher", 1_000));
+});
 
 test("durable tasks checkpoint, complete, and remain private to their owner", async () => {
   const userId = 830001;
@@ -50,4 +59,29 @@ test("task schemas expose the full durable lifecycle and reject malformed filter
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TASK_CREATE", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_TASK_CHECKPOINT", "CHUCK_TASK_BLOCK", "CHUCK_TASK_COMPLETE", "CHUCK_TASK_CANCEL", "CHUCK_TASK_RETRY"]) assert.equal(names.has(name), true);
   await assert.rejects(() => nativeTool(830004, "CHUCK_TASK_LIST", { statuses: ["not-a-status"] }), /Invalid task status filter/);
+});
+
+test("concurrent task mutations preserve both updates through versioned CAS retries", async () => {
+  const userId = 830006;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Concurrent task", objective: "Preserve state" }) as { id: string };
+  await Promise.all([
+    updateTask(userId, task.id, { checkpoint: "checkpoint saved" }),
+    updateTask(userId, task.id, { nextAction: "continue from checkpoint" }),
+  ]);
+  const latest = await getTask(userId, task.id);
+  assert.equal(latest?.checkpoint, "checkpoint saved");
+  assert.equal(latest?.nextAction, "continue from checkpoint");
+  assert.equal(latest?.version, 2);
+});
+
+test("a running task lease can be renewed by its owning worker", async () => {
+  const userId = 830007;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Long task", objective: "Remain claimable by one worker" }) as { id: string };
+  const claimed = await claimTask(userId, task.id, "worker-a", 10_000);
+  assert.ok(claimed?.lease);
+  const before = claimed!.lease!.expiresAt;
+  const renewed = await renewTaskLease(userId, task.id, claimed!.lease!.token, 60_000);
+  assert.ok(renewed);
+  assert.ok((renewed?.lease?.expiresAt ?? 0) > before);
+  assert.equal(renewed?.lease?.workerId, "worker-a");
 });

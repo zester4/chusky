@@ -1,4 +1,4 @@
-import { claimTask, getTask, settleTaskRun, type TaskRecord } from "./store.js";
+import { claimTask, getTask, renewTaskLease, settleTaskRun, type TaskRecord } from "./store.js";
 import { logger } from "./logger.js";
 
 export interface TaskRunPayload { userId: number; taskId: string; }
@@ -14,7 +14,8 @@ export interface TaskRunResult {
 
 export interface TaskRunnerDependencies {
   workerId: string;
-  execute(task: TaskRecord): Promise<TaskRunResult>;
+  leaseMs?: number;
+  execute(task: TaskRecord, signal?: AbortSignal): Promise<TaskRunResult>;
 }
 
 /**
@@ -22,14 +23,31 @@ export interface TaskRunnerDependencies {
  * token-checked settlement, so a stale worker can never overwrite a recovered run.
  */
 export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunnerDependencies): Promise<{ claimed: boolean; task?: TaskRecord }> {
-  const task = await claimTask(payload.userId, payload.taskId, deps.workerId);
+  const leaseMs = Math.max(10_000, Math.min(10 * 60_000, deps.leaseMs ?? 120_000));
+  const task = await claimTask(payload.userId, payload.taskId, deps.workerId, leaseMs);
   if (!task?.lease) {
     logger.info({ userId: payload.userId, taskId: payload.taskId, workerId: deps.workerId }, "Task worker skipped unclaimable task");
     return { claimed: false };
   }
   logger.info({ userId: payload.userId, taskId: task.id, attempt: task.attempt, workerId: deps.workerId }, "Task worker claimed task");
+  const leaseAbort = new AbortController();
+  let consecutiveRenewalFailures = 0;
+  const renewal = setInterval(() => {
+    void renewTaskLease(payload.userId, task.id, task.lease!.token, leaseMs).then((renewed) => {
+      if (renewed) {
+        consecutiveRenewalFailures = 0;
+      } else if (++consecutiveRenewalFailures >= 2) {
+        leaseAbort.abort(new Error("Task lease was lost while the worker was executing."));
+        logger.warn({ userId: payload.userId, taskId: task.id, workerId: deps.workerId }, "Task worker lost its lease");
+      }
+    }).catch((error) => {
+      if (++consecutiveRenewalFailures >= 2) leaseAbort.abort(new Error("Task lease renewal failed repeatedly; stopping the worker before lease expiry."));
+      logger.warn({ err: error, userId: payload.userId, taskId: task.id, consecutiveFailures: consecutiveRenewalFailures }, "Task lease renewal failed");
+    });
+  }, Math.max(1_000, Math.floor(leaseMs / 3)));
+  if (typeof renewal === "object" && "unref" in renewal) renewal.unref();
   try {
-    const outcome = await deps.execute(task);
+    const outcome = await deps.execute(task, leaseAbort.signal);
     const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, outcome);
     logger.info({ userId: payload.userId, taskId: task.id, attempt: task.attempt, status: settled?.status }, "Task worker settled task");
     return { claimed: true, task: settled };
@@ -55,6 +73,8 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
       claimed: true,
       task: settled,
     };
+  } finally {
+    clearInterval(renewal);
   }
 }
 

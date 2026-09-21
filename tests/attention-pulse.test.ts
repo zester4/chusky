@@ -39,6 +39,10 @@ test("attention pulse native contract and no-action sentinel are stable", () => 
   assert.equal(isNoActionPulseOutput(" no_action\n"), true);
   assert.equal(isNoActionPulseOutput("There is an action"), false);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_READ_SKILL_FILE", status: "completed" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_CONTEXT_SEARCH", status: "completed" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "COMPOSIO_SEARCH_WEB", status: "completed" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "COMPOSIO_HUBSPOT_GET_CONTACT", status: "completed" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "COMPOSIO_HUBSPOT_CREATE_CONTACT", status: "completed" }]), true);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_HANDOFF_SUBAGENT", status: "completed" }]), true);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "completed" }]), true);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "failed" }]), false);

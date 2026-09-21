@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { initStore, createMission, getMission, listTasks, startMission, completeMission, completeMissionStep, recordMissionEvidence, verifyMission, missionBudgetPreflight } from "../src/store.js";
+import { claimTask, createTask, initStore, createMission, getMission, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
@@ -51,7 +51,7 @@ test("mission supports parallel ready steps, preflight budgets, and evidence ver
   assert.equal(first?.steps.find((step) => step.id === "review")?.status, "pending");
   const second = await completeMissionStep(userId, mission.id, "design", "Design done");
   assert.equal(second?.steps.find((step) => step.id === "review")?.status, "running");
-  await recordMissionEvidence(userId, mission.id, [{ id: "source-1", kind: "source", summary: "source verified", verified: true, verifiedBy: "system" }]);
+  await recordTrustedMissionEvidence(userId, mission.id, [{ id: "source-1", kind: "source", summary: "source verified", ref: "https://example.test/source", verified: true, verifiedBy: "system" }]);
   const verified = await verifyMission(userId, mission.id);
   assert.equal(verified?.verification?.verified, false); // review still has not completed
   await completeMissionStep(userId, mission.id, "review", "Review done");
@@ -83,8 +83,63 @@ test("strict missions cannot be completed before independent verification", asyn
   const started = await startMission(userId, mission.id);
   assert.equal(await completeMission(userId, mission.id, "premature"), undefined);
   await completeMissionStep(userId, mission.id, started!.currentStepId!, "Step result");
-  await recordMissionEvidence(userId, mission.id, [{ id: "receipt-1", kind: "tool_receipt", summary: "receipt confirmed", verified: true, verifiedBy: "system" }]);
+  await recordMissionEvidence(userId, mission.id, [{ id: "assertion-1", kind: "assertion", summary: "receipt confirmed", verified: true, verifiedBy: "agent" }]);
+  const rejected = await verifyMission(userId, mission.id);
+  assert.equal(rejected?.verification?.verified, false);
+  await recordTrustedMissionEvidence(userId, mission.id, [{ id: "receipt-1", kind: "tool_receipt", summary: "receipt confirmed", ref: "tool://receipt-1", verified: true, verifiedBy: "system" }]);
   await verifyMission(userId, mission.id);
   const completed = await completeMission(userId, mission.id, "Outcome verified");
   assert.equal(completed?.status, "completed");
+});
+
+test("terminal task failure reconciles the linked mission step and mission status", async () => {
+  const userId = 972006;
+  const mission = await createMission(userId, { title: "Failure recovery", objective: "Run one bounded step", definitionOfDone: "The step succeeds", steps: [{ id: "only", title: "Only step", objective: "Run once", retryLimit: 0 }] });
+  const started = await startMission(userId, mission.id);
+  await scheduleMissionSteps(userId, started!, async () => "workflow_failure");
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id);
+  assert.ok(task);
+  const claimed = await claimTask(userId, task!.id, "failure-worker", 60_000);
+  assert.ok(claimed?.lease);
+  await settleTaskRun(userId, task!.id, claimed!.lease!.token, { status: "failed", message: "Provider permanently rejected the request" });
+  const failed = await getMission(userId, mission.id);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.steps.find((step) => step.id === "only")?.status, "failed");
+  assert.match(failed?.nextAction ?? "", /repair|replan/i);
+});
+
+test("concurrent mission schedulers publish one workflow for one deterministic step", async () => {
+  const userId = 972007;
+  const mission = await createMission(userId, { title: "Concurrent schedule", objective: "Run once", definitionOfDone: "One step", steps: [{ id: "only", title: "Only", objective: "Run" }] });
+  const started = await startMission(userId, mission.id);
+  let enqueues = 0;
+  await Promise.all([
+    scheduleMissionSteps(userId, started!, async () => { enqueues += 1; await new Promise((resolve) => setTimeout(resolve, 5)); return `workflow_${enqueues}`; }),
+    scheduleMissionSteps(userId, started!, async () => { enqueues += 1; await new Promise((resolve) => setTimeout(resolve, 5)); return `workflow_${enqueues}`; }),
+  ]);
+  assert.equal(enqueues, 1);
+});
+
+test("mission scheduler recovers an expired pending enqueue claim", async () => {
+  const userId = 972008;
+  const mission = await createMission(userId, { title: "Recover publish", objective: "Recover", definitionOfDone: "One step", steps: [{ id: "only", title: "Only", objective: "Run" }] });
+  const started = await startMission(userId, mission.id);
+  const first = await scheduleMissionSteps(userId, started!, async () => "workflow_first");
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id);
+  assert.ok(task);
+  await updateTask(userId, task!.id, { workflowRunId: "pending:crashed-publisher", enqueueClaim: { token: "crashed-publisher", expiresAt: Date.now() - 1 } });
+  let publishes = 0;
+  await scheduleMissionSteps(userId, first!, async () => { publishes += 1; return "workflow_recovered"; });
+  assert.equal(publishes, 1);
+  assert.equal((await listTasks(userId)).find((item) => item.id === task!.id)?.workflowRunId, "workflow_recovered");
+});
+
+test("manual task retry clears stale provider publication state", async () => {
+  const userId = 972009;
+  const task = await createTask(userId, { title: "Retry me", objective: "Retry", runAt: Date.now() });
+  await updateTask(userId, task.id, { status: "failed", workflowRunId: "workflow_old", enqueueClaim: { token: "old", expiresAt: Date.now() + 60_000 } });
+  const retried = await retryTask(userId, task.id);
+  assert.equal(retried?.status, "queued");
+  assert.equal(retried?.workflowRunId, undefined);
+  assert.equal(retried?.enqueueClaim, undefined);
 });

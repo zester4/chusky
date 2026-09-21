@@ -109,6 +109,42 @@ test("recurring job delivery runs the agent before sending its response", async 
   assert.doesNotMatch(state.sent[0].text, /Run &lt;task&gt;/);
 });
 
+test("attention pulse delivery is confirmed only after the channel send succeeds", async () => {
+  let confirmations = 0;
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-1" }, deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act" }),
+    runAgent: async () => ({ text: "Handled the open loop.", deliveryConfirmation: { kind: "attention_pulse" as const, candidateIds: ["cand_1"], dedupeKey: "digest-1" } }),
+    confirmDelivery: async () => { confirmations += 1; },
+  }));
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(confirmations, 1);
+
+  confirmations = 0;
+  const failedState = deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act" }),
+    runAgent: async () => ({ text: "Handled the open loop.", deliveryConfirmation: { kind: "attention_pulse" as const, candidateIds: ["cand_1"], dedupeKey: "digest-1" } }),
+    sendMessage: async () => { throw new Error("channel unavailable"); },
+    confirmDelivery: async () => { confirmations += 1; },
+  });
+  await assert.rejects(() => deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-2" }, failedState), /channel unavailable/);
+  assert.equal(confirmations, 0);
+});
+
+test("a post-send pulse failure cannot send the same occurrence twice", async () => {
+  const completed = new Set<string>();
+  const state = deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act" }),
+    runAgent: async () => ({ text: "Handled once.", deliveryConfirmation: { kind: "attention_pulse" as const, candidateIds: ["cand_1"], dedupeKey: "digest-2" } }),
+    claimDelivery: async (key: string) => !completed.has(key),
+    completeDelivery: async (key: string) => { completed.add(key); },
+    confirmDelivery: async () => { throw new Error("confirmation persistence failed"); },
+  });
+  await assert.rejects(() => deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-retry" }, state), /confirmation persistence failed/);
+  assert.equal(state.sent.length, 1);
+  assert.deepEqual(await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-retry" }, state), { skipped: true, delivered: false });
+  assert.equal(state.sent.length, 1);
+});
+
 test("worker-bound recurring jobs invoke the specialist runner instead of the supervisor runner", async () => {
   const calls: string[] = [];
   const state = deps({

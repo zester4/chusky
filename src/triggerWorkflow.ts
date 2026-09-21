@@ -20,13 +20,22 @@ export function workflowFailureUrl(): string | undefined {
   return `${config.webhookUrl.replace(/\/+$/, "")}/workflows/failure`;
 }
 
+/**
+ * Stable provider idempotency key for a task publication. If the database
+ * write after a QStash accept fails, recovery republishes the same task and
+ * runAt with this exact key instead of creating a second workflow.
+ */
+export function taskWorkflowRunId(taskId: string, runAt: number): string {
+  return `task-${taskId}-${runAt}`;
+}
+
 export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt = Date.now()): Promise<string> {
   if (!config.webhookUrl) throw new Error("Task scheduling requires WEBHOOK_URL and QStash configuration");
   const workflow = await workflowClient().trigger({
     url: `${config.webhookUrl.replace(/\/+$/, "")}/workflows/task`,
     body: { taskId, userId },
     delay: Math.max(1, Math.ceil((runAt - Date.now()) / 1000)),
-    workflowRunId: `task-${taskId}-${runAt}`,
+    workflowRunId: taskWorkflowRunId(taskId, runAt),
     retries: 3,
     retryDelay: "1000 * (1 + retried)",
     ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),

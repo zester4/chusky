@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { beginExternalAction, finishExternalAction, isExternalWriteTool } from "../src/autonomy/actions.js";
-import { initStore } from "../src/store.js";
+import { completeMissionStep, createMission, getMission, initStore, startMission } from "../src/store.js";
 
 test("autonomous external action receipts make successful provider writes idempotent", async () => {
   await initStore({ memoryOnly: true });
@@ -16,5 +16,36 @@ test("external write classification leaves reads and checkpoints replay-safe", (
   assert.equal(isExternalWriteTool("GMAIL_SEND_EMAIL"), true);
   assert.equal(isExternalWriteTool("GMAIL_GET_MESSAGE"), false);
   assert.equal(isExternalWriteTool("CHUCK_TASK_CHECKPOINT"), false);
+  assert.equal(isExternalWriteTool("CHUCK_TASK_RETRY"), false);
+  assert.equal(isExternalWriteTool("CHUCK_MISSION_RESUME"), false);
   assert.equal(isExternalWriteTool("CHUCK_SET_REMINDER"), true);
+});
+
+test("successful mission external writes create server-trusted receipt evidence", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 950002;
+  const mission = await createMission(userId, {
+    title: "Send approved update",
+    objective: "Send one approved update",
+    definitionOfDone: "The update was sent",
+    requiredEvidence: ["kind:tool_receipt"],
+  });
+  const started = await startMission(userId, mission.id);
+  assert.ok(started?.currentStepId);
+  const claim = await beginExternalAction({
+    userId,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args: { to: "a@example.com", subject: "Approved" },
+    runId: "mission-run-1",
+    source: { kind: "mission", id: mission.id, missionStepId: started!.currentStepId },
+  });
+  assert.equal(claim.state, "new");
+  await finishExternalAction(userId, claim.logicalActionId, "sent", "msg_2");
+  const afterReceipt = await getMission(userId, mission.id);
+  const evidence = afterReceipt?.evidence?.find((item) => item.kind === "tool_receipt");
+  assert.equal(evidence?.verifiedBy, "system");
+  assert.equal(evidence?.verified, true);
+  assert.match(evidence?.ref ?? "", /^tool-receipt:/);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Sent");
 });
