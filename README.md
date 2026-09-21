@@ -358,6 +358,8 @@ Chusky can receive real-time events from connected apps (new Slack message, GitH
 2. Set `COMPOSIO_WEBHOOK_SECRET` and optionally `COMPOSIO_WEBHOOK_URL=https://your-domain.com/composio/triggers`. When the URL is blank, Chusky derives it from `WEBHOOK_URL`.
 3. On startup, Chusky reconciles the project subscription through Composio's current **v3.1** API and explicitly requests the V3 `composio.trigger.message` payload. Check `/health`: `checks.composioTriggers` must be `configured` before relying on triggers.
 
+Missions waiting for a Composio callback should store `provider: "composio"` and the exact stable trigger `eventId` with `CHUCK_MISSION_WAIT_EVENT`. After signature verification, Chusky matches that provider event to the same owner and resumes only the mission waiting for that exact event, then wakes its durable root task through the configured task queue. The generic mission-event API remains available for providers whose signed webhook adapter has not been added yet.
+
 To create a trigger programmatically, tell Chusky:
 > *"Create a trigger for new GitHub commits on my repo my-org/my-repo"*
 

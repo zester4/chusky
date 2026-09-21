@@ -106,6 +106,8 @@ test("mission steps enforce dependency order and reject cycles", async () => {
   ] }));
   assert.equal(mission.currentStepId, "research");
   await startMission(userId, mission.id);
+  assert.equal((await getMission(userId, mission.id))?.steps.find((step) => step.id === "research")?.status, "running");
+  assert.equal(await completeMissionStep(userId, mission.id, "brief", "Bypass attempt"), undefined);
   const advanced = await completeMissionStep(userId, mission.id, "research", "Sources verified.");
   assert.equal(advanced?.currentStepId, "brief");
   assert.equal(advanced?.steps.find((step) => step.id === "brief")?.status, "running");

@@ -4200,7 +4200,10 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
   const mission = await getMission(userId, id);
   if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
   const step = mission.steps.find((candidate) => candidate.id === stepId);
-  if (!step || !["running", "pending"].includes(step.status)) return undefined;
+  // A mission has one executable root task today. Only that task's current
+  // running step may be completed; accepting any pending step would bypass
+  // dependency order and let a caller manufacture a later-stage result.
+  if (!step || step.status !== "running" || mission.currentStepId !== stepId || !step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed")) return undefined;
   const now = Date.now();
   const steps = mission.steps.map((candidate) => candidate.id === stepId ? { ...candidate, status: "completed" as const, result: result.slice(0, 12000), updatedAt: now } : candidate);
   const next = readyMissionStep({ ...mission, steps });
@@ -4233,7 +4236,11 @@ export async function startMission(userId: number, id: string): Promise<MissionR
   const mission = await getMission(userId, id);
   if (!mission || mission.status !== "queued") return undefined;
   const now = Date.now();
-  return updateMission(userId, id, { status: "running", startedAt: now, error: undefined, events: [...mission.events, missionEvent("started", "Mission started", now)] });
+  const current = mission.currentStepId ? mission.steps.find((step) => step.id === mission.currentStepId) : readyMissionStep(mission);
+  const steps = current && current.status === "pending"
+    ? mission.steps.map((step) => step.id === current.id ? { ...step, status: "running" as const, attempts: step.attempts + 1, updatedAt: now } : step)
+    : mission.steps;
+  return updateMission(userId, id, { status: "running", startedAt: now, error: undefined, ...(current ? { currentStepId: current.id, steps } : {}), events: [...mission.events, missionEvent("started", "Mission started", now)] });
 }
 
 export async function pauseMission(userId: number, id: string, reason = "Mission paused."): Promise<MissionRecord | undefined> {

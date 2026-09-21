@@ -9,7 +9,7 @@ import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeet
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -107,6 +107,31 @@ async function persistCalendarMeetingPreparation(userId: number, eventId: string
     createdAt: Date.now(),
     updatedAt: Date.now(),
   });
+}
+
+/**
+ * Composio's signed trigger webhook is a real provider boundary. If a mission
+ * is waiting for this exact event, resume only that mission and wake its
+ * existing durable root task. The generic API event route remains available
+ * for providers that Chusky cannot verify natively yet.
+ */
+async function resumeMissionsFromComposioEvent(userId: number, providerEventId: string): Promise<number> {
+  let resumedCount = 0;
+  const waitingMissions = await listMissions(userId, ["waiting"]);
+  for (const mission of waitingMissions) {
+    if (mission.waiting?.kind !== "provider_event" || mission.waiting.provider !== "composio" || mission.waiting.providerEventId !== providerEventId) continue;
+    const resumed = await resumeMissionFromProviderEvent(userId, mission.id, "composio", providerEventId);
+    if (!resumed?.rootTaskId) continue;
+    const existingTask = await getTask(userId, resumed.rootTaskId);
+    const task = existingTask?.status === "queued"
+      ? await updateTask(userId, existingTask.id, { runAt: Date.now(), error: undefined })
+      : await retryTask(userId, resumed.rootTaskId);
+    if (!task) continue;
+    const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
+    await setTaskWorkflowRunId(userId, task.id, workflowRunId);
+    resumedCount += 1;
+  }
+  return resumedCount;
 }
 
 function boundedRecallChatReply(value: string, maxCharacters: number): string {
@@ -2741,10 +2766,11 @@ async function main(): Promise<void> {
           const record = await createTriggerEvent({ eventId: event.eventId, userId: numericUserId, triggerId, triggerSlug: event.triggerSlug, summary: safeTriggerSummary(event), status: "queued", createdAt: Date.now(), updatedAt: Date.now() });
           if (record.status !== "queued") return c.json({ ok: true, duplicate: true });
           try {
+            const resumedMissions = await resumeMissionsFromComposioEvent(numericUserId, event.eventId);
             const queued = await workflowClient().trigger({ url: triggerWorkflowUrl(), body: { eventId: event.eventId, userId: numericUserId }, workflowRunId: `trigger-${event.eventId}`, retries: 3 });
             await updateTriggerEvent(event.eventId, { workflowRunId: queued.workflowRunId });
-            logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId }, "Trigger queued");
-            return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId }, 202);
+            logger.info({ triggerSlug: event.triggerSlug, userId: numericUserId, workflowRunId: queued.workflowRunId, resumedMissions }, "Trigger queued");
+            return c.json({ ok: true, queued: true, eventId: event.eventId, workflowRunId: queued.workflowRunId, ...(resumedMissions ? { resumedMissions } : {}) }, 202);
           } catch (error) {
             await releaseTriggerEvent(event.eventId);
             await updateTriggerEvent(event.eventId, { status: "failed", error: String(error).slice(0, 2000) });
