@@ -4,6 +4,12 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
 ## Unreleased
 
+## 0.3.1 - 2026-09-21
+
+- Rewrote the SDK README with production setup, security, durability, approvals, missions, company workflows, and resource guidance.
+- Added runnable TypeScript examples for quickstarts, streaming, governed agents, missions, approvals, departments, files, and webhooks.
+- Included the examples directory in published packages.
+
 ## 0.3.0 - 2026-09-21
 
 - Added typed SDK resources for autonomous missions, proof/evidence verification, provider-event resume, replanning, context, departments, and outcome packages.
