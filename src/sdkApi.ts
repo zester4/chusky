@@ -4,7 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStates, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
@@ -1070,7 +1070,14 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/apps", async (c) => {
-    try { return c.json({ data: await getToolkitStates(sdkUser(c)!.userId) }); }
+    const rawLimit = Number(c.req.query("limit") ?? 30);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(50, Math.floor(rawLimit))) : 30;
+    const cursor = c.req.query("cursor")?.trim();
+    const search = c.req.query("search")?.trim().slice(0, 120);
+    try {
+      const page = await getToolkitStatesPage(sdkUser(c)!.userId, { limit, enrich: true, ...(cursor ? { cursor } : {}), ...(search ? { search } : {}) });
+      return c.json({ data: page.items, nextCursor: page.cursor, currentPage: page.currentPage, totalPages: page.totalPages, total: page.totalItems, pageSize: limit });
+    }
     catch (error) { return apiError(c, 502, "apps_unavailable", error instanceof Error ? error.message : "Connected apps are temporarily unavailable."); }
   });
 

@@ -1490,23 +1490,84 @@ export async function disconnectConnectedAccount(userId: number, connectedAccoun
 
 // ── Get toolkit connection states ─────────────────────────────────────────────
 
-export async function getToolkitStates(
-  userId: number
-): Promise<{ slug: string; name: string; connected: boolean; logo?: string; accountCount?: number; aliases?: string[] }[]> {
+export type ToolkitState = {
+  slug: string;
+  name: string;
+  connected: boolean;
+  logo?: string;
+  description?: string;
+  appUrl?: string;
+  categories?: string[];
+  toolsCount?: number;
+  triggersCount?: number;
+  authSchemes?: string[];
+  noAuth?: boolean;
+  accountCount?: number;
+  aliases?: string[];
+};
+
+export type ToolkitStatesPage = {
+  items: ToolkitState[];
+  cursor?: string;
+  currentPage: number;
+  totalPages: number;
+  totalItems: number;
+};
+
+/** Return a paginated Composio toolkit catalogue with safe connection metadata. */
+export async function getToolkitStatesPage(
+  userId: number,
+  options: { cursor?: string; limit?: number; search?: string; enrich?: boolean } = {},
+): Promise<ToolkitStatesPage> {
   const { sessionObj } = await getOrCreateComposioSession(userId);
-  const result = await sessionObj.toolkits();
+  const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 30)));
+  const result = await sessionObj.toolkits({
+    limit,
+    ...(options.cursor ? { cursor: options.cursor } : {}),
+    ...(options.search ? { search: options.search.slice(0, 120) } : {}),
+  });
   const accounts = await listConnectedAccounts(userId).catch(() => []);
   const byToolkit = new Map<string, ConnectedComposioAccount[]>();
   for (const account of accounts) byToolkit.set(account.toolkit.toLowerCase(), [...(byToolkit.get(account.toolkit.toLowerCase()) ?? []), account]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (result.items as any[]).map((t: any) => ({
-    slug: t.slug as string,
-    name: t.name as string,
-    logo: t.logo as string | undefined,
-    connected: Boolean(t.connection?.isActive) || (byToolkit.get(String(t.slug).toLowerCase())?.length ?? 0) > 0,
-    accountCount: byToolkit.get(String(t.slug).toLowerCase())?.length ?? (t.connection?.isActive ? 1 : 0),
-    aliases: byToolkit.get(String(t.slug).toLowerCase())?.map((account) => account.alias ?? account.id) ?? [],
+  // Enrich each visible page with Composio's official toolkit metadata. The
+  // session endpoint owns connection state; the toolkit endpoint owns the
+  // provider branding, description, categories, and capability counts.
+  const items = await Promise.all((result.items as any[]).map(async (t: any): Promise<ToolkitState> => {
+    const slug = String(t.slug ?? "");
+    let detail: any;
+    if (options.enrich !== false) {
+      try { detail = await composio.toolkits.get(slug); } catch { /* preserve the connection row if metadata is temporarily unavailable */ }
+    }
+    const meta = detail?.meta ?? {};
+    const matching = byToolkit.get(slug.toLowerCase()) ?? [];
+    return {
+      slug,
+      name: String(t.name ?? detail?.name ?? slug),
+      logo: String(t.logo ?? meta.logo ?? "") || undefined,
+      description: typeof meta.description === "string" ? meta.description : undefined,
+      appUrl: typeof meta.appUrl === "string" ? meta.appUrl : undefined,
+      categories: Array.isArray(meta.categories) ? meta.categories.map((category: any) => String(category?.name ?? category?.slug ?? "")).filter(Boolean) : undefined,
+      toolsCount: typeof meta.toolsCount === "number" ? meta.toolsCount : undefined,
+      triggersCount: typeof meta.triggersCount === "number" ? meta.triggersCount : undefined,
+      authSchemes: Array.isArray(detail?.composioManagedAuthSchemes) ? detail.composioManagedAuthSchemes.map((scheme: unknown) => String(scheme)) : undefined,
+      noAuth: Boolean(t.isNoAuth),
+      connected: Boolean(t.connection?.isActive) || matching.length > 0,
+      accountCount: matching.length || (t.connection?.isActive ? 1 : 0),
+      aliases: matching.map((account) => account.alias ?? account.id),
+    };
   }));
+  return {
+    items,
+    cursor: result.cursor,
+    currentPage: Number(result.currentPage ?? 1),
+    totalPages: Number(result.totalPages ?? 1),
+    totalItems: Number(result.totalItems ?? items.length),
+  };
+}
+
+/** Legacy array view used by Telegram and CLI summaries. */
+export async function getToolkitStates(userId: number): Promise<ToolkitState[]> {
+  return (await getToolkitStatesPage(userId, { limit: 50, enrich: false })).items;
 }
 
 export async function searchTools(userId: number, query: string): Promise<unknown[]> {

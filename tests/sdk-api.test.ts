@@ -718,6 +718,27 @@ test("connected-app disconnect is scoped to an account-owned Composio connection
   assert.deepEqual(deleted, [account.id]);
 });
 
+test("connected-app catalogue returns official Composio metadata with cursor pagination", async () => {
+  let received: Record<string, unknown> | undefined;
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: { list: async () => ({ items: [{ id: "conn_gmail", alias: "Work Gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }) },
+    toolkits: { get: async () => ({ name: "Gmail", slug: "gmail", meta: { logo: "https://cdn.example/gmail.svg", description: "Email and search", appUrl: "https://gmail.google.com", categories: [{ name: "Communication" }], toolsCount: 42, triggersCount: 3 }, composioManagedAuthSchemes: ["oauth2"] }) },
+    create: async () => ({ toolkits: async (options: Record<string, unknown>) => { received = options; return { items: [{ slug: "gmail", name: "Gmail", logo: "https://cdn.example/gmail.svg", isNoAuth: false, connection: { isActive: true } }], cursor: "next-page", currentPage: 1, totalPages: 2, totalItems: 31 }; } }),
+  } });
+  const api = app();
+  const response = await api.fetch(new Request("http://local/v1/apps?limit=30&search=gmail", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "apps-owner" } }));
+  assert.equal(response.status, 200);
+  assert.deepEqual(received, { limit: 30, search: "gmail" });
+  const payload = await response.json() as { data: Array<Record<string, unknown>>; nextCursor: string; currentPage: number; totalPages: number; total: number };
+  assert.equal(payload.nextCursor, "next-page");
+  assert.equal(payload.currentPage, 1);
+  assert.equal(payload.totalPages, 2);
+  assert.equal(payload.total, 31);
+  assert.deepEqual(payload.data[0], {
+    slug: "gmail", name: "Gmail", connected: true, logo: "https://cdn.example/gmail.svg", description: "Email and search", appUrl: "https://gmail.google.com", categories: ["Communication"], toolsCount: 42, triggersCount: 3, authSchemes: ["oauth2"], noAuth: false, accountCount: 1, aliases: ["Work Gmail"],
+  });
+});
+
 test("meeting capabilities expose safe exact actions with connected-account state", async () => {
   setAgentDependenciesForTests({ composio: {
     connectedAccounts: {
