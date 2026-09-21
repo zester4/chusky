@@ -63,13 +63,16 @@ jobs:
           fi
           version=$(node -p "require('./sdk/package.json').version")
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Refuse an existing release tag
+      - name: Check release tag
+        id: release_tag
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/sdk-v$VERSION" >/dev/null 2>&1; then
-            echo "sdk-v$VERSION already exists"
-            exit 1
+            echo "sdk-v$VERSION already exists; continuing as a publish recovery"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
       - name: Ensure npm publishing is configured
         env:
@@ -81,6 +84,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
       - name: Commit and tag release
+        if: steps.release_tag.outputs.exists != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
@@ -95,4 +99,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: gh release create "sdk-v$VERSION" --title "Chusky SDK v$VERSION" --generate-notes
+        run: |
+          if gh release view "sdk-v$VERSION" >/dev/null 2>&1; then
+            echo "GitHub release sdk-v$VERSION already exists"
+          else
+            gh release create "sdk-v$VERSION" --title "Chusky SDK v$VERSION" --generate-notes
+          fi
