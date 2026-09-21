@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "../src/workflows.js";
 import type { JobRecord, ReminderRecord } from "../src/store.js";
+import type { JobOccurrenceRecord } from "../src/autonomy/types.js";
 import { resolveWorkflowEndpoint } from "../src/workflowUrls.js";
 
 function deps(overrides: Partial<Parameters<typeof deliverReminder>[1]> = {}) {
@@ -156,4 +157,80 @@ test("workflow payload validation rejects malformed and cross-tenant payloads", 
   assert.deepEqual(parseJobWorkflowPayload({ jobId: "job_abc", userId: 7, occurrenceId: "run-1" }), { jobId: "job_abc", userId: 7, occurrenceId: "run-1" });
   assert.throws(() => parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 0 }));
   assert.throws(() => parseJobWorkflowPayload({ jobId: "other", userId: 7 }));
+});
+
+test("contextual reminder runs the bounded agent before delivering its result", async () => {
+  const calls: string[] = [];
+  const state = deps({
+    getReminder: async () => ({ ...deps().reminder, mode: "check_in", links: { taskId: "task_1" }, text: "Check the launch task" }),
+    runReminder: async (reminder) => { calls.push(`${reminder.mode}:${reminder.links?.taskId}`); return { text: "The launch task is still waiting on QA." }; },
+  });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.deepEqual(calls, ["check_in:task_1"]);
+  assert.match(state.sent[0].text, /still waiting on QA/);
+});
+
+test("approval or a blocked contextual reminder is persisted as waiting without a false notification", async () => {
+  const state = deps({
+    getReminder: async () => ({ ...deps().reminder, mode: "act", text: "Update the CRM" }),
+    runReminder: async () => ({ text: "", status: "waiting" as const, nextAction: "Approve the CRM update", waitReason: "Approval required" }),
+  });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.deepEqual(result, { skipped: true, delivered: false });
+  assert.equal(state.sent.length, 0);
+  assert.deepEqual(state.updates[0], { status: "waiting", nextAction: "Approve the CRM update", deliveryError: "Approval required" });
+});
+
+test("recurring autonomous occurrences create and complete an inspectable ledger row", async () => {
+  let occurrence: JobOccurrenceRecord | undefined;
+  const state = deps({
+    getJob: async () => ({ ...deps().job, mode: "act", links: { missionId: "mis_1" } }),
+    getJobOccurrence: async () => occurrence,
+    createJobOccurrence: async (record) => { occurrence = record; return record; },
+    updateJobOccurrence: async (_userId, _id, patch, expectedVersion) => {
+      assert.equal(expectedVersion, occurrence?.version);
+      occurrence = { ...occurrence!, ...patch, version: occurrence!.version + 1, updatedAt: Date.now() };
+      return occurrence;
+    },
+    runAgent: async () => ({ text: "Mission checkpoint verified.", cost: 0.01, toolCalls: 2 }),
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-ledger" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(occurrence?.status, "completed");
+  assert.equal(occurrence?.idempotencyKey, "job:job-1:occ-ledger");
+  assert.equal(occurrence?.cost, 0.01);
+  assert.equal(occurrence?.toolCalls, 2);
+});
+
+test("explicit notify jobs do not invoke the agent", async () => {
+  let called = false;
+  const state = deps({
+    getJob: async () => ({ ...deps().job, mode: "notify" }),
+    runAgent: async () => { called = true; return { text: "should not run" }; },
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "occ-notify" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(called, false);
+  assert.match(state.sent[0].text, /Run &lt;task&gt;/);
+});
+
+test("wait_until reminders reschedule a bounded poll instead of spinning or notifying", async () => {
+  const rescheduled: number[] = [];
+  const state = deps({
+    getReminder: async () => ({ ...deps().reminder, mode: "wait_until", pollEverySeconds: 60, text: "Wait for deployment" }),
+    runReminder: async () => ({ text: "", status: "waiting" as const, nextAction: "Check deployment health again" }),
+    rescheduleReminder: async (_reminder, runAt) => { rescheduled.push(runAt); },
+  });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.deepEqual(result, { skipped: true, delivered: false });
+  assert.equal(rescheduled.length, 1);
+  assert.ok(rescheduled[0] > Date.now());
+  assert.equal(state.sent.length, 0);
+});
+
+test("approval resume identifiers are accepted only for the matching workflow owner", () => {
+  assert.deepEqual(parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 7, approvalId: "appr_123" }), { reminderId: "rem_abc", userId: 7, approvalId: "appr_123" });
+  assert.deepEqual(parseJobWorkflowPayload({ jobId: "job_abc", userId: 7, occurrenceId: "run-1", approvalId: "appr_123" }), { jobId: "job_abc", userId: 7, occurrenceId: "run-1", approvalId: "appr_123" });
+  assert.throws(() => parseReminderWorkflowPayload({ reminderId: "rem_abc", userId: 7, approvalId: "other" }), /Invalid approvalId/);
 });

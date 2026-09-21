@@ -35,6 +35,26 @@ export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt 
   return workflow.workflowRunId;
 }
 
+/** Resume one waiting autonomous occurrence immediately after its approval. */
+export async function enqueueAutonomyApprovalResume(input: { userId: number; kind: "reminder" | "job"; sourceId: string; occurrenceId?: string; approvalId: string }): Promise<string> {
+  if (!config.webhookUrl) throw new Error("Autonomous approval resume requires WEBHOOK_URL and QStash configuration");
+  const path = input.kind === "reminder" ? "/workflows/reminder" : "/workflows/job";
+  const body = input.kind === "reminder"
+    ? { reminderId: input.sourceId, userId: input.userId, approvalId: input.approvalId }
+    : { jobId: input.sourceId, userId: input.userId, occurrenceId: input.occurrenceId, approvalId: input.approvalId };
+  const workflow = await workflowClient().trigger({
+    url: `${config.webhookUrl.replace(/\/+$/, "")}${path}`,
+    body,
+    delay: 1,
+    workflowRunId: `autonomy-approval-${input.approvalId}`,
+    retries: 3,
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+    flowControl: { key: `chusky-autonomy-user-${input.userId}`, parallelism: 1, rate: 1, period: "1s" },
+  });
+  return workflow.workflowRunId;
+}
+
 export async function notifyTriggerApproval(approvalId: string, approved: boolean, triggerEventId?: string): Promise<void> {
   const event = triggerEventId ? await getTriggerEvent(triggerEventId) : undefined;
   await workflowClient().notify({

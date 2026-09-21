@@ -120,7 +120,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
     listAttentionRecords(userId, "standing_order", { limit: 100, status: "active" }),
   ]);
   const actionableLoops = (loops as OpenLoopRecord[])
-    .filter((item) => ["open", "waiting", "blocked"].includes(item.status) && (!item.snoozedUntil || item.snoozedUntil <= now))
+    .filter((item) => ["open", "in_progress", "waiting", "blocked"].includes(item.status) && (!item.snoozedUntil || item.snoozedUntil <= now))
     .sort((a, b) => (b.priority + (b.dueAt && b.dueAt <= now ? 0.25 : 0)) - (a.priority + (a.dueAt && a.dueAt <= now ? 0.25 : 0)))
     .slice(0, MAX_LOOPS);
   const actionableCandidates = (candidates as AttentionCandidateRecord[])

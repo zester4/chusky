@@ -6,6 +6,7 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
+import { getJobOccurrence, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
@@ -29,7 +30,7 @@ import { XchatAdapter } from "./channels/xchat.js";
 import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./channels/xchatSetup.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
-import { enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
@@ -63,6 +64,7 @@ import { mcpClient } from "./mcp/client.js";
 import { isMeetingRepresentativeEmailTool, meetingConversationToolAllowlist, meetingRepresentativeCopilotInstructions, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
 import { buildMeetingFollowThroughPrompt, buildMeetingOutcomeChunkPrompt, buildMeetingOutcomePrompt, buildMeetingOutcomeSynthesisPrompt, splitMeetingOutcomeTranscript, MEETING_OUTCOME_MAX_TRANSCRIPT_CHUNKS, executeScheduledMeetingFollowUp, deliverMeetingOutcomeOnce, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 import { parseGoogleCalendarMeetingTrigger, sealCalendarMeetingUrl } from "./meetings/calendar.js";
+import { buildAutonomyContextBundle, contextBundleToPrompt } from "./autonomy/context.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -1608,6 +1610,15 @@ async function main(): Promise<void> {
         return c.json({ ok: true, denied: true });
       }
       if (!(await claimApproval(device.userId, id))) return c.json({ ok: false, error: "approval could not be claimed" }, 409);
+      if (approval.autonomyResume) {
+        try {
+          const workflowRunId = await enqueueAutonomyApprovalResume({ userId: device.userId, ...approval.autonomyResume, approvalId: approval.id });
+          posthog?.capture({ distinctId: String(device.userId), event: "tool_approval_resolved", properties: { decision: "approve", tool_slug: approval.toolSlug, autonomous_resume: true } });
+          return c.json({ ok: true, resumed: true, workflowRunId, text: "Approved. The waiting autonomous run is resuming now." });
+        } catch (error) {
+          return c.json({ ok: false, error: `approval saved but autonomous resume could not be queued: ${error instanceof Error ? error.message : String(error)}` }, 503);
+        }
+      }
       try {
         return c.json(await withCliLock(device.userId, c.req.raw.signal, async () => {
           if (approval.toolSlug === "CHUCK_START_PHONE_CALL") {
@@ -1709,7 +1720,38 @@ async function main(): Promise<void> {
     app.post("/workflows/reminder", serveWorkflow(async (workflow) => {
       let payload;
       try { payload = parseReminderWorkflowPayload(workflow.requestPayload); } catch (error) { throw new WorkflowNonRetryableError(error instanceof Error ? error.message : "Invalid reminder workflow payload"); }
-      await workflow.run("deliver-reminder", () => deliverReminder(payload, { getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery, sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options), sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }) }));
+      await workflow.run("deliver-reminder", () => deliverReminder(payload, {
+        getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
+        runReminder: async (reminder) => withCliLock(payload.userId, undefined, async () => {
+          const session = await getSession(payload.userId);
+          const context = await buildAutonomyContextBundle(payload.userId, { objective: reminder.text, links: reminder.links, snapshot: reminder.contextSnapshot });
+          try {
+            const result = await runAgent(payload.userId, reminder.text, session.history, session.model, undefined, undefined, undefined, payload.approvalId,
+              reminder.deliveryTarget ? { accountId: `account_${payload.userId}`, provider: reminder.deliveryTarget.provider, conversationId: reminder.deliveryTarget.conversationId, deliveryTarget: reminder.deliveryTarget } : undefined,
+              { runId: `reminder_run_${reminder.id}`, autonomyResume: { kind: "reminder", sourceId: reminder.id }, instructions: `This is a bounded autonomous ${reminder.mode ?? "check_in"} action. Use the linked context as data, verify preconditions, and report the exact next action. Context bundle:\n${contextBundleToPrompt(context)}` });
+            await appendMessages(payload.userId, [{ role: "user", content: `[Autonomous reminder ${reminder.id}] ${reminder.text}` }, { role: "assistant", content: result.text }]);
+            if (result.cost) await addUsage(payload.userId, result.cost);
+            return { text: result.text, cost: result.cost };
+          } catch (error) {
+            if (error instanceof ApprovalRequiredError) return { text: "", status: "waiting" as const, nextAction: `Approve ${error.toolSlug} (${error.approvalId}) before this autonomous action can continue.`, waitReason: `Approval required for ${error.toolSlug}.` };
+            throw error;
+          }
+        }),
+        rescheduleReminder: async (reminder, runAt) => {
+          const queued = await workflowClient().trigger({
+            url: resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows"),
+            body: { reminderId: reminder.id, userId: payload.userId, attemptId: String(runAt) },
+            delay: Math.max(1, Math.ceil((runAt - Date.now()) / 1000)),
+            workflowRunId: `${reminder.id}-${runAt}`,
+            retries: 3,
+            retryDelay: "1000 * (1 + retried)",
+            ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+          });
+          await updateReminder(payload.userId, reminder.id, { status: "scheduled", runAt, workflowRunId: queued.workflowRunId, deliveryError: undefined });
+        },
+        sendMessage: (chatId, text, options) => bot.api.sendMessage(chatId, text, options),
+        sendChannelMessage: (target, text, idempotencyKey) => channelGateway.send({ accountId: `account_${payload.userId}`, userId: payload.userId, target, text, idempotencyKey, kind: "notification" }),
+      }));
     }, { url: resolveWorkflowEndpoint(config.reminderWorkflowUrl, config.webhookUrl, "/workflows/reminder", "Reminder workflows") }));
 
     // QStash failure callbacks are authenticated separately from Workflow
@@ -1748,12 +1790,14 @@ async function main(): Promise<void> {
       const occurrenceId = workflow.workflowRunId ?? `run-${Date.now()}`;
       await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, {
         getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
+        getJobOccurrence, createJobOccurrence, updateJobOccurrence,
         runAgent: async (job) => withCliLock(payload.userId, undefined, async () => {
           const session = await getSession(payload.userId);
+          const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });
           try {
              const result = await runAgent(payload.userId, job.text, session.history, session.model, undefined, undefined, undefined, undefined,
                job.deliveryTarget ? { accountId: `account_${payload.userId}`, provider: job.deliveryTarget.provider, conversationId: job.deliveryTarget.conversationId, deliveryTarget: job.deliveryTarget } : undefined,
-               { runId: `job_run_${job.id}_${occurrenceId}` });
+               { runId: `job_run_${job.id}_${occurrenceId}`, autonomyResume: { kind: "job", sourceId: job.id, occurrenceId }, ...(job.mode && job.mode !== "notify" ? { instructions: `This is a bounded autonomous ${job.mode} occurrence. Verify preconditions and continue from the linked context; do not restart completed work. Context bundle:\n${contextBundleToPrompt(context)}` } : {}) });
             await appendMessages(payload.userId, [
               { role: "user", content: `[Scheduled job ${job.id}] ${job.text}` },
               { role: "assistant", content: result.text },
@@ -1817,6 +1861,7 @@ async function main(): Promise<void> {
             return { text, suppressDelivery: noAction };
           }
           const session = await getSession(payload.userId);
+          const context = await buildAutonomyContextBundle(payload.userId, { objective: job.text, links: job.links, snapshot: job.contextSnapshot });
           try {
             // This is intentionally a direct specialist invocation. The
             // schedule's persisted binding is the authority for the worker,
@@ -1834,7 +1879,7 @@ async function main(): Promise<void> {
               duration: binding.duration,
                budgetSeconds: binding.budgetSeconds,
                context: job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : undefined,
-             }, { model: binding.model, historySummary: session.summaries.slice(-2).join("\n"), deliveryTarget: job.deliveryTarget });
+             }, { model: binding.model, historySummary: `${session.summaries.slice(-2).join("\n")}\nAutonomy context bundle:\n${contextBundleToPrompt(context)}`.slice(-12_000), deliveryTarget: job.deliveryTarget });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
               const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
               return { text: `The scheduled ${binding.worker} task paused for a verified capability request. Handoff ${result.handoffRecord.id} is waiting; continuation ${continuation.workflowRunId} was queued.` };

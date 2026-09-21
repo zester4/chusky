@@ -32,6 +32,7 @@ import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
+import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, type ExternalActionClaim } from "./autonomy/actions.js";
 import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
@@ -700,6 +701,8 @@ export interface AgentRunOptions {
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
   missionId?: string;
+  /** Link approval recovery to the exact autonomous reminder/job occurrence. */
+  autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
 
 const VOICE_HISTORY_MAX_MESSAGES = 12;
@@ -1142,6 +1145,7 @@ export async function runAgent(
       let execResult: unknown;
       let toolFailed = false;
       let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
+      let externalClaim: ExternalActionClaim | undefined;
       try {
         // A tool must be in the exact tool list shown to the model. In
         // particular, meta-tools are not implicit grants when an allowlist is
@@ -1188,6 +1192,7 @@ export async function runAgent(
             request: typeof userMessage === "string" ? userMessage : "User request with attachment",
             history,
             model,
+            ...(options?.autonomyResume ? { autonomyResume: options.autonomyResume } : {}),
           });
           await persistRun("waiting_approval", "run.approval_requested", undefined, { approvalId: approval.id, tool: slug, callId: call.id, round });
           throw new ApprovalRequiredError(approval.id, slug, args);
@@ -1198,10 +1203,23 @@ export async function runAgent(
         // current proposal: otherwise an older/incomplete approval can bypass
         // the native schema and reach a provider with missing fields.
         if (slug.startsWith("CHUCK_") && executionArgs !== args) validateNativeToolArguments(slug, executionArgs);
+        const autonomySource = options?.autonomyResume
+          ? { kind: options.autonomyResume.kind, id: options.autonomyResume.sourceId, occurrenceId: options.autonomyResume.occurrenceId }
+          : options?.missionId
+            ? { kind: "mission", id: options.missionId }
+            : options?.taskId
+              ? { kind: "task", id: options.taskId }
+              : undefined;
+        if (autonomySource && isExternalWriteTool(slug)) {
+          externalClaim = await beginExternalAction({ userId, provider: slug.startsWith("MCP_") ? "mcp" : slug.startsWith("CHUCK_") ? "native" : "composio", tool: slug, args: executionArgs, runId: options?.runId ?? durableRunId, source: autonomySource });
+          if (externalClaim.state === "in_flight") throw new Error(`Autonomous action ${slug} is already in flight for this occurrence. Verify provider state before retrying.`);
+        }
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
-        if (slug === "CHUCK_EMAIL_ARTIFACT") {
+        if (externalClaim?.state === "succeeded") {
+          execResult = { idempotentReplay: true, priorResult: externalClaim.receipt?.resultSummary ?? "The same external action was already confirmed successful." };
+        } else if (slug === "CHUCK_EMAIL_ARTIFACT") {
           execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
         } else if (slug === "CHUCK_GENERATE_IMAGE") {
           const imageRuntime = currentImageRuntime(userMessage);
@@ -1349,10 +1367,12 @@ export async function runAgent(
           : JSON.stringify(execResult) ?? "undefined";
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
+        if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result);
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) throw e;
         if (signal?.aborted) throw e;
+        if (externalClaim?.state === "new") await failExternalAction(userId, externalClaim.logicalActionId, e instanceof Error ? e.message : String(e)).catch(() => undefined);
         toolFailed = true;
         if (String(e).includes("Tool arguments are malformed or truncated JSON")) malformedToolCallPending = true;
         logger.warn(safeToolAudit({ tool: slug, args: effectiveAuditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");

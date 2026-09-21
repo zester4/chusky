@@ -26,7 +26,7 @@ import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
-import { notifyTriggerApproval } from "./triggerWorkflow.js";
+import { notifyTriggerApproval, enqueueAutonomyApprovalResume } from "./triggerWorkflow.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
@@ -2160,11 +2160,11 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (action === "reminders") {
-        const reminders = (await listReminders(ctx.from!.id)).filter((reminder) => reminder.status === "scheduled").sort((a, b) => a.runAt - b.runAt);
+        const reminders = (await listReminders(ctx.from!.id)).filter((reminder) => reminder.status === "scheduled" || reminder.status === "waiting").sort((a, b) => a.runAt - b.runAt);
         const card: TelegramCard = {
           title: "⏰ Upcoming reminders",
           body: reminders.length
-            ? reminders.slice(0, 8).map((reminder) => `${new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} · ${reminder.text}`)
+            ? reminders.slice(0, 8).map((reminder) => `${reminder.status === "waiting" ? "Waiting" : new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" })} · ${reminder.text}`)
             : ["No reminders are scheduled."],
           detail: reminders.length ? "Ask Chusky to change or cancel a reminder, for example: “remind me tomorrow at 9am to follow up with Sam.”" : "Ask Chusky to set one, for example: “remind me tomorrow at 9am to follow up with Sam.”",
           buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
@@ -2415,8 +2415,16 @@ export function registerHandlers(bot: Bot): void {
           return;
         }
         if (command === "jobs") {
+          const [action, jobId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+          if (action && ["pause", "resume", "run"].includes(action) && jobId) {
+            const slug = action === "pause" ? "CHUCK_PAUSE_JOB" : action === "resume" ? "CHUCK_RESUME_JOB" : "CHUCK_RUN_JOB_NOW";
+            validateNativeToolArguments(slug as any, { id: jobId });
+            const result = await nativeTool(uid, slug, { id: jobId });
+            await replyHtml(ctx, `<b>Recurring job ${escapeTelegramHtml(action === "run" ? "started" : `${action}d`)}</b>\n\n${escapeTelegramHtml(typeof result === "string" ? result : JSON.stringify(result))}`);
+            return;
+          }
           const jobs = await listJobs(uid);
-          await replyHtml(ctx, jobs.length ? `<b>Recurring schedules</b>\n\n${jobs.map((job) => `• <code>${escapeTelegramHtml(job.id)}</code> · ${escapeTelegramHtml(job.cron)}\n  ${escapeTelegramHtml(job.text)}`).join("\n")}` : "No active recurring schedules.");
+          await replyHtml(ctx, jobs.length ? `<b>Recurring schedules</b>\n\n${jobs.map((job) => `• <code>${escapeTelegramHtml(job.id)}</code> · <b>${escapeTelegramHtml(job.status)}</b> · ${escapeTelegramHtml(job.cron)}\n  ${escapeTelegramHtml(job.text)}`).join("\n")}\n\n<b>Controls</b>\n<code>/jobs pause &lt;job-id&gt;</code>\n<code>/jobs resume &lt;job-id&gt;</code>\n<code>/jobs run &lt;job-id&gt;</code>` : "No recurring schedules.");
           return;
         }
         if (command === "tasks") {
@@ -2579,6 +2587,16 @@ export function registerHandlers(bot: Bot): void {
         // post-ack Telegram error and give the owner a recoverable explanation.
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id }, "Trigger approval workflow notification failed");
         await editApprovalOutcome(ctx, "⚠️ Approval saved, but the original triggered workflow is no longer active. Please retry the trigger.");
+      }
+      return;
+    }
+    if (approval.autonomyResume) {
+      try {
+        await enqueueAutonomyApprovalResume({ userId: ctx.from.id, ...approval.autonomyResume, approvalId: approval.id });
+        await ctx.reply("▶️ Approved. The waiting autonomous run is resuming now; I’ll send its result when this slice completes.");
+      } catch (error) {
+        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id }, "Autonomous approval resume enqueue failed");
+        await ctx.reply("⚠️ Approval was saved, but the autonomous run could not be resumed yet. Retry the run from its status controls.");
       }
       return;
     }

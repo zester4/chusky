@@ -37,6 +37,7 @@ import { hasMeetingMissionInput } from "./meetings/mission.js";
 import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 import type { TaskWaitRequest } from "./types.js";
 import { createTaskWaitRequest } from "./taskWait.js";
+import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -460,14 +461,43 @@ function durableReminderTarget(target: NativeToolRuntime["deliveryTarget"]): Rem
   };
 }
 
+function autonomyMode(args: Record<string, unknown>, fallback: AutonomyMode = "notify", allowWait = false): AutonomyMode {
+  const candidate = typeof args.mode === "string" ? args.mode : fallback;
+  const allowed: AutonomyMode[] = allowWait ? ["notify", "check_in", "act", "wait_until"] : ["notify", "check_in", "act"];
+  return allowed.includes(candidate as AutonomyMode) ? candidate as AutonomyMode : fallback;
+}
+
+function autonomyLinks(args: Record<string, unknown>): AutonomyLinks | undefined {
+  if (!args.links || typeof args.links !== "object" || Array.isArray(args.links)) return undefined;
+  const input = args.links as Record<string, unknown>;
+  const allowed = ["taskId", "missionId", "missionStepId", "openLoopId", "attentionCandidateId", "projectId", "meetingId", "conversationId"] as const;
+  const links: AutonomyLinks = {};
+  for (const key of allowed) if (typeof input[key] === "string" && input[key].trim()) links[key] = input[key].trim().slice(0, 160);
+  return Object.keys(links).length ? links : undefined;
+}
+
+function boundedAutonomyList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).slice(0, 8).map((item) => item.trim().slice(0, 500));
+}
+
 export async function setReminder(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<ReminderRecord> {
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
+  const mode = autonomyMode(args, "notify", true);
+  const links = autonomyLinks(args);
   const reminder: ReminderRecord = {
     id: `rem_${randomUUID()}`,
     userId,
     text: text(args.text),
     runAt: futureTimestamp(args),
     status: "scheduled",
+    ...(mode !== "notify" ? { mode } : {}),
+    ...(links ? { links } : {}),
+    ...(typeof args.nextAction === "string" && args.nextAction.trim() ? { nextAction: text(args.nextAction) } : {}),
+    ...(mode === "wait_until" && Number.isFinite(Number(args.pollEverySeconds)) ? { pollEverySeconds: Math.max(60, Math.min(7 * 24 * 60 * 60, Math.floor(Number(args.pollEverySeconds)))) } : {}),
+    ...(boundedAutonomyList(args.preconditions) ? { preconditions: boundedAutonomyList(args.preconditions) } : {}),
+    ...(boundedAutonomyList(args.postconditions) ? { postconditions: boundedAutonomyList(args.postconditions) } : {}),
+    ...(mode !== "notify" ? { contextSnapshot: { capturedAt: Date.now(), objective: text(args.text), ...(links ? { links } : {}), source: "user" as const } } : {}),
     ...(deliveryTarget ? { deliveryTarget } : {}),
     createdAt: Date.now(),
   };
@@ -507,7 +537,9 @@ export async function scheduleJob(userId: number, args: Record<string, unknown>,
     ? { worker: runtime.worker, objective: jobText, ...runtime.workerBinding }
     : undefined;
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
-  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: jobText, cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", ...(workerBinding ? { workerBinding } : {}), ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now() };
+  const mode = autonomyMode(args, workerBinding ? "act" : "notify");
+  const links = autonomyLinks(args);
+  const job: JobRecord = { id: `job_${randomUUID()}`, userId, text: jobText, cron, scheduleId: `chuck-${userId}-${randomUUID()}`, status: "active", ...(mode !== "notify" ? { mode } : {}), ...(links ? { links } : {}), ...(typeof args.nextAction === "string" && args.nextAction.trim() ? { nextAction: text(args.nextAction) } : {}), ...(boundedAutonomyList(args.preconditions) ? { preconditions: boundedAutonomyList(args.preconditions) } : {}), ...(boundedAutonomyList(args.postconditions) ? { postconditions: boundedAutonomyList(args.postconditions) } : {}), ...(mode !== "notify" ? { contextSnapshot: { capturedAt: Date.now(), objective: jobText, ...(links ? { links } : {}), source: "user" as const } } : {}), ...(workerBinding ? { workerBinding } : {}), ...(deliveryTarget ? { deliveryTarget } : {}), createdAt: Date.now() };
   const client = new QStashClient({ token: requireQStash() });
   await addJob(userId, job);
   try { await client.schedules.create({
@@ -542,6 +574,54 @@ export async function cancelJob(userId: number, id: string): Promise<string> {
   return `Recurring job ${id} cancelled.`;
 }
 
+export async function pauseJob(userId: number, id: string): Promise<string> {
+  const job = await getJob(userId, id);
+  if (!job) throw new Error("Job not found or not owned by you");
+  if (job.status === "cancelled") throw new Error("Cannot pause a cancelled job");
+  if (job.status === "paused") return `Recurring job ${id} is already paused.`;
+  await updateJob(userId, id, { status: "paused", deliveryError: undefined });
+  try {
+    await new QStashClient({ token: requireQStash() }).schedules.pause({ schedule: job.scheduleId });
+  } catch (error) {
+    await updateJob(userId, id, { status: "active", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw new Error(`Recurring job was not paused: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return `Recurring job ${id} paused.`;
+}
+
+export async function resumeJob(userId: number, id: string): Promise<string> {
+  const job = await getJob(userId, id);
+  if (!job) throw new Error("Job not found or not owned by you");
+  if (job.status === "cancelled") throw new Error("Cannot resume a cancelled job");
+  if (job.status === "active") return `Recurring job ${id} is already active.`;
+  await updateJob(userId, id, { status: "active", deliveryError: undefined });
+  try {
+    await new QStashClient({ token: requireQStash() }).schedules.resume({ schedule: job.scheduleId });
+  } catch (error) {
+    await updateJob(userId, id, { status: "paused", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw new Error(`Recurring job was not resumed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return `Recurring job ${id} resumed.`;
+}
+
+export async function runJobNow(userId: number, id: string): Promise<{ jobId: string; occurrenceId: string; workflowRunId: string }> {
+  const job = await getJob(userId, id);
+  if (!job) throw new Error("Job not found or not owned by you");
+  if (job.status !== "active") throw new Error("Resume the job before running it");
+  const occurrenceId = `manual-${randomUUID()}`;
+  const workflow = await new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined }).trigger({
+    url: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
+    body: { jobId: job.id, userId, occurrenceId },
+    delay: 1,
+    workflowRunId: `job-${job.id}-${occurrenceId}`,
+    retries: 3,
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+    flowControl: { key: `chusky-job-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
+  });
+  return { jobId: job.id, occurrenceId, workflowRunId: workflow.workflowRunId };
+}
+
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   if (slug === "CHUCK_REQUEST_ADDITIONAL_TOOLS" && !runtime.worker) {
     throw new Error("CHUCK_REQUEST_ADDITIONAL_TOOLS is reserved for specialist workers; Chusky must search and verify the capability directly.");
@@ -559,6 +639,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args, runtime);
     case "CHUCK_ATTENTION_PULSE": return configureAttentionPulse(userId, args, runtime);
     case "CHUCK_LIST_JOBS": return listJobs(userId);
+    case "CHUCK_PAUSE_JOB": return pauseJob(userId, text(args.id));
+    case "CHUCK_RESUME_JOB": return resumeJob(userId, text(args.id));
+    case "CHUCK_RUN_JOB_NOW": return runJobNow(userId, text(args.id));
     case "CHUCK_CANCEL_JOB": return cancelJob(userId, text(args.id));
     case "CHUCK_SCRATCHPAD_WRITE": await writeScratchpad(userId, text(args.key), text(args.content)); return { saved: true, key: args.key };
     case "CHUCK_SCRATCHPAD_READ": return readScratchpad(userId, args.query ? String(args.query) : undefined);

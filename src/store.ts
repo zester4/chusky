@@ -21,6 +21,7 @@ import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
+import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -42,6 +43,12 @@ export interface UserSession {
   triggerIds: string[];
   reminders: ReminderRecord[];
   jobs: JobRecord[];
+  /** Bounded durable execution records for autonomous reminders, jobs, and missions. */
+  autonomyRuns?: AutonomousRunRecord[];
+  /** Per-schedule occurrence ledger; prevents duplicate work across retries/restarts. */
+  jobOccurrences?: JobOccurrenceRecord[];
+  /** Durable write receipts used to prevent replaying autonomous external actions. */
+  externalActions?: ExternalActionReceipt[];
   scratchpad: Record<string, ScratchpadEntry>;
   memories: MemoryFact[];
   imageAssets: ImageAsset[];
@@ -703,11 +710,37 @@ export interface ReminderRecord {
   text: string;
   runAt: number;
   workflowRunId?: string;
-  status: "scheduled" | "sent" | "cancelled" | "failed";
+  status: "scheduled" | "waiting" | "sent" | "cancelled" | "failed";
+  /** notify preserves legacy delivery; other modes execute bounded agent work. */
+  mode?: AutonomyMode;
+  links?: AutonomyLinks;
+  contextSnapshot?: AutonomyContextSnapshot;
+  preconditions?: string[];
+  postconditions?: string[];
+  nextAction?: string;
+  /** Optional bounded polling interval for wait_until conditions. */
+  pollEverySeconds?: number;
   /** Durable channel destination captured when the reminder is created. */
   deliveryTarget?: ReminderDeliveryTarget;
   deliveryError?: string;
   createdAt: number;
+}
+
+export interface ExternalActionReceipt {
+  id: string;
+  userId: number;
+  provider: "composio" | "mcp" | "native";
+  tool: string;
+  account?: string;
+  argumentsHash: string;
+  logicalActionId: string;
+  occurrenceId?: string;
+  status: "started" | "succeeded" | "failed";
+  resultSummary?: string;
+  providerId?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface ReminderDeliveryTarget {
@@ -743,7 +776,14 @@ export interface JobRecord {
   text: string;
   cron: string;
   scheduleId: string;
-  status: "active" | "cancelled";
+  status: "active" | "paused" | "cancelled";
+  /** notify sends the configured text; act/check_in execute a bounded agent slice. */
+  mode?: AutonomyMode;
+  links?: AutonomyLinks;
+  contextSnapshot?: AutonomyContextSnapshot;
+  preconditions?: string[];
+  postconditions?: string[];
+  nextAction?: string;
   /** Standard recurring work or the owner-enabled attention governor. */
   kind?: "standard" | "attention_pulse";
   attentionPulse?: { lastDigestKey?: string; lastDeliveredAt?: number; lastDeliveredDayUtc?: string; deliveriesToday?: number };
@@ -820,7 +860,7 @@ export interface OpenLoopRecord {
   id: string; userId: number; title: string; objective?: string; source?: string;
   priority: number; confidence: number; dueAt?: number; snoozedUntil?: number;
   nextAction?: string; waitingFor?: string; relatedEntityIds?: string[];
-  status: "open" | "waiting" | "blocked" | "snoozed" | "completed" | "dismissed";
+  status: "open" | "in_progress" | "waiting" | "blocked" | "snoozed" | "completed" | "dismissed";
   createdAt: number; updatedAt: number;
 }
 export interface AttentionCandidateRecord {
@@ -874,6 +914,8 @@ export interface ApprovalRecord {
   expiresAt: number;
   /** Present for a specialist proposal; the Chusky supervisor resolves it. */
   handoffId?: string;
+  /** A bounded durable run that can be resumed immediately after approval. */
+  autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
 }
 
 export interface TriggerEventRecord {
@@ -2944,7 +2986,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -3077,6 +3119,102 @@ function normalizeRecallSpeakerEvents(value: unknown): RecallMeetingSpeakerEvent
     .slice(-200);
 }
 
+const AUTONOMY_MODES: AutonomyMode[] = ["notify", "check_in", "act", "wait_until"];
+const AUTONOMY_STATUSES = ["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"] as const;
+
+function normalizeAutonomyLinks(value: unknown): AutonomyLinks | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const keys: Array<keyof AutonomyLinks> = ["taskId", "missionId", "missionStepId", "openLoopId", "attentionCandidateId", "projectId", "meetingId", "conversationId"];
+  const links: AutonomyLinks = {};
+  for (const key of keys) {
+    if (typeof input[key] === "string" && input[key].trim()) links[key] = input[key].trim().slice(0, 160);
+  }
+  return Object.keys(links).length ? links : undefined;
+}
+
+function normalizeContextSnapshot(value: unknown): AutonomyContextSnapshot | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (typeof input.objective !== "string" || !input.objective.trim()) return undefined;
+  const source = input.source === "checkpoint" || input.source === "user" || input.source === "system" ? input.source : "live";
+  return {
+    capturedAt: typeof input.capturedAt === "number" && Number.isFinite(input.capturedAt) ? input.capturedAt : Date.now(),
+    objective: input.objective.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 2_000),
+    ...(typeof input.summary === "string" && input.summary.trim() ? { summary: input.summary.slice(0, 4_000) } : {}),
+    ...(typeof input.nextAction === "string" && input.nextAction.trim() ? { nextAction: input.nextAction.slice(0, 1_000) } : {}),
+    ...(normalizeAutonomyLinks(input.links) ? { links: normalizeAutonomyLinks(input.links) } : {}),
+    ...(typeof input.freshnessMs === "number" && Number.isFinite(input.freshnessMs) ? { freshnessMs: Math.max(0, Math.min(input.freshnessMs, 7 * 24 * 60 * 60 * 1_000)) } : {}),
+    source,
+  };
+}
+
+function normalizeAutonomyRun(value: unknown, uid: number): AutonomousRunRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input.userId !== uid || typeof input.id !== "string" || typeof input.sourceId !== "string" || typeof input.objective !== "string") return undefined;
+  if (!AUTONOMY_MODES.includes(input.mode as AutonomyMode) || !AUTONOMY_STATUSES.includes(input.status as typeof AUTONOMY_STATUSES[number])) return undefined;
+  return {
+    id: input.id.slice(0, 160), userId: uid,
+    kind: input.kind === "job" || input.kind === "mission" || input.kind === "task" || input.kind === "pulse" ? input.kind : "reminder",
+    sourceId: input.sourceId.slice(0, 160),
+    ...(typeof input.occurrenceId === "string" ? { occurrenceId: input.occurrenceId.slice(0, 160) } : {}),
+    status: input.status as AutonomousRunRecord["status"], mode: input.mode as AutonomyMode,
+    idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey.slice(0, 240) : `${input.id}:${input.sourceId}`,
+    objective: input.objective.slice(0, 2_000),
+    ...(normalizeContextSnapshot(input.context) ? { context: normalizeContextSnapshot(input.context) } : {}),
+    ...(typeof input.nextAction === "string" ? { nextAction: input.nextAction.slice(0, 1_000) } : {}),
+    ...(typeof input.waitReason === "string" ? { waitReason: input.waitReason.slice(0, 1_000) } : {}),
+    ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
+    ...(typeof input.cost === "number" && Number.isFinite(input.cost) ? { cost: Math.max(0, input.cost) } : {}),
+    ...(typeof input.toolCalls === "number" && Number.isFinite(input.toolCalls) ? { toolCalls: Math.max(0, Math.floor(input.toolCalls)) } : {}),
+    ...(typeof input.startedAt === "number" ? { startedAt: input.startedAt } : {}),
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(),
+    updatedAt: typeof input.updatedAt === "number" ? input.updatedAt : Date.now(),
+    version: typeof input.version === "number" && Number.isSafeInteger(input.version) ? Math.max(0, input.version) : 0,
+  };
+}
+
+function normalizeJobOccurrence(value: unknown, uid: number): JobOccurrenceRecord | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input.userId !== uid || typeof input.id !== "string" || typeof input.jobId !== "string" || typeof input.occurrenceId !== "string") return undefined;
+  if (!AUTONOMY_MODES.includes(input.mode as AutonomyMode) || !AUTONOMY_STATUSES.includes(input.status as typeof AUTONOMY_STATUSES[number])) return undefined;
+  return {
+    id: input.id.slice(0, 160), userId: uid, jobId: input.jobId.slice(0, 160), occurrenceId: input.occurrenceId.slice(0, 240),
+    status: input.status as JobOccurrenceRecord["status"], mode: input.mode as AutonomyMode,
+    idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey.slice(0, 240) : `${input.jobId}:${input.occurrenceId}`,
+    ...(normalizeContextSnapshot(input.context) ? { context: normalizeContextSnapshot(input.context) } : {}),
+    ...(typeof input.result === "string" ? { result: input.result.slice(0, 8_000) } : {}),
+    ...(typeof input.nextAction === "string" ? { nextAction: input.nextAction.slice(0, 1_000) } : {}),
+    ...(typeof input.waitReason === "string" ? { waitReason: input.waitReason.slice(0, 1_000) } : {}),
+    ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
+    ...(typeof input.cost === "number" && Number.isFinite(input.cost) ? { cost: Math.max(0, input.cost) } : {}),
+    ...(typeof input.toolCalls === "number" && Number.isFinite(input.toolCalls) ? { toolCalls: Math.max(0, Math.floor(input.toolCalls)) } : {}),
+    ...(typeof input.startedAt === "number" ? { startedAt: input.startedAt } : {}),
+    ...(typeof input.completedAt === "number" ? { completedAt: input.completedAt } : {}),
+    createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(),
+    updatedAt: typeof input.updatedAt === "number" ? input.updatedAt : Date.now(),
+    version: typeof input.version === "number" && Number.isSafeInteger(input.version) ? Math.max(0, input.version) : 0,
+  };
+}
+
+function normalizeExternalAction(value: unknown, uid: number): ExternalActionReceipt | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  if (input.userId !== uid || typeof input.id !== "string" || typeof input.tool !== "string" || typeof input.argumentsHash !== "string" || typeof input.logicalActionId !== "string") return undefined;
+  if (input.provider !== "composio" && input.provider !== "mcp" && input.provider !== "native") return undefined;
+  if (input.status !== "started" && input.status !== "succeeded" && input.status !== "failed") return undefined;
+  return {
+    id: input.id.slice(0, 160), userId: uid, provider: input.provider, tool: input.tool.slice(0, 180),
+    ...(typeof input.account === "string" ? { account: input.account.slice(0, 160) } : {}), argumentsHash: input.argumentsHash.slice(0, 128), logicalActionId: input.logicalActionId.slice(0, 240),
+    ...(typeof input.occurrenceId === "string" ? { occurrenceId: input.occurrenceId.slice(0, 240) } : {}), status: input.status,
+    ...(typeof input.resultSummary === "string" ? { resultSummary: input.resultSummary.slice(0, 8_000) } : {}), ...(typeof input.providerId === "string" ? { providerId: input.providerId.slice(0, 240) } : {}), ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
+    createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(), updatedAt: typeof input.updatedAt === "number" ? input.updatedAt : Date.now(),
+  };
+}
+
 export async function getSession(uid: number): Promise<UserSession> {
   const raw = await backend.getSession(uid) as UserSession & { faceTimeCalls?: Array<Record<string, unknown>> };
   // Read and migrate the old persisted field once, without carrying the obsolete
@@ -3117,7 +3255,7 @@ export async function getSession(uid: number): Promise<UserSession> {
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
     return true;
   }).slice(-20) : [];
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
@@ -4577,7 +4715,7 @@ export async function addReminder(uid: number, reminder: ReminderRecord): Promis
 }
 
 export async function listReminders(uid: number): Promise<ReminderRecord[]> {
-  return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled").sort((a, b) => a.runAt - b.runAt);
+  return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting").sort((a, b) => a.runAt - b.runAt);
 }
 
 export async function getReminder(uid: number, id: string): Promise<ReminderRecord | undefined> {
@@ -4599,7 +4737,7 @@ export async function addJob(uid: number, job: JobRecord): Promise<void> {
 }
 
 export async function listJobs(uid: number): Promise<JobRecord[]> {
-  return (await backend.getJobs(uid)).filter((j) => j.status === "active");
+  return (await backend.getJobs(uid)).filter((j) => j.status === "active" || j.status === "paused");
 }
 
 export async function listAllJobs(uid: number): Promise<JobRecord[]> {
@@ -4617,6 +4755,115 @@ export async function updateJob(uid: number, id: string, patch: Partial<JobRecor
   Object.assign(j, patch);
   await backend.saveJobs(uid, jobs);
   return true;
+}
+
+/** Read owner-scoped autonomous run history, newest first. */
+export async function listAutonomyRuns(uid: number, limit = 50): Promise<AutonomousRunRecord[]> {
+  const safeLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+  return (await getSession(uid)).autonomyRuns?.slice(-safeLimit).reverse() ?? [];
+}
+
+export async function getAutonomyRun(uid: number, id: string): Promise<AutonomousRunRecord | undefined> {
+  return (await getSession(uid)).autonomyRuns?.find((run) => run.id === id && run.userId === uid);
+}
+
+/**
+ * Persist a run with an optimistic version check. The check prevents an old
+ * QStash retry from overwriting a newer checkpoint when the same owner has
+ * multiple wakeups in flight.
+ */
+export async function saveAutonomyRun(record: AutonomousRunRecord, expectedVersion?: number): Promise<AutonomousRunRecord | undefined> {
+  const session = await getSession(record.userId);
+  const runs = session.autonomyRuns ?? [];
+  const current = runs.find((run) => run.id === record.id);
+  if (current && expectedVersion !== undefined && current.version !== expectedVersion) return undefined;
+  const next: AutonomousRunRecord = {
+    ...record,
+    userId: record.userId,
+    version: current ? current.version + 1 : Math.max(0, record.version),
+    updatedAt: Date.now(),
+  };
+  session.autonomyRuns = [...runs.filter((run) => run.id !== record.id), next].slice(-200);
+  await saveSession(record.userId, session);
+  return next;
+}
+
+export async function listJobOccurrences(uid: number, jobId?: string, limit = 50): Promise<JobOccurrenceRecord[]> {
+  const safeLimit = Math.max(1, Math.min(400, Math.floor(limit)));
+  return (await getSession(uid)).jobOccurrences
+    ?.filter((occurrence) => !jobId || occurrence.jobId === jobId)
+    .slice(-safeLimit)
+    .reverse() ?? [];
+}
+
+export async function getJobOccurrence(uid: number, jobId: string, occurrenceId: string): Promise<JobOccurrenceRecord | undefined> {
+  return (await getSession(uid)).jobOccurrences?.find((occurrence) => occurrence.userId === uid && occurrence.jobId === jobId && occurrence.occurrenceId === occurrenceId);
+}
+
+/** Create or return the durable occurrence ledger row for a scheduled run. */
+export async function createJobOccurrence(record: JobOccurrenceRecord): Promise<JobOccurrenceRecord> {
+  const session = await getSession(record.userId);
+  const occurrences = session.jobOccurrences ?? [];
+  const existing = occurrences.find((occurrence) => occurrence.jobId === record.jobId && occurrence.occurrenceId === record.occurrenceId);
+  if (existing) return existing;
+  session.jobOccurrences = [...occurrences, record].slice(-400);
+  await saveSession(record.userId, session);
+  return record;
+}
+
+export async function updateJobOccurrence(uid: number, id: string, patch: Partial<JobOccurrenceRecord>, expectedVersion?: number): Promise<JobOccurrenceRecord | undefined> {
+  const session = await getSession(uid);
+  const occurrences = session.jobOccurrences ?? [];
+  const current = occurrences.find((occurrence) => occurrence.id === id && occurrence.userId === uid);
+  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) return undefined;
+  const next: JobOccurrenceRecord = { ...current, ...patch, id: current.id, userId: uid, version: current.version + 1, updatedAt: Date.now() };
+  session.jobOccurrences = [...occurrences.filter((occurrence) => occurrence.id !== id), next].slice(-400);
+  await saveSession(uid, session);
+  return next;
+}
+
+/**
+ * Claim a scheduled occurrence after a short lease check. Redis delivery
+ * claims provide cross-process duplicate suppression; the persisted row makes
+ * the state inspectable and recoverable after a restart.
+ */
+export async function claimJobOccurrence(record: JobOccurrenceRecord, leaseMs = 5 * 60_000): Promise<{ occurrence: JobOccurrenceRecord; claimed: boolean }> {
+  const existing = await getJobOccurrence(record.userId, record.jobId, record.occurrenceId);
+  const now = Date.now();
+  if (existing && ["completed", "cancelled"].includes(existing.status)) return { occurrence: existing, claimed: false };
+  if (existing?.status === "running" && now - existing.updatedAt < leaseMs) return { occurrence: existing, claimed: false };
+  const claimed = await claimDelivery(`autonomy:occurrence:${record.userId}:${record.jobId}:${record.occurrenceId}`, leaseMs);
+  if (!claimed) return { occurrence: existing ?? record, claimed: false };
+  const next = existing ? await updateJobOccurrence(record.userId, existing.id, { status: "running", startedAt: existing.startedAt ?? now, error: undefined }, existing.version) : await createJobOccurrence({ ...record, status: "running", startedAt: now, updatedAt: now });
+  return { occurrence: next ?? existing ?? record, claimed: Boolean(next || existing) };
+}
+
+export async function getExternalAction(userId: number, logicalActionId: string): Promise<ExternalActionReceipt | undefined> {
+  return (await getSession(userId)).externalActions?.find((action) => action.userId === userId && action.logicalActionId === logicalActionId);
+}
+
+export async function saveExternalAction(record: ExternalActionReceipt): Promise<ExternalActionReceipt> {
+  const session = await getSession(record.userId);
+  const existing = (session.externalActions ?? []).find((action) => action.logicalActionId === record.logicalActionId);
+  if (existing && existing.status === "succeeded") return existing;
+  const next = { ...record, userId: record.userId, updatedAt: Date.now() };
+  session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== record.logicalActionId), next].slice(-400);
+  await saveSession(record.userId, session);
+  return next;
+}
+
+export async function updateExternalAction(userId: number, logicalActionId: string, patch: Partial<ExternalActionReceipt>): Promise<ExternalActionReceipt | undefined> {
+  const session = await getSession(userId);
+  const current = (session.externalActions ?? []).find((action) => action.logicalActionId === logicalActionId);
+  if (!current) return undefined;
+  const next = { ...current, ...patch, id: current.id, userId, logicalActionId, updatedAt: Date.now() };
+  session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== logicalActionId), next].slice(-400);
+  await saveSession(userId, session);
+  return next;
+}
+
+export async function listExternalActions(userId: number, limit = 50): Promise<ExternalActionReceipt[]> {
+  return (await getSession(userId)).externalActions?.slice(-Math.max(1, Math.min(200, Math.floor(limit)))).reverse() ?? [];
 }
 
 export async function writeScratchpad(uid: number, key: string, content: string): Promise<void> {
@@ -5045,7 +5292,7 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       ...base, title: attentionText(raw.title, "title", 300, true)!, objective: attentionText(raw.objective, "objective"), source: attentionText(raw.source, "source", 200),
       priority: attentionNumber(raw.priority, "priority", 0.5, 0, 1), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1), dueAt: attentionTimestamp(raw.dueAt, "dueAt"), snoozedUntil: attentionTimestamp(raw.snoozedUntil, "snoozedUntil"),
       nextAction: attentionText(raw.nextAction, "nextAction"), waitingFor: attentionText(raw.waitingFor, "waitingFor"), relatedEntityIds: attentionArray(raw.relatedEntityIds, "relatedEntityIds"),
-      status: attentionStatus(raw.status, ["open", "waiting", "blocked", "snoozed", "completed", "dismissed"], "open") as OpenLoopRecord["status"],
+      status: attentionStatus(raw.status, ["open", "in_progress", "waiting", "blocked", "snoozed", "completed", "dismissed"], "open") as OpenLoopRecord["status"],
     };
     case "attention-candidates": return {
       ...base, candidateType: attentionStatus(raw.candidateType, ["nudge", "digest", "prepare", "ask", "act"], "nudge") as AttentionCandidateRecord["candidateType"],
