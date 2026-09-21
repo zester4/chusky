@@ -1,0 +1,87 @@
+name: Release Chusky SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact SDK version to publish (x.y.z)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: chusky-sdk-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Set requested version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          current=$(node -p "require('./package.json').version")
+          if [ "$current" != "$VERSION" ]; then
+            npm version "$VERSION" --no-git-tag-version
+          fi
+          test "$(node -p "require('./package.json').version")" = "$VERSION"
+      - name: Verify package
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+      - name: Ensure version is not already published
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if npm view "@chusky/sdk@$VERSION" version >/dev/null 2>&1; then
+            echo "@chusky/sdk@$VERSION is already published"
+            exit 1
+          fi
+      - name: Commit and tag release
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git add package.json package-lock.json
+            git commit -m "chore: release SDK v$VERSION"
+            git push origin HEAD:main
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/sdk-v$VERSION" >/dev/null 2>&1; then
+            echo "sdk-v$VERSION already exists"
+          else
+            git tag -a "sdk-v$VERSION" -m "Chusky SDK v$VERSION"
+            git push origin "sdk-v$VERSION"
+          fi
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm provenance currently rejects private GitHub source repositories.
+        # The package remains public; authentication is provided by NPM_TOKEN.
+        run: npm publish --access public
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if gh release view "sdk-v$VERSION" >/dev/null 2>&1; then
+            echo "GitHub release sdk-v$VERSION already exists"
+          else
+            gh release create "sdk-v$VERSION" --title "Chusky SDK v$VERSION" --generate-notes
+          fi
