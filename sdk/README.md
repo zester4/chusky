@@ -1,90 +1,377 @@
 # Chusky TypeScript SDK
 
-## Documentation
+The official TypeScript client for the Chusky Developer API.
 
-The complete Mintlify-style documentation is in [`docs/`](docs/index.mdx), including the quickstart, concepts, streaming, model selection, calls and live voice, Recall meetings, autonomous missions, context, departments, outcome packages, files, approvals, durable tasks, tools, skills, artifacts, video jobs, workers, channels, webhooks, security, errors, release operations, and production guidance. Embedded chat is documented in [`docs/embedded-chat.mdx`](docs/embedded-chat.mdx); import the browser element from `@chusky/sdk/widget` and keep the project key on your server. The Mintlify navigation configuration is [`docs.json`](docs.json).
+Chusky gives applications a persistent, tool-using agent that can stream
+responses, run durable work, use connected business applications, pause for
+human approval, produce artifacts, and continue after restarts. The SDK is the
+server-side boundary for those capabilities; it does not expose Redis,
+Composio credentials, or Chusky's internal `CHUCK_*` tool implementations.
 
-This package is the public developer boundary for Chusky. It is intentionally separate from the Telegram bot, Redis store, Composio credentials, and internal `CHUCK_*` tool names. SDK applications use `CHUSKY_API_KEY`, containing their scoped `chsk_` API key. `CHUSKY_PROJECT_KEY` is used only by the self-hosted Chusky operator to provision those API keys; it is never an SDK application credential.
+## Install
+
+```bash
+npm install @chusky/sdk
+```
+
+Requirements: Node.js 18 or newer.
+
+## Five-minute quickstart
+
+Create a project-scoped API key in the Chusky dashboard under **Developer API**
+or provision one from a trusted operator environment. Then keep it on your
+server:
+
+```env
+CHUSKY_API_KEY=chsk_your_project_key
+CHUSKY_BASE_URL=https://api.chusky.ai
+```
+
+Never put `CHUSKY_API_KEY` in browser JavaScript, a mobile binary, a public
+repository, or client-side environment variables.
 
 ```ts
 import { Chusky } from "@chusky/sdk";
 
-const chusky = new Chusky({ apiKey: process.env.CHUSKY_API_KEY!, baseUrl: process.env.CHUSKY_BASE_URL, userId: "customer_123" });
-const thread = await chusky.threads.create();
+const chusky = new Chusky({
+  apiKey: process.env.CHUSKY_API_KEY!,
+  baseUrl: process.env.CHUSKY_BASE_URL,
+  // Use your application's stable user or tenant identity. Do not use a
+  // secret, email address, or the root operator identity here.
+  userId: "customer_123",
+});
 
-for await (const event of chusky.threads.runs(thread.id).stream(
-  { input: "Prepare a concise renewal brief." },
-  { idempotencyKey: crypto.randomUUID() },
-)) {
-  if (event.type === "run.delta") process.stdout.write(event.text);
-  if (event.type === "run.approval_required") {
-    // Present the exact approval to an authenticated human.
-  }
+const { thread, run } = await chusky.runs.create(
+  { input: "Prepare a concise renewal brief.", wait: false },
+  { idempotencyKey: "renewal-brief-customer-123-2026-09-21" },
+);
+
+const completed = await chusky.runs.wait(thread.id, run.id, {
+  timeoutMs: 120_000,
+});
+
+console.log(completed.status);
+console.log(completed.output ?? "The run did not produce text output.");
+```
+
+`userId` is an application-owned identity boundary. Chusky uses it to isolate
+threads, runs, memories, approvals, files, tasks, reminders, connected
+accounts, and durable work. Use the same stable value whenever that user
+returns.
+
+## Examples
+
+The [`examples/`](examples/) directory contains complete TypeScript examples
+that can be adapted directly into a server application:
+
+| Example | Shows |
+| --- | --- |
+| [`quickstart.ts`](examples/quickstart.ts) | Create a durable run and wait for completion |
+| [`streaming.ts`](examples/streaming.ts) | Stream response deltas and handle approval events |
+| [`company-agent.ts`](examples/company-agent.ts) | Use an agent template, policy, budget, and idempotency |
+| [`mission.ts`](examples/mission.ts) | Run multi-step work with proof, evidence, and verification |
+| [`approvals.ts`](examples/approvals.ts) | Present and decide a pending human approval |
+| [`context-and-departments.ts`](examples/context-and-departments.ts) | Save shared context and create a typed department handoff |
+| [`files.ts`](examples/files.ts) | Upload bytes through a short-lived storage intent |
+| [`webhooks.ts`](examples/webhooks.ts) | Register a delivery endpoint and inspect deliveries |
+
+Run an example from the SDK repository with `tsx`:
+
+```bash
+CHUSKY_API_KEY=chsk_... npx tsx examples/quickstart.ts
+```
+
+PowerShell:
+
+```powershell
+$env:CHUSKY_API_KEY = "chsk_..."
+npx tsx examples/quickstart.ts
+```
+
+Examples make real API requests. Use a development project key and a test
+identity when trying them.
+
+## The execution model
+
+```text
+Your server
+    ↓
+@chusky/sdk
+    ↓  authenticated /v1 API
+Chusky runtime
+    ↓
+agent loop → native tools / Composio / durable workflows
+    ↓
+business result, artifact, webhook, or approval
+```
+
+There are three useful execution modes:
+
+1. **Synchronous** — set `wait: true` when the result should return in the
+   request lifecycle and the work is short.
+2. **Durable** — set `wait: false` to receive a task-backed run immediately,
+   then use `runs.get()`, `runs.wait()`, `runs.events()`, `tasks.get()`, or a
+   webhook to observe it.
+3. **Streaming** — use `threads.runs(threadId).stream()` for incremental text
+   and approval events. Streaming is a delivery channel, not the source of
+   truth; persisted run state remains available through `get()` and `events()`.
+
+## Idempotency and retries
+
+Use an `idempotencyKey` for every durable POST that your server may retry after
+an interruption. Reuse the same key only for the exact same operation and
+request body.
+
+```ts
+const operationKey = `research:${customerId}:${requestId}`;
+
+const firstAttempt = await chusky.runs.create(
+  { input: "Research our renewal risk and draft next steps.", wait: false },
+  { idempotencyKey: operationKey },
+);
+
+// A network retry with operationKey returns the same durable operation rather
+// than creating a duplicate run.
+```
+
+Do not generate a new idempotency key for a retry unless you intentionally want
+to start a new operation.
+
+## Human approvals
+
+Chusky keeps routine reads and reversible work autonomous while pausing
+materially risky actions according to the project policy. A run can return
+`requires_approval` and include an `approvalId`.
+
+Your application should show the action, target, and relevant context to an
+authenticated human, then call `approvals.decide()`. Never auto-approve from a
+browser callback or from model output.
+
+```ts
+const approvals = await chusky.approvals.list();
+const pending = approvals.data.find((item) => item.status === "pending");
+
+if (pending) {
+  // Render pending.request and the bounded action details in your own UI.
+  const decision = await chusky.approvals.decide(
+    pending.id,
+    "approve",
+    { idempotencyKey: `approval:${pending.id}:approve` },
+  );
+  console.log("Approval handled", decision);
 }
 ```
 
-For company workflows, provision an agent profile from a specialist template
-and create a durable run in one call. The project key's scopes and the company
-policy are enforced by Chusky; send an idempotency key so retries do not create
-duplicate threads or tasks.
+The exact approval boundary is enforced server-side. The SDK is not a way to
+bypass it.
+
+## Agent templates and company workflows
+
+Use a built-in specialist template or create a governed agent profile for a
+company workflow. Policies, allowed tools, budgets, and approvals are applied
+by Chusky before execution.
 
 ```ts
 const templates = await chusky.agents.templates();
-const agent = await chusky.agents.create({ template: "lead-research", name: "Fintech lead scout" });
-const { thread, run } = await chusky.runs.create({
-  input: "Find fintech companies with more than 50 employees and prepare sourced CRM-ready profiles.",
-  agentId: agent.id,
-  wait: false,
-}, { idempotencyKey: "customer-42-lead-research-2026-09-14" });
-console.log(thread.id, run.id, run.status);
+console.log(templates.data.map((template) => template.slug));
+
+const agent = await chusky.agents.create({
+  template: "lead-research",
+  name: "Fintech lead scout",
+  instructions: "Return sourced, deduplicated company profiles.",
+  policy: {
+    tools: {
+      allow: ["crm.read", "web.search", "email.draft"],
+      requireApproval: ["email.send", "crm.write"],
+    },
+    budget: { duration: "30m", maxToolCalls: 80, maxCost: 8 },
+  },
+});
+
+const { thread, run } = await chusky.runs.create(
+  {
+    agentId: agent.id,
+    input: "Find qualified fintech leads with more than 50 employees.",
+    wait: false,
+  },
+  { idempotencyKey: "acme-fintech-leads-2026-09-21" },
+);
+
+console.log(`Run ${run.id} started in thread ${thread.id}`);
 ```
 
-Poll with `chusky.runs.get(thread.id, run.id)` or use the task ID on the run
-with `chusky.tasks.get()`. Composio remains responsible for OAuth, connected
-accounts, and tool execution; Chusky enforces the orchestration policy and
-approval boundary.
+Composio owns OAuth, connected accounts, token refresh, and external tool
+execution. Chusky owns the agent profile, policy, orchestration, approvals,
+durability, and result delivery.
 
-## Operator-only API key provisioning
+## Durable missions
 
-Run this only on a trusted backend or operator machine. Never expose the root
-`CHUSKY_PROJECT_KEY` to a browser, developer, or end user.
+Use missions when the work has multiple steps, dependencies, budgets, evidence,
+waits, or a definition of done. The mission API supports pause, resume,
+repair, cancellation, provider-event continuation, replanning, proof, and
+verification.
+
+```ts
+const mission = await chusky.missions.create({
+  title: "Qualified fintech leads",
+  objective: "Find 20 fintech companies matching our ICP.",
+  definitionOfDone: "Every lead has a source, qualification reason, and CRM-ready payload.",
+  verificationMode: "strict",
+  requiredEvidence: ["source URL", "qualification assertion", "deduplication check"],
+  steps: [
+    { id: "research", title: "Research companies", objective: "Collect source-backed facts." },
+    { id: "qualify", title: "Qualify leads", objective: "Apply the ICP and remove duplicates.", dependsOn: ["research"] },
+    { id: "prepare", title: "Prepare CRM payload", objective: "Create an approval-ready import.", dependsOn: ["qualify"] },
+  ],
+  maxDurationSeconds: 3 * 60 * 60,
+  maxSteps: 30,
+  maxToolCalls: 100,
+  maxCost: 15,
+}, { idempotencyKey: "acme-lead-mission-2026-09-21" });
+
+const proof = await chusky.missions.proof(mission.id);
+console.log(proof.status, proof.nextAction, proof.verification);
+```
+
+Treat `proof()` and `verify()` as the external completion record. Do not claim
+that a mission completed because a model produced a plausible paragraph; use
+the recorded steps, evidence, and verification state.
+
+## Shared context, departments, and outcomes
+
+The operating layer lets applications preserve useful, sensitivity-aware
+context and hand work between specialized departments.
+
+```ts
+await chusky.context.save({
+  scope: "customer",
+  scopeId: "customer_123",
+  kind: "preference",
+  key: "renewal_window",
+  value: "Customer prefers renewal discussions in October.",
+  source: "crm",
+  confidence: 0.9,
+  sensitivity: "normal",
+});
+
+const salesContext = await chusky.context.list({
+  scope: "customer",
+  scopeId: "customer_123",
+  purpose: "renewal",
+});
+
+const packet = await chusky.departments.handoff("customer-success", {
+  objective: "Prepare a renewal risk review for the account team.",
+  inputs: { customerId: "customer_123" },
+  constraints: ["Use verified CRM facts only."],
+  evidenceRequired: ["account health source", "open risk owner"],
+  approvalBoundary: "Draft only; do not contact the customer.",
+});
+
+console.log(packet.id, packet.status, salesContext.data.length);
+```
+
+## Files and artifacts
+
+File uploads use a short-lived storage URL. The SDK also exposes artifact
+metadata and verified downloads for files generated by Chusky.
+
+```ts
+const body = new TextEncoder().encode("customer_id,renewal_date\n123,2026-10-01\n");
+const upload = await chusky.files.create({
+  name: "renewals.csv",
+  contentType: "text/csv",
+  size: body.byteLength,
+}, { idempotencyKey: "upload-renewals-2026-09-21" });
+
+const response = await fetch(upload.uploadUrl, {
+  method: "PUT",
+  headers: { "Content-Type": "text/csv" },
+  body,
+});
+if (!response.ok) throw new Error(`Upload failed: ${response.status}`);
+
+const file = await chusky.files.complete(upload.id);
+console.log(file.id, file.status);
+```
+
+## Webhooks
+
+Register a server endpoint for durable delivery notifications and make the
+handler idempotent by recording the delivery ID before applying the event.
+
+```ts
+const webhook = await chusky.webhooks.create(
+  "https://app.example.com/api/chusky/events",
+  { idempotencyKey: "webhook-register-events-v1" },
+);
+
+const deliveries = await chusky.webhooks.deliveries(webhook.id);
+console.log(deliveries.data.map((delivery) => delivery.status));
+```
+
+## Operator provisioning
+
+`createChuskyAdmin()` is for a trusted operator service only. It uses the root
+project key to provision scoped project keys and must never be shipped to an
+end-user application.
 
 ```ts
 import { createChuskyAdmin } from "@chusky/sdk";
-const admin = createChuskyAdmin({ apiKey: process.env.CHUSKY_PROJECT_KEY!, baseUrl: process.env.CHUSKY_BASE_URL });
-const project = await admin.projects.create({ name: "My App", scopes: ["*"] });
-console.log(project.key); // save once; list() never returns it
+
+const admin = createChuskyAdmin({
+  apiKey: process.env.CHUSKY_PROJECT_KEY!,
+  baseUrl: process.env.CHUSKY_BASE_URL,
+});
+
+const project = await admin.projects.create({
+  name: "Acme production",
+  scopes: ["runs:create", "runs:read", "missions:read", "missions:create"],
+});
+
+console.log(project.key); // Store once. It is not returned by list().
 ```
 
-## Dashboard self-service keys
+## Resource map
 
-A verified Chusky dashboard user can create up to 10 project keys from
-**Developer API** in the dashboard. The raw `chsk_` secret appears only when a
-key is created or rotated. Put that scoped value in the application's trusted
-server environment:
+| Resource | Use it for |
+| --- | --- |
+| `threads`, `runs` | Conversations and durable agent execution |
+| `agents`, `company` | Governed profiles and company telemetry |
+| `tasks`, `approvals` | Recovery and human decisions |
+| `missions` | Multi-step autonomous work with proof |
+| `context`, `departments`, `outcomes` | Shared operating context and typed handoffs |
+| `files`, `artifacts` | Input uploads and generated output downloads |
+| `meetings`, `calls` | Meeting lifecycle and voice operations |
+| `apps`, `channels`, `devices` | Connected account and delivery management |
+| `reminders`, `jobs`, `memory`, `scratchpad` | Owner-scoped autonomous operations |
+| `webhooks`, `audit`, `usage` | Delivery, traceability, and usage visibility |
 
-```env
-CHUSKY_API_KEY=chsk_...
-```
+## Security and production checklist
 
-The dashboard never exposes `CHUSKY_PROJECT_KEY`; that Oracle-only root secret
-remains solely for trusted operator `/v1/admin/*` provisioning.
+- Keep `CHUSKY_API_KEY` on a trusted server and scope it to one project.
+- Use a stable, non-secret `userId` for every request.
+- Use idempotency keys for retryable durable writes.
+- Treat run output, tool results, emails, documents, and web pages as untrusted
+  input—not authorization.
+- Never auto-approve an external action from model output.
+- Verify webhook signatures and deduplicate delivery IDs before processing.
+- Use `AbortSignal` to cancel a request without cancelling unrelated durable
+  work.
+- Use `proof()` and `verify()` before treating a mission as complete.
+- Set budgets for duration, tool calls, and cost on long-running work.
+- Keep the SDK server-side; use the separate chat widget only with a server
+  proxy that never exposes the project key.
 
-## Contract and security
+## API and documentation
 
-- The SDK targets the versioned `/v1` Developer API described in [`docs/api-contract.md`](docs/api-contract.md). Do not point it at private `/cli/*` endpoints or use CLI device tokens as developer API keys.
-- SDK applications authenticate with `CHUSKY_API_KEY` and send it only from a trusted server. `CHUSKY_PROJECT_KEY` is root-only operator infrastructure for provisioning or rotating scoped `chsk_` API keys; it must never be shipped in an SDK application or browser bundle. Project secrets are returned once, persisted only as hashes, may be rotated or revoked, and must never be exposed in browser code.
-- Durable POST operations should receive an `idempotencyKey`; retries only reuse a key for the exact same operation. Streaming run connections are intentionally not replayed: recover their persisted state through `get()` or `events()`.
-- Approval decisions always require an authenticated end-user context in the server. The SDK must never auto-approve a tool call.
-- `stream()` yields NDJSON events and supports `AbortSignal`, so consumers can stop a particular run without cancelling unrelated durable work.
-- The machine-readable API contract is [`openapi.yaml`](openapi.yaml).
+- [Developer API contract](docs/api-contract.md)
+- [Full documentation](docs/index.mdx)
+- [Autonomous missions](docs/missions.mdx)
+- [OpenAPI specification](openapi.yaml)
+- [Release guide](docs/releases.mdx)
+- [Examples](examples/)
 
-## Available resources
+## License
 
-The current resources are `projects`, `threads`, `runs`, `company`, `tasks`, `approvals`, `files`, `tools`, `skills`, `artifacts`, `videos`, `workers`, `channels`, `activity`, `calls`, `meetings`, `apps`, `reminders`, `jobs`, `memory`, `scratchpad`, `devices`, `missions`, `context`, `departments`, `outcomes`, `account.voiceOptions()`, `webhooks`, `audit`, and `usage`. Missions provide durable multi-step work with dependency scheduling, budgets, proof, evidence, verification, provider-event waits, pause/resume, repair, cancellation, and replanning. Context is a sensitivity-aware owner-scoped operating graph; departments and outcome packages provide typed business handoffs and governed plans. Calls validate and start an outbound request directly; the server selects Twilio or Bland and never exposes provider credentials. Meetings cover Recall-based Zoom, Google Meet, Microsoft Teams, and Webex lifecycle operations, private preparation, participant/outcome snapshots, and approved active-meeting context. `company.runs()`, `company.audit()`, and `company.usage()` read bounded, cross-caller telemetry for a company project and require its `company:read` scope. Files use short-lived, direct Cloudflare R2 URLs: create an upload intent, upload with the returned URL, call `files.complete()`, then request a download URL. `files.upload()` is a convenience helper for this sequence. Artifact downloads return verified bytes from the Daytona workspace through the API.
-
-See [`docs/architecture.mdx`](docs/architecture.mdx) for the request, durability, capability, storage, and delivery boundaries that implement these resources.
-
-Runs can be short and synchronous or durable and asynchronous. Pass `wait: false` to `runs.create()` to receive a task-backed run immediately; inspect it with `tasks.get()`, retry or cancel it, and resume a failed or approval-paused run with `runs.resume()`. Use `budget.duration` (`5m`, `30m`, `1h`, `3h`, `6h`, `3d`, or `1w`) together with `budget.maxToolCalls` and `budget.maxCost` to bound work. Tool and skill allowlists are enforced server-side before the agent receives its catalog.
-
-Webhook deliveries are queryable and can be retried through the SDK. Keep the endpoint idempotent and treat delivery IDs as deduplication keys.
+MIT
