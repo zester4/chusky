@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { isSimpleTelegramGreeting, registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
-import { addJob, addReminder, appendChannelConversationMessages, consumeCliPairing, createApproval, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
+import { addJob, addReminder, appendChannelConversationMessages, consumeCliPairing, createApproval, createMission, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
 
 class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
@@ -173,7 +173,7 @@ test("approval callback is scoped to the requesting user and deny never executes
   assert.match(owner.sent.at(-1).text, /Action denied/);
 });
 
-test("home workspace exposes durable reminders, schedules, tasks, and voice controls", async () => {
+test("home workspace exposes durable reminders, schedules, tasks, missions, and voice controls", async () => {
   const bot = new FakeBot();
   registerHandlers(bot as any);
   const userId = 840004;
@@ -181,7 +181,8 @@ test("home workspace exposes durable reminders, schedules, tasks, and voice cont
   await addReminder(userId, { id: "reminder_home", userId, text: "Follow up with Ada", runAt: now + 60_000, status: "scheduled", createdAt: now });
   await addJob(userId, { id: "job_home", userId, text: "Send a weekly digest", cron: "0 9 * * 1", scheduleId: "schedule_home", status: "active", createdAt: now });
   await createTask(userId, { title: "Prepare proposal", objective: "Draft the client proposal" });
-  const workspace = bot.callbacks.find((item) => item.pattern.source.includes("reminders|schedules|tasks|voice"));
+  await createMission(userId, { title: "Launch research", objective: "Research launch inputs", definitionOfDone: "A verified brief exists", idempotencyKey: "home-mission" });
+  const workspace = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:(refresh|apps"));
   assert.ok(workspace);
   for (const [action, expected] of [["reminders", /Follow up with Ada/], ["schedules", /Send a weekly digest/], ["tasks", /Prepare proposal/]] as const) {
     const ctx = context(userId);
@@ -190,6 +191,14 @@ test("home workspace exposes durable reminders, schedules, tasks, and voice cont
     await workspace.handler(ctx);
     assert.match(ctx.sent.at(-1).text, expected);
   }
+  const missions = bot.callbacks.find((item) => item.pattern.source.includes("missions"));
+  assert.ok(missions);
+  const missionCtx = context(userId);
+  missionCtx.callbackQuery = { message: { message_id: 1 } };
+  missionCtx.match = ["home:missions", "missions"];
+  await missions.handler(missionCtx);
+  assert.match(missionCtx.sent.at(-1).text, /Launch research/);
+  assert.match(missionCtx.sent.at(-1).text, /\/missions pause/);
   const voice = bot.callbacks.find((item) => item.pattern.source.startsWith("^home:voice:(on|off)"));
   assert.ok(voice);
   const voiceCtx = context(userId);

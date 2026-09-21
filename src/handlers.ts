@@ -337,7 +337,7 @@ function telegramMeetingJoinFields(raw: string): { meetingUrl: string; clientNam
   };
 }
 
-function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; activeMeetings: number; preparedMeetings: number; meetingContacts: number; mcpConnections: number; voiceReplies: boolean; attentionPulseEnabled: boolean }): TelegramCard {
+function workspaceCard(input: { model: string; connectedApps: number; connectedAccounts: number; pendingApprovals: number; activeWorkers: number; triggerCount: number; activeReminders: number; activeJobs: number; activeTasks: number; activeMissions: number; activeMeetings: number; preparedMeetings: number; meetingContacts: number; mcpConnections: number; voiceReplies: boolean; attentionPulseEnabled: boolean }): TelegramCard {
   const connectionLine = input.connectedApps
     ? `🟢 ${input.connectedApps} app${input.connectedApps === 1 ? "" : "s"} connected across ${input.connectedAccounts} account${input.connectedAccounts === 1 ? "" : "s"}`
     : "⚪ No connected apps yet";
@@ -350,6 +350,7 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       `⚡ ${input.triggerCount} active trigger${input.triggerCount === 1 ? "" : "s"}`,
       `⏰ ${input.activeReminders} reminder${input.activeReminders === 1 ? "" : "s"} · 🗓️ ${input.activeJobs} recurring schedule${input.activeJobs === 1 ? "" : "s"}`,
       `📋 ${input.activeTasks} task${input.activeTasks === 1 ? "" : "s"} in progress · ${input.voiceReplies ? "🔊 voice replies on" : "🔇 voice replies off"}`,
+      `🚀 ${input.activeMissions} active mission${input.activeMissions === 1 ? "" : "s"} · long-running work that can pause and resume`,
       `🤝 ${input.activeMeetings} live meeting${input.activeMeetings === 1 ? "" : "s"} · ${input.preparedMeetings} prepared · ${input.meetingContacts} follow-up contact${input.meetingContacts === 1 ? "" : "s"}`,
       `🔗 ${input.mcpConnections} third-party MCP server${input.mcpConnections === 1 ? "" : "s"} connected`,
       `🧭 Attention pulse: ${input.attentionPulseEnabled ? "enabled" : "disabled"}`,
@@ -359,7 +360,8 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
       [{ text: "🧩 Apps", callbackData: "home:apps", style: "primary" }, { text: "⚡ Triggers", callbackData: "home:triggers" }],
       [{ text: "⏰ Reminders", callbackData: "home:reminders" }, { text: "🗓️ Schedules", callbackData: "home:schedules" }],
       [{ text: "📋 Tasks", callbackData: "home:tasks" }, { text: "✅ Approvals", callbackData: "home:approvals" }],
-      [{ text: "🤝 Meetings", callbackData: "home:meetings", style: "primary" }, { text: "🔊 Voice", callbackData: "home:voice" }],
+      [{ text: "🚀 Missions", callbackData: "home:missions", style: "primary" }, { text: "🤝 Meetings", callbackData: "home:meetings" }],
+      [{ text: "🔊 Voice", callbackData: "home:voice" }],
       [{ text: input.attentionPulseEnabled ? "🧭 Pulse on · Disable" : "🧭 Pulse off · Enable", callbackData: "home:pulse:toggle", style: input.attentionPulseEnabled ? "success" : "primary" }],
       [{ text: "MCP servers", callbackData: "home:mcp" }, { text: "🔄 Refresh", callbackData: "home:refresh" }],
     ],
@@ -425,7 +427,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     if (messageId) await editCard(ctx, messageId, card); else await replyCard(ctx, card);
     return;
   }
-  const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks, meetings, preparations, contacts, mcpConnections] = await Promise.all([
+  const [session, states, approvals, handoffs, triggers, reminders, jobs, tasks, missions, meetings, preparations, contacts, mcpConnections] = await Promise.all([
     getSession(ctx.from!.id),
     getToolkitStates(ctx.from!.id).catch((error) => { logger.warn({ err: error, userId: ctx.from!.id }, "Could not load workspace app summary"); return []; }),
     listApprovals(ctx.from!.id, 50),
@@ -434,6 +436,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     listReminders(ctx.from!.id),
     listJobs(ctx.from!.id),
     listTasks(ctx.from!.id),
+    listMissions(ctx.from!.id),
     listRecallMeetings(ctx.from!.id, 20),
     listCalendarMeetingPreparations(ctx.from!.id, 20),
     listMeetingContacts(ctx.from!.id, 50),
@@ -451,6 +454,7 @@ async function showWorkspace(ctx: Context, messageId?: number): Promise<void> {
     activeReminders: reminders.filter((reminder) => reminder.status === "scheduled").length,
     activeJobs: jobs.filter((job) => job.status === "active").length,
     activeTasks: tasks.filter((task) => !["completed", "cancelled", "failed"].includes(task.status)).length,
+    activeMissions: missions.filter((mission) => !["completed", "cancelled", "failed"].includes(mission.status)).length,
     activeMeetings: meetings.filter((meeting) => ["creating", "scheduled", "joining", "waiting_room", "in_call", "leaving"].includes(meeting.status)).length,
     preparedMeetings: preparations.filter((preparation) => ["prepared", "auto_scheduled"].includes(preparation.status)).length,
     meetingContacts: contacts.length,
@@ -2126,7 +2130,7 @@ export function registerHandlers(bot: Bot): void {
 
   // Workspace card actions. They deliberately reuse the existing command
   // handlers' data sources instead of creating a second session model.
-  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals|reminders|schedules|tasks|voice|meetings|mcp)$/, async (ctx) => {
+  bot.callbackQuery(/^home:(refresh|apps|triggers|approvals|reminders|schedules|tasks|missions|voice|meetings|mcp)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
     if (!(await guard(ctx))) return;
     const action = ctx.match[1];
@@ -2192,6 +2196,32 @@ export function registerHandlers(bot: Bot): void {
           buttons: [[{ text: "← Workspace", callbackData: "home:refresh" }]],
         };
         await editCard(ctx, messageId, card);
+        return;
+      }
+      if (action === "missions") {
+        if (isTelegramShared(ctx)) { await ctx.editMessageText("Mission details are available only in your private chat with Chusky."); return; }
+        const missions = await listMissions(ctx.from!.id);
+        const visible = missions.slice(0, 12);
+        const body = visible.length
+          ? visible.map((mission) => {
+              const status = mission.status.replaceAll("_", " ");
+              const detail = mission.nextAction ?? mission.checkpoint ?? mission.error ?? "No checkpoint yet.";
+              return `${status} · ${mission.id}\n${mission.title}\n${detail}`;
+            })
+          : ["No autonomous missions yet.", "Ask Chusky to start work that should continue across time, survive waits, or be resumed later."];
+        const commandHelp = [
+          "Mission commands",
+          "/missions — list missions",
+          "/missions pause <mission-id>",
+          "/missions resume <mission-id>",
+          "/missions cancel <mission-id>",
+        ].join("\n");
+        await editCard(ctx, messageId, {
+          title: "🚀 Autonomous missions",
+          body,
+          detail: `${commandHelp}\n\nMission actions are private to your Chusky account. The list above is read from the durable mission store.`,
+          buttons: [[{ text: "🔄 Refresh missions", callbackData: "home:missions" }, { text: "← Workspace", callbackData: "home:refresh" }]],
+        });
         return;
       }
       if (action === "meetings") {
@@ -2357,7 +2387,10 @@ export function registerHandlers(bot: Bot): void {
             return;
           }
           const missions = await listMissions(uid);
-          await replyHtml(ctx, missions.length ? `<b>Autonomous missions</b>\n\n${missions.slice(0, 20).map((mission) => `• <code>${escapeTelegramHtml(mission.id)}</code> · <b>${escapeTelegramHtml(mission.status)}</b>\n  ${escapeTelegramHtml(mission.title)}\n  ${escapeTelegramHtml(mission.nextAction ?? mission.checkpoint ?? "No checkpoint yet.")}`).join("\n")}` : "No autonomous missions yet. Ask Chusky to start one for work that should continue across time.");
+          const missionList = missions.length
+            ? `<b>Autonomous missions</b>\n\n${missions.slice(0, 20).map((mission) => `• <code>${escapeTelegramHtml(mission.id)}</code> · <b>${escapeTelegramHtml(mission.status)}</b>\n  ${escapeTelegramHtml(mission.title)}\n  ${escapeTelegramHtml(mission.nextAction ?? mission.checkpoint ?? "No checkpoint yet.")}`).join("\n")}`
+            : "No autonomous missions yet. Ask Chusky to start one for work that should continue across time.";
+          await replyHtml(ctx, `${missionList}\n\n<b>Commands</b>\n<code>/missions pause &lt;mission-id&gt;</code>\n<code>/missions resume &lt;mission-id&gt;</code>\n<code>/missions cancel &lt;mission-id&gt;</code>`);
           return;
         }
         if (command === "history") {
