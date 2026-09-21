@@ -78,9 +78,9 @@ through the same /v1 API used by the dashboard and SDK.
 cloudflare/chusky-mcp is a stateless Streamable HTTP MCP server for clients
 that need Chusky tools. It proxies a small, explicit set of operations (list
 templates/profiles, start and inspect runs, check approval status,
-inspect/cancel/retry tasks, and read usage) to the authenticated Chusky /v1
-API. It does not store project keys or provider credentials, and it cannot
-approve external actions.
+inspect/cancel/retry tasks, start and control autonomous missions, and read
+usage) to the authenticated Chusky /v1 API. It does not store project keys or
+provider credentials, and it cannot approve external actions.
 Configure the Cloudflare Worker with CHUSKY_API_ORIGIN; MCP clients send a
 Chusky project key as Authorization: Bearer … and a trusted stable identity as
 X-Chusky-User-Id.
@@ -89,6 +89,37 @@ The separate MCP Worker can be deployed independently with its own npm install
 and Wrangler configuration. See its README for local development, deployment,
 and client configuration. Production Chusky API durability still depends on
 the backend's Redis and QStash configuration.
+
+### Autonomous missions
+
+Use a mission when work must continue after the initiating request: research,
+lead qualification, long-running browser work, provider polling, or a
+multi-stage business operation. A mission is not an unbounded background loop.
+It is a sequence of short, checkpointed execution slices. Each slice observes
+current ground truth, performs bounded work, records the next action, and
+schedules the next slice through QStash. Waiting on an external service uses
+`CHUCK_TASK_WAIT`, so the worker sleeps without holding a process open.
+
+Every mission has a concrete objective and verifiable definition of done,
+maximum duration/steps/tool calls/cost, an owner-scoped checkpoint and next
+action, bounded events, and explicit queued/running/waiting/paused/blocked/
+completed/failed/cancelled states. Mission creation is idempotent, so a
+retried request does not create duplicate work.
+
+The authenticated API exposes `POST /v1/missions`, `GET /v1/missions`,
+`GET /v1/missions/:id`, pause/resume/cancel actions, and
+`POST /v1/missions/:id/events` for an exact provider callback
+(`provider + providerEventId`). Replayed callbacks are harmless. Missions can
+also contain dependency-aware steps; the agent advances a step only after
+`CHUCK_MISSION_STEP_COMPLETE` records its verified result. The Telegram
+`/missions` command and dashboard Missions page expose the same owner-scoped
+state and controls. The Cloudflare MCP
+maps those controls to `chusky_mission_start`, `chusky_missions_list`,
+`chusky_mission_get`, `chusky_mission_step_complete`,
+`chusky_mission_replan`, `chusky_mission_event`, `chusky_mission_pause`,
+`chusky_mission_resume`, and `chusky_mission_cancel`. Production autonomy requires Redis for durable state
+and QStash for continuation delivery; without them, Chusky must fail clearly
+instead of pretending that background work is durable.
 
 ### Calling third-party MCP servers
 

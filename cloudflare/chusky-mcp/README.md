@@ -2,7 +2,7 @@
 
 This Cloudflare Worker exposes a remote, stateless MCP endpoint over Chusky's public `/v1` API. It does not contain an agent runtime, Composio credentials, or a second workflow engine. Chusky remains the orchestrator; Composio continues to own connected accounts and tool execution.
 
-Version `0.2.0` supports two authentication modes:
+Version `0.3.0` supports two authentication modes:
 
 - Private/server-to-server mode: `Authorization: Bearer chsk_...` plus `X-Chusky-User-Id`.
 - Interactive MCP mode: OAuth 2.1 authorization-code flow with S256 PKCE, dynamic client registration, encrypted provider grants, and standard protected-resource/authorization-server discovery. OAuth requires a Cloudflare KV binding named `OAUTH_KV`.
@@ -13,6 +13,7 @@ Version `0.2.0` supports two authentication modes:
 - Inspect Composio-backed apps and triggers; start Composio OAuth consent flows for a connected toolkit.
 - Start durable, policy-governed runs; inspect status, events, and run history; cancel or resume runs.
 - Check approval status without approving; list, inspect, cancel, and retry durable tasks.
+- Start bounded autonomous missions that continue across slices and restarts; inspect checkpoints and budgets; pause, resume, or cancel them.
 - Read per-identity usage and company-project run, audit, and monthly usage summaries.
 - Discover Chusky tools and trusted skills, revisit threads, inspect approvals, and retrieve artifact/file metadata.
 - Manage agent profiles, triggers, and webhook targets when the caller has the `mcp:manage` scope.
@@ -128,6 +129,7 @@ public names and their minimum MCP scope:
 | Composio | `chusky_composio_apps_list`, `chusky_composio_connect_app`, `chusky_triggers_list` |
 | Runs | `chusky_run_start`, `chusky_run_get`, `chusky_runs_list`, `chusky_run_events`, `chusky_run_cancel`, `chusky_run_resume` |
 | Tasks | `chusky_tasks_list`, `chusky_task_get`, `chusky_task_cancel`, `chusky_task_retry` |
+| Autonomous missions | `chusky_missions_list`, `chusky_mission_get`, `chusky_mission_start`, `chusky_mission_step_complete`, `chusky_mission_replan`, `chusky_mission_event`, `chusky_mission_pause`, `chusky_mission_resume`, `chusky_mission_cancel` |
 | Threads | `chusky_threads_list`, `chusky_thread_get`, `chusky_thread_update` |
 | Approvals | `chusky_approval_status`, `chusky_approvals_list` |
 | Files and artifacts | `chusky_file_get`, `chusky_artifacts_list`, `chusky_artifact_get` |
@@ -153,6 +155,18 @@ The most important input contracts are:
     "idempotencyKey": "required string, 8–200 characters"
   },
   "chusky_run_get": { "threadId": "string", "runId": "string" },
+  "chusky_mission_start": {
+    "title": "string",
+    "objective": "string",
+    "definitionOfDone": "string",
+    "budgets": "optional maxDurationSeconds, maxSteps, maxToolCalls, maxCost",
+    "idempotencyKey": "required string, 8–200 characters"
+  },
+  "chusky_mission_event": {
+    "missionId": "string",
+    "provider": "string",
+    "providerEventId": "stable provider event id"
+  },
   "chusky_skill_read": { "name": "string", "path": "optional skill-relative path" },
   "chusky_composio_connect_app": { "toolkit": "string", "alias": "optional string" },
   "chusky_webhook_create": { "url": "HTTPS URL", "idempotencyKey": "optional string" }

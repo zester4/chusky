@@ -538,6 +538,64 @@ export interface DaytonaAppRecord {
 
 export type TaskStatus = "queued" | "running" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled";
 
+export type MissionStatus = "queued" | "running" | "waiting" | "paused" | "blocked" | "completed" | "failed" | "cancelled";
+
+export interface MissionBudget {
+  maxDurationSeconds: number;
+  maxSteps: number;
+  maxToolCalls: number;
+  maxCost: number;
+}
+
+export interface MissionStepRecord {
+  id: string;
+  title: string;
+  objective: string;
+  status: "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
+  dependsOn: string[];
+  taskId?: string;
+  attempts: number;
+  retryLimit?: number;
+  updatedAt: number;
+  result?: string;
+}
+
+export interface MissionEventRecord {
+  id: string;
+  type: "created" | "started" | "checkpointed" | "waiting" | "paused" | "resumed" | "blocked" | "completed" | "failed" | "cancelled" | "budget_exhausted";
+  message: string;
+  at: number;
+}
+
+export interface MissionRecord {
+  id: string;
+  userId: number;
+  title: string;
+  objective: string;
+  definitionOfDone: string;
+  status: MissionStatus;
+  steps: MissionStepRecord[];
+  currentStepId?: string;
+  rootTaskId?: string;
+  checkpoint?: string;
+  nextAction?: string;
+  waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number };
+  budget: MissionBudget;
+  consumedSteps: number;
+  toolCalls: number;
+  cost: number;
+  idempotencyKey?: string;
+  result?: string;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  events: MissionEventRecord[];
+  /** Monotonic revision used to prevent concurrent workers from overwriting state. */
+  version: number;
+}
+
 export interface TaskStep {
   id: string;
   title: string;
@@ -607,6 +665,10 @@ export interface TaskRecord {
   composerWorkflowId?: string;
   composerStageId?: string;
   composerBudgetSeconds?: number;
+  /** A task may be one bounded execution slice of an autonomous mission. */
+  missionId?: string;
+  /** One approved tool execution may be replayed when a durable mission resumes. */
+  approvedApprovalId?: string;
 }
 
 export type ComposerStageStatus = "pending" | "running" | "completed" | "blocked" | "failed" | "cancelled";
@@ -1037,6 +1099,10 @@ interface Backend {
   clearDaytonaWorkspace(userId: number): Promise<void>;
   getTasks(userId: number): Promise<TaskRecord[]>;
   saveTasks(userId: number, tasks: TaskRecord[]): Promise<void>;
+  getMissions(userId: number): Promise<MissionRecord[]>;
+  saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
+  createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
+  compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
   getJobs(userId: number): Promise<JobRecord[]>;
@@ -1277,6 +1343,7 @@ class RedisBackend implements Backend {
   private rk = (id: number) => `chuck:rate:${id}`;
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
+  private missionk = (id: number) => `chuck:missions:${id}`;
   private reminderk = (id: number) => `chuck:reminders:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
@@ -1737,6 +1804,45 @@ class RedisBackend implements Backend {
   async saveTasks(userId: number, tasks: TaskRecord[]): Promise<void> {
     // Intentionally no expiry: task recovery must outlive conversational context.
     await this.r.set(this.taskk(userId), JSON.stringify(tasks));
+  }
+  async getMissions(userId: number): Promise<MissionRecord[]> {
+    const raw = await this.r.get(this.missionk(userId));
+    if (!raw) return [];
+    try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { return []; }
+  }
+  async saveMissions(userId: number, missions: MissionRecord[]): Promise<void> {
+    // Mission state is durable control-plane state and must outlive chat history.
+    await this.r.set(this.missionk(userId), JSON.stringify(missions.slice(-100)));
+  }
+  async createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord> {
+    const key = this.missionk(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let missions: MissionRecord[] = [];
+      try { const parsed = raw ? JSON.parse(raw) : []; missions = Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { missions = []; }
+      const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
+      if (existing) { await this.r.unwatch(); return normalizeMission(existing); }
+      const result = await this.r.multi().set(key, JSON.stringify([...missions, mission].slice(-100))).exec();
+      if (result) return mission;
+    }
+    throw new Error("Mission creation changed concurrently; please retry");
+  }
+  async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined> {
+    const key = this.missionk(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let missions: MissionRecord[] = [];
+      try { const parsed = raw ? JSON.parse(raw) : []; missions = Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { missions = []; }
+      const index = missions.findIndex((mission) => mission.id === id);
+      const current = index < 0 ? undefined : normalizeMission(missions[index]);
+      if (!current || current.version !== expectedVersion) { await this.r.unwatch(); return undefined; }
+      missions[index] = next;
+      const result = await this.r.multi().set(key, JSON.stringify(missions.slice(-100))).exec();
+      if (result) return next;
+    }
+    return undefined;
   }
   async getReminders(userId: number): Promise<ReminderRecord[]> {
     const raw = await this.r.get(this.reminderk(userId));
@@ -2588,11 +2694,31 @@ class MemoryBackend implements Backend {
   }
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
+  private missions = new Map<number, MissionRecord[]>();
   async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
   async saveTasks(userId: number, tasks: TaskRecord[]) { this.tasks.set(userId, tasks); }
+  async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
+  async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
+  async createMissionIfAbsent(userId: number, mission: MissionRecord) {
+    const missions = this.missions.get(userId) ?? [];
+    const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
+    if (existing) return normalizeMission(existing);
+    this.missions.set(userId, [...missions, mission].slice(-100));
+    return mission;
+  }
+  async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord) {
+    const missions = this.missions.get(userId) ?? [];
+    const index = missions.findIndex((mission) => mission.id === id);
+    const current = index < 0 ? undefined : normalizeMission(missions[index]);
+    if (!current || current.version !== expectedVersion) return undefined;
+    const nextList = [...missions];
+    nextList[index] = next;
+    this.missions.set(userId, nextList.slice(-100));
+    return next;
+  }
   private attentionKey(userId: number, collection: AttentionCollection): string { return `${userId}:${collection}`; }
   async getAttentionRecords(userId: number, collection: AttentionCollection) {
     return this.attention.get(this.attentionKey(userId, collection)) ?? [];
@@ -3885,6 +4011,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     attempt: task.attempt ?? 0,
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
     events: (task.events ?? []).slice(-100),
+    ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(meetingFollowUp ? { meetingFollowUp } : { meetingFollowUp: undefined }),
   };
 }
@@ -3922,6 +4049,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkSkills: input.sdkSkills,
     sdkInstructions: input.sdkInstructions,
     meetingFollowUp: input.meetingFollowUp,
+    missionId: input.missionId,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,
@@ -3938,6 +4066,256 @@ export async function listTasks(userId: number, statuses?: TaskStatus[]): Promis
 
 export async function getTask(userId: number, id: string): Promise<TaskRecord | undefined> {
   return (await backend.getTasks(userId)).map(normalizeTask).find((task) => task.id === id);
+}
+
+const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
+
+function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now()): MissionEventRecord {
+  return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at };
+}
+
+function normalizeMission(mission: MissionRecord): MissionRecord {
+  const budget = mission.budget ?? DEFAULT_MISSION_BUDGET;
+  const numeric = (value: unknown, fallback: number): number => typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return {
+    ...mission,
+    title: String(mission.title ?? "Autonomous mission").slice(0, 240),
+    objective: String(mission.objective ?? "").slice(0, 8000),
+    definitionOfDone: String(mission.definitionOfDone ?? "").slice(0, 4000),
+    status: ["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"].includes(mission.status) ? mission.status : "failed",
+    steps: (mission.steps ?? []).slice(0, 100).map((step) => ({
+      ...step,
+      id: String(step.id).slice(0, 160),
+      title: String(step.title ?? "Mission step").slice(0, 240),
+      objective: String(step.objective ?? "").slice(0, 4000),
+      dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((id): id is string => typeof id === "string").slice(0, 20) : [],
+      attempts: Math.max(0, Math.min(20, Number(step.attempts) || 0)),
+      retryLimit: Math.max(0, Math.min(20, Math.floor(numeric(step.retryLimit, 2)))),
+      updatedAt: Number(step.updatedAt) || mission.updatedAt,
+    })),
+    budget: {
+      maxDurationSeconds: Math.max(60, Math.min(30 * 24 * 60 * 60, numeric(budget.maxDurationSeconds, DEFAULT_MISSION_BUDGET.maxDurationSeconds))),
+      maxSteps: Math.max(1, Math.min(1000, Math.floor(numeric(budget.maxSteps, DEFAULT_MISSION_BUDGET.maxSteps)))),
+      maxToolCalls: Math.max(1, Math.min(10000, Math.floor(numeric(budget.maxToolCalls, DEFAULT_MISSION_BUDGET.maxToolCalls)))),
+      maxCost: Math.max(0, Math.min(10000, numeric(budget.maxCost, DEFAULT_MISSION_BUDGET.maxCost))),
+    },
+    consumedSteps: Math.max(0, Number(mission.consumedSteps) || 0),
+    toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
+    cost: Math.max(0, Number(mission.cost) || 0),
+    events: (mission.events ?? []).slice(-100),
+    version: Math.max(0, Math.floor(numeric(mission.version, 0))),
+  };
+}
+
+type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitionOfDone"> & {
+  id?: string;
+  idempotencyKey?: string;
+  budget?: Partial<MissionBudget>;
+  steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>;
+};
+
+export async function createMission(userId: number, input: MissionCreateInput): Promise<MissionRecord> {
+  if (input.id !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(input.id)) throw new Error("Mission ID is invalid");
+  const idempotencyKey = input.idempotencyKey?.slice(0, 200);
+  const missions = (await backend.getMissions(userId)).map(normalizeMission);
+  if (idempotencyKey) {
+    const existing = missions.find((mission) => mission.idempotencyKey === idempotencyKey);
+    if (existing) return existing;
+  }
+  if (input.id) {
+    const existing = missions.find((mission) => mission.id === input.id);
+    if (existing) return existing;
+  }
+  const now = Date.now();
+  const rawSteps = Array.isArray(input.steps) && input.steps.length ? input.steps.slice(0, 100) : [{ title: input.title, objective: input.objective }];
+  const stepIds = rawSteps.map((step) => step.id?.trim() || `mstep_${randomUUID()}`);
+  if (new Set(stepIds).size !== stepIds.length) throw new Error("Mission step IDs must be unique");
+  const knownStepIds = new Set(stepIds);
+  const steps = rawSteps.map((step, index) => {
+    const dependsOn = [...new Set((step.dependsOn ?? []).filter((dependency) => knownStepIds.has(dependency) && dependency !== stepIds[index]))];
+    return { id: stepIds[index], title: step.title, objective: step.objective, status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now };
+  });
+  const ready = steps.find((step) => step.dependsOn.length === 0);
+  if (!ready) throw new Error("Mission steps must include at least one dependency-free starting step");
+  const resolvable = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of steps) if (!resolvable.has(step.id) && step.dependsOn.every((dependency) => resolvable.has(dependency))) { resolvable.add(step.id); changed = true; }
+  }
+  if (resolvable.size !== steps.length) throw new Error("Mission steps contain a dependency cycle");
+  const stableId = idempotencyKey
+    ? `mis_${createHash("sha256").update(`mission:${userId}:${idempotencyKey}`).digest("hex").slice(0, 48)}`
+    : undefined;
+  const mission = normalizeMission({
+    id: input.id ?? stableId ?? `mis_${randomUUID()}`,
+    userId,
+    title: input.title,
+    objective: input.objective,
+    definitionOfDone: input.definitionOfDone,
+    status: "queued",
+    steps,
+    currentStepId: ready.id,
+    budget: { ...DEFAULT_MISSION_BUDGET, ...(input.budget ?? {}) },
+    consumedSteps: 0,
+    toolCalls: 0,
+    cost: 0,
+    idempotencyKey,
+    createdAt: now,
+    updatedAt: now,
+    events: [missionEvent("created", "Mission created", now)],
+    version: 0,
+  });
+  return backend.createMissionIfAbsent(userId, mission);
+}
+
+export function readyMissionStep(mission: MissionRecord): MissionStepRecord | undefined {
+  return mission.steps.find((step) => step.status === "pending" && step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+}
+
+export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>, reason: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  const now = Date.now();
+  const steps: MissionStepRecord[] = rawSteps.slice(0, 100).map((step, index) => {
+    const stepId = step.id?.trim() || `mstep_${randomUUID()}`;
+    const previous = mission.steps.find((candidate) => candidate.id === stepId);
+    return { id: stepId, title: step.title, objective: step.objective, status: previous?.status === "completed" ? "completed" as const : "pending" as const, dependsOn: [...new Set((step.dependsOn ?? []).filter((dependency) => dependency !== stepId))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result };
+  });
+  if (!steps.length || new Set(steps.map((step) => step.id)).size !== steps.length) throw new Error("Replanned mission steps must have unique IDs");
+  const known = new Set(steps.map((step) => step.id));
+  for (const step of steps) step.dependsOn = step.dependsOn.filter((dependency) => known.has(dependency));
+  const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
+  if (![...completedIds].every((stepId) => steps.some((step) => step.id === stepId && step.status === "completed"))) throw new Error("A replan cannot remove a completed mission step");
+  const resolvable = new Set<string>();
+  let changed = true;
+  while (changed) { changed = false; for (const step of steps) if (!resolvable.has(step.id) && step.dependsOn.every((dependency) => resolvable.has(dependency) || completedIds.has(dependency))) { resolvable.add(step.id); changed = true; } }
+  if (resolvable.size !== steps.length) throw new Error("Replanned mission steps contain a dependency cycle");
+  const next = steps.find((step) => step.status === "pending" && step.dependsOn.every((dependency) => completedIds.has(dependency) || steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+  if (next) next.status = "running";
+  return updateMission(userId, id, { steps, currentStepId: next?.id, nextAction: next ? `Continue with replanned step: ${next.title}.` : "Verify the replanned definition of done, then complete the mission.", events: [...mission.events, missionEvent("checkpointed", `Mission replanned: ${reason}`)] });
+}
+
+export async function completeMissionStep(userId: number, id: string, stepId: string, result: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  const step = mission.steps.find((candidate) => candidate.id === stepId);
+  if (!step || !["running", "pending"].includes(step.status)) return undefined;
+  const now = Date.now();
+  const steps = mission.steps.map((candidate) => candidate.id === stepId ? { ...candidate, status: "completed" as const, result: result.slice(0, 12000), updatedAt: now } : candidate);
+  const next = readyMissionStep({ ...mission, steps });
+  if (next) steps[steps.findIndex((candidate) => candidate.id === next.id)] = { ...next, status: "running", attempts: next.attempts + 1, updatedAt: now };
+  return updateMission(userId, id, { steps, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with step: ${next.title}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("checkpointed", next ? `Step ${step.title} completed; next step is ${next.title}.` : `Step ${step.title} completed; verify the mission definition of done.`)] });
+}
+
+export async function listMissions(userId: number, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
+  return (await backend.getMissions(userId)).map(normalizeMission)
+    .filter((mission) => !statuses?.length || statuses.includes(mission.status))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
+  return (await backend.getMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
+}
+
+export async function updateMission(userId: number, id: string, patch: Partial<Omit<MissionRecord, "id" | "userId" | "createdAt">>): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = await getMission(userId, id);
+    if (!current) return undefined;
+    const next = normalizeMission({ ...current, ...patch, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: Date.now(), version: current.version + 1 });
+    const saved = await backend.compareAndUpdateMission(userId, id, current.version, next);
+    if (saved) return saved;
+  }
+  throw new Error("Mission state changed concurrently; please retry");
+}
+
+export async function startMission(userId: number, id: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || mission.status !== "queued") return undefined;
+  const now = Date.now();
+  return updateMission(userId, id, { status: "running", startedAt: now, error: undefined, events: [...mission.events, missionEvent("started", "Mission started", now)] });
+}
+
+export async function pauseMission(userId: number, id: string, reason = "Mission paused."): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || !["running", "waiting"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "paused", error: reason, waiting: undefined, events: [...mission.events, missionEvent("paused", reason)] });
+}
+
+export async function resumeMission(userId: number, id: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || !["paused", "blocked", "failed"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "running", error: undefined, waiting: undefined, events: [...mission.events, missionEvent("resumed", "Mission resumed")] });
+}
+
+export async function waitMission(userId: number, id: string, waiting: MissionRecord["waiting"], checkpoint?: string, nextAction?: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || !["running", "waiting"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "waiting", waiting, checkpoint: checkpoint ?? mission.checkpoint, nextAction: nextAction ?? mission.nextAction, events: [...mission.events, missionEvent("waiting", nextAction ?? "Mission is waiting for an external event.")] });
+}
+
+/** Resume exactly once for a matching provider event. Replayed events are harmless. */
+export async function resumeMissionFromProviderEvent(userId: number, id: string, provider: string, providerEventId: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission) return undefined;
+  const waiting = mission.waiting;
+  if (mission.status === "running" && mission.events.some((event) => event.type === "resumed" && event.message.includes(providerEventId))) return mission;
+  if (mission.status !== "waiting" || waiting?.kind !== "provider_event" || waiting.provider !== provider || waiting.providerEventId !== providerEventId) return undefined;
+  const now = Date.now();
+  return updateMission(userId, id, {
+    status: "running",
+    waiting: undefined,
+    error: undefined,
+    nextAction: "Continue from the provider event checkpoint.",
+    events: [...mission.events, missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now)],
+  });
+}
+
+export async function checkpointMission(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || !["running", "waiting"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "running", checkpoint: checkpoint.slice(0, 8000), nextAction: nextAction?.slice(0, 2000), waiting: undefined, events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")] });
+}
+
+export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number }): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || !["running", "waiting"].includes(mission.status)) return undefined;
+  const now = Date.now();
+  const consumedSteps = mission.consumedSteps + 1;
+  const toolCalls = mission.toolCalls + (Number.isFinite(input.toolCalls) ? Math.max(0, Math.floor(input.toolCalls ?? 0)) : 0);
+  const cost = mission.cost + (typeof input.cost === "number" && Number.isFinite(input.cost) ? Math.max(0, input.cost) : 0);
+  const durationExceeded = Boolean(mission.startedAt && now - mission.startedAt > mission.budget.maxDurationSeconds * 1000);
+  const budgetExceeded = durationExceeded || consumedSteps > mission.budget.maxSteps || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
+  const reason = durationExceeded ? "Mission duration budget exhausted." : consumedSteps > mission.budget.maxSteps ? "Mission step budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
+  return updateMission(userId, id, {
+    status: budgetExceeded ? "blocked" : "running",
+    checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint,
+    nextAction: budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction,
+    error: reason,
+    consumedSteps,
+    toolCalls,
+    cost,
+    events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : "checkpointed", reason ?? input.nextAction ?? "Mission slice completed.", now)],
+  });
+}
+
+export async function completeMission(userId: number, id: string, result: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  const now = Date.now();
+  return updateMission(userId, id, { status: "completed", result: result.slice(0, 12000), nextAction: undefined, waiting: undefined, error: undefined, completedAt: now, events: [...mission.events, missionEvent("completed", "Mission completed", now)] });
+}
+
+export async function cancelMission(userId: number, id: string, reason = "Mission cancelled."): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "cancelled", error: reason, nextAction: undefined, waiting: undefined, completedAt: Date.now(), events: [...mission.events, missionEvent("cancelled", reason)] });
+}
+
+export async function blockMission(userId: number, id: string, reason: string, nextAction?: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "blocked", error: reason.slice(0, 2000), nextAction: nextAction?.slice(0, 2000), waiting: undefined, events: [...mission.events, missionEvent("blocked", reason)] });
 }
 
 export async function updateTask(userId: number, id: string, patch: Partial<Omit<TaskRecord, "id" | "userId" | "createdAt">>): Promise<TaskRecord | undefined> {
@@ -4479,6 +4857,11 @@ export async function searchMemories(uid: number, query?: string, options: { cat
         const memory = memories.find((item) => item.id === memoryId);
         if (!memory) continue;
         const semanticScore = typeof match.score === "number" ? match.score : 0;
+        // Vector search is an assist, not an authority. A low-confidence
+        // semantic hit must never make an unrelated private memory appear in
+        // a targeted query; lexical matches remain authoritative for exact
+        // terms while stronger semantic matches can still enrich recall.
+        if (semanticScore < 0.65) continue;
         const current = ranked.get(memory.id);
         ranked.set(memory.id, { memory, score: (current?.score ?? 0) + semanticScore + Math.max(0, limit - index) / limit });
       }

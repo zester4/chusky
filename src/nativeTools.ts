@@ -11,9 +11,10 @@ import {
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
+  blockMission, cancelMission, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
-  type TaskStatus,
+  type TaskStatus, type MissionStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
@@ -62,8 +63,21 @@ export interface NativeToolRuntime {
   userRequest?: string;
   /** The durable task currently executing; absent for interactive turns. */
   taskId?: string;
+  /** The autonomous mission currently executing this bounded slice. */
+  missionId?: string;
   /** Set by the internal task-wait tool; the workflow settles the run after the agent turn ends. */
   requestTaskWait?: (request: TaskWaitRequest) => void;
+  /** Set by the mission event-wait tool; the workflow parks the durable slice. */
+  requestMissionWait?: (request: MissionWaitRequest) => void;
+}
+
+export interface MissionWaitRequest {
+  provider: string;
+  providerEventId: string;
+  stepId?: string;
+  checkpoint?: string;
+  nextAction?: string;
+  timeoutSeconds?: number;
 }
 
 type PhoneCallLauncherForTests = (userId: number, input: Record<string, unknown>) => Promise<unknown>;
@@ -100,6 +114,15 @@ function taskStatuses(value: unknown): TaskStatus[] | undefined {
   const statuses = value.map((item) => String(item));
   if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as TaskStatus))) throw new Error("Invalid task status filter");
   return [...new Set(statuses)] as TaskStatus[];
+}
+
+function missionStatuses(value: unknown): MissionStatus[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new Error("statuses must be an array");
+  const allowed: MissionStatus[] = ["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"];
+  const statuses = value.map((item) => String(item));
+  if (statuses.length > allowed.length || statuses.some((status) => !allowed.includes(status as MissionStatus))) throw new Error("Invalid mission status filter");
+  return [...new Set(statuses)] as MissionStatus[];
 }
 
 function stringList(value: unknown, label: string, maxItems = 12): string[] {
@@ -764,6 +787,112 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const request: TaskWaitRequest = createTaskWaitRequest(args);
       runtime.requestTaskWait(request);
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
+    }
+    case "CHUCK_MISSION_START": {
+      const mission = await createMission(userId, {
+        title: text(args.title), objective: text(args.objective), definitionOfDone: text(args.definitionOfDone),
+        idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey) : undefined,
+        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({ id: typeof step.id === "string" ? step.id : undefined, title: text(step.title), objective: text(step.objective), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) })) : undefined,
+        budget: {
+          maxDurationSeconds: args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds),
+          maxSteps: args.maxSteps === undefined ? undefined : Number(args.maxSteps),
+          maxToolCalls: args.maxToolCalls === undefined ? undefined : Number(args.maxToolCalls),
+          maxCost: args.maxCost === undefined ? undefined : Number(args.maxCost),
+        },
+      });
+      if (mission.status === "queued") {
+        const started = await startMission(userId, mission.id);
+        if (started && !started.rootTaskId) {
+          try {
+            const task = await createTask(userId, {
+              title: `Mission: ${started.title}`,
+              objective: started.objective,
+              missionId: started.id,
+              runAt: Date.now(),
+              maxAttempts: 3,
+            });
+            const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
+            await setTaskWorkflowRunId(userId, task.id, workflowRunId);
+            return (await updateMission(userId, started.id, { rootTaskId: task.id, steps: started.steps.map((step) => ({ ...step, status: step.id === started.currentStepId ? "running" as const : step.status, taskId: step.id === started.currentStepId ? task.id : step.taskId, updatedAt: Date.now() })) })) ?? started;
+          } catch (error) {
+            await blockMission(userId, started.id, `Mission could not be scheduled: ${error instanceof Error ? error.message : String(error)}`, "Retry after the durable workflow service is available.");
+            throw error;
+          }
+        }
+        if (started) return started;
+      }
+      return mission;
+    }
+    case "CHUCK_MISSION_LIST": return listMissions(userId, missionStatuses(args.statuses));
+    case "CHUCK_MISSION_GET": {
+      const mission = await getMission(userId, text(args.id));
+      if (!mission) throw new Error("Mission not found or not owned by you");
+      return mission;
+    }
+    case "CHUCK_MISSION_CHECKPOINT": {
+      const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint), args.nextAction ? text(args.nextAction) : undefined);
+      if (!mission) throw new Error("Only running missions you own can be checkpointed");
+      return mission;
+    }
+    case "CHUCK_MISSION_PAUSE": {
+      const mission = await pauseMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
+      if (!mission) throw new Error("Only running or waiting missions you own can be paused");
+      if (mission.rootTaskId) await cancelTask(userId, mission.rootTaskId);
+      return mission;
+    }
+    case "CHUCK_MISSION_RESUME": {
+      const mission = await resumeMission(userId, text(args.id));
+      if (!mission) throw new Error("Only paused, blocked, or failed missions you own can be resumed");
+      if (mission.rootTaskId) {
+        const task = await retryTask(userId, mission.rootTaskId);
+        if (task) {
+          const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
+          await setTaskWorkflowRunId(userId, task.id, workflowRunId);
+        }
+      }
+      return mission;
+    }
+    case "CHUCK_MISSION_CANCEL": {
+      const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
+      if (!mission) throw new Error("Only unfinished missions you own can be cancelled");
+      if (mission.rootTaskId) await cancelTask(userId, mission.rootTaskId);
+      return mission;
+    }
+    case "CHUCK_MISSION_WAIT_EVENT": {
+      const mission = await getMission(userId, text(args.id));
+      if (!mission || !["running", "waiting"].includes(mission.status)) throw new Error("Only a running mission you own can wait for a provider event");
+      const provider = text(args.provider).slice(0, 120);
+      const providerEventId = text(args.providerEventId).slice(0, 240);
+      const request: MissionWaitRequest = { provider, providerEventId, stepId: args.stepId ? text(args.stepId) : mission.currentStepId, checkpoint: args.checkpoint ? text(args.checkpoint) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
+      runtime.requestMissionWait?.(request);
+      return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };
+    }
+    case "CHUCK_MISSION_STEP_COMPLETE": {
+      const mission = await completeMissionStep(userId, text(args.id), text(args.stepId), text(args.result));
+      if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
+      return mission;
+    }
+    case "CHUCK_MISSION_REPLAN": {
+      const steps = Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
+        id: typeof step.id === "string" ? step.id : undefined,
+        title: text(step.title),
+        objective: text(step.objective),
+        dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined,
+        retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit),
+      })) : [];
+      const mission = await replanMission(userId, text(args.id), steps, text(args.reason));
+      if (!mission) throw new Error("Only an unfinished mission you own can be replanned");
+      return mission;
+    }
+    case "CHUCK_MISSION_BLOCK": {
+      const mission = await blockMission(userId, text(args.id), text(args.reason), args.nextAction ? text(args.nextAction) : undefined);
+      if (!mission) throw new Error("Only unfinished missions you own can be blocked");
+      return mission;
+    }
+    case "CHUCK_MISSION_COMPLETE": {
+      const mission = await completeMission(userId, text(args.id), text(args.result));
+      if (!mission) throw new Error("Only unfinished missions you own can be completed");
+      return mission;
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
     case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));

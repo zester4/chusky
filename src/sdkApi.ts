@@ -9,7 +9,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setTaskWorkflowRunId, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
@@ -1677,6 +1677,94 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await sdkTaskWorkflowEnqueuer(userId, task.id, task.runAt ?? Date.now()); const updated = await setTaskWorkflowRunId(userId, task.id, workflowRunId); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });
   app.post("/v1/tasks/:taskId/cancel", async (c) => { const task = await cancelTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 409, "task_not_cancellable", "This task is already completed or cancelled."); });
+  app.get("/v1/missions", async (c) => c.json({ data: await listMissions(sdkUser(c)!.userId) }));
+  app.post("/v1/missions", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    const objective = typeof body.objective === "string" ? body.objective.trim() : "";
+    const definitionOfDone = typeof body.definitionOfDone === "string" ? body.definitionOfDone.trim() : "";
+    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const step = value as Record<string, unknown>;
+      if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
+      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) }];
+    }) : undefined;
+    if (!title || !objective || !definitionOfDone || title.length > 240 || objective.length > 8000 || definitionOfDone.length > 4000) return apiError(c, 400, "invalid_mission", "title, objective, and definitionOfDone are required and must be within their size limits.");
+    const idempotencyKey = (c.req.header("Idempotency-Key") ?? (typeof body.idempotencyKey === "string" ? body.idempotencyKey : "")).trim().slice(0, 200) || undefined;
+    try {
+      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, budget: {
+        maxDurationSeconds: body.maxDurationSeconds === undefined ? undefined : Number(body.maxDurationSeconds),
+        maxSteps: body.maxSteps === undefined ? undefined : Number(body.maxSteps),
+        maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
+        maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
+      } });
+      if (mission.rootTaskId) return c.json(mission, 200);
+      const started = await startMission(owner.userId, mission.id);
+      if (!started) return apiError(c, 409, "mission_not_startable", "Mission is no longer in a startable state.");
+      const task = await createTask(owner.userId, { title: `Mission: ${started.title}`, objective: started.objective, missionId: started.id, runAt: Date.now(), maxAttempts: 3 });
+      try {
+        const workflowRunId = await sdkTaskWorkflowEnqueuer(owner.userId, task.id, task.runAt ?? Date.now());
+        await setTaskWorkflowRunId(owner.userId, task.id, workflowRunId);
+        const linked = await updateMission(owner.userId, started.id, { rootTaskId: task.id, steps: started.steps.map((step) => ({ ...step, status: step.id === started.currentStepId ? "running" as const : step.status, taskId: step.id === started.currentStepId ? task.id : step.taskId, updatedAt: Date.now() })) });
+        return c.json(linked ?? started, 201);
+      } catch (error) {
+        await updateMission(owner.userId, started.id, { status: "blocked", error: `Mission could not be scheduled: ${error instanceof Error ? error.message : String(error)}`, nextAction: "Retry after the durable workflow service is available." });
+        return apiError(c, 503, "mission_enqueue_failed", error instanceof Error ? error.message : "Mission could not be scheduled.");
+      }
+    } catch (error) { return apiError(c, 400, "mission_create_failed", error instanceof Error ? error.message : "Mission could not be created."); }
+  });
+  app.get("/v1/missions/:missionId", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(mission) : apiError(c, 404, "not_found", "Mission not found."); });
+  app.post("/v1/missions/:missionId/pause", async (c) => { const owner = sdkUser(c)!; const mission = await pauseMission(owner.userId, c.req.param("missionId"), "Mission paused through the API."); if (mission?.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId); return mission ? c.json(mission) : apiError(c, 409, "mission_not_paused", "Only a running or waiting mission can be paused."); });
+  app.post("/v1/missions/:missionId/resume", async (c) => {
+    const owner = sdkUser(c)!; const mission = await resumeMission(owner.userId, c.req.param("missionId"));
+    if (!mission) return apiError(c, 409, "mission_not_resumable", "Only a paused, blocked, or failed mission can be resumed.");
+    if (mission.rootTaskId) { const task = await retryTask(owner.userId, mission.rootTaskId); if (task) { const workflowRunId = await sdkTaskWorkflowEnqueuer(owner.userId, task.id, task.runAt ?? Date.now()); await setTaskWorkflowRunId(owner.userId, task.id, workflowRunId); } }
+    return c.json(await getMission(owner.userId, mission.id) ?? mission);
+  });
+  app.post("/v1/missions/:missionId/events", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { provider?: unknown; providerEventId?: unknown };
+    const provider = typeof body.provider === "string" ? body.provider.trim().slice(0, 120) : "";
+    const providerEventId = typeof body.providerEventId === "string" ? body.providerEventId.trim().slice(0, 240) : "";
+    if (!provider || !providerEventId) return apiError(c, 400, "invalid_provider_event", "provider and providerEventId are required.");
+    const mission = await resumeMissionFromProviderEvent(owner.userId, c.req.param("missionId"), provider, providerEventId);
+    if (!mission) return apiError(c, 409, "mission_event_not_expected", "This mission is not waiting for that provider event.");
+    if (mission.rootTaskId) {
+      const existingTask = await getTask(owner.userId, mission.rootTaskId);
+      const task = existingTask?.status === "queued" ? await updateTask(owner.userId, existingTask.id, { runAt: Date.now(), error: undefined }) : await retryTask(owner.userId, mission.rootTaskId);
+      if (task) {
+        const workflowRunId = await sdkTaskWorkflowEnqueuer(owner.userId, task.id, task.runAt ?? Date.now());
+        await setTaskWorkflowRunId(owner.userId, task.id, workflowRunId);
+      }
+    }
+    return c.json(await getMission(owner.userId, mission.id) ?? mission, 202);
+  });
+  app.post("/v1/missions/:missionId/steps/:stepId/complete", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { result?: unknown };
+    const result = typeof body.result === "string" ? body.result.trim() : "";
+    if (!result || result.length > 12_000) return apiError(c, 400, "invalid_step_result", "result is required and must be 12000 characters or fewer.");
+    const mission = await completeMissionStep(owner.userId, c.req.param("missionId"), c.req.param("stepId"), result);
+    return mission ? c.json(mission) : apiError(c, 409, "mission_step_not_completable", "The mission step is not pending/running, is not owned by you, or the mission is finished.");
+  });
+  app.post("/v1/missions/:missionId/replan", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "Verified information changed the remaining plan.";
+    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+      if (!value || typeof value !== "object") return [];
+      const step = value as Record<string, unknown>;
+      if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
+      return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) }];
+    }) : [];
+    if (!reason || reason.length > 2_000 || !steps.length) return apiError(c, 400, "invalid_replan", "reason and at least one valid step are required.");
+    try {
+      const mission = await replanMission(owner.userId, c.req.param("missionId"), steps, reason);
+      return mission ? c.json(mission) : apiError(c, 409, "mission_not_replannable", "Only an unfinished mission you own can be replanned.");
+    } catch (error) { return apiError(c, 400, "mission_replan_failed", error instanceof Error ? error.message : "Mission could not be replanned."); }
+  });
+  app.post("/v1/missions/:missionId/cancel", async (c) => { const owner = sdkUser(c)!; const mission = await cancelMission(owner.userId, c.req.param("missionId"), "Mission cancelled through the API."); if (!mission) return apiError(c, 409, "mission_not_cancellable", "This mission is already completed or cancelled."); if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId); return c.json(mission); });
   app.get("/v1/company/runs", async (c) => {
     const project = await requestCompanyProject(c);
     if (!project) return apiError(c, 404, "company_project_not_found", "Company telemetry is not available for this API project.");
@@ -1715,7 +1803,19 @@ export function registerSdkApi(app: Hono): void {
     const pending = await getApproval(owner.userId, c.req.param("approvalId"));
     if (!pending || pending.status !== "pending" || pending.expiresAt <= Date.now()) return apiError(c, 404, "not_found", "Pending approval not found.");
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
-    if (body.decision === "deny") { await setApprovalStatus(owner.userId, pending.id, "denied"); await rejectComposerApproval(owner.userId, pending.id); return c.json({ id: pending.id, status: "denied" }); }
+    if (body.decision === "deny") {
+      await setApprovalStatus(owner.userId, pending.id, "denied");
+      await rejectComposerApproval(owner.userId, pending.id);
+      for (const candidate of await listTasks(owner.userId)) {
+        if (!candidate.missionId) continue;
+        const candidateMission = await getMission(owner.userId, candidate.missionId);
+        if (candidateMission?.waiting?.kind === "approval" && candidateMission.waiting.key === pending.id) {
+          await updateMission(owner.userId, candidateMission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${pending.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
+          break;
+        }
+      }
+      return c.json({ id: pending.id, status: "denied" });
+    }
     const approval = await claimApproval(owner.userId, pending.id);
     if (!approval) return apiError(c, 409, "approval_unavailable", "Approval was already decided, expired, or consumed.");
     const token = randomUUID();
@@ -1745,6 +1845,21 @@ export function registerSdkApi(app: Hono): void {
           await setApprovalStatus(owner.userId, approval.id, "consumed");
           return apiError(c, 502, "call_start_failed", error instanceof Error ? error.message : "Phone call could not be started.");
         }
+      }
+      let missionTask: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
+      for (const candidate of await listTasks(owner.userId)) {
+        if (!candidate.missionId || candidate.status !== "blocked") continue;
+        const candidateMission = await getMission(owner.userId, candidate.missionId);
+        if (candidateMission?.waiting?.kind === "approval" && candidateMission.waiting.key === approval.id) { missionTask = candidate; break; }
+      }
+      if (missionTask?.missionId) {
+        const resumedMission = await resumeMission(owner.userId, missionTask.missionId);
+        const retried = await retryTask(owner.userId, missionTask.id);
+        if (!resumedMission || !retried) return apiError(c, 409, "mission_not_resumable", "The mission approval could not be resumed.");
+        await updateTask(owner.userId, missionTask.id, { approvedApprovalId: approval.id });
+        const workflowRunId = await sdkTaskWorkflowEnqueuer(owner.userId, missionTask.id, retried.runAt ?? Date.now());
+        await setTaskWorkflowRunId(owner.userId, missionTask.id, workflowRunId);
+        return c.json({ id: approval.id, status: "approved", mission: await getMission(owner.userId, resumedMission.id) ?? resumedMission }, 202);
       }
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }

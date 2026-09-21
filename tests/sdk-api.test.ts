@@ -63,6 +63,38 @@ test("SDK thread creation is authenticated, replay-safe, and rejects key/body mi
   assert.equal(forbidden.status, 401);
 });
 
+test("SDK autonomous missions are idempotent, owner-scoped, and controllable", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-mission-test");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "mission-owner", "Content-Type": "application/json", "Idempotency-Key": "mission-request-1" };
+  const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
+  const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
+  assert.equal(first.status, 201);
+  const created = await first.json() as { id: string; status: string; rootTaskId?: string };
+  assert.equal(created.status, "running");
+  assert.ok(created.rootTaskId);
+  const replay = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json() as { id: string }).id, created.id);
+  const hidden = await api.fetch(new Request(`http://local/v1/missions/${created.id}`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "another-owner" } }));
+  assert.equal(hidden.status, 404);
+  const paused = await api.fetch(new Request(`http://local/v1/missions/${created.id}/pause`, { method: "POST", headers }));
+  assert.equal(paused.status, 200);
+  assert.equal((await paused.json() as { status: string }).status, "paused");
+  const resumed = await api.fetch(new Request(`http://local/v1/missions/${created.id}/resume`, { method: "POST", headers }));
+  assert.equal(resumed.status, 200);
+  assert.equal((await resumed.json() as { status: string }).status, "running");
+  const step = await api.fetch(new Request(`http://local/v1/missions/${created.id}/steps/research/complete`, { method: "POST", headers, body: JSON.stringify({ result: "Sources verified." }) }));
+  assert.equal(step.status, 200);
+  assert.equal((await step.json() as { currentStepId?: string }).currentStepId, "draft");
+  const replanned = await api.fetch(new Request(`http://local/v1/missions/${created.id}/replan`, { method: "POST", headers, body: JSON.stringify({ reason: "Add an explicit review gate.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }, { id: "review", title: "Review", objective: "Review the brief.", dependsOn: ["draft"] }] }) }));
+  assert.equal(replanned.status, 200);
+  assert.equal((await replanned.json() as { steps: Array<{ id: string; status: string }> }).steps.find((item) => item.id === "research")?.status, "completed");
+  const cancelled = await api.fetch(new Request(`http://local/v1/missions/${created.id}/cancel`, { method: "POST", headers }));
+  assert.equal(cancelled.status, 200);
+  assert.equal((await cancelled.json() as { status: string }).status, "cancelled");
+});
+
 test("SDK conversation lifecycle is owned, archive-aware, and protects active runs", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "lifecycle-user", "Content-Type": "application/json" };

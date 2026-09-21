@@ -9,7 +9,7 @@ import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeet
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -1840,10 +1840,34 @@ async function main(): Promise<void> {
         const run = await executeDurableTask(payload, {
           workerId: `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`,
           execute: async (task) => {
+            let mission: Awaited<ReturnType<typeof getMission>>;
             try {
-              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`;
+              mission = task.missionId ? await getMission(task.userId, task.missionId) : undefined;
+              if (mission && ["paused", "blocked", "completed", "cancelled"].includes(mission.status)) {
+                return { status: mission.status === "completed" ? "completed" as const : mission.status === "cancelled" ? "cancelled" as const : "blocked" as const, message: mission.result ?? mission.error ?? `Mission is ${mission.status}.`, result: mission.result, checkpoint: mission.checkpoint, nextAction: mission.nextAction };
+              }
+              if (mission?.status === "waiting") {
+                if (mission.waiting?.kind === "provider_event") {
+                  const wakeAt = mission.waiting.expiresAt ?? Date.now() + 7 * 24 * 60 * 60 * 1000;
+                  return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: wakeAt };
+                }
+                if (mission.waiting?.kind === "approval") {
+                  const wakeAt = mission.waiting.expiresAt ?? Date.now() + 24 * 60 * 60 * 1000;
+                  return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: wakeAt };
+                }
+                await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
+              }
+              const currentMissionStep = mission?.steps.find((step) => step.id === mission?.currentStepId);
+              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\nCurrent executable step: ${currentMissionStep ? `${currentMissionStep.title} — ${currentMissionStep.objective}` : "Verify the mission definition of done"}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nNext action: ${mission.nextAction ?? "determine the safest next bounded action"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only after the current step is verified. Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.` : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`;
               const session = await getSession(task.userId);
-              const durationSeconds = task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
+              const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
+              const missionRemainingTools = mission ? mission.budget.maxToolCalls - mission.toolCalls : undefined;
+              const missionRemainingCost = mission ? mission.budget.maxCost - mission.cost : undefined;
+              if (mission && ((missionRemainingSteps ?? 1) <= 0 || (missionRemainingTools ?? 1) <= 0 || (missionRemainingCost ?? 1) <= 0 || (mission.startedAt && Date.now() - mission.startedAt >= mission.budget.maxDurationSeconds * 1000))) {
+                const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "Mission budget is exhausted before the next slice.", nextAction: "Increase the mission budget or revise the objective before resuming." });
+                return { status: "blocked" as const, message: blocked?.error ?? "Mission budget exhausted", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+              }
+              const durationSeconds = mission ? Math.max(1, Math.floor((mission.budget.maxDurationSeconds * 1000 - (Date.now() - (mission.startedAt ?? Date.now()))) / 1000)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
@@ -1864,7 +1888,7 @@ async function main(): Promise<void> {
                   if (!task.meetingFollowUp) {
                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
                     const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, undefined, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: task.sdkBudget?.maxToolCalls, maxCost: task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id });
+                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId });
                   }
 
                   const followUp = task.meetingFollowUp;
@@ -1912,12 +1936,29 @@ async function main(): Promise<void> {
                 throw error;
               }
               finally { if (budgetTimer) clearTimeout(budgetTimer); clearInterval(cancellationPoll); }
+              if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
               if (result.taskWait) {
+                if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt }, result.taskWait.checkpoint, result.taskWait.nextAction);
                 if (task.sdkRunId && task.sdkThreadId) {
                   const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
                   if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
                 }
                 return { status: "queued" as const, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
+              }
+              if (result.missionWait && mission) {
+                const timeoutSeconds = result.missionWait.timeoutSeconds === undefined ? undefined : Math.min(30 * 24 * 60 * 60, Math.max(60, result.missionWait.timeoutSeconds));
+                const expiresAt = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
+                await waitMission(task.userId, mission.id, { kind: "provider_event", provider: result.missionWait.provider, providerEventId: result.missionWait.providerEventId, stepId: result.missionWait.stepId, expiresAt }, result.missionWait.checkpoint, result.missionWait.nextAction);
+                return { status: "queued" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt ?? Date.now() + 7 * 24 * 60 * 60 * 1000 };
+              }
+              if (mission) {
+                const currentMission = await getMission(task.userId, mission.id);
+                if (currentMission?.status === "completed") return { status: "completed" as const, message: "Autonomous mission completed", result: currentMission.result, checkpoint: currentMission.checkpoint };
+                if (currentMission?.status === "cancelled") return { status: "cancelled" as const, message: currentMission.error ?? "Autonomous mission cancelled" };
+                if (currentMission?.status === "paused" || currentMission?.status === "blocked" || currentMission?.status === "failed") return { status: "blocked" as const, message: currentMission.error ?? "Autonomous mission is waiting for intervention", checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
+                const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission?.checkpoint ?? result.text, nextAction: currentMission?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
+                if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
+                return { status: "queued" as const, message: "Autonomous mission slice completed", checkpoint: accounted.checkpoint, nextAction: accounted.nextAction ?? "Continue from the verified checkpoint.", runAt: Date.now() + 5000 };
               }
               if (task.sdkRunId && task.sdkThreadId) {
                 if (result.cost) await addUsage(task.userId, result.cost);
@@ -1939,6 +1980,12 @@ async function main(): Promise<void> {
             } catch (error) {
               if (error instanceof ApprovalRequiredError) {
                 if (task.sdkRunId && task.sdkThreadId) { const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "requires_approval"; sdkRun.approvalId = error.approvalId; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.approval_required", at: Date.now() }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); } }
+                if (mission) {
+                  const approval = await getApproval(task.userId, error.approvalId);
+                  const expiresAt = approval?.expiresAt;
+                  await waitMission(task.userId, mission.id, { kind: "approval", key: error.approvalId, stepId: mission.currentStepId, expiresAt }, mission.checkpoint, `Approve or deny ${error.toolSlug} (${error.approvalId}) before the mission can continue.`);
+                  return { status: "queued" as const, message: `Mission is waiting for approval of ${error.toolSlug}.`, checkpoint: mission.checkpoint, nextAction: `Approve or deny ${error.toolSlug} (${error.approvalId}) before continuing.`, runAt: expiresAt ?? Date.now() + 24 * 60 * 60 * 1000 };
+                }
                 return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
               }
               if (task.sdkRunId && task.sdkThreadId) { const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId); if (sdkRun) { sdkRun.status = "failed"; sdkRun.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.failed", at: Date.now(), text: sdkRun.error.message }); sdkRun.updatedAt = Date.now(); await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); } }
@@ -1946,13 +1993,18 @@ async function main(): Promise<void> {
             }
           },
         });
-        return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt, taskId: run.task?.id };
+        return { claimed: run.claimed, status: run.task?.status, runAt: run.task?.runAt, taskId: run.task?.id, missionId: run.task?.missionId };
       });
       // Each execution/retry is a named durable step. Completed steps are not
       // repeated if QStash retries the workflow after a transport interruption.
       for (let attempt = 0; attempt < 10; attempt++) {
-        const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string };
+        const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string; missionId?: string };
         if (run.taskId) await onComposerTaskSettled(payload.userId, run.taskId).catch((error) => logger.warn({ err: error, taskId: run.taskId }, "Composer stage reconciliation failed"));
+        if (run.missionId && run.status === "queued" && run.runAt) {
+          const workflowRunId = await enqueueTaskWorkflow(payload.userId, run.taskId!, run.runAt);
+          await setTaskWorkflowRunId(payload.userId, run.taskId!, workflowRunId);
+          break;
+        }
         if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
       }

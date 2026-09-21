@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, listApprovals, listJobs, listReminders, listTasks,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, setTaskWorkflowRunId, listApprovals, listJobs, listReminders, listTasks, listMissions, pauseMission, resumeMission, cancelMission,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
   searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
@@ -27,6 +27,7 @@ import { randomUUID } from "node:crypto";
 import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePreference } from "./channels/identity.js";
 import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval } from "./triggerWorkflow.js";
+import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
@@ -977,6 +978,7 @@ export function registerHandlers(bot: Bot): void {
       `  /api — create and manage project API keys\n` +
       `  /call <code>+number purpose</code> — request a phone call\n` +
       `  /meetings — meeting status, participants, calendar preparations, and contacts\n` +
+      `  /missions [pause|resume|cancel] <mission-id> — inspect and control autonomous missions\n` +
       `  /meeting profile|prepare|join|join-prepared|context|leave — meeting controls\n` +
       `  /voice list|set — choose live-call voices\n` +
       `  /channel — choose a private channel or iMessage group to link\n` +
@@ -1009,6 +1011,7 @@ export function registerHandlers(bot: Bot): void {
       `/voice on|off|status — control spoken replies\n` +
       `/voice list|set twilio|meetings|bland — choose a live-call voice\n` +
       `/meetings [meeting id] — meetings, participants, outcomes, and contacts\n` +
+      `/missions [pause|resume|cancel] <mission-id> — inspect and control autonomous missions\n` +
       `/meeting profile|prepare|join|join-prepared|context|leave — meeting controls\n` +
       `/video-status [job id] — check video generation status\n` +
       `/agents — list recent worker delegations\n` +
@@ -2334,12 +2337,29 @@ export function registerHandlers(bot: Bot): void {
   // Read-only collection commands keep Telegram at parity with the CLI while
   // leaving writes to the normal agent/tool path. These are private because
   // memories, scratchpad notes, history, and approvals can be sensitive.
-  for (const command of ["history", "memory", "scratchpad", "reminders", "jobs", "tasks", "approvals"] as const) {
+  for (const command of ["history", "memory", "scratchpad", "reminders", "jobs", "tasks", "missions", "approvals"] as const) {
     bot.command(command, async (ctx) => {
       if (!(await guard(ctx))) return;
       if (isTelegramShared(ctx)) { await ctx.reply(`For privacy, /${command} is available only in your private chat with Chusky.`); return; }
-      const uid = ctx.from!.id;
-      try {
+        const uid = ctx.from!.id;
+        try {
+        if (command === "missions") {
+          const [action, missionId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+          if (action && ["pause", "resume", "cancel"].includes(action) && missionId) {
+            const updated = action === "pause" ? await pauseMission(uid, missionId, "Mission paused from Telegram.") : action === "resume" ? await resumeMission(uid, missionId) : await cancelMission(uid, missionId, "Mission cancelled from Telegram.");
+            if (!updated) { await replyHtml(ctx, `Could not ${action} that mission. Check <code>/missions</code> for its current state.`); return; }
+            if (action === "pause" || action === "cancel") { if (updated.rootTaskId) await cancelTask(uid, updated.rootTaskId); }
+            if (action === "resume" && updated.rootTaskId) {
+              const task = await retryTask(uid, updated.rootTaskId);
+              if (task) await setTaskWorkflowRunId(uid, task.id, await enqueueTaskWorkflow(uid, task.id, task.runAt ?? Date.now()));
+            }
+            await replyHtml(ctx, `<b>Mission ${escapeTelegramHtml(action)}d</b>\n\n<code>${escapeTelegramHtml(updated.id)}</code> · ${escapeTelegramHtml(updated.status)}\n${escapeTelegramHtml(updated.nextAction ?? updated.error ?? "State updated.")}`);
+            return;
+          }
+          const missions = await listMissions(uid);
+          await replyHtml(ctx, missions.length ? `<b>Autonomous missions</b>\n\n${missions.slice(0, 20).map((mission) => `• <code>${escapeTelegramHtml(mission.id)}</code> · <b>${escapeTelegramHtml(mission.status)}</b>\n  ${escapeTelegramHtml(mission.title)}\n  ${escapeTelegramHtml(mission.nextAction ?? mission.checkpoint ?? "No checkpoint yet.")}`).join("\n")}` : "No autonomous missions yet. Ask Chusky to start one for work that should continue across time.");
+          return;
+        }
         if (command === "history") {
           const history = (await getSession(uid)).history.slice(-20);
           await replyHtml(ctx, history.length ? `<b>Recent history</b>\n\n${history.map((message) => `${message.role === "assistant" ? "Chusky" : "You"}: ${escapeTelegramHtml(message.content)}`).join("\n\n")}` : "Your private history is empty.");
