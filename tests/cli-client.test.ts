@@ -163,6 +163,48 @@ test("CLI client exposes reminder and recurring-job autonomy controls", async ()
   } finally { globalThis.fetch = original; }
 });
 
+test("CLI client exposes mission proof, context, department, and outcome controls", async () => {
+  const original = globalThis.fetch;
+  const calls: { path: string; method: string; body?: unknown }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    calls.push({ path: new URL(request.url).pathname, method: request.method, body: request.method === "GET" ? undefined : JSON.parse(await request.text() || "{}") });
+    return response({ ok: true, missions: [], proof: { missionId: "mis_1", evidence: [], steps: [], events: [] }, events: [], context: [], departments: [], outcomes: [], plan: { steps: [] }, mission: { id: "mis_1" } });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    await client.missions();
+    await client.mission("mis_1");
+    await client.missionEvents("mis_1");
+    await client.missionProof("mis_1");
+    await client.createMission({ title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
+    await client.missionAction("mis_1", "pause");
+    await client.replanMission("mis_1", { reason: "New evidence", steps: [{ title: "Recheck", objective: "Recheck the evidence" }] });
+    await client.missionProviderEvent("mis_1", "stripe", "evt_1");
+    await client.addMissionEvidence("mis_1", [{ kind: "source", summary: "Receipt", verified: true }]);
+    await client.verifyMission("mis_1", { confidence: 0.9 });
+    await client.completeMissionStep("mis_1", "step_1", "Done");
+    await client.context({ purpose: "sales", limit: 10 });
+    await client.saveContext({ scope: "user", kind: "fact", key: "segment", value: "fintech", confidence: 1, sensitivity: "normal", tags: [] });
+    await client.departmentCatalog();
+    await client.departments();
+    await client.provisionDepartment({ department: "sales" });
+    await client.departmentHandoff("sales", { objective: "Qualify leads" });
+    await client.outcomes();
+    await client.outcome("qualified-fintech-leads");
+    await client.planOutcome("qualified-fintech-leads", { "ideal customer profile": "B2B fintech" });
+    assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
+      "GET /cli/missions", "GET /cli/missions/mis_1", "GET /cli/missions/mis_1/events", "GET /cli/missions/mis_1/proof",
+      "POST /cli/missions", "POST /cli/missions/mis_1/action", "POST /cli/missions/mis_1/replan", "POST /cli/missions/mis_1/events",
+      "POST /cli/missions/mis_1/evidence", "POST /cli/missions/mis_1/verify", "POST /cli/missions/mis_1/steps/step_1/complete",
+      "GET /cli/context", "POST /cli/context", "GET /cli/departments/catalog", "GET /cli/departments", "POST /cli/departments",
+      "POST /cli/departments/sales/handoffs", "GET /cli/outcomes", "GET /cli/outcomes/qualified-fintech-leads", "POST /cli/outcomes/qualified-fintech-leads/plan",
+    ]);
+    assert.deepEqual(calls[4].body, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
+    assert.deepEqual(calls[7].body, { provider: "stripe", providerEventId: "evt_1" });
+  } finally { globalThis.fetch = original; }
+});
+
 test("CLI client exposes meeting preparation, participant context, and lifecycle APIs", async () => {
   const original = globalThis.fetch;
   const calls: { path: string; method: string; body?: unknown }[] = [];

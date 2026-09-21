@@ -113,13 +113,34 @@ The authenticated API exposes `POST /v1/missions`, `GET /v1/missions`,
 also contain dependency-aware steps; the agent advances a step only after
 `CHUCK_MISSION_STEP_COMPLETE` records its verified result. The Telegram
 `/missions` command and dashboard Missions page expose the same owner-scoped
-state and controls. The Cloudflare MCP
+state and controls. The dashboard also shows execution proof, evidence,
+verification state, branch activity, budgets, durable events, and the governed
+outcome package catalogue. The Cloudflare MCP
 maps those controls to `chusky_mission_start`, `chusky_missions_list`,
 `chusky_mission_get`, `chusky_mission_step_complete`,
 `chusky_mission_replan`, `chusky_mission_event`, `chusky_mission_pause`,
-`chusky_mission_resume`, and `chusky_mission_cancel`. Production autonomy requires Redis for durable state
+`chusky_mission_resume`, and `chusky_mission_cancel`, plus proof, evidence,
+verification, repair, context, and outcome tools/resources. Production autonomy requires Redis for durable state
 and QStash for continuation delivery; without them, Chusky must fail clearly
 instead of pretending that background work is durable.
+
+### Context, departments, and business outcomes
+
+Missions use the owner-scoped context graph to select durable facts,
+preferences, decisions, open loops, meeting history, tool receipts, and
+artifacts for the current purpose. Context records carry scope, sensitivity,
+confidence, review/expiry times, and source references; sensitive context is
+excluded from normal prompts unless the runtime explicitly requests it.
+
+The API exposes `/v1/context`, `/v1/departments`, and `/v1/outcomes`. A
+department space gives a team a mission, policies, approved capabilities,
+escalation owner, and typed handoff packets. Outcome packages turn a business
+result—such as qualified leads, support resolution, competitor intelligence,
+employee onboarding, finance reconciliation, executive review, or incident
+repair—into required inputs, allowed tools, evidence rules, approval policy,
+budget, SLA, and deliverable expectations. Use `POST /v1/outcomes/:slug/plan`
+to validate inputs and inspect the proposed execution graph before starting a
+mission.
 
 ### Calling third-party MCP servers
 
@@ -227,7 +248,7 @@ npm run cli
 
 The pairing code is one-time and expires after 10 minutes. The terminal stores a revocable device token locally; conversation history, memories, approvals, reminders, jobs, and the Composio session remain server-side. Use `/cli devices` and `/cli revoke <terminal name>` in Telegram to manage access. When installed, the optional `keytar` dependency stores the token in Windows Credential Manager, macOS Keychain, or Linux Secret Service. If native storage is unavailable, set `CHUSKY_CLI_SECRET` to enable AES-256-GCM encrypted fallback storage; otherwise Chusky retains the legacy file behavior and reports it in diagnostics.
 
-CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/meetings [id]`, `/meeting profile`, `/meeting prepare <client> | <objective> | <context>`, `/meeting join <url> | <client> | <objective> | <context>`, `/meeting join-prepared <preparation-id>`, `/meeting context <meeting-id> [question]`, `/meeting leave <meeting-id>`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Meeting commands share the Recall lifecycle with Telegram and the dashboard: prepared calendar meetings, participant rosters, bounded conversation history, outcomes, and captured follow-up contacts remain owner-scoped. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` validates the E.164 destination and purpose, then starts the configured outbound call directly. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
+CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/missions [id]`, `/mission create|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...`, `/context [query]`, `/departments [catalog|provision|handoff ...]`, `/outcomes [slug|plan ...]`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/meetings [id]`, `/meeting profile`, `/meeting prepare <client> | <objective> | <context>`, `/meeting join <url> | <client> | <objective> | <context>`, `/meeting join-prepared <preparation-id>`, `/meeting context <meeting-id> [question]`, `/meeting leave <meeting-id>`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Mission controls use the same durable runtime as Telegram, the dashboard, the SDK, and MCP: dependency-aware steps, bounded budgets, evidence/proof, verification, pause/resume/repair, exact provider-event continuation, cancellation, and replanning. Context, department spaces, typed handoffs, and outcome packages are owner-scoped and available from the CLI without exposing provider credentials. Meeting commands share the Recall lifecycle with Telegram and the dashboard: prepared calendar meetings, participant rosters, bounded conversation history, outcomes, and captured follow-up contacts remain owner-scoped. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` validates the E.164 destination and purpose, then starts the configured outbound call directly. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, mission, context, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
 
 Routine email, messaging, publishing, artifact creation, triggers, reminders, memory maintenance, and validated outbound calls are autonomous. Deletion, payment, permission changes, production deployment, remote Git push, and other materially risky actions use the approval picker before execution. Daytona's private computer and sandbox are agent-controlled for ordinary workspace work, while destructive file/workspace actions and remote pushes still use the approval boundary. `COMPOSIO_MULTI_EXECUTE_TOOL` pauses when one of its nested actions is materially risky or cannot be classified safely. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
 `/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
@@ -921,6 +942,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |
 | `QSTASH_TOKEN` | reminders/jobs/triggers | — | Upstash QStash token |
 | `QSTASH_URL` | QStash client | `https://qstash-us-east-1.upstash.io` | Regional Upstash QStash API URL |
+| `MISSION_WEBHOOK_SECRET` | signed mission events | — | HMAC secret for provider callbacks to `/v1/missions/:id/events/signed` |
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |
 | `TRIGGER_WORKFLOW_URL` | Composio triggers | — | Public `.../workflows/trigger-event` URL; defaults from `WEBHOOK_URL` |

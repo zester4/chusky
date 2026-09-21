@@ -1,0 +1,46 @@
+import type { CompanyBudget, CompanyToolPolicy } from "../companyPlatform.js";
+
+export type OutcomePackage = {
+  slug: string;
+  name: string;
+  department: "sales" | "support" | "marketing" | "recruiting" | "finance-ops" | "executive-ops" | "engineering";
+  description: string;
+  requiredInputs: string[];
+  allowedTools: string[];
+  successCriteria: string[];
+  evidenceRequired: string[];
+  escalationRules: string[];
+  approvalPolicy: "draft_only" | "approve_external_action" | "approve_every_write";
+  budget: CompanyBudget;
+  slaSeconds: number;
+  deliverable: string;
+};
+
+const commonResearch = ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "CHUCK_SEARCH_SKILLS", "CHUCK_READ_SKILL_FILE"];
+const packages: OutcomePackage[] = [
+  { slug: "qualified-fintech-leads", name: "Qualified fintech leads", department: "sales", description: "Research, qualify, deduplicate, and prepare CRM-ready fintech leads.", requiredInputs: ["ideal customer profile", "target geography", "lead count"], allowedTools: [...commonResearch, "COMPOSIO_EXECUTE_TOOL"], successCriteria: ["Every lead has company, role, source, and qualification reason", "Duplicates are removed", "Uncertain fields are labeled"], evidenceRequired: ["source URL for every lead", "qualification assertion", "deduplication check"], escalationRules: ["Missing ICP", "Unsupported contact data", "CRM write or outreach requires approval"], approvalPolicy: "approve_external_action", budget: { duration: "3h", maxToolCalls: 100, maxCost: 15 }, slaSeconds: 10_800, deliverable: "Sourced lead table and CRM-ready import." },
+  { slug: "support-case-resolution", name: "Support case resolution", department: "support", description: "Triage a support case, gather authorized context, draft a response, and escalate when a human is required.", requiredInputs: ["case id or customer message", "support policy"], allowedTools: ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL"], successCriteria: ["Issue category and severity are assigned", "Relevant account facts are cited", "Response is policy-safe", "Human-required cases are escalated"], evidenceRequired: ["case context receipt", "policy reference", "draft response"], escalationRules: ["Refund, entitlement, security, legal, or angry-customer escalation"], approvalPolicy: "approve_external_action", budget: { duration: "1h", maxToolCalls: 60, maxCost: 8 }, slaSeconds: 3600, deliverable: "Resolution brief, proposed reply, and escalation state." },
+  { slug: "competitor-change-report", name: "Competitor change report", department: "marketing", description: "Monitor public competitor signals and report only verified material changes.", requiredInputs: ["competitor list", "monitoring topics", "report cadence"], allowedTools: commonResearch, successCriteria: ["Changes are dated and source-backed", "Observed facts are separated from interpretation", "No private access or unsupported claims"], evidenceRequired: ["source URLs", "before/after comparison"], escalationRules: ["Potential legal, brand, or security issue"], approvalPolicy: "draft_only", budget: { duration: "1h", maxToolCalls: 50, maxCost: 6 }, slaSeconds: 86_400, deliverable: "Change report with confidence and recommended actions." },
+  { slug: "employee-onboarding", name: "Employee onboarding", department: "recruiting", description: "Coordinate a new hire onboarding checklist across approved systems.", requiredInputs: ["employee identity", "start date", "role", "checklist"], allowedTools: ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL"], successCriteria: ["Required steps are tracked", "Access requests are scoped", "Exceptions are escalated", "Completion receipts are attached"], evidenceRequired: ["task receipts", "manager confirmation", "completion checklist"], escalationRules: ["Access, payroll, legal, or identity issue"], approvalPolicy: "approve_every_write", budget: { duration: "3h", maxToolCalls: 80, maxCost: 12 }, slaSeconds: 86_400, deliverable: "Onboarding status and outstanding actions." },
+  { slug: "finance-exception-reconciliation", name: "Finance exception reconciliation", department: "finance-ops", description: "Investigate a finance exception and prepare a reconciled, evidence-backed disposition.", requiredInputs: ["exception id", "period", "ledger or payment source"], allowedTools: ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL"], successCriteria: ["Amounts reconcile", "Source transactions are identified", "No payment or ledger write happens without approval"], evidenceRequired: ["before/after totals", "transaction receipts", "reconciliation assertion"], escalationRules: ["Payment movement, tax, fraud, or material variance"], approvalPolicy: "approve_every_write", budget: { duration: "3h", maxToolCalls: 80, maxCost: 15 }, slaSeconds: 86_400, deliverable: "Reconciliation report and approval-ready action." },
+  { slug: "executive-weekly-review", name: "Executive weekly review", department: "executive-ops", description: "Compile company signals, decisions, risks, and open loops into an executive brief.", requiredInputs: ["reporting period", "departments", "priority objectives"], allowedTools: ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "CHUCK_SEARCH_SKILLS", "CHUCK_READ_SKILL_FILE"], successCriteria: ["Every material metric has a source", "Open loops have owners and next actions", "Risks and uncertainty are explicit"], evidenceRequired: ["metric sources", "decision list", "open-loop status"], escalationRules: ["Material financial, legal, security, or people risk"], approvalPolicy: "draft_only", budget: { duration: "1h", maxToolCalls: 60, maxCost: 8 }, slaSeconds: 86_400, deliverable: "Executive brief with decisions and next actions." },
+  { slug: "production-incident-repair", name: "Production incident repair", department: "engineering", description: "Investigate an incident, propose or execute a bounded repair, and prove service recovery.", requiredInputs: ["incident signal", "service", "impact window"], allowedTools: ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "CHUCK_DAYTONA_APP"], successCriteria: ["Root cause hypotheses are tested", "Repair is reversible or approved", "Health checks pass", "Timeline and evidence are recorded"], evidenceRequired: ["logs or metric source", "change receipt", "post-repair health check"], escalationRules: ["Data loss, security, destructive change, or uncertain rollback"], approvalPolicy: "approve_every_write", budget: { duration: "3h", maxToolCalls: 120, maxCost: 20 }, slaSeconds: 3600, deliverable: "Incident timeline, repair record, and recovery evidence." },
+];
+
+export function listOutcomePackages(): OutcomePackage[] { return packages.map((item) => structuredClone(item)); }
+export function getOutcomePackage(slug: string): OutcomePackage | undefined { const item = packages.find((candidate) => candidate.slug === slug); return item ? structuredClone(item) : undefined; }
+
+export function planOutcome(slug: string, input: Record<string, unknown>): { package: OutcomePackage; missingInputs: string[]; objective: string; definitionOfDone: string; steps: Array<{ id: string; title: string; objective: string; dependsOn?: string[]; evidenceRequired: string[] }> } {
+  const outcome = getOutcomePackage(slug); if (!outcome) throw new Error("Unknown outcome package");
+  const missingInputs = outcome.requiredInputs.filter((key) => { const value = input[key] ?? input[key.replace(/ /g, "_")]; return value === undefined || value === null || String(value).trim() === ""; });
+  const objective = `${outcome.description} Inputs: ${JSON.stringify(input).slice(0, 4000)}`;
+  const steps = [
+    { id: "intake", title: "Validate inputs and constraints", objective: `Confirm ${outcome.requiredInputs.join(", ")} and identify escalation boundaries.`, evidenceRequired: ["input validation"] },
+    { id: "research", title: "Gather authorized context and evidence", objective: "Use only the approved tools and context scopes to collect source-backed facts.", dependsOn: ["intake"], evidenceRequired: outcome.evidenceRequired },
+    { id: "prepare", title: "Prepare the business outcome", objective: `Produce the ${outcome.deliverable.toLowerCase()} and separate verified facts from inference.`, dependsOn: ["research"], evidenceRequired: outcome.evidenceRequired },
+    { id: "verify", title: "Verify success criteria and escalation", objective: `Check: ${outcome.successCriteria.join("; ")}`, dependsOn: ["prepare"], evidenceRequired: outcome.successCriteria },
+  ];
+  return { package: outcome, missingInputs, objective, definitionOfDone: outcome.successCriteria.join("; "), steps };
+}
+
+export function policyForOutcome(slug: string): CompanyToolPolicy { const outcome = getOutcomePackage(slug); if (!outcome) throw new Error("Unknown outcome package"); return { allow: outcome.allowedTools, requireApproval: outcome.approvalPolicy === "draft_only" ? [] : ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL"] }; }

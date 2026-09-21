@@ -10,7 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, updateVideoJob, getVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, setTaskWorkflowRunId, listOutbox, createTask, acquireMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -18,6 +18,7 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
+import { scheduleMissionSteps } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
@@ -65,6 +66,9 @@ import { isMeetingRepresentativeEmailTool, meetingConversationToolAllowlist, mee
 import { buildMeetingFollowThroughPrompt, buildMeetingOutcomeChunkPrompt, buildMeetingOutcomePrompt, buildMeetingOutcomeSynthesisPrompt, splitMeetingOutcomeTranscript, MEETING_OUTCOME_MAX_TRANSCRIPT_CHUNKS, executeScheduledMeetingFollowUp, deliverMeetingOutcomeOnce, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 import { parseGoogleCalendarMeetingTrigger, sealCalendarMeetingUrl } from "./meetings/calendar.js";
 import { buildAutonomyContextBundle, contextBundleToPrompt } from "./autonomy/context.js";
+import { selectContext, upsertContextNode } from "./contextGraph.js";
+import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
+import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -1092,6 +1096,122 @@ async function main(): Promise<void> {
       return c.json({ ok: true, occurrences: await listJobOccurrences(device.userId, c.req.param("id"), limit) });
     });
 
+    app.get("/cli/missions", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      return c.json({ ok: true, missions: await listMissions(device.userId) });
+    });
+    app.get("/cli/missions/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const mission = await getMission(device.userId, c.req.param("id"));
+      return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.get("/cli/missions/:id/events", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const mission = await getMission(device.userId, c.req.param("id"));
+      return mission ? c.json({ ok: true, events: mission.events }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.get("/cli/missions/:id/proof", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const mission = await getMission(device.userId, c.req.param("id"));
+      return mission ? c.json({ ok: true, proof: missionProof(mission) }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.post("/cli/missions", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const title = String(body.title ?? "").trim(); const objective = String(body.objective ?? "").trim(); const definitionOfDone = String(body.definitionOfDone ?? "").trim();
+      if (!title || !objective || !definitionOfDone) return c.json({ ok: false, error: "title, objective, and definitionOfDone are required" }, 400);
+      try {
+        const mission = await createMission(device.userId, { title, objective, definitionOfDone, idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined, requiredEvidence: Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined, verificationMode: body.verificationMode === "strict" ? "strict" : body.verificationMode === "legacy" ? "legacy" : undefined, steps: Array.isArray(body.steps) ? body.steps.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((step) => ({ id: typeof step.id === "string" ? step.id : undefined, title: String(step.title ?? ""), objective: String(step.objective ?? ""), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined, budget: { maxDurationSeconds: typeof body.maxDurationSeconds === "number" ? body.maxDurationSeconds : undefined, maxSteps: typeof body.maxSteps === "number" ? body.maxSteps : undefined, maxToolCalls: typeof body.maxToolCalls === "number" ? body.maxToolCalls : undefined, maxCost: typeof body.maxCost === "number" ? body.maxCost : undefined } });
+        if (mission.rootTaskId) return c.json({ ok: true, mission });
+        const started = await startMission(device.userId, mission.id); if (!started) return c.json({ ok: false, error: "mission could not start" }, 409);
+        const linked = await scheduleMissionSteps(device.userId, started, enqueueTaskWorkflow);
+        return c.json({ ok: true, mission: linked ?? started }, 201);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission creation failed" }, 400); }
+    });
+    app.post("/cli/missions/:id/action", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const action = String(((await c.req.json().catch(() => ({}))) as { action?: unknown }).action ?? ""); const id = c.req.param("id");
+      try {
+        const mission = action === "pause" ? await pauseMission(device.userId, id, "Mission paused from CLI.") : action === "resume" ? await resumeMission(device.userId, id) : action === "cancel" ? await cancelMission(device.userId, id, "Mission cancelled from CLI.") : action === "repair" ? await repairMission(device.userId, id, { reason: "Operator requested mission recovery from CLI." }) : undefined;
+        if (!mission) return c.json({ ok: false, error: "mission action is not valid for the current state" }, 409);
+        if (action === "pause" || action === "cancel") await cancelMissionTasks(device.userId, id);
+        if (action === "resume" || action === "repair") await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
+        return c.json({ ok: true, mission: await getMission(device.userId, id) ?? mission });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission action failed" }, 409); }
+    });
+    app.post("/cli/missions/:id/replan", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const reason = typeof body.reason === "string" ? body.reason.trim() : "Verified information changed the remaining plan.";
+      const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+        if (!value || typeof value !== "object") return [];
+        const step = value as Record<string, unknown>;
+        if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
+        return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) }];
+      }) : [];
+      if (!reason || reason.length > 2_000 || !steps.length) return c.json({ ok: false, error: "reason and at least one valid step are required" }, 400);
+      try {
+        const mission = await replanMission(device.userId, c.req.param("id"), steps, reason);
+        return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission is not replannable" }, 409);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission replan failed" }, 400); }
+    });
+    app.post("/cli/missions/:id/events", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { provider?: unknown; providerEventId?: unknown };
+      if (typeof body.provider !== "string" || typeof body.providerEventId !== "string") return c.json({ ok: false, error: "provider and providerEventId are required" }, 400);
+      const mission = await resumeMissionFromProviderEvent(device.userId, c.req.param("id"), body.provider, body.providerEventId);
+      if (!mission) return c.json({ ok: false, error: "mission is not waiting for that provider event" }, 409);
+      await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
+      return c.json({ ok: true, mission: await getMission(device.userId, mission.id) ?? mission }, 202);
+    });
+    app.post("/cli/missions/:id/evidence", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as { stepId?: unknown; evidence?: unknown };
+      const evidence = Array.isArray(body.evidence) ? body.evidence.slice(0, 20).flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const value = item as Record<string, unknown>;
+        if (typeof value.summary !== "string" || typeof value.kind !== "string" || typeof value.verified !== "boolean") return [];
+        const allowedKinds = new Set(["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"]);
+        if (!allowedKinds.has(value.kind)) return [];
+        return [{ id: typeof value.id === "string" ? value.id : `evidence_${randomUUID()}`, kind: value.kind as "source", summary: value.summary, ...(typeof value.source === "string" ? { source: value.source } : {}), ...(typeof value.ref === "string" ? { ref: value.ref } : {}), ...(typeof value.hash === "string" ? { hash: value.hash } : {}), verified: value.verified, ...(value.verifiedBy === "agent" || value.verifiedBy === "system" || value.verifiedBy === "human" ? { verifiedBy: value.verifiedBy as "agent" | "system" | "human" } : {}) }];
+      }) : [];
+      if (!evidence.length) return c.json({ ok: false, error: "at least one valid evidence record is required" }, 400);
+      const mission = await recordMissionEvidence(device.userId, c.req.param("id"), evidence, typeof body.stepId === "string" ? body.stepId : undefined);
+      return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "evidence could not be recorded" }, 409);
+    });
+    app.post("/cli/missions/:id/verify", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: body.verifiedBy === "human" || body.verifiedBy === "agent" ? body.verifiedBy : "system" });
+      return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.post("/cli/missions/:id/steps/:stepId/complete", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const result = String(((await c.req.json().catch(() => ({}))) as { result?: unknown }).result ?? "").trim(); if (!result) return c.json({ ok: false, error: "result is required" }, 400);
+      const mission = await completeMissionStep(device.userId, c.req.param("id"), c.req.param("stepId"), result);
+      if (!mission) return c.json({ ok: false, error: "mission step is not completable" }, 409);
+      const linked = await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
+      return c.json({ ok: true, mission: linked ?? mission });
+    });
+    app.get("/cli/context", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const data = await selectContext(device.userId, { query: c.req.query("query"), scope: c.req.query("scope") as never, scopeId: c.req.query("scopeId"), purpose: c.req.query("purpose") as never, limit: Number(c.req.query("limit") ?? 30) || 30 });
+      return c.json({ ok: true, context: data });
+    });
+    app.post("/cli/context", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      if (typeof body.scope !== "string" || typeof body.kind !== "string" || typeof body.key !== "string" || typeof body.value !== "string" || (body.sensitivity !== "normal" && body.sensitivity !== "sensitive")) return c.json({ ok: false, error: "scope, kind, key, value, and sensitivity are required" }, 400);
+      try { return c.json({ ok: true, context: await upsertContextNode(device.userId, { scope: body.scope as never, scopeId: typeof body.scopeId === "string" ? body.scopeId : undefined, kind: body.kind as never, key: body.key, value: body.value, sensitivity: body.sensitivity, source: typeof body.source === "string" ? body.source : "cli", sourceRef: typeof body.sourceRef === "string" ? body.sourceRef : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, tags: Array.isArray(body.tags) ? body.tags.filter((item): item is string => typeof item === "string") : undefined }) }, 201); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "context could not be saved" }, 400); }
+    });
+    app.get("/cli/departments/catalog", async (c) => { const device = await cliAuth(c); return device ? c.json({ ok: true, departments: listDepartments() }) : c.json({ ok: false, error: "unauthorized" }, 401); });
+    app.get("/cli/departments", async (c) => { const device = await cliAuth(c); return device ? c.json({ ok: true, departments: await listDepartmentSpaces(device.userId) }) : c.json({ ok: false, error: "unauthorized" }, 401); });
+    app.post("/cli/departments", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; try { return c.json({ ok: true, department: await provisionDepartment(device.userId, String(body.department ?? ""), { name: typeof body.name === "string" ? body.name : undefined, mission: typeof body.mission === "string" ? body.mission : undefined }) }, 201); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "department could not be provisioned" }, 400); } });
+    app.post("/cli/departments/:department/handoffs", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; if (typeof body.objective !== "string") return c.json({ ok: false, error: "objective is required" }, 400); try { return c.json({ ok: true, handoff: await createDepartmentHandoff(device.userId, { department: c.req.param("department"), objective: body.objective, inputs: body.inputs && typeof body.inputs === "object" ? body.inputs as Record<string, unknown> : {}, constraints: [], evidenceRequired: [] }) }, 201); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "handoff could not be created" }, 400); } });
+    app.get("/cli/outcomes", async (c) => { const device = await cliAuth(c); return device ? c.json({ ok: true, outcomes: listOutcomePackages() }) : c.json({ ok: false, error: "unauthorized" }, 401); });
+    app.get("/cli/outcomes/:slug", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const outcome = getOutcomePackage(c.req.param("slug")); return outcome ? c.json({ ok: true, outcome }) : c.json({ ok: false, error: "outcome not found" }, 404); });
+    app.post("/cli/outcomes/:slug/plan", async (c) => { const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401); const body = await c.req.json().catch(() => ({})); try { return c.json({ ok: true, plan: planOutcome(c.req.param("slug"), body && typeof body === "object" ? body as Record<string, unknown> : {}) }); } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "outcome could not be planned" }, 400); } });
+
     app.get("/cli/workers", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const status = String(c.req.query("status") ?? "").trim();
@@ -1967,7 +2087,8 @@ async function main(): Promise<void> {
                 }
                 await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
               }
-              const currentMissionStep = mission?.steps.find((step) => step.id === mission?.currentStepId);
+              const activeMission = mission;
+              const currentMissionStep = activeMission ? activeMission.steps.find((step) => step.id === task.missionStepId && activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => step.id === activeMission.currentStepId) : undefined;
               const prompt = task.sdkRunId ? await sdkTaskMessage(task) : mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\nCurrent executable step: ${currentMissionStep ? `${currentMissionStep.title} — ${currentMissionStep.objective}` : "Verify the mission definition of done"}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nNext action: ${mission.nextAction ?? "determine the safest next bounded action"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only after the current step is verified. Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.` : `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`;
               const session = await getSession(task.userId);
               const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
@@ -1976,6 +2097,20 @@ async function main(): Promise<void> {
               if (mission && ((missionRemainingSteps ?? 1) <= 0 || (missionRemainingTools ?? 1) <= 0 || (missionRemainingCost ?? 1) <= 0 || (mission.startedAt && Date.now() - mission.startedAt >= mission.budget.maxDurationSeconds * 1000))) {
                 const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "Mission budget is exhausted before the next slice.", nextAction: "Increase the mission budget or revise the objective before resuming." });
                 return { status: "blocked" as const, message: blocked?.error ?? "Mission budget exhausted", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+              }
+              if (mission) {
+                const preflight = missionBudgetPreflight(mission, { steps: 1, toolCalls: 1, cost: 0.0001, durationSeconds: 1 });
+                if (!preflight.allowed) {
+                  const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: preflight.reason ?? "Mission budget preflight failed.", nextAction: "Increase the mission budget or revise the objective before resuming." });
+                  return { status: "blocked" as const, message: blocked?.error ?? "Mission budget preflight failed", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+                }
+              }
+              let missionLeaseToken: string | undefined;
+              if (mission) {
+                const leased = await acquireMissionLease(task.userId, mission.id, `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`);
+                if (!leased?.lease) return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 };
+                mission = leased;
+                missionLeaseToken = leased.lease.token;
               }
               const durationSeconds = mission ? Math.max(1, Math.floor((mission.budget.maxDurationSeconds * 1000 - (Date.now() - (mission.startedAt ?? Date.now()))) / 1000)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
@@ -2045,7 +2180,11 @@ async function main(): Promise<void> {
                 }
                 throw error;
               }
-              finally { if (budgetTimer) clearTimeout(budgetTimer); clearInterval(cancellationPoll); }
+              finally {
+                if (budgetTimer) clearTimeout(budgetTimer);
+                clearInterval(cancellationPoll);
+                if (mission?.id && missionLeaseToken) await releaseMissionLease(task.userId, mission.id, missionLeaseToken);
+              }
               if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
               if (result.taskWait) {
                 if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt }, result.taskWait.checkpoint, result.taskWait.nextAction);
@@ -2068,6 +2207,13 @@ async function main(): Promise<void> {
                 if (currentMission?.status === "paused" || currentMission?.status === "blocked" || currentMission?.status === "failed") return { status: "blocked" as const, message: currentMission.error ?? "Autonomous mission is waiting for intervention", checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
                 const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission?.checkpoint ?? result.text, nextAction: currentMission?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
                 if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
+                const refreshed = await getMission(task.userId, mission.id);
+                if (refreshed) {
+                  await scheduleMissionSteps(task.userId, refreshed, enqueueTaskWorkflow);
+                  if (task.missionStepId && refreshed.activeStepIds?.length && !refreshed.activeStepIds.includes(task.missionStepId)) {
+                    return { status: "completed" as const, message: "Mission branch completed; the next dependency-ready branch was scheduled.", result: result.text, checkpoint: refreshed.checkpoint };
+                  }
+                }
                 return { status: "queued" as const, message: "Autonomous mission slice completed", checkpoint: accounted.checkpoint, nextAction: accounted.nextAction ?? "Continue from the verified checkpoint.", runAt: Date.now() + 5000 };
               }
               if (task.sdkRunId && task.sdkThreadId) {

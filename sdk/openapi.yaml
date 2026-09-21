@@ -243,6 +243,50 @@ paths:
     post: { summary: Queue an immediate recurring-job execution, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Queued } } }
   /jobs/{id}/occurrences:
     get: { summary: List owner-scoped recurring-job occurrences, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }], responses: { '200': { description: Occurrence history } } }
+  /missions:
+    get: { summary: List owner-scoped autonomous missions, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Mission records } } }
+    post: { summary: Create and start a durable dependency-aware mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Mission started } } }
+  /missions/{missionId}:
+    get: { summary: Get an autonomous mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission record } } }
+  /missions/{missionId}/events:
+    get: { summary: List mission lifecycle events, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission events } } }
+    post: { summary: Resume a mission for its exact expected provider event, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Continuation queued } } }
+  /missions/{missionId}/events/signed:
+    post: { summary: Verify and ingest a signed provider event for a mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '202': { description: Continuation queued } } }
+  /missions/{missionId}/proof:
+    get: { summary: Get bounded mission proof with budget, evidence, and verification, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission proof } } }
+  /missions/{missionId}/evidence:
+    post: { summary: Attach verified evidence records to a mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Updated mission } } }
+  /missions/{missionId}/verify:
+    post: { summary: Verify a mission definition of done, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Verification result } } }
+  /missions/{missionId}/repair:
+    post: { summary: Move a mission into an explicit repair state, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Repair state } } }
+  /missions/{missionId}/pause:
+    post: { summary: Pause a mission and cancel active slices, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Paused mission } } }
+  /missions/{missionId}/resume:
+    post: { summary: Resume a paused, blocked, or failed mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Resumed mission } } }
+  /missions/{missionId}/replan:
+    post: { summary: Replace the unfinished portion of a mission plan while preserving completed work, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Replanned mission } } }
+  /missions/{missionId}/steps/{stepId}/complete:
+    post: { summary: Complete the currently executable mission step, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }, { name: stepId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Updated mission } } }
+  /missions/{missionId}/cancel:
+    post: { summary: Cancel a mission and its active tasks, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Cancelled mission } } }
+  /context:
+    get: { summary: Select owner-scoped operating context, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Context nodes and prompt projection } } }
+    post: { summary: Save a sensitivity-aware context node, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Context node } } }
+  /departments/catalog:
+    get: { summary: List supported department operating templates, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Department catalogue } } }
+  /departments:
+    get: { summary: List owner department spaces, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Department spaces } } }
+    post: { summary: Provision a department space, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Department space } } }
+  /departments/{department}/handoffs:
+    post: { summary: Create a typed department work packet, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: department, in: path, required: true, schema: { type: string } }], responses: { '201': { description: Handoff packet } } }
+  /outcomes:
+    get: { summary: List governed business outcome packages, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Outcome packages } } }
+  /outcomes/{slug}:
+    get: { summary: Get one business outcome package, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: slug, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Outcome package } } }
+  /outcomes/{slug}/plan:
+    post: { summary: Plan a governed outcome from supplied business inputs, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: slug, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Outcome plan } } }
   /scratchpad:
     get: { summary: Search private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     delete: { summary: Clear private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cleared } } }
@@ -264,3 +308,4 @@ components:
   parameters:
     UserId: { name: X-Chusky-User-Id, in: header, required: true, schema: { type: string, maxLength: 200 } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 255 } }
+    MissionId: { name: missionId, in: path, required: true, schema: { type: string, pattern: '^mis_[A-Za-z0-9_-]+$' } }

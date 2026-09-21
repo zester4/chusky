@@ -82,6 +82,72 @@ export interface UserSession {
   /** Organization-owned meeting rooms live in the control session (uid 0). */
   meetingRooms?: MeetingRoomRecord[];
   handoffRecords?: HandoffRecord[];
+  /** Owner-scoped context graph nodes. Sensitive values are never returned to models unless selected by purpose. */
+  contextNodes?: ContextNodeRecord[];
+  /** Department operating spaces and typed handoff packets for company workflows. */
+  departmentSpaces?: DepartmentSpaceRecord[];
+  workPackets?: WorkPacketRecord[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type ContextScope = "user" | "organization" | "department" | "project" | "mission" | "meeting" | "conversation" | "channel";
+export type ContextSensitivity = "normal" | "sensitive";
+
+export interface ContextNodeRecord {
+  id: string;
+  userId: number;
+  scope: ContextScope;
+  scopeId?: string;
+  kind: "memory" | "decision" | "preference" | "objective" | "open_loop" | "tool_receipt" | "artifact" | "meeting" | "message" | "fact" | "relationship";
+  key: string;
+  value: string;
+  source?: string;
+  sourceRef?: string;
+  confidence: number;
+  sensitivity: ContextSensitivity;
+  tags: string[];
+  createdAt: number;
+  updatedAt: number;
+  reviewAt?: number;
+  expiresAt?: number;
+}
+
+export interface DepartmentSpaceRecord {
+  id: string;
+  userId: number;
+  department: string;
+  name: string;
+  mission?: string;
+  objectives: string[];
+  policies: string[];
+  approvedTools: string[];
+  escalationOwner?: string;
+  contextNodeIds: string[];
+  activeMissionIds: string[];
+  decisionNodeIds: string[];
+  budget?: { maxToolCalls?: number; maxCost?: number; maxDurationSeconds?: number };
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type WorkPacketStatus = "queued" | "in_progress" | "waiting" | "completed" | "blocked" | "cancelled";
+export interface WorkPacketRecord {
+  id: string;
+  userId: number;
+  department: string;
+  fromAgent?: string;
+  toAgent?: string;
+  objective: string;
+  inputs: Record<string, unknown>;
+  constraints: string[];
+  evidenceRequired: string[];
+  outputSchema?: Record<string, unknown>;
+  deadline?: number;
+  approvalBoundary?: string;
+  status: WorkPacketStatus;
+  result?: Record<string, unknown>;
+  evidence?: MissionEvidenceRecord[];
   createdAt: number;
   updatedAt: number;
 }
@@ -554,6 +620,35 @@ export interface MissionBudget {
   maxCost: number;
 }
 
+export interface MissionEvidenceRecord {
+  id: string;
+  kind: "source" | "tool_receipt" | "artifact" | "assertion" | "before_after" | "human_confirmation";
+  summary: string;
+  source?: string;
+  ref?: string;
+  hash?: string;
+  verified: boolean;
+  verifiedAt?: number;
+  verifiedBy?: "agent" | "system" | "human";
+}
+
+export interface MissionVerification {
+  mode?: "legacy" | "strict";
+  requiredEvidence: string[];
+  verified: boolean;
+  verifiedAt?: number;
+  verifiedBy?: "agent" | "system" | "human";
+  unresolved: string[];
+  confidence?: number;
+}
+
+export interface MissionLease {
+  token: string;
+  workerId: string;
+  acquiredAt: number;
+  expiresAt: number;
+}
+
 export interface MissionStepRecord {
   id: string;
   title: string;
@@ -565,13 +660,24 @@ export interface MissionStepRecord {
   retryLimit?: number;
   updatedAt: number;
   result?: string;
+  input?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  evidenceRequired?: string[];
+  evidence?: MissionEvidenceRecord[];
+  compensationObjective?: string;
+  retryBackoffSeconds?: number;
+  parallelGroup?: string;
 }
 
 export interface MissionEventRecord {
   id: string;
-  type: "created" | "started" | "checkpointed" | "waiting" | "paused" | "resumed" | "blocked" | "completed" | "failed" | "cancelled" | "budget_exhausted";
+  type: "created" | "started" | "checkpointed" | "waiting" | "paused" | "resumed" | "blocked" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "step_started" | "step_completed" | "step_failed" | "approval_waiting" | "approval_resumed" | "replanned" | "repaired" | "provider_event" | "verification_failed" | "lease_acquired" | "lease_released";
   message: string;
   at: number;
+  stepId?: string;
+  provider?: string;
+  providerEventId?: string;
+  metadata?: Record<string, string | number | boolean>;
 }
 
 export interface MissionRecord {
@@ -583,6 +689,8 @@ export interface MissionRecord {
   status: MissionStatus;
   steps: MissionStepRecord[];
   currentStepId?: string;
+  /** All dependency-ready steps currently eligible for parallel execution. */
+  activeStepIds?: string[];
   rootTaskId?: string;
   checkpoint?: string;
   nextAction?: string;
@@ -599,6 +707,9 @@ export interface MissionRecord {
   startedAt?: number;
   completedAt?: number;
   events: MissionEventRecord[];
+  evidence?: MissionEvidenceRecord[];
+  verification?: MissionVerification;
+  lease?: MissionLease;
   /** Monotonic revision used to prevent concurrent workers from overwriting state. */
   version: number;
 }
@@ -674,6 +785,8 @@ export interface TaskRecord {
   composerBudgetSeconds?: number;
   /** A task may be one bounded execution slice of an autonomous mission. */
   missionId?: string;
+  /** The independently executable mission step represented by this task. */
+  missionStepId?: string;
   /** One approved tool execution may be replayed when a durable mission resumes. */
   approvedApprovalId?: string;
 }
@@ -3255,6 +3368,9 @@ export async function getSession(uid: number): Promise<UserSession> {
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
     return true;
   }).slice(-20) : [];
+  s.contextNodes = Array.isArray(s.contextNodes) ? s.contextNodes.filter((item): item is ContextNodeRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-1000) : [];
+  s.departmentSpaces = Array.isArray(s.departmentSpaces) ? s.departmentSpaces.filter((item): item is DepartmentSpaceRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-50) : [];
+  s.workPackets = Array.isArray(s.workPackets) ? s.workPackets.filter((item): item is WorkPacketRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-500) : [];
   return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
@@ -4150,6 +4266,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
+    ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
     ...(meetingFollowUp ? { meetingFollowUp } : { meetingFollowUp: undefined }),
   };
 }
@@ -4188,6 +4305,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkInstructions: input.sdkInstructions,
     meetingFollowUp: input.meetingFollowUp,
     missionId: input.missionId,
+    missionStepId: input.missionStepId,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,
@@ -4230,6 +4348,13 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       attempts: Math.max(0, Math.min(20, Number(step.attempts) || 0)),
       retryLimit: Math.max(0, Math.min(20, Math.floor(numeric(step.retryLimit, 2)))),
       updatedAt: Number(step.updatedAt) || mission.updatedAt,
+      ...(step.input && typeof step.input === "object" && !Array.isArray(step.input) ? { input: structuredClone(step.input) } : {}),
+      ...(step.outputSchema && typeof step.outputSchema === "object" && !Array.isArray(step.outputSchema) ? { outputSchema: structuredClone(step.outputSchema) } : {}),
+      evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string").slice(0, 20).map((item) => item.slice(0, 500)) : [],
+      evidence: Array.isArray(step.evidence) ? step.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-50) : [],
+      ...(typeof step.compensationObjective === "string" ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}),
+      retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(numeric(step.retryBackoffSeconds, 0)))),
+      ...(typeof step.parallelGroup === "string" ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}),
     })),
     budget: {
       maxDurationSeconds: Math.max(60, Math.min(30 * 24 * 60 * 60, numeric(budget.maxDurationSeconds, DEFAULT_MISSION_BUDGET.maxDurationSeconds))),
@@ -4240,7 +4365,19 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     consumedSteps: Math.max(0, Number(mission.consumedSteps) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
-    events: (mission.events ?? []).slice(-100),
+    activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, 100) : undefined,
+    events: (mission.events ?? []).slice(-500).map((event) => ({ ...event, message: String(event.message ?? "").slice(0, 1000) })),
+    evidence: Array.isArray(mission.evidence) ? mission.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-100) : [],
+    verification: mission.verification && typeof mission.verification === "object" ? {
+      ...(mission.verification.mode ? { mode: mission.verification.mode } : {}),
+      requiredEvidence: Array.isArray(mission.verification.requiredEvidence) ? mission.verification.requiredEvidence.filter((item): item is string => typeof item === "string").slice(0, 50) : [],
+      verified: mission.verification.verified === true,
+      ...(mission.verification.verifiedAt ? { verifiedAt: Number(mission.verification.verifiedAt) } : {}),
+      ...(mission.verification.verifiedBy ? { verifiedBy: mission.verification.verifiedBy } : {}),
+      unresolved: Array.isArray(mission.verification.unresolved) ? mission.verification.unresolved.filter((item): item is string => typeof item === "string").slice(0, 50) : [],
+      ...(typeof mission.verification.confidence === "number" ? { confidence: Math.max(0, Math.min(1, mission.verification.confidence)) } : {}),
+    } : undefined,
+    ...(mission.lease && typeof mission.lease === "object" ? { lease: mission.lease } : {}),
     version: Math.max(0, Math.floor(numeric(mission.version, 0))),
   };
 }
@@ -4249,7 +4386,9 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   id?: string;
   idempotencyKey?: string;
   budget?: Partial<MissionBudget>;
-  steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>;
+  requiredEvidence?: string[];
+  verificationMode?: "legacy" | "strict";
+  steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string }>;
 };
 
 export async function createMission(userId: number, input: MissionCreateInput): Promise<MissionRecord> {
@@ -4271,7 +4410,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
   const knownStepIds = new Set(stepIds);
   const steps = rawSteps.map((step, index) => {
     const dependsOn = [...new Set((step.dependsOn ?? []).filter((dependency) => knownStepIds.has(dependency) && dependency !== stepIds[index]))];
-    return { id: stepIds[index], title: step.title, objective: step.objective, status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now };
+    return { id: stepIds[index], title: step.title, objective: step.objective, status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}) };
   });
   const ready = steps.find((step) => step.dependsOn.length === 0);
   if (!ready) throw new Error("Mission steps must include at least one dependency-free starting step");
@@ -4294,6 +4433,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     status: "queued",
     steps,
     currentStepId: ready.id,
+    activeStepIds: undefined,
     budget: { ...DEFAULT_MISSION_BUDGET, ...(input.budget ?? {}) },
     consumedSteps: 0,
     toolCalls: 0,
@@ -4302,6 +4442,8 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     createdAt: now,
     updatedAt: now,
     events: [missionEvent("created", "Mission created", now)],
+    evidence: [],
+    verification: { mode: input.verificationMode ?? ((input.requiredEvidence?.length ?? 0) > 0 ? "strict" : "legacy"), requiredEvidence: (input.requiredEvidence ?? []).slice(0, 50), verified: false, unresolved: (input.requiredEvidence ?? []).slice(0, 50) },
     version: 0,
   });
   return backend.createMissionIfAbsent(userId, mission);
@@ -4309,6 +4451,41 @@ export async function createMission(userId: number, input: MissionCreateInput): 
 
 export function readyMissionStep(mission: MissionRecord): MissionStepRecord | undefined {
   return mission.steps.find((step) => step.status === "pending" && step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+}
+
+/** Return every dependency-ready step, preserving plan order for deterministic fan-out. */
+export function readyMissionSteps(mission: MissionRecord): MissionStepRecord[] {
+  return mission.steps.filter((step) => step.status === "pending" && step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+}
+
+export function missionBudgetPreflight(mission: MissionRecord, estimate: { toolCalls?: number; cost?: number; durationSeconds?: number; steps?: number } = {}): { allowed: boolean; reason?: string; remaining: { steps: number; toolCalls: number; cost: number; durationSeconds: number } } {
+  const elapsed = mission.startedAt ? Math.max(0, (Date.now() - mission.startedAt) / 1000) : 0;
+  const remaining = {
+    steps: Math.max(0, mission.budget.maxSteps - mission.consumedSteps),
+    toolCalls: Math.max(0, mission.budget.maxToolCalls - mission.toolCalls),
+    cost: Math.max(0, mission.budget.maxCost - mission.cost),
+    durationSeconds: Math.max(0, mission.budget.maxDurationSeconds - elapsed),
+  };
+  if ((estimate.steps ?? 1) > remaining.steps) return { allowed: false, reason: "Mission step budget would be exceeded.", remaining };
+  if ((estimate.toolCalls ?? 0) > remaining.toolCalls) return { allowed: false, reason: "Mission tool-call budget would be exceeded.", remaining };
+  if ((estimate.cost ?? 0) > remaining.cost) return { allowed: false, reason: "Mission cost budget would be exceeded.", remaining };
+  if ((estimate.durationSeconds ?? 0) > remaining.durationSeconds) return { allowed: false, reason: "Mission duration budget would be exceeded.", remaining };
+  return { allowed: true, remaining };
+}
+
+export async function acquireMissionLease(userId: number, id: string, workerId: string, leaseMs = 60_000): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  const now = Date.now();
+  if (mission.lease && mission.lease.expiresAt > now && mission.lease.workerId !== workerId) return undefined;
+  const token = randomUUID();
+  return updateMission(userId, id, { lease: { token, workerId: workerId.slice(0, 160), acquiredAt: now, expiresAt: now + Math.max(1000, Math.min(900_000, leaseMs)) }, events: [...mission.events, missionEvent("lease_acquired", `Mission lease acquired by ${workerId}.`)] });
+}
+
+export async function releaseMissionLease(userId: number, id: string, token: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || mission.lease?.token !== token) return undefined;
+  return updateMission(userId, id, { lease: undefined, events: [...mission.events, missionEvent("lease_released", "Mission lease released.")] });
 }
 
 export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>, reason: string): Promise<MissionRecord | undefined> {
@@ -4341,12 +4518,47 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
   // A mission has one executable root task today. Only that task's current
   // running step may be completed; accepting any pending step would bypass
   // dependency order and let a caller manufacture a later-stage result.
-  if (!step || step.status !== "running" || mission.currentStepId !== stepId || !step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed")) return undefined;
+  const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
+  if (!step || step.status !== "running" || !active.has(stepId) || !step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed")) return undefined;
   const now = Date.now();
   const steps = mission.steps.map((candidate) => candidate.id === stepId ? { ...candidate, status: "completed" as const, result: result.slice(0, 12000), updatedAt: now } : candidate);
-  const next = readyMissionStep({ ...mission, steps });
-  if (next) steps[steps.findIndex((candidate) => candidate.id === next.id)] = { ...next, status: "running", attempts: next.attempts + 1, updatedAt: now };
-  return updateMission(userId, id, { steps, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with step: ${next.title}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("checkpointed", next ? `Step ${step.title} completed; next step is ${next.title}.` : `Step ${step.title} completed; verify the mission definition of done.`)] });
+  const ready = steps.filter((candidate) => candidate.status === "pending" && candidate.dependsOn.every((dependency) => steps.find((item) => item.id === dependency)?.status === "completed"));
+  const nextActive = [...new Set([...active].filter((item) => item !== stepId).concat(ready.map((item) => item.id)))];
+  for (const readyStep of ready) {
+    const index = steps.findIndex((candidate) => candidate.id === readyStep.id);
+    if (index >= 0) steps[index] = { ...steps[index], status: "running", attempts: steps[index].attempts + 1, updatedAt: now };
+  }
+  const next = nextActive.map((candidate) => steps.find((item) => item.id === candidate)).find(Boolean);
+  return updateMission(userId, id, { steps, activeStepIds: nextActive, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now)] });
+}
+
+export async function recordMissionEvidence(userId: number, id: string, evidence: MissionEvidenceRecord[], stepId?: string): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status) || !Array.isArray(evidence) || !evidence.length) return undefined;
+  const clean = evidence.slice(0, 20).map((item) => ({ ...item, id: item.id || `evidence_${randomUUID()}`, summary: String(item.summary ?? "").slice(0, 2000), verified: item.verified === true, ...(item.source ? { source: item.source.slice(0, 500) } : {}), ...(item.ref ? { ref: item.ref.slice(0, 500) } : {}) }));
+  const steps = mission.steps.map((step) => step.id === stepId ? { ...step, evidence: [...(step.evidence ?? []), ...clean].slice(-50) } : step);
+  return updateMission(userId, id, { steps, evidence: [...(mission.evidence ?? []), ...clean].slice(-100), events: [...mission.events, missionEvent("checkpointed", `${clean.length} evidence record(s) added${stepId ? ` to step ${stepId}` : ""}.`)] });
+}
+
+export async function verifyMission(userId: number, id: string, input: { evidenceIds?: string[]; confidence?: number; verifiedBy?: "agent" | "system" | "human" } = {}): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["cancelled"].includes(mission.status)) return undefined;
+  const allStepsComplete = mission.steps.every((step) => step.status === "completed");
+  const evidence = mission.evidence ?? [];
+  const selected = input.evidenceIds?.length ? evidence.filter((item) => input.evidenceIds?.includes(item.id)) : evidence;
+  const required = mission.verification?.requiredEvidence ?? [];
+  const unresolved = [
+    ...(allStepsComplete ? [] : ["All mission steps must be completed."]),
+    ...required.filter((requirement) => !selected.some((item) => item.verified && (item.summary.toLowerCase().includes(requirement.toLowerCase()) || item.kind === "assertion"))),
+  ];
+  const verified = unresolved.length === 0;
+  return updateMission(userId, id, { verification: { mode: mission.verification?.mode ?? (required.length ? "strict" : "legacy"), requiredEvidence: required, verified, verifiedAt: verified ? Date.now() : undefined, verifiedBy: input.verifiedBy ?? "system", unresolved, confidence: input.confidence === undefined ? undefined : Math.max(0, Math.min(1, input.confidence)) }, events: [...mission.events, missionEvent(verified ? "checkpointed" : "verification_failed", verified ? "Mission definition of done verified." : `Mission verification incomplete: ${unresolved.join("; ")}`)] });
+}
+
+export async function repairMission(userId: number, id: string, input: { reason: string; nextAction?: string; replan?: boolean }): Promise<MissionRecord | undefined> {
+  const mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  return updateMission(userId, id, { status: "blocked", error: input.reason.slice(0, 2000), nextAction: (input.nextAction ?? "Review the failed step and repair or replan before resuming.").slice(0, 2000), events: [...mission.events, missionEvent("repaired", `Repair required: ${input.reason}`)] });
 }
 
 export async function listMissions(userId: number, statuses?: MissionStatus[]): Promise<MissionRecord[]> {
@@ -4357,6 +4569,29 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
 
 export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
   return (await backend.getMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
+}
+
+/** Cancel every durable slice belonging to a mission, including parallel branches. */
+export async function cancelMissionTasks(userId: number, missionId: string): Promise<void> {
+  const tasks = await listTasks(userId);
+  await Promise.all(tasks.filter((task) => task.missionId === missionId && !["completed", "cancelled"].includes(task.status)).map((task) => cancelTask(userId, task.id)));
+}
+
+/** Bounded, human-readable proof record for dashboards and external agents. */
+export function missionProof(mission: MissionRecord): Record<string, unknown> {
+  return {
+    missionId: mission.id,
+    objective: mission.objective,
+    definitionOfDone: mission.definitionOfDone,
+    status: mission.status,
+    nextAction: mission.nextAction,
+    checkpoint: mission.checkpoint,
+    budget: { ...mission.budget, consumedSteps: mission.consumedSteps, toolCalls: mission.toolCalls, cost: mission.cost },
+    verification: mission.verification,
+    steps: mission.steps.map((step) => ({ id: step.id, title: step.title, status: step.status, result: step.result, evidence: (step.evidence ?? []).map((item) => ({ id: item.id, kind: item.kind, summary: item.summary, source: item.source, ref: item.ref, verified: item.verified, verifiedBy: item.verifiedBy })) })),
+    evidence: (mission.evidence ?? []).map((item) => ({ id: item.id, kind: item.kind, summary: item.summary, source: item.source, ref: item.ref, verified: item.verified, verifiedBy: item.verifiedBy })),
+    events: mission.events.slice(-100),
+  };
 }
 
 export async function updateMission(userId: number, id: string, patch: Partial<Omit<MissionRecord, "id" | "userId" | "createdAt">>): Promise<MissionRecord | undefined> {
@@ -4374,11 +4609,11 @@ export async function startMission(userId: number, id: string): Promise<MissionR
   const mission = await getMission(userId, id);
   if (!mission || mission.status !== "queued") return undefined;
   const now = Date.now();
-  const current = mission.currentStepId ? mission.steps.find((step) => step.id === mission.currentStepId) : readyMissionStep(mission);
-  const steps = current && current.status === "pending"
-    ? mission.steps.map((step) => step.id === current.id ? { ...step, status: "running" as const, attempts: step.attempts + 1, updatedAt: now } : step)
-    : mission.steps;
-  return updateMission(userId, id, { status: "running", startedAt: now, error: undefined, ...(current ? { currentStepId: current.id, steps } : {}), events: [...mission.events, missionEvent("started", "Mission started", now)] });
+  const ready = readyMissionSteps(mission);
+  const steps = mission.steps.map((step) => ready.some((candidate) => candidate.id === step.id) ? { ...step, status: "running" as const, attempts: step.attempts + 1, updatedAt: now } : step);
+  const activeStepIds = ready.map((step) => step.id);
+  const current = ready[0];
+  return updateMission(userId, id, { status: "running", startedAt: now, error: undefined, activeStepIds, ...(current ? { currentStepId: current.id, steps } : {}), events: [...mission.events, missionEvent("started", activeStepIds.length > 1 ? `Mission started with ${activeStepIds.length} parallel steps.` : "Mission started", now)] });
 }
 
 export async function pauseMission(userId: number, id: string, reason = "Mission paused."): Promise<MissionRecord | undefined> {
@@ -4447,6 +4682,7 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
 export async function completeMission(userId: number, id: string, result: string): Promise<MissionRecord | undefined> {
   const mission = await getMission(userId, id);
   if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+  if (mission.verification?.mode === "strict" && (!mission.verification.verified || mission.steps.some((step) => step.status !== "completed"))) return undefined;
   const now = Date.now();
   return updateMission(userId, id, { status: "completed", result: result.slice(0, 12000), nextAction: undefined, waiting: undefined, error: undefined, completedAt: now, events: [...mission.events, missionEvent("completed", "Mission completed", now)] });
 }

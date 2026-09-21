@@ -11,7 +11,7 @@ import {
   readScratchpad, updateJob, updateReminder, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemory,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, setTaskWorkflowRunId, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
-  blockMission, cancelMission, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission,
+  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
   type TaskStatus, type MissionStatus,
@@ -38,6 +38,10 @@ import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
 import type { TaskWaitRequest } from "./types.js";
 import { createTaskWaitRequest } from "./taskWait.js";
 import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
+import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
+import { createDepartmentHandoff } from "./departments.js";
+import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
+import { scheduleMissionSteps } from "./missionScheduler.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -694,7 +698,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SCRATCHPAD_CLEAR": await clearScratchpad(userId, args.key ? text(args.key) : undefined); return { cleared: true };
     case "CHUCK_SAVE_MEMORY": {
       if (args.sensitivity !== "normal" && args.sensitivity !== "sensitive") throw new Error("sensitivity is required when saving memory");
-      return upsertMemory(userId, { category: (args.category as any) ?? "fact", key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+      const category = (args.category as string) ?? "fact";
+      const memory = await upsertMemory(userId, { category: category as any, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+      const contextKind = ["preference", "relationship", "fact", "decision", "objective", "open_loop"].includes(category) ? category : "memory";
+      const context = await upsertContextNode(userId, { scope: args.projectId ? "project" : "user", ...(args.projectId ? { scopeId: text(args.projectId) } : {}), kind: contextKind as never, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : "CHUCK_SAVE_MEMORY", sourceRef: memory.id, sensitivity: args.sensitivity, confidence: Number(args.confidence ?? 1), ...(args.reviewAt !== undefined ? { reviewAt: Number(args.reviewAt) } : {}), ...(args.expiresAt !== undefined ? { expiresAt: Number(args.expiresAt) } : {}) });
+      return { ...memory, contextNodeId: context.id };
     }
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
     case "CHUCK_UPDATE_MEMORY": {
@@ -921,7 +929,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const mission = await createMission(userId, {
         title: text(args.title), objective: text(args.objective), definitionOfDone: text(args.definitionOfDone),
         idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey) : undefined,
-        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({ id: typeof step.id === "string" ? step.id : undefined, title: text(step.title), objective: text(step.objective), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit) })) : undefined,
+        requiredEvidence: Array.isArray(args.requiredEvidence) ? args.requiredEvidence.filter((value: unknown): value is string => typeof value === "string") : undefined,
+        verificationMode: args.verificationMode === "strict" || (args.verificationMode === undefined && Array.isArray(args.requiredEvidence) && args.requiredEvidence.length > 0) ? "strict" : "legacy",
+        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({ id: typeof step.id === "string" ? step.id : undefined, title: text(step.title), objective: text(step.objective), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((value: unknown): value is string => typeof value === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined,
         budget: {
           maxDurationSeconds: args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds),
           maxSteps: args.maxSteps === undefined ? undefined : Number(args.maxSteps),
@@ -933,16 +943,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         const started = await startMission(userId, mission.id);
         if (started && !started.rootTaskId) {
           try {
-            const task = await createTask(userId, {
-              title: `Mission: ${started.title}`,
-              objective: started.objective,
-              missionId: started.id,
-              runAt: Date.now(),
-              maxAttempts: 3,
-            });
-            const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
-            await setTaskWorkflowRunId(userId, task.id, workflowRunId);
-            return (await updateMission(userId, started.id, { rootTaskId: task.id, steps: started.steps.map((step) => ({ ...step, status: step.id === started.currentStepId ? "running" as const : step.status, taskId: step.id === started.currentStepId ? task.id : step.taskId, updatedAt: Date.now() })) })) ?? started;
+            return (await scheduleMissionSteps(userId, started, enqueueTaskWorkflow)) ?? started;
           } catch (error) {
             await blockMission(userId, started.id, `Mission could not be scheduled: ${error instanceof Error ? error.message : String(error)}`, "Retry after the durable workflow service is available.");
             throw error;
@@ -958,6 +959,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!mission) throw new Error("Mission not found or not owned by you");
       return mission;
     }
+    case "CHUCK_MISSION_PROOF": {
+      const mission = await getMission(userId, text(args.id));
+      if (!mission) throw new Error("Mission not found or not owned by you");
+      return missionProof(mission);
+    }
     case "CHUCK_MISSION_CHECKPOINT": {
       const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint), args.nextAction ? text(args.nextAction) : undefined);
       if (!mission) throw new Error("Only running missions you own can be checkpointed");
@@ -966,25 +972,18 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_MISSION_PAUSE": {
       const mission = await pauseMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
       if (!mission) throw new Error("Only running or waiting missions you own can be paused");
-      if (mission.rootTaskId) await cancelTask(userId, mission.rootTaskId);
+      await cancelMissionTasks(userId, mission.id);
       return mission;
     }
     case "CHUCK_MISSION_RESUME": {
       const mission = await resumeMission(userId, text(args.id));
       if (!mission) throw new Error("Only paused, blocked, or failed missions you own can be resumed");
-      if (mission.rootTaskId) {
-        const task = await retryTask(userId, mission.rootTaskId);
-        if (task) {
-          const workflowRunId = await enqueueTaskWorkflow(userId, task.id, task.runAt ?? Date.now());
-          await setTaskWorkflowRunId(userId, task.id, workflowRunId);
-        }
-      }
-      return mission;
+      return (await scheduleMissionSteps(userId, mission, enqueueTaskWorkflow)) ?? mission;
     }
     case "CHUCK_MISSION_CANCEL": {
       const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
       if (!mission) throw new Error("Only unfinished missions you own can be cancelled");
-      if (mission.rootTaskId) await cancelTask(userId, mission.rootTaskId);
+      await cancelMissionTasks(userId, mission.id);
       return mission;
     }
     case "CHUCK_MISSION_WAIT_EVENT": {
@@ -1001,6 +1000,36 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
       return mission;
     }
+    case "CHUCK_MISSION_EVIDENCE": {
+      const rawEvidence = Array.isArray(args.evidence) ? args.evidence : [];
+      if (!rawEvidence.length) throw new Error("At least one evidence record is required");
+      const evidence = rawEvidence.map((item: Record<string, unknown>) => ({ id: `evidence_${randomUUID()}`, kind: text(item.kind) as "source", summary: text(item.summary), ...(item.source ? { source: text(item.source) } : {}), ...(item.ref ? { ref: text(item.ref) } : {}), ...(item.hash ? { hash: text(item.hash) } : {}), verified: item.verified === true, ...(item.verifiedBy ? { verifiedBy: text(item.verifiedBy) as "agent" } : {}) }));
+      const mission = await recordMissionEvidence(userId, text(args.id), evidence, args.stepId ? text(args.stepId) : undefined);
+      if (!mission) throw new Error("Mission not found, finished, or not owned by you");
+      return mission;
+    }
+    case "CHUCK_MISSION_VERIFY": {
+      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: args.verifiedBy === "human" || args.verifiedBy === "agent" ? args.verifiedBy : "system" });
+      if (!mission) throw new Error("Mission not found or not owned by you");
+      return mission;
+    }
+    case "CHUCK_MISSION_REPAIR": {
+      const mission = await repairMission(userId, text(args.id), { reason: text(args.reason), nextAction: args.nextAction ? text(args.nextAction) : undefined });
+      if (!mission) throw new Error("Mission not found, finished, or not owned by you");
+      return mission;
+    }
+    case "CHUCK_CONTEXT_SEARCH": {
+      const selection = { query: args.query ? text(args.query) : undefined, scope: args.scope as never, scopeId: args.scopeId ? text(args.scopeId) : undefined, purpose: args.purpose as never, limit: args.limit === undefined ? undefined : Number(args.limit) };
+      return { nodes: await selectContext(userId, selection), prompt: await contextPrompt(userId, selection) };
+    }
+    case "CHUCK_CONTEXT_SAVE": {
+      return upsertContextNode(userId, { scope: text(args.scope) as never, scopeId: args.scopeId ? text(args.scopeId) : undefined, kind: text(args.kind) as never, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, sourceRef: args.sourceRef ? text(args.sourceRef) : undefined, sensitivity: text(args.sensitivity) as "normal" | "sensitive", confidence: args.confidence === undefined ? undefined : Number(args.confidence), tags: Array.isArray(args.tags) ? args.tags.filter((value: unknown): value is string => typeof value === "string") : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
+    }
+    case "CHUCK_DEPARTMENT_HANDOFF": {
+      return createDepartmentHandoff(userId, { department: text(args.department), objective: text(args.objective), inputs: args.inputs && typeof args.inputs === "object" ? args.inputs as Record<string, unknown> : {}, constraints: Array.isArray(args.constraints) ? args.constraints.filter((value: unknown): value is string => typeof value === "string") : [], evidenceRequired: Array.isArray(args.evidenceRequired) ? args.evidenceRequired.filter((value: unknown): value is string => typeof value === "string") : [], ...(args.outputSchema && typeof args.outputSchema === "object" ? { outputSchema: args.outputSchema as Record<string, unknown> } : {}), ...(args.toAgent ? { toAgent: text(args.toAgent) } : {}), ...(args.deadline ? { deadline: Number(args.deadline) } : {}), ...(args.approvalBoundary ? { approvalBoundary: text(args.approvalBoundary) } : {}) });
+    }
+    case "CHUCK_OUTCOME_LIST": return listOutcomePackages();
+    case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
     case "CHUCK_MISSION_REPLAN": {
       const steps = Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
         id: typeof step.id === "string" ? step.id : undefined,

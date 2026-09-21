@@ -95,6 +95,28 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   assert.equal((await cancelled.json() as { status: string }).status, "cancelled");
 });
 
+test("context, outcome, evidence, and A2A surfaces share the same owner-scoped runtime", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-test");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "a2a-owner", "Content-Type": "application/json" };
+  const context = await api.fetch(new Request("http://local/v1/context", { method: "POST", headers, body: JSON.stringify({ scope: "department", scopeId: "sales", kind: "decision", key: "ICP", value: "Fintech", sensitivity: "normal" }) }));
+  assert.equal(context.status, 201);
+  const selected = await api.fetch(new Request("http://local/v1/context?purpose=sales", { headers }));
+  assert.match(await selected.text(), /Fintech/);
+  const outcomes = await api.fetch(new Request("http://local/v1/outcomes", { headers }));
+  assert.equal(outcomes.status, 200); assert.ok(((await outcomes.json()) as { data: unknown[] }).data.length >= 7);
+  const card = await api.fetch(new Request("http://local/a2a/.well-known/agent-card.json"));
+  assert.equal(card.status, 200); assert.match(await card.text(), /Outcome Runtime/);
+  const task = await api.fetch(new Request("http://local/a2a/tasks", { method: "POST", headers, body: JSON.stringify({ outcome: "competitor-change-report", input: { "competitor list": "Acme", "monitoring topics": "pricing", "report cadence": "weekly" } }) }));
+  assert.equal(task.status, 202);
+  const created = await task.json() as { id: string; status: string };
+  assert.equal(created.status, "working");
+  const status = await api.fetch(new Request(`http://local/a2a/tasks/${created.id}`, { headers }));
+  assert.equal(status.status, 200);
+  const forbidden = await api.fetch(new Request(`http://local/a2a/tasks/${created.id}`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "other-owner" } }));
+  assert.equal(forbidden.status, 404);
+});
+
 test("SDK conversation lifecycle is owned, archive-aware, and protects active runs", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "lifecycle-user", "Content-Type": "application/json" };

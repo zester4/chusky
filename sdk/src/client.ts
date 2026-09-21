@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, Worker } from "./types.js";
+import type { AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -32,6 +32,10 @@ export class Chusky {
   readonly memory: MemoryResource;
   readonly scratchpad: ScratchpadResource;
   readonly devices: DevicesResource;
+  readonly missions: MissionsResource;
+  readonly context: ContextResource;
+  readonly departments: DepartmentsResource;
+  readonly outcomes: OutcomesResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly userId: string;
@@ -77,6 +81,10 @@ export class Chusky {
     this.memory = new MemoryResource(this);
     this.scratchpad = new ScratchpadResource(this);
     this.devices = new DevicesResource(this);
+    this.missions = new MissionsResource(this);
+    this.context = new ContextResource(this);
+    this.departments = new DepartmentsResource(this);
+    this.outcomes = new OutcomesResource(this);
   }
 
   /** @internal Returns the configured default model for run requests. */
@@ -435,6 +443,45 @@ export class MeetingsResource {
   context(meetingId: string, query = "", options?: RequestOptions): Promise<MeetingContext> { const suffix = query ? `?query=${encodeURIComponent(query)}` : ""; return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/context${suffix}`, {}, options); }
   deleteContact(contactId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/meetings/contacts/${encodeURIComponent(contactId)}`, { method: "DELETE" }, options); }
 }
+export class MissionsResource {
+  constructor(private readonly client: Chusky) {}
+  list(options?: RequestOptions): Promise<Page<Mission>> { return this.client.request("/missions", {}, options); }
+  create(params: MissionCreateParams, options?: RequestOptions): Promise<Mission> { return this.client.request("/missions", { method: "POST", body: JSON.stringify(params) }, options); }
+  get(missionId: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}`, {}, options); }
+  events(missionId: string, options?: RequestOptions): Promise<Page<Mission["events"][number]>> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/events`, {}, options); }
+  proof(missionId: string, options?: RequestOptions): Promise<MissionProof> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/proof`, {}, options); }
+  evidence(missionId: string, input: { stepId?: string; evidence: MissionEvidence[] }, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/evidence`, { method: "POST", body: JSON.stringify(input) }, options); }
+  verify(missionId: string, input: { evidenceIds?: string[]; confidence?: number; verifiedBy?: "human" | "agent" | "system" }, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/verify`, { method: "POST", body: JSON.stringify(input) }, options); }
+  repair(missionId: string, input: { reason: string; nextAction?: string }, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/repair`, { method: "POST", body: JSON.stringify(input) }, options); }
+  pause(missionId: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/pause`, { method: "POST", body: "{}" }, options); }
+  resume(missionId: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/resume`, { method: "POST", body: "{}" }, options); }
+  cancel(missionId: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/cancel`, { method: "POST", body: "{}" }, options); }
+  completeStep(missionId: string, stepId: string, result: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/steps/${encodeURIComponent(stepId)}/complete`, { method: "POST", body: JSON.stringify({ result }) }, options); }
+  replan(missionId: string, input: { reason?: string; steps: Array<Partial<Mission["steps"][number]> & { title: string; objective: string }> }, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/replan`, { method: "POST", body: JSON.stringify(input) }, options); }
+  providerEvent(missionId: string, provider: string, providerEventId: string, options?: RequestOptions): Promise<Mission> { return this.client.request(`/missions/${encodeURIComponent(missionId)}/events`, { method: "POST", body: JSON.stringify({ provider, providerEventId }) }, options); }
+}
+
+export class ContextResource {
+  constructor(private readonly client: Chusky) {}
+  list(params: { query?: string; scope?: string; scopeId?: string; purpose?: string; limit?: number } = {}, options?: RequestOptions): Promise<{ data: ContextNode[]; prompt: string }> { const query = new URLSearchParams(); for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== "") query.set(key, String(value)); return this.client.request(`/context${query.size ? `?${query}` : ""}`, {}, options); }
+  save(input: Omit<ContextNode, "id" | "createdAt" | "updatedAt">, options?: RequestOptions): Promise<ContextNode> { return this.client.request("/context", { method: "POST", body: JSON.stringify(input) }, options); }
+}
+
+export class DepartmentsResource {
+  constructor(private readonly client: Chusky) {}
+  catalog(options?: RequestOptions): Promise<Page<DepartmentCatalogItem>> { return this.client.request("/departments/catalog", {}, options); }
+  list(options?: RequestOptions): Promise<Page<DepartmentSpace>> { return this.client.request("/departments", {}, options); }
+  create(input: { department: string; name?: string; mission?: string; objectives?: string[]; policies?: string[]; approvedTools?: string[]; escalationOwner?: string }, options?: RequestOptions): Promise<DepartmentSpace> { return this.client.request("/departments", { method: "POST", body: JSON.stringify(input) }, options); }
+  handoff(department: string, input: { objective: string; inputs?: Record<string, unknown>; constraints?: string[]; evidenceRequired?: string[]; outputSchema?: Record<string, unknown>; toAgent?: string; deadline?: number; approvalBoundary?: string }, options?: RequestOptions): Promise<WorkPacket> { return this.client.request(`/departments/${encodeURIComponent(department)}/handoffs`, { method: "POST", body: JSON.stringify(input) }, options); }
+}
+
+export class OutcomesResource {
+  constructor(private readonly client: Chusky) {}
+  list(options?: RequestOptions): Promise<Page<OutcomePackage>> { return this.client.request("/outcomes", {}, options); }
+  get(slug: string, options?: RequestOptions): Promise<{ data: OutcomePackage }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}`, {}, options); }
+  plan(slug: string, input: Record<string, unknown>, options?: RequestOptions): Promise<{ data: OutcomePlan }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}/plan`, { method: "POST", body: JSON.stringify(input) }, options); }
+}
+
 export class UsageResource {
   constructor(private readonly client: Chusky) {}
   get(options?: RequestOptions): Promise<Usage> { return this.client.request("/usage", {}, options); }

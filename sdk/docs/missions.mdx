@@ -1,0 +1,129 @@
+---
+title: Autonomous missions
+description: Run multi-step business work with checkpoints, evidence, recovery, and bounded autonomy.
+---
+
+Missions are the SDK surface for work that must continue beyond one model request. A mission has an objective, an explicit definition of done, dependency-aware steps, budgets, durable events, evidence, and a verification record. It can pause for a timer, provider event, approval, or human input and can be resumed without recreating the work.
+
+## Create a mission
+
+Keep the definition of done concrete. If you provide steps, the first dependency-free steps may run in parallel; later steps cannot start until their dependencies are completed.
+
+```ts
+const mission = await chusky.missions.create({
+  title: "Qualified fintech leads",
+  objective: "Find 20 fintech companies matching our ICP and prepare CRM-ready profiles.",
+  definitionOfDone: "Every lead has a source URL, qualification reason, duplicate check, and approval-ready CRM payload.",
+  verificationMode: "strict",
+  requiredEvidence: ["source URL for every lead", "qualification assertion", "deduplication check"],
+  steps: [
+    { id: "research", title: "Research companies", objective: "Collect source-backed company facts." },
+    { id: "qualify", title: "Qualify and deduplicate", objective: "Apply the ICP and remove duplicates", dependsOn: ["research"] },
+    { id: "prepare", title: "Prepare CRM payload", objective: "Draft the bounded CRM import", dependsOn: ["qualify"] },
+  ],
+  maxDurationSeconds: 3 * 60 * 60,
+  maxSteps: 30,
+  maxToolCalls: 100,
+  maxCost: 15,
+}, { idempotencyKey: "acme-fintech-leads-2026-09-21" });
+```
+
+The create call starts durable execution. Use an idempotency key for retries after a network timeout; reusing it with a different body is rejected.
+
+## Observe proof, not just status
+
+```ts
+const mission = await chusky.missions.get(missionId);
+const proof = await chusky.missions.proof(missionId);
+const events = await chusky.missions.events(missionId);
+```
+
+`proof()` is a bounded external record: it contains the definition of done, budget consumption, step results, evidence summaries, verification, and recent lifecycle events. It never returns private prompts, provider credentials, or raw connected-app payloads.
+
+## Evidence and verification
+
+Agents and supervising applications can attach source receipts, tool receipts, artifacts, before/after checks, assertions, or human confirmations. Verification does not invent evidence: strict missions remain unverified until every step is complete and required evidence is satisfied.
+
+```ts
+await chusky.missions.evidence(missionId, {
+  stepId: "research",
+  evidence: [{
+    kind: "source",
+    summary: "Company headcount and fintech classification confirmed.",
+    source: "https://example.com/company",
+    verified: true,
+    verifiedBy: "agent",
+  }],
+});
+
+const verified = await chusky.missions.verify(missionId, {
+  confidence: 0.92,
+  verifiedBy: "system",
+});
+```
+
+Use the result of `verify()` as the release gate for downstream CRM writes, emails, purchases, or other external actions. Approval and tool policy remain separate safety boundaries.
+
+## Waits, recovery, and replanning
+
+```ts
+await chusky.missions.pause(missionId);
+await chusky.missions.resume(missionId);
+await chusky.missions.repair(missionId, {
+  reason: "The enrichment provider returned incomplete records.",
+  nextAction: "Retry enrichment with the fallback provider.",
+});
+
+await chusky.missions.replan(missionId, {
+  reason: "The target market changed after the research step.",
+  steps: [
+    { id: "research", title: "Research companies", objective: "Refresh source-backed facts." },
+    { id: "qualify", title: "Requalify", objective: "Apply the new ICP", dependsOn: ["research"] },
+  ],
+});
+```
+
+For external providers, configure the mission to wait for a specific provider and event ID from the agent workflow. Resume it with `providerEvent()` when your verified webhook has durably accepted that exact event. For webhook delivery, prefer the signed endpoint `POST /v1/missions/:missionId/events/signed`; never treat an unsigned provider payload as authorization.
+
+```ts
+await chusky.missions.providerEvent(missionId, "stripe", "evt_123");
+```
+
+Repeated delivery of the same expected event is safe. A mismatched event does not resume the mission.
+
+## Context, departments, and outcomes
+
+Missions are designed to work with the shared operating layer:
+
+```ts
+const context = await chusky.context.list({ purpose: "sales", query: "ICP" });
+const departments = await chusky.departments.catalog();
+const outcome = await chusky.outcomes.plan("qualified-fintech-leads", {
+  "ideal customer profile": "B2B fintech, 50+ employees",
+  "target geography": "United Kingdom",
+  "lead count": 20,
+});
+```
+
+Context nodes are owner-scoped, sensitivity-aware, and filtered for expiry/review rules. Department handoffs are typed work packets with explicit objectives, constraints, evidence requirements, and escalation boundaries. Outcome packages turn a business result into a governed plan rather than a vague prompt.
+
+## CLI parity
+
+The paired CLI exposes the same operational controls without inventing a second runtime:
+
+```text
+/missions
+/missions <mission-id>
+/mission create <title> | <objective> | <definition of done>
+/mission pause|resume|cancel|repair <mission-id>
+/mission proof|events <mission-id>
+/mission evidence <mission-id> <JSON array>
+/mission verify <mission-id> [evidence-id,...]
+/mission replan <mission-id> <reason> | <steps JSON>
+/mission event <mission-id> <provider> <provider-event-id>
+/context [query]
+/departments [catalog|provision|handoff ...]
+/outcomes [slug|plan ...]
+```
+
+Both surfaces use the authenticated owner identity of the API key or paired CLI device. A CLI device cannot inspect another account's missions, context, evidence, departments, or outcomes.

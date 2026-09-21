@@ -40,6 +40,25 @@ function taskLine(task: CliTask, color: boolean): string {
   return `${paint(task.id, "dim", color)}  ${paint(`[${task.status}]`, statusColors[task.status], color)}  ${task.title}`;
 }
 
+function missionLine(mission: any, color: boolean): string {
+  const statusColor = mission.status === "completed" ? "green" : ["failed", "cancelled"].includes(mission.status) ? "red" : ["paused", "blocked", "waiting"].includes(mission.status) ? "yellow" : "cyan";
+  const active = Array.isArray(mission.activeStepIds) && mission.activeStepIds.length ? ` · ${mission.activeStepIds.length} active step${mission.activeStepIds.length === 1 ? "" : "s"}` : "";
+  return `${paint(String(mission.id), "dim", color)}  ${paint(`[${mission.status}]`, statusColor as "green" | "red" | "yellow" | "cyan", color)}  ${mission.title}${active}`;
+}
+
+function missionDetail(mission: any, color: boolean): string {
+  const lines = [missionLine(mission, color), `Objective: ${mission.objective}`, `Definition of done: ${mission.definitionOfDone}`, `Next action: ${mission.nextAction || "not set"}`, `Checkpoint: ${mission.checkpoint || "none"}`, `Budget: ${mission.consumedSteps}/${mission.budget?.maxSteps ?? "?"} steps · ${mission.toolCalls}/${mission.budget?.maxToolCalls ?? "?"} tools · $${Number(mission.cost || 0).toFixed(4)}/${mission.budget?.maxCost ?? "?"}`];
+  if (mission.waiting) lines.push(`Waiting: ${JSON.stringify(mission.waiting)}`);
+  if (Array.isArray(mission.steps)) lines.push(`\nSteps:\n${mission.steps.map((step: any) => `- ${step.id} [${step.status}] ${step.title}${step.dependsOn?.length ? ` (after ${step.dependsOn.join(", ")})` : ""}${step.result ? `\n  ${step.result}` : ""}`).join("\n")}`);
+  if (mission.verification) lines.push(`\nVerification: ${mission.verification.verified ? "verified" : "not verified"}${mission.verification.unresolved?.length ? ` — ${mission.verification.unresolved.join("; ")}` : ""}`);
+  if (mission.error) lines.push(`Error: ${mission.error}`);
+  return lines.join("\n");
+}
+
+function parseJson<T>(value: string, usage: string): T {
+  try { return JSON.parse(value) as T; } catch { throw new Error(`Invalid JSON. Usage: ${usage}`); }
+}
+
 function meetingLine(meeting: any, color: boolean): string {
   const participants = Array.isArray(meeting.participantRoster) ? meeting.participantRoster.filter((person: any) => person.status !== "left").map((person: any) => person.name).filter(Boolean).slice(0, 8).join(", ") : "";
   return `${paint(meeting.id, "dim", color)}  ${paint(`[${meeting.status}]`, meeting.status === "in_call" ? "green" : meeting.status === "failed" ? "red" : "cyan", color)}  ${meeting.platform}  ${meeting.title || "Untitled meeting"}${participants ? `\n  Participants: ${participants}` : ""}`;
@@ -142,7 +161,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /reminders|/jobs pause|resume|run|cancel <id>\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /meetings [id] /meeting profile|prepare|join|join-prepared|context|leave ...\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice list|set twilio|meetings|bland <voice> /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /reminders|/jobs pause|resume|run|cancel <id>\n  /missions [id] /mission create|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...\n  /context [query] /departments [catalog|provision|handoff] /outcomes [slug|plan ...]\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /meetings [id] /meeting profile|prepare|join|join-prepared|context|leave ...\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice list|set twilio|meetings|bland <voice> /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -387,6 +406,89 @@ async function chat(): Promise<void> {
         if (action === "create") { const durationIndex = parts.findIndex((item) => ["5m", "30m", "1h", "3h", "6h", "3d", "1w"].includes(item)); const duration = durationIndex >= 0 ? parts.splice(durationIndex, 1)[0] : "30m"; const modelFlag = parts.find((item) => item.startsWith("--model=")); const toolsFlag = parts.find((item) => item.startsWith("--max-tools=")); const costFlag = parts.find((item) => item.startsWith("--max-cost=")); const input = parts.filter((item) => !item.startsWith("--model=") && !item.startsWith("--max-tools=") && !item.startsWith("--max-cost=")).join(" "); const result = await client.createRun({ input, duration, ...(modelFlag ? { model: modelFlag.slice(8) } : {}), ...(toolsFlag ? { maxToolCalls: Number(toolsFlag.slice(12)) } : {}), ...(costFlag ? { maxCost: Number(costFlag.slice(11)) } : {}) }); console.log(result.ok ? formatSuccess(`Run queued: ${result.run?.id || "created"} (${duration}).`, color) : formatError(result.error || "Run could not be queued.", color)); }
         else if (parts[0]) { const id = parts[0]; const result = action === "status" ? await client.run(id) : action === "events" ? await client.runEvents(id) : action === "cancel" ? await client.cancelRun(id) : await client.resumeRun(id); if (action === "events") console.log(result.ok ? ((result.events as any[] | undefined)?.map((event: any) => `${new Date(event.at).toISOString()}  ${event.type}${event.text ? ` — ${event.text}` : ""}`).join("\n") || "No new events.") : formatError(result.error || "Run not found.", color)); else { const run: any = result.run; console.log(result.ok && run ? `${run.id}  [${run.status}]  ${run.model || "default"}\n${run.input}${run.output ? `\n\n${run.output}` : ""}${run.error ? `\nError: ${run.error.message}` : ""}` : formatError(result.error || "Run not found.", color)); } }
         else console.log(formatError("Usage: /run <prompt> [5m|30m|1h|3h|6h|3d|1w] | /run status|events|cancel|resume <id>", color));
+        continue;
+      }
+      if (line === "/missions" || line.startsWith("/missions ")) {
+        const id = line.slice("/missions".length).trim();
+        if (!id) {
+          const result = await client.missions();
+          if (!result.ok) console.log(formatError(result.error || "Could not load missions.", color));
+          else await showPaged(result.missions?.length ? result.missions.map((mission) => missionLine(mission, color)).join("\n") : "No autonomous missions.", true);
+        } else {
+          const result = await client.mission(id);
+          if (!result.ok || !result.mission) console.log(formatError(result.error || "Mission not found.", color));
+          else await showPaged(missionDetail(result.mission, color), true);
+        }
+        continue;
+      }
+      if (line === "/mission" || line.startsWith("/mission ")) {
+        const raw = line.slice("/mission".length).trim();
+        const parts = raw ? raw.split(/\s+/) : [];
+        const action = parts.shift()?.toLowerCase() || "list";
+        if (action === "list") {
+          const result = await client.missions();
+          if (!result.ok) console.log(formatError(result.error || "Could not load missions.", color));
+          else await showPaged(result.missions?.length ? result.missions.map((mission) => missionLine(mission, color)).join("\n") : "No autonomous missions.", true);
+        } else if (action === "create") {
+          const fields = raw.slice("create".length).trim().split("|").map((value) => value.trim());
+          if (!fields[0] || !fields[1] || !fields[2]) console.log(formatError("Usage: /mission create <title> | <objective> | <definition of done>", color));
+          else { const result = await client.createMission({ title: fields[0], objective: fields[1], definitionOfDone: fields[2] }); console.log(result.ok ? formatSuccess(`Mission started: ${result.mission?.id || "queued"}.`, color) : formatError(result.error || "Mission could not be created.", color)); }
+        } else if (["pause", "resume", "cancel", "repair"].includes(action)) {
+          const id = parts[0];
+          if (!id) console.log(formatError(`Usage: /mission ${action} <id>`, color));
+          else { const result = await client.missionAction(id, action as "pause" | "resume" | "cancel" | "repair"); console.log(result.ok ? formatSuccess(`Mission ${action} requested: ${id}.`, color) : formatError(result.error || `Mission could not be ${action}d.`, color)); }
+        } else if (["proof", "events"].includes(action)) {
+          const id = parts[0];
+          if (!id) console.log(formatError(`Usage: /mission ${action} <id>`, color));
+          else if (action === "proof") { const result = await client.missionProof(id); console.log(result.ok && result.proof ? JSON.stringify(result.proof, null, 2) : formatError(result.error || "Mission proof is unavailable.", color)); }
+          else { const result = await client.missionEvents(id); await showPaged(result.ok ? (result.events?.map((event) => `${new Date(event.at).toISOString()}  ${event.type}: ${event.message}`).join("\n") || "No mission events.") : formatError(result.error || "Mission events are unavailable.", color), true); }
+        } else if (action === "step") {
+          const id = parts.shift(); const stepId = parts.shift(); const resultText = parts.join(" ");
+          if (!id || !stepId || !resultText) console.log(formatError("Usage: /mission step <mission id> <step id> <verified result>", color));
+          else { const result = await client.completeMissionStep(id, stepId, resultText); console.log(result.ok ? formatSuccess(`Mission step completed: ${stepId}.`, color) : formatError(result.error || "Mission step could not be completed.", color)); }
+        } else if (action === "evidence") {
+          const id = parts.shift(); const json = raw.slice("evidence".length).trim().replace(/^\S+\s*/, "");
+          if (!id || !json) console.log(formatError('Usage: /mission evidence <id> <JSON array, e.g. [{"kind":"source","summary":"...","verified":true}]>', color));
+          else { try { const result = await client.addMissionEvidence(id, parseJson<any[]>(json, " /mission evidence <id> <JSON array>")); console.log(result.ok ? formatSuccess("Mission evidence recorded.", color) : formatError(result.error || "Mission evidence could not be recorded.", color)); } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); } }
+        } else if (action === "verify") {
+          const id = parts.shift();
+          if (!id) console.log(formatError("Usage: /mission verify <id> [evidence-id,evidence-id]", color));
+          else { const evidenceIds = parts[0] ? parts[0].split(",").map((value) => value.trim()).filter(Boolean) : undefined; const result = await client.verifyMission(id, evidenceIds ? { evidenceIds } : {}); console.log(result.ok ? formatSuccess(`Mission verification ${result.mission?.verification?.verified ? "passed" : "recorded"}.`, color) : formatError(result.error || "Mission verification failed.", color)); }
+        } else if (action === "replan") {
+          const id = parts.shift(); const remainder = raw.slice("replan".length).trim(); const divider = remainder.indexOf("|"); const reason = divider >= 0 ? remainder.slice(id?.length || 0, divider).trim() : "Verified information changed the remaining plan."; const json = divider >= 0 ? remainder.slice(divider + 1).trim() : remainder.slice(id?.length || 0).trim();
+          if (!id || !json) console.log(formatError("Usage: /mission replan <id> <reason> | <steps JSON>", color));
+          else { try { const result = await client.replanMission(id, { reason, steps: parseJson<any[]>(json, "/mission replan <id> <reason> | <steps JSON>") }); console.log(result.ok ? formatSuccess("Mission replanned.", color) : formatError(result.error || "Mission could not be replanned.", color)); } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); } }
+        } else if (action === "event") {
+          const id = parts[0]; const provider = parts[1]; const providerEventId = parts[2];
+          if (!id || !provider || !providerEventId) console.log(formatError("Usage: /mission event <id> <provider> <provider event id>", color));
+          else { const result = await client.missionProviderEvent(id, provider, providerEventId); console.log(result.ok ? formatSuccess("Mission provider event accepted; continuation queued.", color) : formatError(result.error || "Mission event was not accepted.", color)); }
+        } else console.log(formatError("Usage: /missions [id] | /mission create|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...", color));
+        continue;
+      }
+      if (line === "/context" || line.startsWith("/context ")) {
+        const raw = line.slice("/context".length).trim();
+        if (raw.toLowerCase().startsWith("save ")) {
+          try { const result = await client.saveContext(parseJson<any>(raw.slice(5).trim(), "/context save <context JSON>")); console.log(result.ok ? formatSuccess("Context saved.", color) : formatError(result.error || "Context could not be saved.", color)); } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); }
+        } else {
+          const result = await client.context(raw ? { query: raw } : {});
+          if (!result.ok) console.log(formatError(result.error || "Could not load context.", color));
+          else await showPaged(result.context?.length ? result.context.map((node) => `[${node.scope}/${node.kind}] ${node.key}: ${node.value}`).join("\n") : "No matching context.", true);
+        }
+        continue;
+      }
+      if (line === "/departments" || line.startsWith("/departments ")) {
+        const raw = line.slice("/departments".length).trim(); const parts = raw.split(/\s+/).filter(Boolean); const action = parts.shift()?.toLowerCase() || "list";
+        if (action === "catalog") { const result = await client.departmentCatalog(); await showPaged(result.ok ? result.departments.map((department) => `${department.slug} — ${department.name} (${department.worker})\n${department.objective}`).join("\n\n") : formatError(result.error || "Could not load department catalogue.", color), true); }
+        else if (action === "provision") { const slug = parts[0]; if (!slug) console.log(formatError("Usage: /departments provision <slug>", color)); else { const result = await client.provisionDepartment({ department: slug }); console.log(result.ok ? formatSuccess(`Department provisioned: ${result.department?.name || slug}.`, color) : formatError(result.error || "Department could not be provisioned.", color)); } }
+        else if (action === "handoff") { const department = parts.shift(); const objective = parts.join(" "); if (!department || !objective) console.log(formatError("Usage: /departments handoff <department> <objective>", color)); else { const result = await client.departmentHandoff(department, { objective }); console.log(result.ok ? formatSuccess(`Handoff queued: ${result.handoff?.id || "created"}.`, color) : formatError(result.error || "Handoff could not be created.", color)); } }
+        else { const result = await client.departments(); await showPaged(result.ok ? (result.departments?.map((department) => `${department.id}  ${department.name} [${department.department}]\n${department.mission || department.objectives.join("; ")}`).join("\n\n") || "No department spaces provisioned.") : formatError(result.error || "Could not load departments.", color), true); }
+        continue;
+      }
+      if (line === "/outcomes" || line.startsWith("/outcomes ")) {
+        const raw = line.slice("/outcomes".length).trim(); const parts = raw.split(/\s+/).filter(Boolean); const action = parts.shift()?.toLowerCase() || "list";
+        if (action === "list") { const result = await client.outcomes(); await showPaged(result.ok ? result.outcomes.map((outcome) => `${outcome.slug} — ${outcome.name}\n${outcome.description}`).join("\n\n") : formatError(result.error || "Could not load outcomes.", color), true); }
+        else if (action === "plan") { const slug = parts.shift(); const json = parts.join(" ") || "{}"; if (!slug) console.log(formatError("Usage: /outcomes plan <slug> <inputs JSON>", color)); else { try { const result = await client.planOutcome(slug, parseJson<Record<string, unknown>>(json, "/outcomes plan <slug> <inputs JSON>")); console.log(result.ok && result.plan ? JSON.stringify(result.plan, null, 2) : formatError(result.error || "Outcome could not be planned.", color)); } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); } } }
+        else { const result = await client.outcome(action); console.log(result.ok && result.outcome ? `${result.outcome.name}\n\n${result.outcome.description}\n\nSuccess criteria:\n${result.outcome.successCriteria.map((item) => `- ${item}`).join("\n")}` : formatError(result.error || "Outcome package not found.", color)); }
         continue;
       }
       if (line === "/webhooks") { const result = await client.webhooks(); console.log(result.ok ? (result.webhooks?.map((hook) => `${hook.id}  [${hook.disabledAt ? "disabled" : "enabled"}]  ${hook.url}`).join("\n") || "No webhooks.") : formatError(result.error || "Could not load webhooks.", color)); continue; }

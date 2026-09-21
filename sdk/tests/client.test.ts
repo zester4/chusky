@@ -227,3 +227,30 @@ test("SDK exposes native schedules, memory, scratchpad, app connections, channel
   assert.ok(calls.includes("POST:https://example.test/v1/channels/link-code"));
   assert.ok(calls.includes("GET:https://example.test/v1/devices"));
 });
+
+test("SDK exposes mission proof, context, department, and outcome resources", async () => {
+  const calls: string[] = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push(`${init?.method ?? "GET"}:${url}`);
+    if (url.endsWith("/outcomes/qualified-fintech-leads/plan")) return new Response(JSON.stringify({ data: { package: { slug: "qualified-fintech-leads" }, missingInputs: [], steps: [] } }), { status: 200 });
+    if (url.endsWith("/outcomes/qualified-fintech-leads")) return new Response(JSON.stringify({ data: { slug: "qualified-fintech-leads" } }), { status: 200 });
+    if (url.endsWith("/missions/mis_1/proof")) return new Response(JSON.stringify({ missionId: "mis_1", status: "running", evidence: [], steps: [], events: [] }), { status: 200 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+  await sdk.missions.list();
+  await sdk.missions.proof("mis_1");
+  await sdk.missions.events("mis_1");
+  await sdk.missions.providerEvent("mis_1", "stripe", "evt_1", { idempotencyKey: "event_1" });
+  await sdk.context.list({ purpose: "sales", limit: 10 });
+  await sdk.departments.catalog();
+  await sdk.departments.list();
+  await sdk.outcomes.list();
+  await sdk.outcomes.get("qualified-fintech-leads");
+  await sdk.outcomes.plan("qualified-fintech-leads", { "lead count": 10 });
+  assert.ok(calls.includes("GET:https://example.test/v1/missions"));
+  assert.ok(calls.includes("GET:https://example.test/v1/missions/mis_1/proof"));
+  assert.ok(calls.includes("POST:https://example.test/v1/missions/mis_1/events"));
+  assert.ok(calls.includes("GET:https://example.test/v1/context?purpose=sales&limit=10"));
+  assert.ok(calls.includes("GET:https://example.test/v1/departments/catalog"));
+  assert.ok(calls.includes("GET:https://example.test/v1/outcomes"));
+});

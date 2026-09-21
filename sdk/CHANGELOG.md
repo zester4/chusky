@@ -2,6 +2,14 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## Unreleased
+
+## 0.3.0 - 2026-09-21
+
+- Added typed SDK resources for autonomous missions, proof/evidence verification, provider-event resume, replanning, context, departments, and outcome packages.
+- Added matching authenticated CLI client methods and interactive commands for mission recovery, context, department handoffs, and outcome planning.
+- Documented the shared autonomy contract and CLI parity.
+
 ## 0.2.0
 
 - Added typed `calls` and `meetings` resources.

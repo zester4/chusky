@@ -15,6 +15,7 @@ export const SELF_SERVICE_PROJECT_SCOPES = [
   "jobs:write", "memory:read", "memory:write", "scratchpad:read",
   "scratchpad:write", "calls:read", "calls:write", "voice:read", "voice:write",
   "meetings:read", "meetings:write",
+  "missions:read", "missions:write", "context:read", "context:write", "departments:read", "departments:write", "outcomes:read", "outcomes:write",
   "mcp:read", "mcp:write",
 ] as const;
 
