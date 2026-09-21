@@ -151,6 +151,9 @@ export class ChuskyClient {
   revokeDevice(name: string) { return this.request(`/cli/devices/${encodeURIComponent(name)}`, { method: "DELETE" }); }
   events(since = 0) { return this.request(`/cli/events?since=${Math.max(0, Math.floor(since))}`) as Promise<CliEventsResponse>; }
   collection(kind: "history" | "memories" | "scratchpad" | "reminders" | "jobs", page = 1, pageSize = 25, query = "") { return this.request(`/cli/collection/${kind}?page=${Math.max(1, Math.floor(page))}&pageSize=${Math.max(1, Math.floor(pageSize))}&query=${encodeURIComponent(query)}`) as Promise<CliCollectionResponse>; }
+  reminderAction(id: string, action: "pause" | "resume" | "run" | "cancel") { return this.request(`/cli/reminders/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ action }) }); }
+  jobAction(id: string, action: "pause" | "resume" | "run" | "cancel") { return this.request(`/cli/jobs/${encodeURIComponent(id)}`, { method: "POST", body: JSON.stringify({ action }) }); }
+  jobOccurrences(id: string, limit = 50) { return this.request(`/cli/jobs/${encodeURIComponent(id)}/occurrences?limit=${Math.max(1, Math.min(100, Math.floor(limit)))}`); }
   async *eventStream(since = 0, signal?: AbortSignal): AsyncGenerator<CliEventsResponse> {
     if (!this.config.serverUrl) throw new Error("Set CHUSKY_SERVER_URL or run: chusky auth link --server https://your-chusky-host");
     const headers = new Headers({ Accept: "text/event-stream" }); if (this.config.token) headers.set("Authorization", `Bearer ${this.config.token}`);

@@ -710,7 +710,7 @@ export interface ReminderRecord {
   text: string;
   runAt: number;
   workflowRunId?: string;
-  status: "scheduled" | "waiting" | "sent" | "cancelled" | "failed";
+  status: "scheduled" | "waiting" | "paused" | "sent" | "cancelled" | "failed";
   /** notify preserves legacy delivery; other modes execute bounded agent work. */
   mode?: AutonomyMode;
   links?: AutonomyLinks;
@@ -4715,7 +4715,7 @@ export async function addReminder(uid: number, reminder: ReminderRecord): Promis
 }
 
 export async function listReminders(uid: number): Promise<ReminderRecord[]> {
-  return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting").sort((a, b) => a.runAt - b.runAt);
+  return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused").sort((a, b) => a.runAt - b.runAt);
 }
 
 export async function getReminder(uid: number, id: string): Promise<ReminderRecord | undefined> {

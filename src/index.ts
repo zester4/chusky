@@ -6,7 +6,7 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
-import { getJobOccurrence, createJobOccurrence, updateJobOccurrence } from "./store.js";
+import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
@@ -47,7 +47,7 @@ import { processBlandConsult, processBlandWebhook } from "./calls/blandWebhooks.
 import { isBlandVoiceConfigured } from "./calls/bland.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
-import { nativeTool } from "./nativeTools.js";
+import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
@@ -1060,6 +1060,38 @@ async function main(): Promise<void> {
       return c.json({ ok: true, kind, page: safePage, pageSize, total, totalPages, items: items.slice((safePage - 1) * pageSize, safePage * pageSize) });
     });
 
+    app.post("/cli/reminders/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const action = String(((await c.req.json().catch(() => ({}))) as { action?: unknown }).action ?? "");
+      try {
+        if (action === "pause") await pauseReminder(device.userId, c.req.param("id"));
+        else if (action === "resume") await resumeReminder(device.userId, c.req.param("id"));
+        else if (action === "run") await runReminderNow(device.userId, c.req.param("id"));
+        else if (action === "cancel") await nativeTool(device.userId, "CHUCK_CANCEL_REMINDER", { id: c.req.param("id") });
+        else return c.json({ ok: false, error: "action must be pause, resume, run, or cancel" }, 400);
+        const reminder = await getReminder(device.userId, c.req.param("id"));
+        return reminder ? c.json({ ok: true, reminder }) : c.json({ ok: false, error: "reminder not found" }, 404);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "reminder action failed" }, 409); }
+    });
+    app.post("/cli/jobs/:id", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const action = String(((await c.req.json().catch(() => ({}))) as { action?: unknown }).action ?? "");
+      try {
+        if (action === "pause") await pauseJob(device.userId, c.req.param("id"));
+        else if (action === "resume") await resumeJob(device.userId, c.req.param("id"));
+        else if (action === "run") await runJobNow(device.userId, c.req.param("id"));
+        else if (action === "cancel") await nativeTool(device.userId, "CHUCK_CANCEL_JOB", { id: c.req.param("id") });
+        else return c.json({ ok: false, error: "action must be pause, resume, run, or cancel" }, 400);
+        const job = await getJob(device.userId, c.req.param("id"));
+        return job ? c.json({ ok: true, job }) : c.json({ ok: false, error: "job not found" }, 404);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "job action failed" }, 409); }
+    });
+    app.get("/cli/jobs/:id/occurrences", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 50) || 50));
+      return c.json({ ok: true, occurrences: await listJobOccurrences(device.userId, c.req.param("id"), limit) });
+    });
+
     app.get("/cli/workers", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const status = String(c.req.query("status") ?? "").trim();
@@ -1778,7 +1810,15 @@ async function main(): Promise<void> {
       const errorMessage = String(body.responseBody ?? body.error ?? body.message ?? "QStash delivery failed").slice(0, 500);
       recordFailure("workflow_failure", new Error(errorMessage), { workflow: "qstash-failure-callback", userId: Number.isSafeInteger(userId) ? userId : undefined });
       if (Number.isSafeInteger(userId) && userId > 0) {
-        if (typeof nested.reminderId === "string") await updateReminder(userId, nested.reminderId, { status: "failed", deliveryError: errorMessage });
+        // A queued attempt can fail after the owner pauses a reminder. The
+        // pause is authoritative; a stale QStash callback must not resurrect
+        // failure state or make the dashboard show a false terminal error.
+        if (typeof nested.reminderId === "string") {
+          const reminder = await getReminder(userId, nested.reminderId);
+          if (reminder && reminder.status !== "paused" && reminder.status !== "cancelled") {
+            await updateReminder(userId, nested.reminderId, { status: "failed", deliveryError: errorMessage });
+          }
+        }
         if (typeof nested.jobId === "string") await updateJob(userId, nested.jobId, { deliveryError: errorMessage });
       }
       return c.json({ ok: true });

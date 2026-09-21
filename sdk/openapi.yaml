@@ -224,11 +224,25 @@ paths:
     post: { summary: Schedule a one-time reminder, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Scheduled } } }
   /reminders/{id}:
     delete: { summary: Cancel an owned reminder, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cancelled } } }
+  /reminders/{id}/pause:
+    post: { summary: Pause an owned reminder, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Paused } } }
+  /reminders/{id}/resume:
+    post: { summary: Resume an owned reminder, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Resumed } } }
+  /reminders/{id}/run:
+    post: { summary: Queue an immediate reminder execution, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Queued } } }
   /jobs:
     get: { summary: List recurring schedules, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Create a recurring QStash schedule, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Scheduled } } }
   /jobs/{id}:
     delete: { summary: Cancel an owned recurring schedule, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cancelled } } }
+  /jobs/{id}/pause:
+    post: { summary: Pause an owned recurring schedule, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Paused } } }
+  /jobs/{id}/resume:
+    post: { summary: Resume an owned recurring schedule, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Resumed } } }
+  /jobs/{id}/run:
+    post: { summary: Queue an immediate recurring-job execution, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Queued } } }
+  /jobs/{id}/occurrences:
+    get: { summary: List owner-scoped recurring-job occurrences, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }], responses: { '200': { description: Occurrence history } } }
   /scratchpad:
     get: { summary: Search private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     delete: { summary: Clear private scratchpad notes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Cleared } } }

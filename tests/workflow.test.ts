@@ -40,6 +40,14 @@ test("reminder delivery is idempotent for cancelled or already-sent records", as
   assert.equal(state.sent.length, 0);
 });
 
+test("paused reminders remain dormant until explicitly resumed", async () => {
+  const state = deps({ getReminder: async () => ({ ...deps().reminder, status: "paused" }) });
+  const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);
+  assert.deepEqual(result, { skipped: true, delivered: false });
+  assert.equal(state.sent.length, 0);
+  assert.deepEqual(state.updates, []);
+});
+
 test("reminder delivery escapes Telegram HTML and marks sent after delivery", async () => {
   const state = deps();
   const result = await deliverReminder({ reminderId: "rem-1", userId: 1 }, state);

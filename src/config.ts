@@ -332,6 +332,7 @@ REMINDERS AND JOBS
 - When a specialist creates CHUCK_SCHEDULE_JOB, the schedule is bound to that specialist's current contract and each recurrence invokes that specialist directly. Do not describe it as a Chusky-only reminder. Legacy schedules without a worker binding continue through Chusky.
 - Use list/cancel tools for existing reminders and jobs. Include the returned ID when the user may need to cancel it.
 - Recurring jobs are durable controls: use CHUCK_PAUSE_JOB to stop future occurrences without losing the schedule, CHUCK_RESUME_JOB to continue a paused schedule, and CHUCK_RUN_JOB_NOW for one immediate durable occurrence. Never recreate a job to resume it and never report a run as complete until its delivery/occurrence state confirms success.
+- Reminders are durable controls too: use CHUCK_PAUSE_REMINDER to stop a scheduled delivery without losing its time or context, CHUCK_RESUME_REMINDER to continue it, and CHUCK_RUN_REMINDER_NOW for an immediate durable delivery. Never claim the reminder ran until the workflow confirms its delivery state.
 
 PROACTIVE ATTENTION
 - Do not enable proactive monitoring unless the user explicitly asks for it or uses the Attention pulse control in /home.

@@ -2410,21 +2410,29 @@ export function registerHandlers(bot: Bot): void {
           return;
         }
         if (command === "reminders") {
+          const [action, reminderId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+          if (action && ["pause", "resume", "run", "cancel"].includes(action) && reminderId) {
+            const slug = action === "pause" ? "CHUCK_PAUSE_REMINDER" : action === "resume" ? "CHUCK_RESUME_REMINDER" : action === "run" ? "CHUCK_RUN_REMINDER_NOW" : "CHUCK_CANCEL_REMINDER";
+            validateNativeToolArguments(slug as any, { id: reminderId });
+            const result = await nativeTool(uid, slug, { id: reminderId });
+            await replyHtml(ctx, `<b>Reminder ${escapeTelegramHtml(action === "run" ? "started" : `${action}d`)}</b>\n\n${escapeTelegramHtml(typeof result === "string" ? result : JSON.stringify(result))}`);
+            return;
+          }
           const reminders = await listReminders(uid);
-          await replyHtml(ctx, reminders.length ? `<b>Upcoming reminders</b>\n\n${reminders.map((reminder) => `• <code>${escapeTelegramHtml(reminder.id)}</code> · ${escapeTelegramHtml(new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }))}\n  ${escapeTelegramHtml(reminder.text)}`).join("\n")}` : "No active reminders.");
+          await replyHtml(ctx, reminders.length ? `<b>Upcoming reminders</b>\n\n${reminders.map((reminder) => `• <code>${escapeTelegramHtml(reminder.id)}</code> · <b>${escapeTelegramHtml(reminder.status)}</b> · ${escapeTelegramHtml(new Date(reminder.runAt).toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" }))}\n  ${escapeTelegramHtml(reminder.text)}`).join("\n")}\n\n<b>Controls</b>\n<code>/reminders pause &lt;reminder-id&gt;</code>\n<code>/reminders resume &lt;reminder-id&gt;</code>\n<code>/reminders run &lt;reminder-id&gt;</code>\n<code>/reminders cancel &lt;reminder-id&gt;</code>` : "No active reminders.");
           return;
         }
         if (command === "jobs") {
           const [action, jobId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
-          if (action && ["pause", "resume", "run"].includes(action) && jobId) {
-            const slug = action === "pause" ? "CHUCK_PAUSE_JOB" : action === "resume" ? "CHUCK_RESUME_JOB" : "CHUCK_RUN_JOB_NOW";
+          if (action && ["pause", "resume", "run", "cancel"].includes(action) && jobId) {
+            const slug = action === "pause" ? "CHUCK_PAUSE_JOB" : action === "resume" ? "CHUCK_RESUME_JOB" : action === "run" ? "CHUCK_RUN_JOB_NOW" : "CHUCK_CANCEL_JOB";
             validateNativeToolArguments(slug as any, { id: jobId });
             const result = await nativeTool(uid, slug, { id: jobId });
             await replyHtml(ctx, `<b>Recurring job ${escapeTelegramHtml(action === "run" ? "started" : `${action}d`)}</b>\n\n${escapeTelegramHtml(typeof result === "string" ? result : JSON.stringify(result))}`);
             return;
           }
           const jobs = await listJobs(uid);
-          await replyHtml(ctx, jobs.length ? `<b>Recurring schedules</b>\n\n${jobs.map((job) => `• <code>${escapeTelegramHtml(job.id)}</code> · <b>${escapeTelegramHtml(job.status)}</b> · ${escapeTelegramHtml(job.cron)}\n  ${escapeTelegramHtml(job.text)}`).join("\n")}\n\n<b>Controls</b>\n<code>/jobs pause &lt;job-id&gt;</code>\n<code>/jobs resume &lt;job-id&gt;</code>\n<code>/jobs run &lt;job-id&gt;</code>` : "No recurring schedules.");
+          await replyHtml(ctx, jobs.length ? `<b>Recurring schedules</b>\n\n${jobs.map((job) => `• <code>${escapeTelegramHtml(job.id)}</code> · <b>${escapeTelegramHtml(job.status)}</b> · ${escapeTelegramHtml(job.cron)}\n  ${escapeTelegramHtml(job.text)}`).join("\n")}\n\n<b>Controls</b>\n<code>/jobs pause &lt;job-id&gt;</code>\n<code>/jobs resume &lt;job-id&gt;</code>\n<code>/jobs run &lt;job-id&gt;</code>\n<code>/jobs cancel &lt;job-id&gt;</code>` : "No recurring schedules.");
           return;
         }
         if (command === "tasks") {

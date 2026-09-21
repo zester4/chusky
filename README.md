@@ -421,6 +421,16 @@ Configure `QSTASH_TOKEN`, `REMINDER_WORKFLOW_URL=https://your-domain/workflows/r
 Workflow runs; recurring jobs are QStash schedules that invoke the authenticated Workflow endpoint.
 Chusky checks ownership and cancellation state before delivering a notification.
 
+The same autonomy controls are available from every shared surface. Use
+`POST /v1/reminders/:id/pause|resume|run` and
+`POST /v1/jobs/:id/pause|resume|run` from the SDK or dashboard, and
+`GET /v1/jobs/:id/occurrences` for durable execution history. The SDK exposes
+these as `reminders.pause()`, `reminders.resume()`, `reminders.runNow()`,
+`jobs.pause()`, `jobs.resume()`, `jobs.runNow()`, and `jobs.occurrences()`.
+Telegram and CLI controls update these same owner-scoped records. Pausing is
+authoritative even if an older QStash delivery is still in flight; resuming or
+running now creates a fresh durable attempt.
+
 For a durable task that is waiting on an external provider, Chusky can pause the
 same task without notifying the user or creating a recurring schedule. The agent
 uses `CHUCK_TASK_WAIT` with a verified `checkpoint`, an exact `nextAction`, and

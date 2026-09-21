@@ -142,7 +142,7 @@ async function chat(): Promise<void> {
       if (line === null) break;
       if (!line) continue;
       if (line === "/exit" || line === "/quit") break;
-      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /meetings [id] /meeting profile|prepare|join|join-prepared|context|leave ...\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice list|set twilio|meetings|bland <voice> /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
+      if (line === "/help") { console.log(`${paint("Commands", "cyan", color)}\n  /help /status /history /memory /scratchpad /reminders /jobs /tasks /approvals\n  /reminders|/jobs pause|resume|run|cancel <id>\n  /apps [page] /connect <toolkit> /tools search <query>\n  /triggers /trigger create|enable|disable|delete ...\n  /channel list|link <provider>|notify <provider> on|off\n  /meetings [id] /meeting profile|prepare|join|join-prepared|context|leave ...\n  /workers [status] /worker <id> | cancel <id>\n  /skills [query] /skill <name> [file]\n  /artifacts [type] /artifact download|delete|package ...\n  /videos /video create|status|cancel ...\n  /runs [status] /run <prompt> | status|events|cancel|resume <id>\n  /webhooks /webhook add|enable|disable|delete ... /deliveries\n  /voice list|set twilio|meetings|bland <voice> /voice [on|off|status] /call <E.164 number> <purpose> /usage /info /export /dashboard /image <description>\n  /task <id> /task retry <id> /task cancel <id>\n  /attach <path> [instruction] /devices /revoke <name>\n  /model [id] /approve <id> /deny <id> /clear history /clear session /exit\n\n${formatStatus("Input", "Paste multiline text and press Enter to send; Ctrl+J inserts a newline.", color)}\n${formatStatus("Approvals", "Use /approvals for ↑/↓ selection; Enter confirms; Esc cancels. Deny is the safe default.", color)}\n${formatStatus("Long lists", "Space/↓ next, b/↑ previous, q quit. Chat responses scroll normally.", color)}\n${formatStatus("Cancel", "Ctrl+C cancels only the active request; it does not close Chusky.", color)}\n`); continue; }
       if (line.startsWith("/approve ") || line.startsWith("/deny ")) {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
@@ -440,6 +440,15 @@ async function chat(): Promise<void> {
         } catch (error) { console.log(formatError(error instanceof Error ? error.message : String(error), color)); }
         continue;
       }
+      const automationCommand = line.match(/^\/(reminders|jobs)\s+(pause|resume|run|cancel)\s+(\S+)$/);
+      if (automationCommand) {
+        const [, kind, action, id] = automationCommand;
+        const result = kind === "reminders"
+          ? await client.reminderAction(id, action as "pause" | "resume" | "run" | "cancel")
+          : await client.jobAction(id, action as "pause" | "resume" | "run" | "cancel");
+        console.log(result.ok ? formatSuccess(`${kind === "reminders" ? "Reminder" : "Job"} ${action} requested.`, color) : formatError(result.error || "Automation action failed.", color));
+        continue;
+      }
       if (["/status", "/memory", "/scratchpad", "/reminders", "/jobs"].includes(line) || line.startsWith("/memory ") || line.startsWith("/scratchpad ")) {
         if (line === "/status") {
           const current = await client.session();
@@ -449,7 +458,7 @@ async function chat(): Promise<void> {
         if (line === "/memory" || line.startsWith("/memory ")) { const items = await loadCollection(client, "memories", line.slice("/memory".length).trim()); await showPaged(items.length ? items.map((m: any) => `[${m.category}] ${m.key}: ${m.value}`).join("\n") : "No matching memories.", true); }
         if (line === "/scratchpad" || line.startsWith("/scratchpad ")) { const items = await loadCollection(client, "scratchpad", line.slice("/scratchpad".length).trim()); await showPaged(items.length ? items.map((m: any) => `${m.key}: ${m.content}`).join("\n") : "Scratchpad is empty.", true); }
         if (line === "/reminders") { const items = await loadCollection(client, "reminders"); await showPaged(items.length ? items.map((r: any) => `${r.id} — ${new Date(r.runAt).toISOString()} — ${r.text}`).join("\n") : "No active reminders.", true); }
-        if (line === "/jobs") { const items = await loadCollection(client, "jobs"); await showPaged(items.length ? items.map((j: any) => `${j.id} — ${j.cron} — ${j.text}`).join("\n") : "No active jobs.", true); }
+        if (line === "/jobs") { const items = await loadCollection(client, "jobs"); await showPaged(items.length ? items.map((j: any) => `${j.id} — [${j.status}] — ${j.cron} — ${j.text}`).join("\n") : "No active jobs.", true); }
         continue;
       }
       if (line.startsWith("/model")) {

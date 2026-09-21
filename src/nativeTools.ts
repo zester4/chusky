@@ -501,26 +501,28 @@ export async function setReminder(userId: number, args: Record<string, unknown>,
     ...(deliveryTarget ? { deliveryTarget } : {}),
     createdAt: Date.now(),
   };
-  const client = new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined });
   await addReminder(userId, reminder);
-  let workflow;
   try {
-    workflow = await client.trigger({
-    url: workflowUrl(config.reminderWorkflowUrl, "REMINDER_WORKFLOW_URL", "/workflows/reminder"),
-    body: { reminderId: reminder.id, userId },
-    delay: Math.max(1, Math.ceil((reminder.runAt - Date.now()) / 1000)),
-    workflowRunId: reminder.id,
-    retries: 3,
-    retryDelay: "1000 * (1 + retried)",
-    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
-    });
+    const workflow = await enqueueReminderWorkflow(userId, reminder, Math.max(1, Math.ceil((reminder.runAt - Date.now()) / 1000)), reminder.id);
+    reminder.workflowRunId = workflow.workflowRunId;
+    await updateReminder(userId, reminder.id, { workflowRunId: reminder.workflowRunId });
   } catch (error) {
     await updateReminder(userId, reminder.id, { status: "failed", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
     throw error;
   }
-  reminder.workflowRunId = workflow.workflowRunId;
-  await updateReminder(userId, reminder.id, { workflowRunId: reminder.workflowRunId });
   return reminder;
+}
+
+async function enqueueReminderWorkflow(userId: number, reminder: ReminderRecord, delaySeconds: number, workflowRunId: string, attemptId?: string) {
+  return new WorkflowClient({ token: requireQStash(), baseUrl: config.qstashUrl || undefined }).trigger({
+    url: workflowUrl(config.reminderWorkflowUrl, "REMINDER_WORKFLOW_URL", "/workflows/reminder"),
+    body: { reminderId: reminder.id, userId, ...(attemptId ? { attemptId } : {}) },
+    delay: Math.max(1, Math.floor(delaySeconds)),
+    workflowRunId,
+    retries: 3,
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+  });
 }
 
 export async function cancelReminder(userId: number, id: string): Promise<string> {
@@ -528,6 +530,47 @@ export async function cancelReminder(userId: number, id: string): Promise<string
   if (!reminder) throw new Error("Reminder not found or not owned by you");
   await updateReminder(userId, id, { status: "cancelled" });
   return `Reminder ${id} cancelled.`;
+}
+
+export async function pauseReminder(userId: number, id: string): Promise<string> {
+  const reminder = await getReminder(userId, id);
+  if (!reminder) throw new Error("Reminder not found or not owned by you");
+  if (["sent", "cancelled", "failed"].includes(reminder.status)) throw new Error(`Cannot pause a ${reminder.status} reminder`);
+  if (reminder.status === "paused") return `Reminder ${id} is already paused.`;
+  await updateReminder(userId, id, { status: "paused", deliveryError: undefined });
+  return `Reminder ${id} paused.`;
+}
+
+export async function resumeReminder(userId: number, id: string): Promise<string> {
+  const reminder = await getReminder(userId, id);
+  if (!reminder) throw new Error("Reminder not found or not owned by you");
+  if (reminder.status !== "paused") return reminder.status === "scheduled" || reminder.status === "waiting" ? `Reminder ${id} is already active.` : `Cannot resume a ${reminder.status} reminder`;
+  const runAt = Math.max(Date.now() + 1_000, reminder.runAt);
+  await updateReminder(userId, id, { status: "scheduled", runAt, deliveryError: undefined });
+  try {
+    const workflow = await enqueueReminderWorkflow(userId, { ...reminder, status: "scheduled", runAt }, Math.ceil((runAt - Date.now()) / 1000), `${id}-resume-${randomUUID()}`, `resume-${randomUUID()}`);
+    await updateReminder(userId, id, { workflowRunId: workflow.workflowRunId });
+  } catch (error) {
+    await updateReminder(userId, id, { status: "paused", deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
+  return `Reminder ${id} resumed.`;
+}
+
+export async function runReminderNow(userId: number, id: string): Promise<{ reminderId: string; workflowRunId: string }> {
+  const reminder = await getReminder(userId, id);
+  if (!reminder) throw new Error("Reminder not found or not owned by you");
+  if (["sent", "cancelled", "failed"].includes(reminder.status)) throw new Error(`Cannot run a ${reminder.status} reminder`);
+  const next = { ...reminder, status: "scheduled" as const, runAt: Date.now() + 1_000 };
+  await updateReminder(userId, id, { status: next.status, runAt: next.runAt, deliveryError: undefined });
+  try {
+    const workflow = await enqueueReminderWorkflow(userId, next, 1, `${id}-manual-${randomUUID()}`, `manual-${randomUUID()}`);
+    await updateReminder(userId, id, { workflowRunId: workflow.workflowRunId });
+    return { reminderId: id, workflowRunId: workflow.workflowRunId };
+  } catch (error) {
+    await updateReminder(userId, id, { status: reminder.status, deliveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    throw error;
+  }
 }
 
 export async function scheduleJob(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<JobRecord> {
@@ -636,6 +679,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SET_REMINDER": return setReminder(userId, args, runtime);
     case "CHUCK_LIST_REMINDERS": return listReminders(userId);
     case "CHUCK_CANCEL_REMINDER": return cancelReminder(userId, text(args.id));
+    case "CHUCK_PAUSE_REMINDER": return pauseReminder(userId, text(args.id));
+    case "CHUCK_RESUME_REMINDER": return resumeReminder(userId, text(args.id));
+    case "CHUCK_RUN_REMINDER_NOW": return runReminderNow(userId, text(args.id));
     case "CHUCK_SCHEDULE_JOB": return scheduleJob(userId, args, runtime);
     case "CHUCK_ATTENTION_PULSE": return configureAttentionPulse(userId, args, runtime);
     case "CHUCK_LIST_JOBS": return listJobs(userId);

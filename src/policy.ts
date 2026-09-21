@@ -13,7 +13,7 @@ export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
-  "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER",
+  "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER", "CHUCK_PAUSE_REMINDER", "CHUCK_RESUME_REMINDER", "CHUCK_RUN_REMINDER_NOW",
   "CHUCK_EMAIL_ARTIFACT",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
   "CHUCK_START_PHONE_CALL", "CHUCK_LIST_PHONE_CALLS", "CHUCK_ATTENTION_PULSE", "CHUCK_VIDEO_STATUS",
@@ -215,6 +215,9 @@ const STATUSES: Record<string, string> = {
   CHUCK_SET_REMINDER: "⏰ I’m setting that reminder…",
   CHUCK_LIST_REMINDERS: "⏰ I’m checking your reminders…",
   CHUCK_CANCEL_REMINDER: "⏰ I’m cancelling that reminder…",
+  CHUCK_PAUSE_REMINDER: "⏸️ I’m pausing that reminder…",
+  CHUCK_RESUME_REMINDER: "▶️ I’m resuming that reminder…",
+  CHUCK_RUN_REMINDER_NOW: "▶️ I’m running that reminder now…",
   CHUCK_SCHEDULE_JOB: "🗓️ I’m scheduling that recurring task…",
   CHUCK_LIST_JOBS: "🗓️ I’m checking your scheduled tasks…",
   CHUCK_PAUSE_JOB: "⏸️ I’m pausing that recurring task…",

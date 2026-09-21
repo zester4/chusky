@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, Worker } from "./types.js";
+import type { AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, CreateRunParams, CreateThreadParams, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -375,14 +375,21 @@ export class AppsResource {
 export class RemindersResource {
   constructor(private readonly client: Chusky) {}
   list(options?: RequestOptions): Promise<Page<Reminder>> { return this.client.request("/reminders", {}, options); }
-  create(params: { text: string; delaySeconds?: number; runAt?: string }, options?: RequestOptions): Promise<Reminder> { return this.client.request("/reminders", { method: "POST", body: JSON.stringify(params) }, options); }
+  create(params: { text: string; delaySeconds?: number; runAt?: string; mode?: Reminder["mode"]; links?: Reminder["links"]; nextAction?: string; preconditions?: string[]; postconditions?: string[]; pollEverySeconds?: number }, options?: RequestOptions): Promise<Reminder> { return this.client.request("/reminders", { method: "POST", body: JSON.stringify(params) }, options); }
+  pause(id: string, options?: RequestOptions): Promise<{ message: string; data: Reminder }> { return this.client.request(`/reminders/${encodeURIComponent(id)}/pause`, { method: "POST" }, options); }
+  resume(id: string, options?: RequestOptions): Promise<{ message: string; data: Reminder }> { return this.client.request(`/reminders/${encodeURIComponent(id)}/resume`, { method: "POST" }, options); }
+  runNow(id: string, options?: RequestOptions): Promise<{ reminderId: string; workflowRunId: string; data: Reminder }> { return this.client.request(`/reminders/${encodeURIComponent(id)}/run`, { method: "POST" }, options); }
   delete(id: string, options?: RequestOptions): Promise<void> { return this.client.request(`/reminders/${encodeURIComponent(id)}`, { method: "DELETE" }, options); }
 }
 
 export class JobsResource {
   constructor(private readonly client: Chusky) {}
   list(options?: RequestOptions): Promise<Page<RecurringJob>> { return this.client.request("/jobs", {}, options); }
-  create(params: { text: string; cron: string }, options?: RequestOptions): Promise<RecurringJob> { return this.client.request("/jobs", { method: "POST", body: JSON.stringify(params) }, options); }
+  create(params: { text: string; cron: string; mode?: RecurringJob["mode"]; links?: RecurringJob["links"]; nextAction?: string; preconditions?: string[]; postconditions?: string[] }, options?: RequestOptions): Promise<RecurringJob> { return this.client.request("/jobs", { method: "POST", body: JSON.stringify(params) }, options); }
+  pause(id: string, options?: RequestOptions): Promise<{ message: string; data: RecurringJob }> { return this.client.request(`/jobs/${encodeURIComponent(id)}/pause`, { method: "POST" }, options); }
+  resume(id: string, options?: RequestOptions): Promise<{ message: string; data: RecurringJob }> { return this.client.request(`/jobs/${encodeURIComponent(id)}/resume`, { method: "POST" }, options); }
+  runNow(id: string, options?: RequestOptions): Promise<{ jobId: string; occurrenceId: string; workflowRunId: string; data: RecurringJob }> { return this.client.request(`/jobs/${encodeURIComponent(id)}/run`, { method: "POST" }, options); }
+  occurrences(id: string, limit = 50, options?: RequestOptions): Promise<Page<JobOccurrence>> { return this.client.request(`/jobs/${encodeURIComponent(id)}/occurrences?limit=${Math.max(1, Math.min(100, Math.floor(limit)))}`, {}, options); }
   delete(id: string, options?: RequestOptions): Promise<void> { return this.client.request(`/jobs/${encodeURIComponent(id)}`, { method: "DELETE" }, options); }
 }
 

@@ -140,6 +140,29 @@ test("CLI client exposes Telegram parity management APIs", async () => {
   } finally { globalThis.fetch = original; }
 });
 
+test("CLI client exposes reminder and recurring-job autonomy controls", async () => {
+  const original = globalThis.fetch;
+  const calls: { path: string; method: string; body?: unknown }[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const request = new Request(input, init);
+    calls.push({ path: new URL(request.url).pathname, method: request.method, body: request.method === "GET" ? undefined : JSON.parse(await request.text() || "{}") });
+    return response({ ok: true, data: [], occurrences: [] });
+  }) as typeof fetch;
+  try {
+    const client = new ChuskyClient({ serverUrl: "https://example.test", token: "token" });
+    await client.reminderAction("rem_1", "pause");
+    await client.reminderAction("rem_1", "run");
+    await client.jobAction("job_1", "resume");
+    await client.jobOccurrences("job_1", 12);
+    assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
+      "POST /cli/reminders/rem_1", "POST /cli/reminders/rem_1", "POST /cli/jobs/job_1", "GET /cli/jobs/job_1/occurrences",
+    ]);
+    assert.deepEqual(calls[0].body, { action: "pause" });
+    assert.deepEqual(calls[1].body, { action: "run" });
+    assert.deepEqual(calls[2].body, { action: "resume" });
+  } finally { globalThis.fetch = original; }
+});
+
 test("CLI client exposes meeting preparation, participant context, and lifecycle APIs", async () => {
   const original = globalThis.fetch;
   const calls: { path: string; method: string; body?: unknown }[] = [];

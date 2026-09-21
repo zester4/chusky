@@ -57,7 +57,7 @@ export function parseJobWorkflowPayload(value: unknown): JobWorkflowPayload {
 
 export async function deliverReminder(payload: ReminderWorkflowPayload, deps: WorkflowDependencies): Promise<{ skipped?: boolean; delivered: boolean }> {
   const reminder = await deps.getReminder(payload.userId, payload.reminderId);
-  if (!reminder || (reminder.status !== "scheduled" && !(payload.approvalId && reminder.status === "waiting"))) return { skipped: true, delivered: false };
+  if (!reminder || reminder.status === "paused" || (reminder.status !== "scheduled" && !(payload.approvalId && reminder.status === "waiting"))) return { skipped: true, delivered: false };
   // Each wait_until poll is a distinct execution attempt. Keeping the attempt
   // in the key prevents the first completed poll from suppressing every later
   // wake-up for the same reminder.
