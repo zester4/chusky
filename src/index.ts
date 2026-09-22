@@ -903,7 +903,13 @@ async function main(): Promise<void> {
       if (authorization.state === "denied") return c.json({ ok: false, code: "meeting_unavailable", reason: authorization.reason ?? "Meeting audio is unavailable. Join Chusky again." }, 404, { "Cache-Control": "no-store" });
       if (authorization.state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
       const meeting = await getRecallMeeting(userId, meetingId);
-      if (!meeting || !["joining", "waiting_room", "in_call"].includes(meeting.status)) return c.text("Not found", 404, { "Cache-Control": "no-store" });
+      if (!meeting || !["joining", "waiting_room", "in_call"].includes(meeting.status)) {
+        return c.json({
+          ok: false,
+          code: "meeting_unavailable",
+          reason: "The meeting is not active on Chusky yet. If the call is still open, rejoin Chusky after a moment.",
+        }, 404, { "Cache-Control": "no-store" });
+      }
       const interactionMode = meeting.interactionMode === "representative" || meeting.interactionMode === "copilot"
         ? meeting.interactionMode
         : "addressed";

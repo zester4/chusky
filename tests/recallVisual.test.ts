@@ -19,8 +19,8 @@ const secret = "test-bridge-secret-with-more-than-32-bytes-0123456789";
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/WQAAAABJRU5ErkJggg==";
 
 test("vision-enabled meeting preflight checks the voice service's optional configuration", async () => {
-  await assert.rejects(() => assertRecallVisualServiceHealth("https://voice.example/recall/media", async () => new Response(JSON.stringify({ optionalFeatures: { sharedScreenUnderstanding: "disabled" } }), { status: 200 })), /Configure RECALL_REALTIME_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL/);
-  await assert.rejects(() => assertRecallVisualServiceHealth("https://voice.example/recall/media", async () => { throw new Error("network down"); }), /Configure RECALL_REALTIME_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL/);
+  await assert.rejects(() => assertRecallVisualServiceHealth("https://voice.example/recall/media", async () => new Response(JSON.stringify({ optionalFeatures: { sharedScreenUnderstanding: "disabled" } }), { status: 200 })), /Configure RECALL_WORKSPACE_VERIFICATION_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL/);
+  await assert.rejects(() => assertRecallVisualServiceHealth("https://voice.example/recall/media", async () => { throw new Error("network down"); }), /Configure RECALL_WORKSPACE_VERIFICATION_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL/);
   await assertRecallVisualServiceHealth("https://voice.example/recall/media", async () => new Response(JSON.stringify({ optionalFeatures: { sharedScreenUnderstanding: "configured" } }), { status: 200 }));
 });
 

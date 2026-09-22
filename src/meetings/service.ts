@@ -142,7 +142,7 @@ export async function assertRecallVisualServiceHealth(mediaPageUrl: string, fetc
     const payload = await response.json() as { optionalFeatures?: { sharedScreenUnderstanding?: unknown } };
     if (payload.optionalFeatures?.sharedScreenUnderstanding !== "configured") throw new Error("Voice shared-screen settings are missing");
   } catch {
-    throw new Error("Shared-screen understanding is unavailable. Configure RECALL_REALTIME_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL on chusky-voice, then retry.");
+    throw new Error("Shared-screen understanding is unavailable. Configure RECALL_WORKSPACE_VERIFICATION_SECRET and CHUSKY_RECALL_VISUAL_FRAME_URL on chusky-voice, then retry.");
   }
 }
 
