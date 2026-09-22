@@ -928,7 +928,7 @@ async function main(): Promise<void> {
 
     app.post("/internal/recall/commit-turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; eventType?: string; summary?: string; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -937,8 +937,10 @@ async function main(): Promise<void> {
       const speak = body.speak !== false;
       const cost = Number(body.cost ?? 0);
       const runtimeState = body.runtimeState === undefined ? "healthy" : body.runtimeState;
+      const eventType = body.eventType === undefined ? "turn" : body.eventType;
+      const runtimeEventTypes = new Set(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "audio_received", "speech_detected", "eager_transcript", "final_transcript", "agent_first_token", "first_audio", "final_audio", "turn", "ended", "failed", "outcome"]);
       const turn = body.turn;
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || !runtimeEventTypes.has(eventType) || (body.summary !== undefined && (typeof body.summary !== "string" || body.summary.length > 280)) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
       const key = `recall-turn:${meetingId}:${turnId}`;
@@ -953,8 +955,8 @@ async function main(): Promise<void> {
         if (cost) await addUsage(userId, cost);
         await recordRecallMeetingRuntime(userId, meetingId, {
           state: runtimeState as "healthy" | "degraded" | "reconnecting" | "voice_unavailable" | "ended",
-          eventType: "turn",
-          summary: runtimeState === "degraded" ? "Meeting turn used a natural latency fallback" : "Meeting turn completed",
+          eventType: eventType as Parameters<typeof recordRecallMeetingRuntime>[2]["eventType"],
+          summary: body.summary?.trim() || (runtimeState === "degraded" ? "Meeting turn used a natural latency fallback" : "Meeting turn completed"),
           ...(turn ? { turn } : {}),
         });
         await completeDelivery(key, 7 * 24 * 60 * 60);

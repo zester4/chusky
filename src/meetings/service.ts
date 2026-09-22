@@ -396,6 +396,12 @@ function assertUserId(userId: number): void {
 }
 
 function safeMeeting(record: RecallMeetingRecord) {
+  const publicTurnMetrics = record.turnMetrics
+    ? (() => {
+      const { latencySamples: _latencySamples, ...safeMetrics } = record.turnMetrics!;
+      return safeMetrics;
+    })()
+    : undefined;
   return {
     id: record.id,
     ...(record.roomId ? { roomId: record.roomId } : {}),
@@ -411,7 +417,7 @@ function safeMeeting(record: RecallMeetingRecord) {
     ...(record.keyterms?.length ? { keyterms: record.keyterms } : {}),
     capabilities: record.capabilities ?? getMeetingCapabilities(record.platform),
     runtimeState: record.runtimeState ?? (record.status === "ended" ? "ended" : "healthy"),
-    ...(record.turnMetrics ? { turnMetrics: record.turnMetrics } : {}),
+    ...(publicTurnMetrics ? { turnMetrics: publicTurnMetrics } : {}),
     ...(record.timeline?.length ? { timeline: record.timeline.slice(-100) } : {}),
     screenShareUnderstanding: record.visualContextEnabled === true,
     searchableTranscript: Boolean(record.transcriptRetentionDays && record.transcriptExpiresAt && record.transcriptExpiresAt > Date.now()),
@@ -763,8 +769,7 @@ export async function cancelAutomaticCalendarMeetingJoins(userId: number) {
 export async function lookupRecallMeetingContext(userId: number, meetingId: string, query: unknown) {
   assertUserId(userId);
   if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId)) throw new Error("Invalid meeting ID");
-  const session = await getSession(userId);
-  const meeting = session.recallMeetings?.find((item) => item.id === meetingId && item.userId === userId);
+  const [session, meeting] = await Promise.all([getSession(userId), getRecallMeeting(userId, meetingId)]);
   if (!meeting || meeting.interactionMode !== "representative" || !ACTIVE.has(meeting.status)) {
     throw new Error("This is not an active representative meeting owned by this account");
   }

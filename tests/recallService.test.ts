@@ -1,7 +1,7 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
-import { initStore, getRecallMeeting, listRecallMeetings, recordRecallMeetingRuntime, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { initStore, getRecallMeeting, getSession, listRecallMeetings, recordRecallMeetingRuntime, saveSession, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorization, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationIssue, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
@@ -118,6 +118,14 @@ test("meeting runtime diagnostics persist bounded latency state and timeline eve
   assert.equal(updated?.turnMetrics?.firstAudio.averageMs, 1_200);
   assert.equal(updated?.timeline?.at(-1)?.type, "degraded");
   assert.equal(updated?.timeline?.at(-1)?.summary, "A natural recovery line was used while the model was slow.");
+  const fast = await recordRecallMeetingRuntime(ownerId, meeting.id, {
+    eventType: "agent_first_token",
+    summary: "The meeting agent started speaking.",
+    turn: { completed: true, firstAudioMs: 300, finalResponseMs: 1_100 },
+  });
+  assert.equal(fast?.turnMetrics?.firstAudio.p50Ms, 300);
+  assert.equal(fast?.turnMetrics?.finalResponse.p95Ms, 4_800);
+  assert.equal(fast?.timeline?.at(-1)?.type, "agent_first_token");
 });
 
 test("meeting joins default to proactive copilot or the enabled representative profile", async () => {
@@ -343,6 +351,11 @@ test("Recall media authorization starts once the owned bot is joining and reject
   globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });
   const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/media-auth-race" });
 
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  // Recall's output-media callback must not depend on the ordinary chat
+  // session blob; it can arrive after that key has expired or been recreated.
+  const session = await getSession(ownerId);
+  await saveSession(ownerId, { ...session, recallMeetings: [] });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   const missing = await getRecallMediaAuthorization(ownerId, "mtg_missing_media_session");
   assert.equal(missing.state, "denied");

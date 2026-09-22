@@ -289,13 +289,15 @@ export interface RecallMeetingTurnMetrics {
   fallbackTurns: number;
   firstAudio: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
   finalResponse: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
+  /** Bounded numeric samples used to keep p50/p95 meaningful across turns. */
+  latencySamples?: { firstAudioMs: number[]; finalResponseMs: number[] };
   lastErrorCode?: string;
   updatedAt: number;
 }
 
 export interface RecallMeetingTimelineEvent {
   id: string;
-  type: "created" | "joining" | "waiting_room" | "in_call" | "reconnecting" | "degraded" | "turn" | "ended" | "failed" | "outcome";
+  type: "created" | "joining" | "waiting_room" | "in_call" | "reconnecting" | "degraded" | "audio_received" | "speech_detected" | "eager_transcript" | "final_transcript" | "agent_first_token" | "first_audio" | "final_audio" | "turn" | "ended" | "failed" | "outcome";
   at: number;
   summary: string;
 }
@@ -1275,6 +1277,9 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined>;
+  saveRecallMeeting(record: RecallMeetingRecord): Promise<void>;
+  listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]>;
   saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void>;
   completeCompanyRun(projectId: string, run: CompanyRunSummary, completedAt: number): Promise<boolean>;
   listCompanyRuns(projectId: string, limit: number): Promise<CompanyRunSummary[]>;
@@ -1400,6 +1405,9 @@ const AGENT_RUN_MAX_BYTES = 2 * 1024 * 1024;
 const RECALL_TRANSCRIPT_MAX_SEGMENTS = 8_000;
 const RECALL_TRANSCRIPT_MAX_BYTES = 200_000;
 const RECALL_TRANSCRIPT_EPHEMERAL_TTL_SECONDS = 6 * 60 * 60;
+// A meeting must outlive the conversational session that created it. This also
+// gives Recall status/media callbacks a stable, owner-scoped record to resolve.
+const RECALL_MEETING_TTL_SECONDS = 90 * 24 * 60 * 60;
 
 function validRecallTranscriptSegment(value: unknown): value is RecallTranscriptSegment {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -1590,6 +1598,8 @@ class RedisBackend implements Backend {
   private recallVisualFrameKey = (userId: number, meetingId: string) => `chuck:recall:visual:frame:${this.recallVisualDigest(userId, meetingId)}`;
   private recallVisualRateKey = (userId: number, meetingId: string) => `chuck:recall:visual:rate:${this.recallVisualDigest(userId, meetingId)}`;
   private recallTranscriptKey = (userId: number, meetingId: string) => `chuck:recall:transcript:${this.recallVisualDigest(userId, meetingId)}`;
+  private recallMeetingKey = (userId: number, meetingId: string) => `chuck:recall:meeting:${this.recallVisualDigest(userId, meetingId)}`;
+  private recallMeetingsIndexKey = (userId: number) => `chuck:recall:meetings:${userId}:index`;
   private meetingContactsKey = (id: number) => `chuck:meeting-contacts:${id}`;
   private meetingContactsIndexKey = (id: number) => `chuck:meeting-contacts:${id}:index`;
   private recallMeetingCreationKey = (userId: number, instanceHash: string) => `chuck:recall:meeting:create:${createHash("sha256").update(`${userId}:${instanceHash}`).digest("hex")}`;
@@ -1632,6 +1642,32 @@ class RedisBackend implements Backend {
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+  }
+
+  async getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined> {
+    const raw = await this.r.get(this.recallMeetingKey(userId, id));
+    if (!raw) return undefined;
+    try {
+      const meeting = JSON.parse(raw) as RecallMeetingRecord;
+      return meeting.userId === userId && meeting.id === id ? meeting : undefined;
+    } catch { return undefined; }
+  }
+
+  async saveRecallMeeting(record: RecallMeetingRecord): Promise<void> {
+    const key = this.recallMeetingKey(record.userId, record.id);
+    const index = this.recallMeetingsIndexKey(record.userId);
+    await this.r.multi()
+      .set(key, JSON.stringify(record), "EX", RECALL_MEETING_TTL_SECONDS)
+      .zadd(index, record.updatedAt, record.id)
+      .expire(index, RECALL_MEETING_TTL_SECONDS)
+      .exec();
+  }
+
+  async listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]> {
+    const ids = await this.r.zrevrange(this.recallMeetingsIndexKey(userId), 0, Math.max(0, limit - 1));
+    if (!ids.length) return [];
+    const records = await Promise.all(ids.map((id) => this.getRecallMeeting(userId, id)));
+    return records.flatMap((record) => record ? [record] : []);
   }
 
   async saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void> {
@@ -2665,6 +2701,7 @@ class MemoryBackend implements Backend {
   private recallVisualFrames = new Map<string, { encryptedFrame: string; expiresAt: number }>();
   private recallVisualFrameRates = new Map<string, number>();
   private recallTranscripts = new Map<string, { segments: Map<string, StoredRecallTranscriptSegment>; bytes: number; truncated: boolean; expiresAt: number }>();
+  private recallMeetings = new Map<string, RecallMeetingRecord>();
   private meetingContacts = new Map<number, Map<string, MeetingContactRecord>>();
   private attention = new Map<string, AttentionRecord[]>();
   private reminders = new Map<number, ReminderRecord[]>();
@@ -2674,6 +2711,15 @@ class MemoryBackend implements Backend {
 
   async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async getRecallMeeting(userId: number, id: string) {
+    const record = this.recallMeetings.get(`${userId}:${id}`);
+    return record ? structuredClone(record) : undefined;
+  }
+  async saveRecallMeeting(record: RecallMeetingRecord) { this.recallMeetings.set(`${record.userId}:${record.id}`, structuredClone(record)); }
+  async listRecallMeetings(userId: number, limit: number) {
+    return [...this.recallMeetings.values()].filter((record) => record.userId === userId)
+      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit).map((record) => structuredClone(record));
+  }
   async saveCompanyRun(projectId: string, run: CompanyRunSummary) {
     const records = this.companyRuns.get(projectId) ?? new Map<string, CompanyRunSummary>();
     const previous = records.get(run.id);
@@ -3423,7 +3469,7 @@ function normalizeMeetingCapabilities(value: unknown): MeetingCapabilities | und
 
 function normalizeMeetingTimeline(value: unknown): RecallMeetingTimelineEvent[] {
   if (!Array.isArray(value)) return [];
-  const types = new Set<RecallMeetingTimelineEvent["type"]>(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "turn", "ended", "failed", "outcome"]);
+  const types = new Set<RecallMeetingTimelineEvent["type"]>(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "audio_received", "speech_detected", "eager_transcript", "final_transcript", "agent_first_token", "first_audio", "final_audio", "turn", "ended", "failed", "outcome"]);
   return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
     .filter((item) => typeof item.id === "string" && /^[A-Za-z0-9_-]{1,96}$/.test(item.id) && types.has(item.type as RecallMeetingTimelineEvent["type"]) && Number.isSafeInteger(item.at) && typeof item.summary === "string")
     .map((item) => ({ id: String(item.id), type: item.type as RecallMeetingTimelineEvent["type"], at: Number(item.at), summary: String(item.summary).replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 280) }))
@@ -3445,11 +3491,18 @@ function normalizeMeetingTurnMetrics(value: unknown): RecallMeetingTurnMetrics |
       ...(Number.isSafeInteger(source.p95Ms) ? { p95Ms: Number(source.p95Ms) } : {}),
     };
   };
+  const samples = (item: unknown) => Array.isArray(item)
+    ? item.filter((sample): sample is number => Number.isSafeInteger(sample) && sample >= 0 && sample <= 120_000).slice(-100)
+    : [];
+  const latencySamples = input.latencySamples && typeof input.latencySamples === "object" && !Array.isArray(input.latencySamples)
+    ? input.latencySamples as Record<string, unknown>
+    : undefined;
   if (!Number.isSafeInteger(input.updatedAt) || Number(input.updatedAt) <= 0) return undefined;
   return {
     turns: number(input.turns), eagerTurns: number(input.eagerTurns), resumedTurns: number(input.resumedTurns),
     completedTurns: number(input.completedTurns), failedTurns: number(input.failedTurns), fallbackTurns: number(input.fallbackTurns),
     firstAudio: summary(input.firstAudio), finalResponse: summary(input.finalResponse),
+    ...(latencySamples ? { latencySamples: { firstAudioMs: samples(latencySamples.firstAudioMs), finalResponseMs: samples(latencySamples.finalResponseMs) } } : {}),
     ...(typeof input.lastErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(input.lastErrorCode) ? { lastErrorCode: input.lastErrorCode } : {}),
     updatedAt: Number(input.updatedAt),
   };
@@ -3904,8 +3957,7 @@ export async function updateMeetingContact(userId: number, id: string, patch: Pa
 
 export async function addRecallMeeting(uid: number, record: RecallMeetingRecord): Promise<RecallMeetingRecord> {
   if (!Number.isSafeInteger(uid) || uid <= 0 || record.userId !== uid) throw new Error("Meeting owner does not match the authenticated account");
-  const session = await getSession(uid);
-  const meetings = session.recallMeetings ?? [];
+  const meetings = await listRecallMeetings(uid, 20);
   const duplicate = meetings.find((meeting) => meeting.userId === uid
     && ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status)
     && (meeting.meetingInstanceHash && record.meetingInstanceHash
@@ -3915,25 +3967,24 @@ export async function addRecallMeeting(uid: number, record: RecallMeetingRecord)
   const existing = meetings.filter((meeting) => meeting.id !== record.id);
   const active = existing.filter((meeting) => ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status));
   if (active.length >= 20) throw new Error("Too many active meeting assistants to safely create another");
-  const finished = existing.filter((meeting) => !ACTIVE_RECALL_MEETING_STATUSES.has(meeting.status));
-  // Never evict an in-flight meeting record just to retain a newer history row:
-  // webhooks and owner-scoped controls still need that record to clean it up.
-  session.recallMeetings = [
-    { ...record, history: (record.history ?? []).slice(-20) },
-    ...active,
-    ...finished.slice(0, Math.max(0, 19 - active.length)),
-  ];
-  await saveSession(uid, session);
-  return record;
+  const stored = { ...record, history: (record.history ?? []).slice(-20) };
+  await backend.saveRecallMeeting(stored);
+  return stored;
 }
 
 export async function getRecallMeeting(uid: number, id: string): Promise<RecallMeetingRecord | undefined> {
-  const session = await getSession(uid);
-  const meeting = session.recallMeetings?.find((candidate) => candidate.id === id && candidate.userId === uid);
+  let meeting = await backend.getRecallMeeting(uid, id);
+  // One-way migration keeps current calls working across deployment without
+  // making a live meeting depend on the expiring chat-session key again.
+  if (!meeting) {
+    const session = await getSession(uid);
+    meeting = session.recallMeetings?.find((candidate) => candidate.id === id && candidate.userId === uid);
+    if (meeting) await backend.saveRecallMeeting(meeting);
+  }
   if (meeting?.outcomeTranscript && meeting.outcomeTranscriptCapturedAt && Date.now() - meeting.outcomeTranscriptCapturedAt > 24 * 60 * 60_000) {
     meeting.outcomeTranscript = undefined;
     meeting.outcomeTranscriptCapturedAt = undefined;
-    await saveSession(uid, session);
+    await backend.saveRecallMeeting(meeting);
   }
   return meeting;
 }
@@ -4006,9 +4057,8 @@ export async function searchRecallMeetingTranscripts(
   const cleanQuery = query.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 200);
   const terms = [...new Set(cleanQuery.toLocaleLowerCase().split(/[^\p{L}\p{N}]+/u).filter((term) => term.length >= 2))].slice(0, 8);
   if (!terms.length) return [];
-  const session = await getSession(uid);
   const now = Date.now();
-  const meetings = (session.recallMeetings ?? [])
+  const meetings = (await listRecallMeetings(uid, 20))
     .filter((meeting) => meeting.userId === uid && meeting.status === "ended" && meeting.transcriptRetentionDays
       && typeof meeting.transcriptExpiresAt === "number" && meeting.transcriptExpiresAt > now
       && (!meetingId || meeting.id === meetingId))
@@ -4032,12 +4082,16 @@ export async function searchRecallMeetingTranscripts(
 }
 
 export async function listRecallMeetings(uid: number, limit = 10): Promise<RecallMeetingRecord[]> {
-  return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
+  const boundedLimit = Math.max(1, Math.min(20, Math.floor(limit)));
+  const stored = await backend.listRecallMeetings(uid, boundedLimit);
+  const legacy = (await getSession(uid)).recallMeetings?.slice(0, boundedLimit) ?? [];
+  const missingLegacy = legacy.filter((meeting) => meeting.userId === uid && !stored.some((record) => record.id === meeting.id));
+  await Promise.all(missingLegacy.map((meeting) => backend.saveRecallMeeting(meeting)));
+  return [...stored, ...missingLegacy].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, boundedLimit);
 }
 
 export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode" | "languageMode" | "languageHints" | "keyterms" | "capabilities" | "runtimeState" | "turnMetrics" | "timeline">>): Promise<RecallMeetingRecord | undefined> {
-  const session = await getSession(uid);
-  const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
+  const current = await getRecallMeeting(uid, id);
   if (!current) return undefined;
   if (patch.providerStatusAt !== undefined && current.providerStatusAt !== undefined && patch.providerStatusAt < current.providerStatusAt) return current;
   if (patch.outcome) {
@@ -4081,7 +4135,7 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
     current.speakerEvents = [];
   }
   current.error = current.error?.slice(0, 300);
-  await saveSession(uid, session);
+  await backend.saveRecallMeeting(current);
   if (current.status === "ended" && current.transcriptRetentionDays && current.transcriptExpiresAt) {
     await backend.setRecallTranscriptTtl(uid, id, Math.max(1, Math.ceil((current.transcriptExpiresAt - Date.now()) / 1000)));
   } else if (current.status === "failed") {
@@ -4101,11 +4155,22 @@ export async function recordRecallMeetingRuntime(userId: number, meetingId: stri
   if (!meeting) return undefined;
   const prior = meeting.turnMetrics;
   const turn = input.turn;
-  const average = (summary: { count: number; averageMs?: number }, sample: number | undefined) => {
+  const percentile = (values: number[], fraction: number) => {
+    if (!values.length) return undefined;
+    const ordered = [...values].sort((a, b) => a - b);
+    return ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(ordered.length * fraction) - 1))];
+  };
+  const average = (summary: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number }, sample: number | undefined, samples: number[]) => {
     if (!Number.isFinite(sample) || sample === undefined || sample < 0 || sample > 120_000) return summary;
     const count = summary.count + 1;
-    return { count, averageMs: Math.round(((summary.averageMs ?? 0) * summary.count + sample) / count) };
+    const nextSamples = [...samples, sample].slice(-100);
+    return { count, averageMs: Math.round(((summary.averageMs ?? 0) * summary.count + sample) / count), p50Ms: percentile(nextSamples, 0.5), p95Ms: percentile(nextSamples, 0.95) };
   };
+  const priorSamples = prior?.latencySamples ?? { firstAudioMs: [], finalResponseMs: [] };
+  const firstAudioMs = Number.isFinite(turn?.firstAudioMs) ? turn!.firstAudioMs : undefined;
+  const finalResponseMs = Number.isFinite(turn?.finalResponseMs) ? turn!.finalResponseMs : undefined;
+  const nextFirstAudioSamples = firstAudioMs === undefined ? priorSamples.firstAudioMs : [...priorSamples.firstAudioMs, firstAudioMs].slice(-100);
+  const nextFinalResponseSamples = finalResponseMs === undefined ? priorSamples.finalResponseMs : [...priorSamples.finalResponseMs, finalResponseMs].slice(-100);
   const metrics = turn ? {
     turns: (prior?.turns ?? 0) + 1,
     eagerTurns: (prior?.eagerTurns ?? 0) + (turn.eager ? 1 : 0),
@@ -4113,8 +4178,9 @@ export async function recordRecallMeetingRuntime(userId: number, meetingId: stri
     completedTurns: (prior?.completedTurns ?? 0) + (turn.completed ? 1 : 0),
     failedTurns: (prior?.failedTurns ?? 0) + (turn.failed ? 1 : 0),
     fallbackTurns: (prior?.fallbackTurns ?? 0) + (turn.fallback ? 1 : 0),
-    firstAudio: average(prior?.firstAudio ?? { count: 0 }, turn.firstAudioMs),
-    finalResponse: average(prior?.finalResponse ?? { count: 0 }, turn.finalResponseMs),
+    firstAudio: average(prior?.firstAudio ?? { count: 0 }, firstAudioMs, priorSamples.firstAudioMs),
+    finalResponse: average(prior?.finalResponse ?? { count: 0 }, finalResponseMs, priorSamples.finalResponseMs),
+    latencySamples: { firstAudioMs: nextFirstAudioSamples, finalResponseMs: nextFinalResponseSamples },
     ...(turn.errorCode ? { lastErrorCode: turn.errorCode } : prior?.lastErrorCode ? { lastErrorCode: prior.lastErrorCode } : {}),
     updatedAt: Date.now(),
   } : prior;
@@ -4131,8 +4197,7 @@ export async function recordRecallMeetingRuntime(userId: number, meetingId: stri
 }
 
 export async function appendRecallMeetingMessages(uid: number, id: string, messages: Message[]): Promise<RecallMeetingRecord | undefined> {
-  const session = await getSession(uid);
-  const meeting = session.recallMeetings?.find((candidate) => candidate.id === id && candidate.userId === uid);
+  const meeting = await getRecallMeeting(uid, id);
   if (!meeting) return undefined;
   const bounded = messages.filter((message) => message.role === "user" || message.role === "assistant").map((message) => ({
     role: message.role,
@@ -4141,7 +4206,7 @@ export async function appendRecallMeetingMessages(uid: number, id: string, messa
   }));
   meeting.history = [...meeting.history, ...bounded].slice(-20);
   meeting.updatedAt = Date.now();
-  await saveSession(uid, session);
+  await backend.saveRecallMeeting(meeting);
   return meeting;
 }
 

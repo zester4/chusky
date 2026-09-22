@@ -837,6 +837,14 @@ The task is marked before sending so an ambiguous provider result is not
 automatically retried and duplicated. Redis and QStash are required for delayed
 follow-ups.
 
+Meeting Runtime v2 also records a content-free operator timeline for the live
+turn path: speech detected, eager transcript, final transcript, agent first
+token, first audio, final audio, degraded recovery, and reconnect state. The
+meeting record keeps only bounded numeric latency samples and exposes p50/p95
+first-audio and final-response metrics to the dashboard, CLI, SDK, and MCP
+views; transcript text and provider payloads are never placed in these runtime
+diagnostics.
+
 #### Twilio voice calls
 
 Twilio handles inbound calls and default outbound calls; Bland can be enabled
