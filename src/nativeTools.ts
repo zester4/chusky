@@ -852,7 +852,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         ? args.transcriptRetentionDays
         : undefined;
       return joinRecallMeeting(userId, {
-        meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, languageMode: args.languageMode, languageHints: args.languageHints, keyterms: args.keyterms, analyzeScreenShare: args.analyzeScreenShare,
+        meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, languageMode: args.languageMode, languageHints: args.languageHints, keyterms: args.keyterms, liveCaptions: args.liveCaptions, analyzeScreenShare: args.analyzeScreenShare,
         ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
         ...(hasClientMission ? { clientName, ...(args.objective !== undefined ? { objective: args.objective } : {}), ...(args.clientContext !== undefined ? { clientContext: args.clientContext } : {}), ...(args.clientContextConfirmed !== undefined ? { clientContextConfirmed: args.clientContextConfirmed } : {}) } : {}),
         ...(runtime.meetingId && !hasClientMission ? { inheritMeetingId: runtime.meetingId } : {}),

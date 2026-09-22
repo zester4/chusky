@@ -843,7 +843,11 @@ token, first audio, final audio, degraded recovery, and reconnect state. The
 meeting record keeps only bounded numeric latency samples and exposes p50/p95
 first-audio and final-response metrics to the dashboard, CLI, SDK, and MCP
 views; transcript text and provider payloads are never placed in these runtime
-diagnostics.
+diagnostics. Multilingual Flux meetings can auto-detect a language and update
+recognition hints between turns. Owners can separately enable transient,
+speaker-labelled live captions; those captions stay on the authenticated
+meeting surface and are discarded with the session rather than becoming a
+searchable transcript.
 
 #### Twilio voice calls
 

@@ -133,6 +133,10 @@ export interface MeetingRecord {
   platform: MeetingPlatform;
   status: MeetingStatus;
   interactionMode: MeetingInteractionMode;
+  languageMode?: "english" | "multilingual";
+  languageHints?: string[];
+  keyterms?: string[];
+  liveCaptions?: boolean;
   screenShareUnderstanding: boolean;
   searchableTranscript: boolean;
   transcriptStatus?: "processing" | "ready" | "failed";
@@ -202,6 +206,10 @@ export interface JoinMeetingParams {
   title?: string;
   joinAt?: string;
   interactionMode?: MeetingInteractionMode;
+  languageMode?: "english" | "multilingual";
+  languageHints?: string[];
+  keyterms?: string[];
+  liveCaptions?: boolean;
   analyzeScreenShare?: boolean;
   transcriptRetentionDays?: 1 | 7 | 30;
   clientName?: string;

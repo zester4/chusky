@@ -367,6 +367,8 @@ export interface RecallMeetingRecord {
   languageMode?: "english" | "multilingual";
   languageHints?: string[];
   keyterms?: string[];
+  /** Explicit opt-in to show transient speaker-labelled captions in the meeting surface. */
+  liveCaptions?: boolean;
   capabilities?: MeetingCapabilities;
   runtimeState?: RecallMeetingRuntimeState;
   turnMetrics?: RecallMeetingTurnMetrics;
@@ -1409,6 +1411,10 @@ const RECALL_TRANSCRIPT_EPHEMERAL_TTL_SECONDS = 6 * 60 * 60;
 // gives Recall status/media callbacks a stable, owner-scoped record to resolve.
 const RECALL_MEETING_TTL_SECONDS = 90 * 24 * 60 * 60;
 
+function recallMeetingNeedsWebhookRetention(record: Pick<RecallMeetingRecord, "status">): boolean {
+  return record.status !== "ended" && record.status !== "failed";
+}
+
 function validRecallTranscriptSegment(value: unknown): value is RecallTranscriptSegment {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const segment = value as Record<string, unknown>;
@@ -1600,6 +1606,7 @@ class RedisBackend implements Backend {
   private recallTranscriptKey = (userId: number, meetingId: string) => `chuck:recall:transcript:${this.recallVisualDigest(userId, meetingId)}`;
   private recallMeetingKey = (userId: number, meetingId: string) => `chuck:recall:meeting:${this.recallVisualDigest(userId, meetingId)}`;
   private recallMeetingsIndexKey = (userId: number) => `chuck:recall:meetings:${userId}:index`;
+  private recallMeetingsActiveIndexKey = (userId: number) => `chuck:recall:meetings:${userId}:active`;
   private meetingContactsKey = (id: number) => `chuck:meeting-contacts:${id}`;
   private meetingContactsIndexKey = (id: number) => `chuck:meeting-contacts:${id}:index`;
   private recallMeetingCreationKey = (userId: number, instanceHash: string) => `chuck:recall:meeting:create:${createHash("sha256").update(`${userId}:${instanceHash}`).digest("hex")}`;
@@ -1656,18 +1663,25 @@ class RedisBackend implements Backend {
   async saveRecallMeeting(record: RecallMeetingRecord): Promise<void> {
     const key = this.recallMeetingKey(record.userId, record.id);
     const index = this.recallMeetingsIndexKey(record.userId);
-    await this.r.multi()
+    const activeIndex = this.recallMeetingsActiveIndexKey(record.userId);
+    const transaction = this.r.multi()
       .set(key, JSON.stringify(record), "EX", RECALL_MEETING_TTL_SECONDS)
       .zadd(index, record.updatedAt, record.id)
-      .expire(index, RECALL_MEETING_TTL_SECONDS)
-      .exec();
+      .expire(index, RECALL_MEETING_TTL_SECONDS);
+    if (recallMeetingNeedsWebhookRetention(record)) transaction.zadd(activeIndex, record.updatedAt, record.id).expire(activeIndex, RECALL_MEETING_TTL_SECONDS);
+    else transaction.zrem(activeIndex, record.id);
+    await transaction.exec();
   }
 
   async listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]> {
-    const ids = await this.r.zrevrange(this.recallMeetingsIndexKey(userId), 0, Math.max(0, limit - 1));
+    const recentIds = await this.r.zrevrange(this.recallMeetingsIndexKey(userId), 0, Math.max(0, limit - 1));
+    const activeIds = await this.r.zrevrange(this.recallMeetingsActiveIndexKey(userId), 0, -1);
+    const ids = [...new Set([...activeIds, ...recentIds])];
     if (!ids.length) return [];
     const records = await Promise.all(ids.map((id) => this.getRecallMeeting(userId, id)));
-    return records.flatMap((record) => record ? [record] : []);
+    return records.flatMap((record) => record ? [record] : [])
+      .sort((a, b) => Number(recallMeetingNeedsWebhookRetention(b)) - Number(recallMeetingNeedsWebhookRetention(a)) || b.updatedAt - a.updatedAt)
+      .slice(0, limit);
   }
 
   async saveCompanyRun(projectId: string, run: CompanyRunSummary): Promise<void> {
@@ -2718,7 +2732,8 @@ class MemoryBackend implements Backend {
   async saveRecallMeeting(record: RecallMeetingRecord) { this.recallMeetings.set(`${record.userId}:${record.id}`, structuredClone(record)); }
   async listRecallMeetings(userId: number, limit: number) {
     return [...this.recallMeetings.values()].filter((record) => record.userId === userId)
-      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit).map((record) => structuredClone(record));
+      .sort((a, b) => Number(recallMeetingNeedsWebhookRetention(b)) - Number(recallMeetingNeedsWebhookRetention(a)) || b.updatedAt - a.updatedAt)
+      .slice(0, limit).map((record) => structuredClone(record));
   }
   async saveCompanyRun(projectId: string, run: CompanyRunSummary) {
     const records = this.companyRuns.get(projectId) ?? new Map<string, CompanyRunSummary>();

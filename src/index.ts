@@ -922,6 +922,7 @@ async function main(): Promise<void> {
         languageMode: meeting.languageMode ?? "english",
         languageHints: meeting.languageHints ?? [],
         keyterms: meeting.keyterms ?? [],
+        liveCaptions: meeting.liveCaptions === true,
         ...(ttsModel ? { ttsModel } : {}),
       }, 200, { "Cache-Control": "no-store" });
     });
@@ -2649,11 +2650,11 @@ async function main(): Promise<void> {
             let reply = "";
             let cost = 0;
             if (command.kind === "help") {
-              reply = "Address me by name in voice or chat to ask something. I can contribute to the discussion and use the meeting tools configured by the owner. You can ask me to leave at any time.";
+              reply = "Address me by name in voice or chat to ask something. I can contribute to the discussion and use the meeting tools configured by the owner. The meeting owner controls when I leave.";
             } else if (command.kind === "status") {
               reply = `I’m in the meeting and ready. Interaction mode: ${meeting.interactionMode === "representative" ? "company representative" : meeting.interactionMode === "copilot" ? "proactive copilot" : "addressed"}.`;
             } else if (command.kind === "leave") {
-              reply = "I’m leaving the meeting now, as requested.";
+              reply = "I’ll remain available until the meeting owner ends my session from their private controls, or the meeting provider closes the call.";
             } else if (!(await checkRateLimit(event.userId)) || !(await canSpend(event.userId))) {
               if (command.kind === "ambient") {
                 await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
@@ -2683,7 +2684,7 @@ async function main(): Promise<void> {
                       meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
                       "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
                     ].join("\n\n"),
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission, meetingRoomToolPolicy(meeting)) : ["CHUCK_MEETING_LEAVE"],
+                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission, meetingRoomToolPolicy(meeting)) : [],
                   meetingId: event.meetingId,
                   meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
                   maxToolCalls: representativeActive ? 8 : 1,
@@ -2721,13 +2722,9 @@ async function main(): Promise<void> {
             await workflow.run("acknowledge-recall-chat-leave", async () => {
               if (meeting.platform !== "webex") {
                 try { await sendRecallMeetingChat(afterPrepare.userId, afterPrepare.meetingId, afterPrepare.reply!, recipient); }
-                catch { /* honor the participant's leave request even if chat delivery fails */ }
+                catch { /* The provider chat acknowledgement is best effort. */ }
               }
               return { attempted: true };
-            });
-            await workflow.run("leave-recall-meeting-from-chat", async () => {
-              await leaveRecallMeeting(afterPrepare.userId, afterPrepare.meetingId);
-              return { left: true };
             });
           } else if (meeting.platform !== "webex") {
             await workflow.run("send-recall-chat-reply", async () => {

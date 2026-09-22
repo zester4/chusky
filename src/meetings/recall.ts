@@ -175,7 +175,8 @@ export function buildRecallCreateBotRequest(input: {
   const languageHints = input.languageHints ?? [];
   const keyterms = input.keyterms ?? [];
   if (languageHints.length > 8 || languageHints.some((hint) => typeof hint !== "string" || hint.length > 40)) throw new Error("Invalid meeting language hints");
-  if (languageMode === "multilingual" && languageHints.length === 0) throw new Error("Multilingual meetings require at least one language hint");
+  // An empty hint list intentionally enables Flux automatic detection. Hints
+  // are optional biasing, not a prerequisite for multilingual recognition.
   if (keyterms.length > 50 || keyterms.some((term) => typeof term !== "string" || term.length > 80)) throw new Error("Invalid meeting keyterms");
   let visualWebsocketUrl: string | undefined;
   if (screenShareContextEnabled) {

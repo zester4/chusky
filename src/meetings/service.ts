@@ -415,6 +415,7 @@ function safeMeeting(record: RecallMeetingRecord) {
     languageMode: record.languageMode ?? "english",
     ...(record.languageHints?.length ? { languageHints: record.languageHints } : {}),
     ...(record.keyterms?.length ? { keyterms: record.keyterms } : {}),
+    liveCaptions: record.liveCaptions === true,
     capabilities: record.capabilities ?? getMeetingCapabilities(record.platform),
     runtimeState: record.runtimeState ?? (record.status === "ended" ? "ended" : "healthy"),
     ...(publicTurnMetrics ? { turnMetrics: publicTurnMetrics } : {}),
@@ -447,6 +448,7 @@ export async function joinRecallMeeting(userId: number, input: {
   languageMode?: unknown;
   languageHints?: unknown;
   keyterms?: unknown;
+  liveCaptions?: unknown;
   analyzeScreenShare?: unknown;
   transcriptRetentionDays?: unknown;
   clientName?: unknown;
@@ -469,9 +471,11 @@ export async function joinRecallMeeting(userId: number, input: {
   if (languageMode !== "english" && languageMode !== "multilingual") throw new Error("languageMode must be english or multilingual");
   const languageHints = input.languageHints === undefined ? [] : input.languageHints;
   if (!Array.isArray(languageHints) || languageHints.length > 8 || languageHints.some((hint) => typeof hint !== "string" || !hint.trim() || hint.length > 40)) throw new Error("languageHints must contain at most 8 short language codes or names");
-  if (languageMode === "multilingual" && languageHints.length === 0) throw new Error("Multilingual meetings require at least one language hint");
+  // Empty multilingual hints enable Flux automatic detection and dynamic
+  // language switching; supplied hints only bias the expected languages.
   const keyterms = input.keyterms === undefined ? [] : input.keyterms;
   if (!Array.isArray(keyterms) || keyterms.length > 50 || keyterms.some((term) => typeof term !== "string" || !term.trim() || term.length > 80)) throw new Error("keyterms must contain at most 50 short terms");
+  if (input.liveCaptions !== undefined && typeof input.liveCaptions !== "boolean") throw new Error("liveCaptions must be true or false");
   const room = input.meetingRoom;
   const transcriptRetentionDays = input.transcriptRetentionDays ?? room?.policy.transcriptRetentionDays;
   if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) {
@@ -545,6 +549,7 @@ export async function joinRecallMeeting(userId: number, input: {
     languageMode,
     ...(languageHints.length ? { languageHints: languageHints.map((hint) => hint.trim()) } : {}),
     ...(keyterms.length ? { keyterms: keyterms.map((term) => term.trim()) } : {}),
+    liveCaptions: input.liveCaptions === true,
     capabilities: getMeetingCapabilities(meeting.platform),
     runtimeState: "healthy",
     timeline: [{ id: `evt_${randomUUID()}`, type: "created", at: now, summary: "Meeting assistant created" }],

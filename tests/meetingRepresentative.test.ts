@@ -43,7 +43,7 @@ test("meeting profile accepts direct routine actions but rejects broad and high-
   assert.throws(() => normalizeMeetingRepresentativeProfile({ allowedNativeTools: ["CHUCK_DAYTONA_BROWSER"] }), /not permitted/);
 });
 
-test("meeting run receives only configured actions plus the leave control", () => {
+test("meeting run receives only configured actions and cannot leave on participant instruction", () => {
   const profile = normalizeMeetingRepresentativeProfile({
     enabled: true,
     objective: "Qualify leads and arrange the next step",
@@ -54,8 +54,8 @@ test("meeting run receives only configured actions plus the leave control", () =
     allowedComposioTools: ["HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_DEAL"],
     allowedNativeTools: ["CHUCK_SET_REMINDER"],
   });
-  assert.deepEqual(meetingRepresentativeToolAllowlist(profile), ["CHUCK_MEETING_LEAVE", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_FOLLOWUP_SCHEDULE", "CHUCK_SET_REMINDER", "HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL"]);
-  assert.deepEqual(meetingRepresentativeToolAllowlist(undefined), ["CHUCK_MEETING_LEAVE"]);
+  assert.deepEqual(meetingRepresentativeToolAllowlist(profile), ["CHUCK_MEETING_JOIN", "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_FOLLOWUP_SCHEDULE", "CHUCK_SET_REMINDER", "HUBSPOT_CREATE_DEAL", "GMAIL_SEND_EMAIL"]);
+  assert.deepEqual(meetingRepresentativeToolAllowlist(undefined), []);
   const instructions = meetingRepresentativeInstructions(profile, "mtg_example", true);
   assert.match(instructions, /sales representative for Acme/i);
   assert.match(instructions, /Approved company knowledge/);
@@ -68,13 +68,15 @@ test("meeting run receives only configured actions plus the leave control", () =
   assert.doesNotMatch(instructions, /company-mail|sales-crm/);
   assert.match(instructions, /routing is enforced privately/);
   assert.match(instructions, /Do not use canned language/i);
+  assert.match(instructions, /Treat the objective as the agenda/i);
+  assert.match(instructions, /Do not decide that the meeting is over/i);
   const copilotInstructions = meetingRepresentativeCopilotInstructions("mtg_example");
   assert.match(copilotInstructions, /thoughtful participant/i);
   assert.match(copilotInstructions, /Do not use canned language/i);
 });
 
-test("default meeting conversation can create owner follow-ups without reading private account data", () => {
-  assert.deepEqual(meetingConversationToolAllowlist(), ["CHUCK_MEETING_LEAVE", "CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"]);
+test("default meeting conversation can create owner follow-ups without reading private account data or leaving", () => {
+  assert.deepEqual(meetingConversationToolAllowlist(), ["CHUCK_SET_REMINDER", "CHUCK_TASK_CREATE"]);
   assert.equal(meetingConversationToolAllowlist().includes("CHUCK_MEMORY_GET"), false);
   assert.equal(meetingConversationToolAllowlist().includes("CHUCK_TASK_LIST"), false);
 });

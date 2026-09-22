@@ -63,7 +63,7 @@ test("meeting room updates merge policy and deletion removes only the room", asy
   assert.equal(await getMeetingRoom(created.id), undefined);
 });
 
-test("room policy intersects representative tools while preserving leave control", async () => {
+test("room policy intersects representative tools without granting leave control", async () => {
   const profile = {
     enabled: true,
     allowedNativeTools: ["CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE"],
@@ -73,5 +73,5 @@ test("room policy intersects representative tools while preserving leave control
     allowedNativeTools: ["CHUCK_MEETING_CONTEXT_LOOKUP"],
     allowedComposioTools: ["GOOGLECALENDAR_FIND_EVENT"],
   });
-  assert.deepEqual(tools, ["CHUCK_MEETING_LEAVE", "CHUCK_MEETING_CONTEXT_LOOKUP", "GOOGLECALENDAR_FIND_EVENT"]);
+  assert.deepEqual(tools, ["CHUCK_MEETING_CONTEXT_LOOKUP", "GOOGLECALENDAR_FIND_EVENT"]);
 });
