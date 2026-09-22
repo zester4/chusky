@@ -183,13 +183,14 @@ test("SDK exposes typed calls, voice options, and Recall meeting lifecycle resou
   await sdk.meetings.profile();
   await sdk.meetings.updateProfile({ objective: "Qualify" });
   await sdk.meetings.get(meeting.id);
-  await sdk.meetings.joinPreparation("cmp_1");
+  await sdk.meetings.joinPreparation("cmp_1", { clientName: "Jordan Lee", objective: "Qualify" });
   await sdk.meetings.context(meeting.id, "pricing");
   await sdk.meetings.leave(meeting.id);
 
   assert.ok(calls.some((call) => call.url.endsWith("/v1/account/voice-options")));
   assert.ok(calls.some((call) => call.url.endsWith("/v1/account/calls") && call.method === "POST" && call.body.includes("Confirm appointment")));
   assert.ok(calls.some((call) => call.url.endsWith("/v1/meetings") && call.method === "POST"));
+  assert.ok(calls.some((call) => call.url.endsWith("/v1/meetings/preparations/cmp_1/join") && call.method === "POST" && call.body.includes("Jordan Lee")));
   assert.ok(calls.some((call) => call.url.includes("/v1/meetings/mtg_1/context?query=pricing")));
   assert.ok(calls.some((call) => call.url.endsWith("/v1/meetings/mtg_1/leave") && call.method === "POST"));
 });

@@ -1614,8 +1614,9 @@ async function main(): Promise<void> {
     app.post("/cli/meetings/preparations/:preparationId/join", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       if (!(await checkRateLimit(device.userId))) return c.json({ ok: false, error: "rate limit exceeded" }, 429);
+      const body = await c.req.json().catch(() => ({})) as { clientName?: unknown; objective?: unknown; clientContext?: unknown };
       try {
-        const result = await withCliLock(device.userId, c.req.raw.signal, () => joinPreparedCalendarMeeting(device.userId, c.req.param("preparationId"), c.req.raw.signal));
+        const result = await withCliLock(device.userId, c.req.raw.signal, () => joinPreparedCalendarMeeting(device.userId, c.req.param("preparationId"), body, c.req.raw.signal));
         return c.json({ ok: true, meeting: cliMeetingView(await getRecallMeeting(device.userId, String((result as any).id))), preparation: (result as any).preparation }, 201);
       } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "could not join prepared meeting" }, 400); }
     });

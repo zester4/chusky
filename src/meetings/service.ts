@@ -440,6 +440,12 @@ function recallStatusTime(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+export type MeetingMissionInput = {
+  clientName?: unknown;
+  objective?: unknown;
+  clientContext?: unknown;
+};
+
 export async function joinRecallMeeting(userId: number, input: {
   meetingUrl: unknown;
   title?: unknown;
@@ -462,7 +468,7 @@ export async function joinRecallMeeting(userId: number, input: {
   calendarPreparationId?: string;
   /** Internal-only workspace policy resolved by the authenticated API boundary. */
   meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy };
-}, signal?: AbortSignal) {
+} & MeetingMissionInput, signal?: AbortSignal) {
   requireRecall();
   assertUserId(userId);
   const meeting = validateMeetingUrl(input.meetingUrl);
@@ -647,7 +653,10 @@ export async function prepareRecallMeetingMission(userId: number, input: { clien
 }
 
 /** Join an owner-reviewed calendar preparation without ever returning its meeting link to the model. */
-export async function joinPreparedCalendarMeeting(userId: number, preparationId: unknown, signal?: AbortSignal) {
+export async function joinPreparedCalendarMeeting(userId: number, preparationId: unknown, missionInputOrSignal: MeetingMissionInput | AbortSignal = {}, signal?: AbortSignal) {
+  const looksLikeSignal = missionInputOrSignal && typeof missionInputOrSignal === "object" && "aborted" in missionInputOrSignal && typeof (missionInputOrSignal as AbortSignal).addEventListener === "function";
+  const missionInput = looksLikeSignal ? {} : missionInputOrSignal as MeetingMissionInput;
+  const requestSignal = looksLikeSignal ? missionInputOrSignal as AbortSignal : signal;
   if (typeof preparationId !== "string" || !/^cmp_[A-Za-z0-9_-]{1,96}$/.test(preparationId)) throw new Error("Invalid calendar meeting preparation ID");
   const preparation = await getCalendarMeetingPreparation(userId, preparationId);
   if (!preparation || preparation.status === "cancelled" || preparation.status === "expired") throw new Error("That calendar meeting is no longer available to join");
@@ -658,8 +667,9 @@ export async function joinPreparedCalendarMeeting(userId: number, preparationId:
   const result = await joinRecallMeeting(userId, {
     meetingUrl,
     title: preparation.title,
+    ...(hasMeetingMissionInput(missionInput) ? missionInput : {}),
     ...(joinAt ? { joinAt } : {}),
-  }, signal);
+  }, requestSignal);
   await updateCalendarMeetingPreparation(userId, preparation.id, { status: "joined" });
   return { ...result, preparation: { id: preparation.id, title: preparation.title, startAt: preparation.startAt } };
 }

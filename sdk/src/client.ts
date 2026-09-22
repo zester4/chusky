@@ -487,7 +487,12 @@ export class MeetingsResource {
   updateProfile(profile: Partial<MeetingProfile>, options?: RequestOptions): Promise<MeetingProfile> { return this.client.request("/meetings/profile", { method: "PATCH", body: JSON.stringify(profile) }, options); }
   prepare(brief: MeetingBrief, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/meetings/prepare", { method: "POST", body: JSON.stringify(brief) }, options); }
   join(params: JoinMeetingParams, options?: RequestOptions): Promise<MeetingRecord> { return this.client.request("/meetings", { method: "POST", body: JSON.stringify(params) }, options); }
-  joinPreparation(preparationId: string, options?: RequestOptions): Promise<MeetingRecord & { preparation?: Record<string, unknown> }> { return this.client.request(`/meetings/preparations/${encodeURIComponent(preparationId)}/join`, { method: "POST", body: "{}" }, options); }
+  joinPreparation(preparationId: string, briefOrOptions?: MeetingBrief | RequestOptions, options?: RequestOptions): Promise<MeetingRecord & { preparation?: Record<string, unknown> }> {
+    const isBrief = Boolean(briefOrOptions && ("clientName" in briefOrOptions || "objective" in briefOrOptions || "clientContext" in briefOrOptions));
+    const brief = isBrief ? briefOrOptions as MeetingBrief : undefined;
+    const requestOptions = isBrief ? options : briefOrOptions as RequestOptions | undefined;
+    return this.client.request(`/meetings/preparations/${encodeURIComponent(preparationId)}/join`, { method: "POST", body: JSON.stringify(brief ?? {}) }, requestOptions);
+  }
   leave(meetingId: string, options?: RequestOptions): Promise<MeetingRecord & { alreadyFinished?: boolean }> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/leave`, { method: "POST", body: "{}" }, options); }
   context(meetingId: string, query = "", options?: RequestOptions): Promise<MeetingContext> { const suffix = query ? `?query=${encodeURIComponent(query)}` : ""; return this.client.request(`/meetings/${encodeURIComponent(meetingId)}/context${suffix}`, {}, options); }
   deleteContact(contactId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/meetings/contacts/${encodeURIComponent(contactId)}`, { method: "DELETE" }, options); }

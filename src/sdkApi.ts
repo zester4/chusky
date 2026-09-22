@@ -1555,13 +1555,14 @@ export function registerSdkApi(app: Hono): void {
 
   app.post("/v1/meetings/preparations/:preparationId/join", async (c) => {
     const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { clientName?: unknown; objective?: unknown; clientContext?: unknown };
     const session = await getSession(owner.userId);
-    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:{}`).digest("hex");
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
     const prior = idempotency(c, session, fingerprint);
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     try {
-      const result = await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId"));
+      const result = await joinPreparedCalendarMeeting(owner.userId, c.req.param("preparationId"), body);
       if (prior.key) {
         session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
         await saveSession(owner.userId, session);

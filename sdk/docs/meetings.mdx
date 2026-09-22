@@ -52,7 +52,24 @@ const meeting = await chusky.meetings.join({
 
 `joinAt` schedules the Recall bot when the event is at least ten minutes in the
 future. For recurring calendar automation, use the preparation returned by
-`meetings.list()` and call `joinPreparation(preparation.id)`.
+`meetings.list()` and call `joinPreparation(preparation.id)`. For a calendar
+meeting that needs owner-approved relationship context, prepare a brief first
+and pass the same reviewed fields when joining:
+
+```ts
+const brief = await chusky.meetings.prepare({
+  clientName: "Jordan Lee",
+  objective: "Review the proposal and agree next steps",
+});
+
+await chusky.meetings.joinPreparation(preparation.id, {
+  clientName: brief.clientName,
+  objective: brief.objective,
+});
+```
+
+The brief is bounded to normal-sensitivity relationship and business facts. It
+does not expose the owner's full chat history or credentials to the meeting.
 
 ## Roster, context, and lifecycle
 

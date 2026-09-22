@@ -265,9 +265,10 @@ async function chat(): Promise<void> {
           continue;
         }
         if (action === "join-prepared") {
-          const id = parts[0];
-          if (!id) console.log(formatError("Usage: /meeting join-prepared <preparation id>", color));
-          else { const result = await client.joinPreparedMeeting(id); console.log(result.ok ? formatSuccess(`Prepared meeting join started${result.meeting?.id ? `: ${result.meeting.id}` : "."}`, color) : formatError(result.error || "Could not join prepared meeting.", color)); }
+          const fields = raw.slice("join-prepared".length).trim().split("|").map((value) => value.trim());
+          const id = fields[0];
+          if (!id) console.log(formatError("Usage: /meeting join-prepared <preparation id> | <client name> | <objective> | <context>", color));
+          else { const result = await client.joinPreparedMeeting(id, { ...(fields[1] ? { clientName: fields[1] } : {}), ...(fields[2] ? { objective: fields[2] } : {}), ...(fields[3] ? { clientContext: fields[3] } : {}) }); console.log(result.ok ? formatSuccess(`Prepared meeting join started${result.meeting?.id ? `: ${result.meeting.id}` : "."}`, color) : formatError(result.error || "Could not join prepared meeting.", color)); }
           continue;
         }
         if (action === "join") {
