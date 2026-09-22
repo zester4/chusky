@@ -271,6 +271,34 @@ const packet = await chusky.departments.handoff("customer-success", {
 console.log(packet.id, packet.status, salesContext.data.length);
 ```
 
+## Agent-to-agent (A2A)
+
+The SDK includes a typed client for Chusky's standards-shaped A2A 1.0
+boundary. It uses the same project API key and stable user identity as the
+rest of the SDK, so delegated work stays owner-scoped and durable.
+
+```ts
+const card = await chusky.a2a.card();
+console.log(card.protocolVersion, card.skills?.map((skill) => skill.id));
+
+const task = await chusky.a2a.send("Prepare a verified launch brief.", {
+  idempotencyKey: "launch-brief-2026-09-22",
+});
+
+const current = await chusky.a2a.get(task.id);
+const page = await chusky.a2a.list(undefined, 20);
+console.log(current.status.state, page.tasks.length);
+
+if (current.status.state !== "TASK_STATE_COMPLETED") {
+  await chusky.a2a.cancel(current.id);
+}
+```
+
+Use `a2a.card()` for discovery, `a2a.send()` for a durable delegated task,
+`a2a.get()` or `a2a.list()` for status, and `a2a.cancel()` for cancellation.
+The SDK sends A2A JSON-RPC over the authenticated `/a2a/rpc` boundary and
+does not expose private prompts, credentials, or unscoped tenant data.
+
 ## Files and artifacts
 
 File uploads use a short-lived storage URL. The SDK also exposes artifact

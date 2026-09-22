@@ -13,6 +13,27 @@ export interface Page<T> {
   data: T[];
   nextCursor?: string;
 }
+export interface A2AAgentCard {
+  name: string;
+  description: string;
+  version: string;
+  protocolVersion?: string;
+  url?: string;
+  supportedInterfaces?: Array<{ url: string; protocolBinding: string; protocolVersion: string }>;
+  capabilities?: { streaming?: boolean; pushNotifications?: boolean; stateTransitionHistory?: boolean };
+  skills?: Array<{ id: string; name: string; description: string; tags?: string[]; inputModes?: string[]; outputModes?: string[] }>;
+  defaultInputModes?: string[];
+  defaultOutputModes?: string[];
+  [key: string]: unknown;
+}
+export type A2ATaskState = "TASK_STATE_SUBMITTED" | "TASK_STATE_WORKING" | "TASK_STATE_INPUT_REQUIRED" | "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED" | string;
+export interface A2ATask {
+  id: string;
+  contextId: string;
+  status: { state: A2ATaskState; timestamp?: string; message?: { role: string; parts: Array<{ text: string }> } };
+  artifacts?: Array<{ artifactId: string; name?: string; parts: Array<Record<string, unknown>> }>;
+}
+export interface A2ATaskPage { tasks: A2ATask[]; nextPageToken: string; }
 export interface FileUpload { id: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; uploadUrl: string; expiresAt: string; }
 export interface FileDownload { id: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; downloadUrl: string; expiresAt: string; }
 export interface FileRecord { id: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; }

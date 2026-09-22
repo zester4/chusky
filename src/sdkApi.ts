@@ -118,6 +118,89 @@ function missionA2AStatus(mission: { status: string }): "submitted" | "working" 
   if (mission.status === "queued") return "submitted";
   return "working";
 }
+type A2AOwner = SdkOwner;
+type A2AJsonRpcRequest = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown };
+type A2AJsonRpcId = string | number | null;
+const A2A_PROTOCOL_VERSION = "1.0";
+const A2A_CONTENT_TYPE = "application/a2a+json";
+function a2aState(mission: { status: string }): string {
+  const state = missionA2AStatus(mission);
+  return state === "submitted" ? "TASK_STATE_SUBMITTED"
+    : state === "working" ? "TASK_STATE_WORKING"
+      : state === "input-required" ? "TASK_STATE_INPUT_REQUIRED"
+        : state === "completed" ? "TASK_STATE_COMPLETED"
+          : state === "failed" ? "TASK_STATE_FAILED" : "TASK_STATE_CANCELED";
+}
+function a2aContextId(owner: A2AOwner): string { return `ctx_${digestKey(`a2a:${owner.projectId}:${owner.externalId}`).slice(0, 40)}`; }
+function a2aTaskView(owner: A2AOwner, mission: any) {
+  const statusText = typeof mission.nextAction === "string" ? mission.nextAction : undefined;
+  return {
+    id: mission.id,
+    contextId: a2aContextId(owner),
+    status: {
+      state: a2aState(mission),
+      timestamp: new Date(mission.updatedAt).toISOString(),
+      ...(statusText ? { message: { role: "ROLE_AGENT", parts: [{ text: statusText.slice(0, 2000) }] } } : {}),
+    },
+    ...(mission.status === "completed" ? { artifacts: [{ artifactId: `${mission.id}:proof`, name: "Mission proof", parts: [{ data: missionProof(mission) }] }] } : {}),
+    ...(mission.status !== "completed" ? { artifacts: [] } : {}),
+  };
+}
+function a2aJsonRpcResult(c: any, id: A2AJsonRpcId, result: unknown, status = 200) { c.header("Content-Type", A2A_CONTENT_TYPE); return c.json({ jsonrpc: "2.0", id, result }, status); }
+function a2aJsonRpcError(c: any, id: A2AJsonRpcId, code: number, message: string, status = 400) { c.header("Content-Type", A2A_CONTENT_TYPE); return c.json({ jsonrpc: "2.0", id, error: { code, message } }, status); }
+function a2aTextMessage(params: unknown): { text: string; taskId?: string } | undefined {
+  if (!params || typeof params !== "object" || Array.isArray(params)) return undefined;
+  const value = params as Record<string, unknown>;
+  const message = value.message;
+  if (!message || typeof message !== "object" || Array.isArray(message)) return undefined;
+  const parts = (message as Record<string, unknown>).parts;
+  if (!Array.isArray(parts)) return undefined;
+  const text = parts.filter((part): part is Record<string, unknown> => Boolean(part && typeof part === "object" && !Array.isArray(part)))
+    .map((part) => typeof part.text === "string" ? part.text : "")
+    .filter(Boolean).join("\n").trim().slice(0, 32_000);
+  if (!text) return undefined;
+  const taskId = typeof (message as Record<string, unknown>).taskId === "string" ? String((message as Record<string, unknown>).taskId) : typeof value.taskId === "string" ? value.taskId : undefined;
+  return { text, ...(taskId ? { taskId } : {}) };
+}
+function a2aPageSize(params: unknown): number { const value = params && typeof params === "object" && !Array.isArray(params) ? Number((params as Record<string, unknown>).pageSize ?? 20) : 20; return Number.isFinite(value) ? Math.max(1, Math.min(100, Math.floor(value))) : 20; }
+async function createA2ATask(owner: A2AOwner, body: Record<string, unknown>, idempotencyKey?: string) {
+  const outcomeSlug = typeof body.outcome === "string" ? body.outcome : undefined;
+  const planned = outcomeSlug ? planOutcome(outcomeSlug, body.input && typeof body.input === "object" ? body.input as Record<string, unknown> : {}) : undefined;
+  const objective = typeof body.objective === "string" ? body.objective.trim() : planned?.objective ?? "";
+  const title = typeof body.title === "string" ? body.title.trim() : planned?.package.name ?? "Chusky delegated outcome";
+  const definitionOfDone = typeof body.definitionOfDone === "string" ? body.definitionOfDone.trim() : planned?.definitionOfDone ?? "The requested outcome is verified and evidence is attached.";
+  if (!objective || !title || !definitionOfDone) throw new Error("A2A tasks require objective, title, and definitionOfDone (or a valid outcome package).");
+  const mission = await createMission(owner.userId, { title, objective, definitionOfDone, requiredEvidence: planned?.package.evidenceRequired, steps: planned?.steps, idempotencyKey, budget: planned?.package.budget });
+  const started = mission.status === "queued" ? await startMission(owner.userId, mission.id) : mission;
+  if (!started) throw new Error("The delegated task is no longer startable.");
+  const task = await createTask(owner.userId, { title: `A2A: ${started.title}`, objective: started.objective, missionId: started.id, runAt: Date.now(), maxAttempts: 3 });
+  const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
+  if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly.");
+  const linked = await updateMission(owner.userId, started.id, (latest) => ({ rootTaskId: latest.rootTaskId ?? task.id, steps: latest.steps.map((step) => ({ ...step, taskId: step.id === latest.currentStepId ? task.id : step.taskId })) }));
+  const finalMission = linked ?? started;
+  return { mission: finalMission, task: a2aTaskView(owner, finalMission) };
+}
+function streamA2ATask(c: any, id: A2AJsonRpcId, owner: A2AOwner, taskId: string) {
+  return streamSSE(c, async (stream) => {
+    let lastVersion = -1;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const mission = await getMission(owner.userId, taskId);
+      if (!mission) {
+        await stream.writeSSE({ data: JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32001, message: "Task not found." } }) });
+        return;
+      }
+      if (mission.version !== lastVersion) {
+        lastVersion = mission.version;
+        const event = mission.status === "completed" && missionProof(mission)
+          ? { statusUpdate: { taskId: mission.id, contextId: a2aContextId(owner), status: { state: a2aState(mission), timestamp: new Date(mission.updatedAt).toISOString() }, final: true }, task: a2aTaskView(owner, mission) }
+          : { statusUpdate: { taskId: mission.id, contextId: a2aContextId(owner), status: { state: a2aState(mission), timestamp: new Date(mission.updatedAt).toISOString() }, final: ["completed", "failed", "cancelled"].includes(mission.status) }, task: a2aTaskView(owner, mission) };
+        await stream.writeSSE({ data: JSON.stringify({ jsonrpc: "2.0", id, result: event }) });
+        if (["completed", "failed", "cancelled"].includes(mission.status)) return;
+      }
+      await stream.sleep(1000);
+    }
+  });
+}
 async function audit(userId: number, action: string, requestId: string, status: number): Promise<void> { const session = await getSession(userId); session.sdkAudit!.push({ id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() }); session.sdkAudit = session.sdkAudit!.slice(-500); await saveSession(userId, session); }
 async function companyAudit(projectId: string, action: string, requestId: string, status: number): Promise<void> {
   await appendCompanyAuditEvent(projectId, { id: `audit_${randomUUID()}`, action: action.slice(0, 120), requestId, status, at: Date.now() });
@@ -686,19 +769,29 @@ export function registerSdkApi(app: Hono): void {
   app.get("/a2a/.well-known/agent-card.json", (c) => c.json({
     name: "Chusky Outcome Runtime",
     description: "Persistent, governed business outcomes across tools, departments, meetings, and channels.",
-    version: "1",
+    version: A2A_PROTOCOL_VERSION,
     url: new URL(c.req.url).origin,
+    protocolVersion: A2A_PROTOCOL_VERSION,
+    supportedInterfaces: [{ url: `${new URL(c.req.url).origin}/a2a/rpc`, protocolBinding: "JSONRPC", protocolVersion: A2A_PROTOCOL_VERSION }],
     capabilities: { streaming: true, pushNotifications: false, stateTransitionHistory: true },
-    authentication: { schemes: ["Bearer"], scopes: ["missions:read", "missions:write", "context:read", "outcomes:read"] },
-    skills: listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department] })),
-    defaultInputModes: ["text"],
-    defaultOutputModes: ["text", "data"],
+    securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "Chusky project API key" } },
+    security: [{ bearerAuth: [] }],
+    skills: listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"] })),
+    defaultInputModes: ["text/plain"],
+    defaultOutputModes: ["text/plain", "application/json"],
   }));
   app.use("/a2a/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     const principal = await authorized(token);
     if (!principal) return apiError(c, 401, "invalid_api_key", "A valid Chusky project API key is required.");
-    const requestedScope = c.req.method === "GET" ? "missions:read" : "missions:write";
+    let requestedScope = c.req.method === "GET" ? "missions:read" : "missions:write";
+    // JSON-RPC uses POST for both reads and writes. Inspect a clone so the
+    // handler can still consume the original body, while keeping read-only
+    // GetTask/ListTasks/SubscribeToTask calls on read scope.
+    if (c.req.method === "POST" && (c.req.path === "/a2a/rpc" || c.req.path === "/a2a/v1")) {
+      const rpcBody = await c.req.raw.clone().json().catch(() => undefined) as { method?: unknown } | undefined;
+      if (["GetTask", "ListTasks", "SubscribeToTask"].includes(String(rpcBody?.method ?? ""))) requestedScope = "missions:read";
+    }
     if (!principal.root && !principal.scopes.includes("*") && !principal.scopes.includes(requestedScope) && !principal.scopes.includes("missions:*")) return apiError(c, 403, "insufficient_scope", `This API key lacks ${requestedScope}.`);
     const externalId = (c.req.header("X-Chusky-User-Id") ?? "").trim();
     if (!externalId || externalId.length > 200) return apiError(c, 400, "missing_user", "X-Chusky-User-Id is required for A2A tenant binding.");
@@ -709,21 +802,9 @@ export function registerSdkApi(app: Hono): void {
   app.post("/a2a/tasks", async (c) => {
     const owner = (c as any).get("a2aOwner") as SdkOwner;
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-    const outcomeSlug = typeof body.outcome === "string" ? body.outcome : undefined;
-    const planned = outcomeSlug ? planOutcome(outcomeSlug, body.input && typeof body.input === "object" ? body.input as Record<string, unknown> : {}) : undefined;
-    const objective = typeof body.objective === "string" ? body.objective.trim() : planned?.objective ?? "";
-    const title = typeof body.title === "string" ? body.title.trim() : planned?.package.name ?? "Chusky delegated outcome";
-    const definitionOfDone = typeof body.definitionOfDone === "string" ? body.definitionOfDone.trim() : planned?.definitionOfDone ?? "The requested outcome is verified and evidence is attached.";
-    if (!objective || !title || !definitionOfDone) return apiError(c, 400, "invalid_task", "A2A tasks require objective, title, and definitionOfDone (or a valid outcome package).");
     try {
-      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, requiredEvidence: planned?.package.evidenceRequired, steps: planned?.steps, idempotencyKey: c.req.header("Idempotency-Key") ?? undefined, budget: planned?.package.budget });
-      const started = mission.status === "queued" ? await startMission(owner.userId, mission.id) : mission;
-      if (!started) return apiError(c, 409, "task_not_startable", "The delegated task is no longer startable.");
-      const task = await createTask(owner.userId, { title: `A2A: ${started.title}`, objective: started.objective, missionId: started.id, runAt: Date.now(), maxAttempts: 3 });
-      const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
-      if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly.");
-      const linked = await updateMission(owner.userId, started.id, (latest) => ({ rootTaskId: latest.rootTaskId ?? task.id, steps: latest.steps.map((step) => ({ ...step, taskId: step.id === latest.currentStepId ? task.id : step.taskId })) }));
-      return c.json({ id: started.id, type: "task", status: missionA2AStatus(linked ?? started), mission: linked ?? started, artifacts: [] }, 202);
+      const created = await createA2ATask(owner, body, c.req.header("Idempotency-Key") ?? undefined);
+      return c.json({ id: created.mission.id, type: "task", status: missionA2AStatus(created.mission), mission: created.mission, artifacts: [] }, 202);
     } catch (error) { return apiError(c, 400, "task_create_failed", error instanceof Error ? error.message : "A2A task could not be created."); }
   });
   app.get("/a2a/tasks/:taskId", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await getMission(owner.userId, c.req.param("taskId")); return mission ? c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission, artifacts: [] }) : apiError(c, 404, "task_not_found", "A2A task not found."); });
@@ -743,6 +824,76 @@ export function registerSdkApi(app: Hono): void {
       }
     });
   });
+
+  // Standards-shaped A2A 1.0 JSON-RPC binding. The existing REST task routes
+  // above remain available for Chusky-native clients; interoperable agents
+  // use SendMessage/GetTask/ListTasks/CancelTask and the SSE methods here.
+  const handleA2ARpc = async (c: any) => {
+    const owner = c.get("a2aOwner") as A2AOwner;
+    const body = await c.req.json().catch(() => undefined) as A2AJsonRpcRequest | undefined;
+    const id: A2AJsonRpcId = body && (typeof body.id === "string" || typeof body.id === "number" || body.id === null) ? body.id : null;
+    if (!body || body.jsonrpc !== "2.0" || typeof body.method !== "string") return a2aJsonRpcError(c, id, -32600, "A valid JSON-RPC 2.0 request is required.");
+    const method = body.method;
+    const params = body.params;
+    const record = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : {};
+    const taskId = typeof record.id === "string" ? record.id : typeof record.taskId === "string" ? record.taskId : undefined;
+    try {
+      if (method === "SendMessage" || method === "message/send") {
+        const message = a2aTextMessage(params);
+        if (!message) return a2aJsonRpcError(c, id, -32602, "message.parts must contain at least one text part.");
+        if (message.taskId) {
+          const mission = await getMission(owner.userId, message.taskId);
+          if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+          if (["completed", "failed", "cancelled"].includes(mission.status)) return a2aJsonRpcError(c, id, -32002, "A terminal task cannot accept another message.", 409);
+          const updated = await updateMission(owner.userId, mission.id, { checkpoint: message.text, nextAction: "Incorporate the delegating agent's message in the next bounded slice." });
+          return a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, updated ?? mission) });
+        }
+        const created = await createA2ATask(owner, {
+          objective: message.text,
+          title: typeof record.title === "string" ? record.title : "A2A delegated task",
+          definitionOfDone: typeof record.definitionOfDone === "string" ? record.definitionOfDone : "The requested task is completed and its result is verified.",
+        }, c.req.header("Idempotency-Key") ?? undefined);
+        return a2aJsonRpcResult(c, id, { task: created.task }, 200);
+      }
+      if (method === "GetTask" || method === "tasks/get") {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
+        const mission = await getMission(owner.userId, taskId);
+        return mission ? a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, mission) }) : a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+      }
+      if (method === "ListTasks" || method === "tasks/list") {
+        const missions = await listMissions(owner.userId);
+        const result = page(missions, typeof record.pageToken === "string" ? record.pageToken : undefined, String(a2aPageSize(params)));
+        return a2aJsonRpcResult(c, id, { tasks: result.data.map((mission) => a2aTaskView(owner, mission)), nextPageToken: result.nextCursor ?? "" });
+      }
+      if (method === "CancelTask" || method === "tasks/cancel") {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
+        const mission = await cancelMission(owner.userId, taskId, "Cancelled by the delegating agent.");
+        if (!mission) return a2aJsonRpcError(c, id, -32002, "Task is not cancellable or was not found.", 409);
+        if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId);
+        return a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, mission) });
+      }
+      if (method === "SendStreamingMessage" || method === "message/stream") {
+        const message = a2aTextMessage(params);
+        if (!message) return a2aJsonRpcError(c, id, -32602, "message.parts must contain at least one text part.");
+        const created = message.taskId
+          ? await getMission(owner.userId, message.taskId).then((mission) => mission ? { mission, task: a2aTaskView(owner, mission) } : undefined)
+          : await createA2ATask(owner, { objective: message.text, title: "A2A delegated task", definitionOfDone: "The requested task is completed and its result is verified." }, c.req.header("Idempotency-Key") ?? undefined);
+        if (!created) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+        return streamA2ATask(c, id, owner, created.mission.id);
+      }
+      if (method === "SubscribeToTask" || method === "tasks/subscribe") {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
+        const mission = await getMission(owner.userId, taskId);
+        if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+        return streamA2ATask(c, id, owner, mission.id);
+      }
+      return a2aJsonRpcError(c, id, -32601, `Unsupported A2A method: ${method}.`);
+    } catch (error) {
+      return a2aJsonRpcError(c, id, -32000, error instanceof Error ? error.message : "A2A request failed.", 400);
+    }
+  };
+  app.post("/a2a/rpc", handleA2ARpc);
+  app.post("/a2a/v1", handleA2ARpc);
 
   app.get("/mcp/oauth/callback", async (c) => {
     const state = c.req.query("state") ?? "";

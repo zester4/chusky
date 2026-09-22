@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -36,6 +36,7 @@ export class Chusky {
   readonly context: ContextResource;
   readonly departments: DepartmentsResource;
   readonly outcomes: OutcomesResource;
+  readonly a2a: A2AResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
   private readonly userId: string;
@@ -85,6 +86,7 @@ export class Chusky {
     this.context = new ContextResource(this);
     this.departments = new DepartmentsResource(this);
     this.outcomes = new OutcomesResource(this);
+    this.a2a = new A2AResource(this);
   }
 
   /** @internal Returns the configured default model for run requests. */
@@ -107,6 +109,30 @@ export class Chusky {
       const response = await this.fetchImpl(`${this.baseUrl}/v1${path}`, { ...init, headers, signal: controller.signal });
       if (!response.ok) throw await toError(response);
       if (response.status === 204) return undefined as T;
+      return await response.json() as T;
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", relayAbort);
+    }
+  }
+
+  /** @internal Authenticated transport for the standards A2A boundary. */
+  async requestA2A<T>(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new ChuskyError("Chusky request timed out")), this.timeoutMs);
+    const relayAbort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", relayAbort, { once: true });
+    try {
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${this.apiKey}`);
+      headers.set("X-Chusky-User-Id", this.userId);
+      headers.set("Accept", "application/a2a+json, application/json");
+      headers.set("User-Agent", this.userAgent);
+      if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/a2a+json");
+      if (options.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
+      for (const [key, value] of new Headers(options.headers)) headers.set(key, value);
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
+      if (!response.ok) throw await toError(response);
       return await response.json() as T;
     } finally {
       clearTimeout(timer);
@@ -480,6 +506,31 @@ export class OutcomesResource {
   list(options?: RequestOptions): Promise<Page<OutcomePackage>> { return this.client.request("/outcomes", {}, options); }
   get(slug: string, options?: RequestOptions): Promise<{ data: OutcomePackage }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}`, {}, options); }
   plan(slug: string, input: Record<string, unknown>, options?: RequestOptions): Promise<{ data: OutcomePlan }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}/plan`, { method: "POST", body: JSON.stringify(input) }, options); }
+}
+
+export class A2AResource {
+  constructor(private readonly client: Chusky) {}
+  card(options?: RequestOptions): Promise<A2AAgentCard> { return this.client.requestA2A("/a2a/.well-known/agent-card.json", {}, options); }
+  async send(text: string, options?: RequestOptions): Promise<A2ATask> {
+    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] } } }) }, options);
+    if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
+    return response.result.task;
+  }
+  async get(taskId: string, options?: RequestOptions): Promise<A2ATask> {
+    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTask", params: { id: taskId } }) }, options);
+    if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
+    return response.result.task;
+  }
+  async list(pageToken?: string, pageSize = 20, options?: RequestOptions): Promise<A2ATaskPage> {
+    const response = await this.client.requestA2A<{ result?: A2ATaskPage; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "ListTasks", params: { ...(pageToken ? { pageToken } : {}), pageSize } }) }, options);
+    if (!response.result) throw new Error(response.error?.message ?? "A2A task page was not returned");
+    return response.result;
+  }
+  async cancel(taskId: string, options?: RequestOptions): Promise<A2ATask> {
+    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CancelTask", params: { id: taskId } }) }, options);
+    if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
+    return response.result.task;
+  }
 }
 
 export class UsageResource {

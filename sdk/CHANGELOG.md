@@ -4,6 +4,13 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-22
+
+- Added typed A2A discovery and durable task operations through `chusky.a2a`.
+- Added Agent Card, task status, cursor pagination, cancellation, and A2A
+  JSON-RPC transport coverage.
+- Documented the shared owner-scoped A2A contract and usage example.
+
 ## 0.3.1 - 2026-09-21
 
 - Rewrote the SDK README with production setup, security, durability, approvals, missions, company workflows, and resource guidance.

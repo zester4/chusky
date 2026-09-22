@@ -78,6 +78,36 @@ test("SDK exposes typed authentication and rate-limit errors", async () => {
   await assert.rejects(() => limited.tasks.list(), (error: unknown) => error instanceof ChuskyRateLimitError && error.retryAfter === 12);
 });
 
+test("SDK exposes authenticated A2A discovery and task lifecycle", async () => {
+  const calls: Array<{ url: string; headers: Headers; body?: string }> = [];
+  const task = { id: "mis_a2a", contextId: "ctx_a2a", status: { state: "TASK_STATE_WORKING", timestamp: "2026-09-22T00:00:00.000Z" }, artifacts: [] };
+  const sdk = new Chusky({ apiKey: "chsk_a2a", userId: "a2a-user", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ url, headers: new Headers(init?.headers), body: init?.body ? String(init.body) : undefined });
+    if (url.endsWith("/.well-known/agent-card.json")) return new Response(JSON.stringify({ name: "Chusky", description: "A2A", version: "1.0", protocolVersion: "1.0" }), { status: 200 });
+    const request = JSON.parse(String(init?.body)) as { method: string };
+    if (request.method === "ListTasks") return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tasks: [task], nextPageToken: "" } }), { status: 200 });
+    if (request.method === "CancelTask") return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { task: { ...task, status: { state: "TASK_STATE_CANCELED" } } } }), { status: 200 });
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { task } }), { status: 200 });
+  }) });
+
+  const card = await sdk.a2a.card();
+  const created = await sdk.a2a.send("Research the account.", { idempotencyKey: "a2a-create-1" });
+  const current = await sdk.a2a.get(created.id);
+  const page = await sdk.a2a.list();
+  const cancelled = await sdk.a2a.cancel(current.id);
+
+  assert.equal(card.protocolVersion, "1.0");
+  assert.equal(created.id, "mis_a2a");
+  assert.equal(page.tasks[0]?.id, "mis_a2a");
+  assert.equal(cancelled.status.state, "TASK_STATE_CANCELED");
+  assert.equal(calls[0]?.url, "https://example.test/a2a/.well-known/agent-card.json");
+  assert.equal(calls[1]?.url, "https://example.test/a2a/rpc");
+  assert.equal(calls[1]?.headers.get("authorization"), "Bearer chsk_a2a");
+  assert.equal(calls[1]?.headers.get("x-chusky-user-id"), "a2a-user");
+  assert.equal(calls[1]?.headers.get("content-type"), "application/a2a+json");
+  assert.equal(calls[1]?.headers.get("idempotency-key"), "a2a-create-1");
+});
+
 test("SDK parses NDJSON run events in order", async () => {
   const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode('{"type":"run.started","run":{"id":"run_1"}}\n{"type":"run.delta","runId":"run_1","text":"Hello"}\n')); controller.close(); } });
   const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch(() => new Response(stream, { status: 200 })) });

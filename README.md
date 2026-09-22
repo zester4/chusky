@@ -142,6 +142,16 @@ budget, SLA, and deliverable expectations. Use `POST /v1/outcomes/:slug/plan`
 to validate inputs and inspect the proposed execution graph before starting a
 mission.
 
+### Agent-to-agent (A2A) integration
+
+Chusky also exposes a discoverable A2A 1.0 boundary for external agents. Fetch
+`/a2a/.well-known/agent-card.json` to discover the supported outcome skills and
+JSON-RPC interface, then use a project-scoped bearer key plus a stable
+`X-Chusky-User-Id` to create, stream, inspect, list, or cancel durable tasks.
+The A2A layer maps directly to the same owner-scoped mission runtime as the
+SDK, CLI, dashboard, and MCP; it does not expose private prompts or provider
+credentials. See [docs/a2a.md](docs/a2a.md) for the complete contract.
+
 ### Calling third-party MCP servers
 
 Chusky can also act as an MCP client for owner-approved remote Streamable HTTP

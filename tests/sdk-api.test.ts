@@ -145,6 +145,42 @@ test("context, outcome, evidence, and A2A surfaces share the same owner-scoped r
   assert.equal(forbidden.status, 404);
 });
 
+test("A2A JSON-RPC exposes standard task operations over the owner-scoped mission runtime", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-rpc-test");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "a2a-rpc-owner", "Content-Type": "application/a2a+json", "Idempotency-Key": "a2a-rpc-create" };
+  const card = await api.fetch(new Request("http://local/a2a/.well-known/agent-card.json"));
+  assert.equal(card.status, 200);
+  const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }> };
+  assert.equal(cardBody.protocolVersion, "1.0");
+  assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
+  assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
+
+  const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "SendMessage", params: { message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
+  assert.equal(send.status, 200);
+  const created = await send.json() as { result: { task: { id: string; status: { state: string } } } };
+  assert.match(created.result.task.id, /^mis_/);
+  assert.equal(created.result.task.status.state, "TASK_STATE_WORKING");
+
+  const get = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-get" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "GetTask", params: { id: created.result.task.id } }) }));
+  assert.equal(get.status, 200);
+  assert.equal(((await get.json()) as { result: { task: { id: string } } }).result.task.id, created.result.task.id);
+
+  const list = await api.fetch(new Request("http://local/a2a/v1", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-list" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ListTasks", params: { pageSize: 10 } }) }));
+  assert.equal(list.status, 200);
+  const listed = await list.json() as { result: { tasks: Array<{ id: string }>; nextPageToken: string } };
+  assert.equal(listed.result.tasks.some((item) => item.id === created.result.task.id), true);
+  assert.equal(typeof listed.result.nextPageToken, "string");
+
+  const cancelled = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-cancel" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "CancelTask", params: { id: created.result.task.id } }) }));
+  assert.equal(cancelled.status, 200);
+  assert.equal(((await cancelled.json()) as { result: { task: { status: { state: string } } } }).result.task.status.state, "TASK_STATE_CANCELED");
+
+  const malformed = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-invalid" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "NotA2AMethod", params: {} }) }));
+  assert.equal(malformed.status, 400);
+  assert.equal(((await malformed.json()) as { error: { code: number } }).error.code, -32601);
+});
+
 test("SDK conversation lifecycle is owned, archive-aware, and protects active runs", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "lifecycle-user", "Content-Type": "application/json" };
