@@ -538,6 +538,7 @@ export function mapRecallBotStatus(code: unknown): "joining" | "waiting_room" | 
     case "joining_call": return "joining";
     case "in_waiting_room": return "waiting_room";
     case "in_call_not_recording":
+    case "in_call":
     case "recording_permission_allowed":
     case "recording_permission_denied":
     case "in_call_recording": return "in_call";

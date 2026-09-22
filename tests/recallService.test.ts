@@ -343,6 +343,19 @@ test("Recall media authorization starts once the owned bot is joining and reject
   assert.equal(await getRecallMediaAuthorizationState(ownerId + 1, meeting.id), "denied");
 });
 
+test("Recall media authorization repairs a stale terminal webhook before denying Output Media", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: "bot_stale_media" }), { status: 201 });
+    if (url.endsWith("/bot/bot_stale_media/") && init?.method === "GET") return new Response(JSON.stringify({ status: { code: "in_call_not_recording" } }), { status: 200 });
+    return new Response(null, { status: 204 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/stale-media-terminal" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "ended", error: "Recall could not join the meeting" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "in_call");
+});
+
 test("an ended representative meeting schedules post-meeting follow-through and retries can re-enqueue it", async () => {
   await updateMeetingRepresentativeProfile(ownerId, { enabled: true, objective: "Represent the company and progress onboarding" });
   globalThis.fetch = async () => new Response(JSON.stringify({ id: botId }), { status: 201 });

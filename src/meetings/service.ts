@@ -738,6 +738,33 @@ export async function getRecallMediaAuthorizationState(userId: number, id: strin
   // actually connected it to the call.
   if (["joining", "waiting_room", "in_call"].includes(meeting.status)) return "authorized";
   if (["creating", "scheduled"].includes(meeting.status)) return "pending";
+  // A status webhook can arrive out of order, or a provider retry can be
+  // delayed while Recall has already admitted the bot. Before denying the
+  // Output Media page, reconcile a recently terminal local record against
+  // Recall's authenticated source of truth. The short Redis lease prevents
+  // every browser retry from creating a provider request storm.
+  if (["ended", "failed"].includes(meeting.status) && meeting.providerBotId && Date.now() - meeting.updatedAt < 5 * 60_000) {
+    const leaseKey = `recall-media-reconcile:${userId}:${id}`;
+    const leaseToken = randomUUID();
+    if ((await claimDeliveryLease(leaseKey, leaseToken, 5_000)) === "acquired") {
+      try {
+        const providerStatus = await retrieveRecallBotStatus(meeting.providerBotId);
+        if (providerStatus && ["joining", "waiting_room", "in_call"].includes(providerStatus)) {
+          await updateRecallMeeting(userId, id, {
+            status: providerStatus,
+            error: undefined,
+            ...(providerStatus === "in_call" ? { runtimeState: "healthy" as const } : {}),
+          });
+          return "authorized";
+        }
+      } catch {
+        // The bridge will return the safe terminal state if Recall cannot be
+        // checked. Provider failures must not turn into a false authorization.
+      } finally {
+        await releaseDeliveryLease(leaseKey, leaseToken).catch(() => undefined);
+      }
+    }
+  }
   return "denied";
 }
 

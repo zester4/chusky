@@ -834,16 +834,28 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw new Error("Searchable meeting transcript retention can be enabled only from a private owner conversation");
       }
       const profile = await getMeetingRepresentativeProfile(userId);
-      const hasClientMission = hasMeetingMissionInput(args);
-      const interactionMode = hasClientMission ? "representative" : args.interactionMode ?? (profile.enabled ? "representative" : "copilot");
-        const transcriptRetentionDays = ownerExplicitlyRequestedTranscriptRetention(runtime.userRequest ?? "")
-          ? args.transcriptRetentionDays
-          : undefined;
-        return joinRecallMeeting(userId, {
-          meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, languageMode: args.languageMode, languageHints: args.languageHints, keyterms: args.keyterms, analyzeScreenShare: args.analyzeScreenShare,
-          ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
-        clientName: args.clientName, objective: args.objective, clientContext: args.clientContext, clientContextConfirmed: args.clientContextConfirmed,
-        ...(runtime.meetingId && args.clientName === undefined ? { inheritMeetingId: runtime.meetingId } : {}),
+      const clientName = typeof args.clientName === "string" && args.clientName.trim() ? args.clientName : undefined;
+      // Objective/context without a named client is incomplete model carry-over,
+      // not authorization for representative mode. Drop the incomplete brief so
+      // an ordinary meeting can still join safely and predictably.
+      const hasClientMission = clientName !== undefined && hasMeetingMissionInput({ ...args, clientName });
+      const requestedMode = hasClientMission ? "representative" : args.interactionMode;
+      // A model can carry a stale representative selection from a previous
+      // turn. Never make an ordinary meeting fail just because the owner has
+      // not configured that optional profile; downgrade safely to copilot.
+      // Client-bound representation remains strict because it requires the
+      // owner's approved mandate and bounded relationship brief.
+      const interactionMode = requestedMode === "representative" && !profile.enabled && !hasClientMission
+        ? "copilot"
+        : requestedMode ?? (profile.enabled ? "representative" : "copilot");
+      const transcriptRetentionDays = ownerExplicitlyRequestedTranscriptRetention(runtime.userRequest ?? "")
+        ? args.transcriptRetentionDays
+        : undefined;
+      return joinRecallMeeting(userId, {
+        meetingUrl: args.meetingUrl, title: args.title, joinAt: args.joinAt, interactionMode, languageMode: args.languageMode, languageHints: args.languageHints, keyterms: args.keyterms, analyzeScreenShare: args.analyzeScreenShare,
+        ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
+        ...(hasClientMission ? { clientName, ...(args.objective !== undefined ? { objective: args.objective } : {}), ...(args.clientContext !== undefined ? { clientContext: args.clientContext } : {}), ...(args.clientContextConfirmed !== undefined ? { clientContextConfirmed: args.clientContextConfirmed } : {}) } : {}),
+        ...(runtime.meetingId && !hasClientMission ? { inheritMeetingId: runtime.meetingId } : {}),
       }, runtime.signal);
     }
     case "CHUCK_MEETING_PROFILE_GET": return getMeetingRepresentativeProfile(userId);
