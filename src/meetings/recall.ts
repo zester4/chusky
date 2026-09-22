@@ -36,7 +36,7 @@ export interface RecallCreateBotRequest {
     participant_events: null | Record<string, never>;
     meeting_metadata: null;
     transcript: null | {
-      provider: { recallai_streaming: { mode: "prioritize_low_latency"; language_code: "en" } };
+      provider: { recallai_streaming: { mode: "prioritize_low_latency"; language_code: string } };
       diarization: { use_separate_streams_when_available: true };
     };
     realtime_endpoints?: Array<{
@@ -148,6 +148,9 @@ export function buildRecallCreateBotRequest(input: {
   transcriptRetentionDays?: 1 | 7 | 30;
   screenShareContextEnabled?: boolean;
   visualWebsocketUrl?: string;
+  languageMode?: "english" | "multilingual";
+  languageHints?: string[];
+  keyterms?: string[];
 }): RecallCreateBotRequest {
   const meeting = validateMeetingUrl(input.meetingUrl);
   const botName = String(input.botName ?? "").trim();
@@ -167,6 +170,13 @@ export function buildRecallCreateBotRequest(input: {
   const transcriptRetentionDays = input.transcriptRetentionDays;
   if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) throw new Error("Meeting transcript retention must be 1, 7, or 30 days");
   if (transcriptRetentionDays !== undefined && !realtimeWebhookUrl) throw new Error("Retained meeting transcripts require the configured signed Recall real-time endpoint");
+  const languageMode = input.languageMode ?? "english";
+  if (languageMode !== "english" && languageMode !== "multilingual") throw new Error("Invalid meeting language mode");
+  const languageHints = input.languageHints ?? [];
+  const keyterms = input.keyterms ?? [];
+  if (languageHints.length > 8 || languageHints.some((hint) => typeof hint !== "string" || hint.length > 40)) throw new Error("Invalid meeting language hints");
+  if (languageMode === "multilingual" && languageHints.length === 0) throw new Error("Multilingual meetings require at least one language hint");
+  if (keyterms.length > 50 || keyterms.some((term) => typeof term !== "string" || term.length > 80)) throw new Error("Invalid meeting keyterms");
   let visualWebsocketUrl: string | undefined;
   if (screenShareContextEnabled) {
     if (meeting.platform === "webex") throw new Error("Recall real-time screen understanding supports Zoom, Google Meet, and Microsoft Teams, not Webex");
@@ -199,7 +209,7 @@ export function buildRecallCreateBotRequest(input: {
   const request: RecallCreateBotRequest = {
     meeting_url: meeting.url,
     bot_name: botName,
-    metadata: { chusky_meeting_id: input.meetingId, chusky_user_id: String(input.userId) },
+    metadata: { chusky_meeting_id: input.meetingId, chusky_user_id: String(input.userId), chusky_language_mode: languageMode, ...(languageHints.length ? { chusky_language_hints: languageHints.join(",").slice(0, 320) } : {}), ...(keyterms.length ? { chusky_keyterms: keyterms.join(",").slice(0, 2_000) } : {}) },
     output_media: { camera: { kind: "webpage", config: { url: mediaPage.toString() } } },
     // Output Media supplies the live audio path. Do not also create retained
     // recording artifacts or transcripts: Recall supports retention:null for

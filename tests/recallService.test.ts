@@ -1,7 +1,7 @@
 import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
-import { initStore, getRecallMeeting, listRecallMeetings, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { initStore, getRecallMeeting, listRecallMeetings, recordRecallMeetingRuntime, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
@@ -87,6 +87,23 @@ test("creates an owner-scoped immediate meeting with no URL leakage or retained 
   assert.equal(stored?.meetingUrlHash.length, 64);
   assert.equal("meetingUrl" in (stored ?? {}), false);
   assert.equal((await getRecallMeeting(ownerId + 1, meeting.id)), undefined);
+});
+
+test("meeting runtime diagnostics persist bounded latency state and timeline events", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_runtime_123" }), { status: 201 });
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/runtime-diagnostics-room" });
+  const updated = await recordRecallMeetingRuntime(ownerId, meeting.id, {
+    state: "degraded",
+    eventType: "degraded",
+    summary: "A natural recovery line was used while the model was slow.",
+    turn: { completed: true, fallback: true, firstAudioMs: 1_200, finalResponseMs: 4_800 },
+  });
+  assert.equal(updated?.runtimeState, "degraded");
+  assert.equal(updated?.turnMetrics?.turns, 1);
+  assert.equal(updated?.turnMetrics?.fallbackTurns, 1);
+  assert.equal(updated?.turnMetrics?.firstAudio.averageMs, 1_200);
+  assert.equal(updated?.timeline?.at(-1)?.type, "degraded");
+  assert.equal(updated?.timeline?.at(-1)?.summary, "A natural recovery line was used while the model was slow.");
 });
 
 test("meeting joins default to proactive copilot or the enabled representative profile", async () => {

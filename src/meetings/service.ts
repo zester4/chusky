@@ -45,6 +45,7 @@ import {
   validateMeetingUrl,
   validateRecallJoinAt,
 } from "./recall.js";
+import { getMeetingCapabilities } from "./capabilities.js";
 import { hasMeetingMissionInput, lookupMeetingBusinessKnowledge, lookupMeetingMission, prepareMeetingMission } from "./mission.js";
 import { openCalendarMeetingUrl } from "./calendar.js";
 import { planCalendarAutoJoin } from "./calendarAutomation.js";
@@ -333,6 +334,13 @@ function safeMeeting(record: RecallMeetingRecord) {
     platform: record.platform,
     status: record.status,
     interactionMode: record.interactionMode === "copilot" || record.interactionMode === "representative" ? record.interactionMode : "addressed",
+    languageMode: record.languageMode ?? "english",
+    ...(record.languageHints?.length ? { languageHints: record.languageHints } : {}),
+    ...(record.keyterms?.length ? { keyterms: record.keyterms } : {}),
+    capabilities: record.capabilities ?? getMeetingCapabilities(record.platform),
+    runtimeState: record.runtimeState ?? (record.status === "ended" ? "ended" : "healthy"),
+    ...(record.turnMetrics ? { turnMetrics: record.turnMetrics } : {}),
+    ...(record.timeline?.length ? { timeline: record.timeline.slice(-100) } : {}),
     screenShareUnderstanding: record.visualContextEnabled === true,
     searchableTranscript: Boolean(record.transcriptRetentionDays && record.transcriptExpiresAt && record.transcriptExpiresAt > Date.now()),
     ...(record.transcriptStatus && ["processing", "ready", "failed"].includes(record.transcriptStatus) ? { transcriptStatus: record.transcriptStatus } : {}),
@@ -358,6 +366,9 @@ export async function joinRecallMeeting(userId: number, input: {
   title?: unknown;
   joinAt?: unknown;
   interactionMode?: unknown;
+  languageMode?: unknown;
+  languageHints?: unknown;
+  keyterms?: unknown;
   analyzeScreenShare?: unknown;
   transcriptRetentionDays?: unknown;
   clientName?: unknown;
@@ -376,6 +387,13 @@ export async function joinRecallMeeting(userId: number, input: {
   assertUserId(userId);
   const meeting = validateMeetingUrl(input.meetingUrl);
   if (input.analyzeScreenShare !== undefined && typeof input.analyzeScreenShare !== "boolean") throw new Error("analyzeScreenShare must be true or false");
+  const languageMode = input.languageMode === undefined ? "english" : input.languageMode;
+  if (languageMode !== "english" && languageMode !== "multilingual") throw new Error("languageMode must be english or multilingual");
+  const languageHints = input.languageHints === undefined ? [] : input.languageHints;
+  if (!Array.isArray(languageHints) || languageHints.length > 8 || languageHints.some((hint) => typeof hint !== "string" || !hint.trim() || hint.length > 40)) throw new Error("languageHints must contain at most 8 short language codes or names");
+  if (languageMode === "multilingual" && languageHints.length === 0) throw new Error("Multilingual meetings require at least one language hint");
+  const keyterms = input.keyterms === undefined ? [] : input.keyterms;
+  if (!Array.isArray(keyterms) || keyterms.length > 50 || keyterms.some((term) => typeof term !== "string" || !term.trim() || term.length > 80)) throw new Error("keyterms must contain at most 50 short terms");
   const room = input.meetingRoom;
   const transcriptRetentionDays = input.transcriptRetentionDays ?? room?.policy.transcriptRetentionDays;
   if (transcriptRetentionDays !== undefined && transcriptRetentionDays !== 1 && transcriptRetentionDays !== 7 && transcriptRetentionDays !== 30) {
@@ -446,6 +464,12 @@ export async function joinRecallMeeting(userId: number, input: {
     ...(room ? { roomId: room.roomId, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.visibility, roomAllowedComposioTools: [...room.policy.allowedComposioTools], roomAllowedNativeTools: [...room.policy.allowedNativeTools] } : {}),
     platform: meeting.platform,
     interactionMode,
+    languageMode,
+    ...(languageHints.length ? { languageHints: languageHints.map((hint) => hint.trim()) } : {}),
+    ...(keyterms.length ? { keyterms: keyterms.map((term) => term.trim()) } : {}),
+    capabilities: getMeetingCapabilities(meeting.platform),
+    runtimeState: "healthy",
+    timeline: [{ id: `evt_${randomUUID()}`, type: "created", at: now, summary: "Meeting assistant created" }],
     visualContextEnabled: analyzeScreenShare,
     ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
     status: "creating",
@@ -486,6 +510,9 @@ export async function joinRecallMeeting(userId: number, input: {
       meetingId: id,
       userId,
       interactionMode,
+      languageMode,
+      ...(languageHints.length ? { languageHints: languageHints.map((hint) => hint.trim()) } : {}),
+      ...(keyterms.length ? { keyterms: keyterms.map((term) => term.trim()) } : {}),
       ...(transcriptRetentionDays !== undefined ? { transcriptRetentionDays } : {}),
       screenShareContextEnabled: analyzeScreenShare,
       ...(analyzeScreenShare ? { visualWebsocketUrl: recallVisualWebsocketUrl() } : {}),
@@ -838,7 +865,10 @@ export async function applyRecallStatusWebhook(input: {
     const error = status === "failed"
       ? `Recall could not join the meeting${errorCode ? ` (${errorCode})` : ""}`
       : undefined;
-    const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt" | "participantRoster">> = { status, ...(providerStatusAt ? { providerStatusAt } : {}), error, ...(["ended", "failed"].includes(status) ? { participantRoster: [] } : {}) };
+    const timelineType: NonNullable<RecallMeetingRecord["timeline"]>[number]["type"] | undefined = status === "failed" ? "failed" : status === "ended" ? "ended" : status === "waiting_room" ? "waiting_room" : status === "in_call" ? "in_call" : status === "joining" ? "joining" : undefined;
+    const runtimeState = status === "ended" ? "ended" : status === "failed" ? "voice_unavailable" : status === "in_call" ? "healthy" : undefined;
+    const timeline = timelineType ? [...(current.timeline ?? []), { id: `evt_${randomUUID()}`, type: timelineType, at: Date.now(), summary: error ?? `Meeting provider status changed to ${status}` }].slice(-100) : current.timeline;
+    const patch: Partial<Pick<RecallMeetingRecord, "status" | "error" | "providerStatusAt" | "participantRoster" | "runtimeState" | "timeline">> = { status, ...(runtimeState ? { runtimeState } : {}), ...(timeline ? { timeline } : {}), ...(providerStatusAt ? { providerStatusAt } : {}), error, ...(["ended", "failed"].includes(status) ? { participantRoster: [] } : {}) };
     const updated = await updateRecallMeeting(userId, meetingId, patch);
     if (updated) {
       const preparations = await listCalendarMeetingPreparations(userId, 30);

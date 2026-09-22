@@ -407,6 +407,13 @@ function meetingView(meeting: any) {
     ...(meeting.visibility ? { visibility: meeting.visibility } : {}),
     platform: meeting.platform,
     interactionMode: meeting.interactionMode ?? "addressed",
+    languageMode: meeting.languageMode ?? "english",
+    languageHints: meeting.languageHints ?? [],
+    keyterms: meeting.keyterms ?? [],
+    capabilities: meeting.capabilities,
+    runtimeState: meeting.runtimeState ?? (meeting.status === "ended" ? "ended" : "healthy"),
+    turnMetrics: meeting.turnMetrics,
+    timeline: (meeting.timeline ?? []).map((entry: any) => ({ ...entry, at: new Date(entry.at).toISOString() })),
     status: meeting.status,
     title: meeting.title,
     joinAt: meeting.joinAt,
@@ -1291,7 +1298,7 @@ export function registerSdkApi(app: Hono): void {
     if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
     if (prior.replay) return c.json(prior.replay, 201);
     try {
-      const result = await joinRecallMeeting(owner.userId, { ...body, ...(room ? { meetingRoom: { roomId: room.id, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.policy.visibility, policy: room.policy } } : {}) } as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string; meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy } });
+      const result = await joinRecallMeeting(owner.userId, { ...body, ...(room ? { meetingRoom: { roomId: room.id, organizationId: room.organizationId, ...(room.teamId ? { teamId: room.teamId } : {}), ...(room.projectId ? { projectId: room.projectId } : {}), visibility: room.policy.visibility, policy: room.policy } } : {}) } as { meetingUrl: unknown; title?: unknown; joinAt?: unknown; interactionMode?: unknown; languageMode?: unknown; languageHints?: unknown; keyterms?: unknown; analyzeScreenShare?: unknown; transcriptRetentionDays?: unknown; clientName?: unknown; objective?: unknown; clientContext?: unknown; inheritMeetingId?: string; calendarPreparationId?: string; meetingRoom?: { roomId: string; organizationId: string; teamId?: string; projectId?: string; visibility: "private" | "team" | "organization"; policy: MeetingRoomPolicy } });
       if (prior.key) {
         session.sdkIdempotency![prior.key] = { fingerprint, response: result, createdAt: Date.now() };
         await saveSession(owner.userId, session);

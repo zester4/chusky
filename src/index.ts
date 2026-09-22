@@ -10,7 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -904,13 +904,16 @@ async function main(): Promise<void> {
       return c.json({
         interactionMode: effectiveMode,
         greeting: meetingRepresentativeGreeting(effectiveMode, profile),
+        languageMode: meeting.languageMode ?? "english",
+        languageHints: meeting.languageHints ?? [],
+        keyterms: meeting.keyterms ?? [],
         ...(ttsModel ? { ttsModel } : {}),
       }, 200, { "Cache-Control": "no-store" });
     });
 
     app.post("/internal/recall/commit-turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret) || !config.recallMeetingsEnabled) return c.json({ ok: false, error: "unauthorized" }, 401);
-      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean };
+      const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number; transcript?: string; text?: string; cost?: number; turnId?: string; speak?: boolean; runtimeState?: string; turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string } };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       const transcript = String(body.transcript ?? "").trim();
@@ -918,7 +921,9 @@ async function main(): Promise<void> {
       const turnId = String(body.turnId ?? "").trim();
       const speak = body.speak !== false;
       const cost = Number(body.cost ?? 0);
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
+      const runtimeState = body.runtimeState === undefined ? "healthy" : body.runtimeState;
+      const turn = body.turn;
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0 || (speak && (!transcript || transcript.length > 5000 || !text || text.length > 5000)) || (!speak && (transcript || text)) || !/^[A-Za-z0-9:_-]{1,160}$/.test(turnId) || !Number.isFinite(cost) || cost < 0 || cost > 10 || !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(runtimeState) || (turn !== undefined && (!turn || typeof turn !== "object" || Object.values(turn).some((value) => typeof value === "number" && (!Number.isFinite(value) || value < 0 || value > 120_000))))) return c.json({ ok: false, error: "invalid meeting voice commit" }, 400);
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
       const key = `recall-turn:${meetingId}:${turnId}`;
@@ -931,6 +936,12 @@ async function main(): Promise<void> {
           ]);
         }
         if (cost) await addUsage(userId, cost);
+        await recordRecallMeetingRuntime(userId, meetingId, {
+          state: runtimeState as "healthy" | "degraded" | "reconnecting" | "voice_unavailable" | "ended",
+          eventType: "turn",
+          summary: runtimeState === "degraded" ? "Meeting turn used a natural latency fallback" : "Meeting turn completed",
+          ...(turn ? { turn } : {}),
+        });
         await completeDelivery(key, 7 * 24 * 60 * 60);
         return c.json({ ok: true });
       } catch (error) {

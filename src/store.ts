@@ -16,6 +16,7 @@ import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
+import type { MeetingCapabilities } from "./meetings/capabilities.js";
 import { defaultMeetingRepresentativeProfile, normalizeMeetingRepresentativeProfile, type MeetingRepresentativeProfile } from "./meetings/representative.js";
 import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission.js";
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
@@ -265,6 +266,38 @@ export interface RecallMeetingOutcome {
   decisions: string[];
   actionItems: { task: string; owner: string; dueDate?: string }[];
   openQuestions: string[];
+  escalation?: RecallMeetingEscalation;
+}
+
+export type RecallMeetingRuntimeState = "healthy" | "degraded" | "reconnecting" | "voice_unavailable" | "ended";
+
+export interface RecallMeetingEscalation {
+  required: boolean;
+  severity: "low" | "medium" | "high" | "critical";
+  reason?: string;
+  nextSteps: Array<{ action: string; owner: string; dueDate?: string }>;
+  openQuestions: string[];
+  confidence: "low" | "medium" | "high";
+}
+
+export interface RecallMeetingTurnMetrics {
+  turns: number;
+  eagerTurns: number;
+  resumedTurns: number;
+  completedTurns: number;
+  failedTurns: number;
+  fallbackTurns: number;
+  firstAudio: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
+  finalResponse: { count: number; averageMs?: number; p50Ms?: number; p95Ms?: number };
+  lastErrorCode?: string;
+  updatedAt: number;
+}
+
+export interface RecallMeetingTimelineEvent {
+  id: string;
+  type: "created" | "joining" | "waiting_room" | "in_call" | "reconnecting" | "degraded" | "turn" | "ended" | "failed" | "outcome";
+  at: number;
+  summary: string;
 }
 
 export interface RecallMeetingFollowThrough {
@@ -328,6 +361,14 @@ export interface RecallMeetingRecord {
   platform: "zoom" | "google_meet" | "microsoft_teams" | "webex";
   /** addressed is conservative default; copilot is explicit per-meeting opt-in. */
   interactionMode?: "addressed" | "copilot" | "representative";
+  /** Per-meeting voice configuration; persisted without provider credentials. */
+  languageMode?: "english" | "multilingual";
+  languageHints?: string[];
+  keyterms?: string[];
+  capabilities?: MeetingCapabilities;
+  runtimeState?: RecallMeetingRuntimeState;
+  turnMetrics?: RecallMeetingTurnMetrics;
+  timeline?: RecallMeetingTimelineEvent[];
   /** Explicit owner opt-in to transient shared-screen PNG context for supported platforms. */
   visualContextEnabled?: boolean;
   /** Explicit owner opt-in; omitted means the transcript is deleted after outcome processing. */
@@ -3345,6 +3386,54 @@ function normalizeRecallSpeakerEvents(value: unknown): RecallMeetingSpeakerEvent
     .slice(-200);
 }
 
+function normalizeMeetingCapabilities(value: unknown): MeetingCapabilities | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const level = (item: unknown): "supported" | "limited" | "unsupported" => item === "supported" || item === "limited" ? item : "unsupported";
+  return {
+    audio: level(input.audio), outboundChat: level(input.outboundChat), inboundChat: level(input.inboundChat),
+    screenShare: level(input.screenShare), participantEvents: level(input.participantEvents),
+    speakerEvents: level(input.speakerEvents), scheduledJoin: level(input.scheduledJoin),
+    waitingRoom: level(input.waitingRoom), admissionControl: level(input.admissionControl),
+    transcript: level(input.transcript),
+    notes: Array.isArray(input.notes) ? input.notes.filter((note): note is string => typeof note === "string").map((note) => note.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 500)).filter(Boolean).slice(0, 5) : [],
+  };
+}
+
+function normalizeMeetingTimeline(value: unknown): RecallMeetingTimelineEvent[] {
+  if (!Array.isArray(value)) return [];
+  const types = new Set<RecallMeetingTimelineEvent["type"]>(["created", "joining", "waiting_room", "in_call", "reconnecting", "degraded", "turn", "ended", "failed", "outcome"]);
+  return value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    .filter((item) => typeof item.id === "string" && /^[A-Za-z0-9_-]{1,96}$/.test(item.id) && types.has(item.type as RecallMeetingTimelineEvent["type"]) && Number.isSafeInteger(item.at) && typeof item.summary === "string")
+    .map((item) => ({ id: String(item.id), type: item.type as RecallMeetingTimelineEvent["type"], at: Number(item.at), summary: String(item.summary).replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 280) }))
+    .filter((item) => item.summary)
+    .slice(-100);
+}
+
+function normalizeMeetingTurnMetrics(value: unknown): RecallMeetingTurnMetrics | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const number = (item: unknown, fallback = 0) => Number.isSafeInteger(item) && Number(item) >= 0 ? Number(item) : fallback;
+  const summary = (item: unknown) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return { count: 0 };
+    const source = item as Record<string, unknown>;
+    return {
+      count: number(source.count),
+      ...(Number.isSafeInteger(source.averageMs) ? { averageMs: Number(source.averageMs) } : {}),
+      ...(Number.isSafeInteger(source.p50Ms) ? { p50Ms: Number(source.p50Ms) } : {}),
+      ...(Number.isSafeInteger(source.p95Ms) ? { p95Ms: Number(source.p95Ms) } : {}),
+    };
+  };
+  if (!Number.isSafeInteger(input.updatedAt) || Number(input.updatedAt) <= 0) return undefined;
+  return {
+    turns: number(input.turns), eagerTurns: number(input.eagerTurns), resumedTurns: number(input.resumedTurns),
+    completedTurns: number(input.completedTurns), failedTurns: number(input.failedTurns), fallbackTurns: number(input.fallbackTurns),
+    firstAudio: summary(input.firstAudio), finalResponse: summary(input.finalResponse),
+    ...(typeof input.lastErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(input.lastErrorCode) ? { lastErrorCode: input.lastErrorCode } : {}),
+    updatedAt: Number(input.updatedAt),
+  };
+}
+
 const AUTONOMY_MODES: AutonomyMode[] = ["notify", "check_in", "act", "wait_until"];
 const AUTONOMY_STATUSES = ["queued", "running", "waiting", "blocked", "completed", "failed", "cancelled"] as const;
 
@@ -3489,6 +3578,16 @@ export async function getSession(uid: number): Promise<UserSession> {
   s.contextNodes = Array.isArray(s.contextNodes) ? s.contextNodes.filter((item): item is ContextNodeRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-1000) : [];
   s.departmentSpaces = Array.isArray(s.departmentSpaces) ? s.departmentSpaces.filter((item): item is DepartmentSpaceRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-50) : [];
   s.workPackets = Array.isArray(s.workPackets) ? s.workPackets.filter((item): item is WorkPacketRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-500) : [];
+  s.recallMeetings = Array.isArray(s.recallMeetings) ? s.recallMeetings.map((meeting) => ({
+    ...meeting,
+    languageMode: meeting.languageMode === "multilingual" ? "multilingual" as const : "english" as const,
+    languageHints: Array.isArray(meeting.languageHints) ? meeting.languageHints.filter((hint): hint is string => typeof hint === "string").map((hint) => hint.trim().slice(0, 40)).filter(Boolean).slice(0, 8) : [],
+    keyterms: Array.isArray(meeting.keyterms) ? meeting.keyterms.filter((term): term is string => typeof term === "string").map((term) => term.trim().slice(0, 80)).filter(Boolean).slice(0, 50) : [],
+    capabilities: normalizeMeetingCapabilities(meeting.capabilities),
+    runtimeState: meeting.runtimeState === "degraded" || meeting.runtimeState === "reconnecting" || meeting.runtimeState === "voice_unavailable" || meeting.runtimeState === "ended" ? meeting.runtimeState : "healthy" as const,
+    turnMetrics: normalizeMeetingTurnMetrics(meeting.turnMetrics),
+    timeline: normalizeMeetingTimeline(meeting.timeline),
+  })) : [];
   return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.filter((item): item is McpConnectionRecord => Boolean(item) && typeof item === "object" && typeof item.serverId === "string" && /^[A-Za-z0-9_-]{1,48}$/.test(item.serverId) && typeof item.enabled === "boolean" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt) && (!item.credential || typeof item.credential === "object")).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], shoppingSites: Array.isArray(s.shoppingSites) ? s.shoppingSites.slice(0, 100) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
@@ -3915,7 +4014,7 @@ export async function listRecallMeetings(uid: number, limit = 10): Promise<Recal
   return (await getSession(uid)).recallMeetings?.slice(0, Math.max(1, Math.min(20, Math.floor(limit)))) ?? [];
 }
 
-export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode">>): Promise<RecallMeetingRecord | undefined> {
+export async function updateRecallMeeting(uid: number, id: string, patch: Partial<Pick<RecallMeetingRecord, "status" | "providerBotId" | "title" | "joinAt" | "error" | "providerStatusAt" | "participantRoster" | "speakerEvents" | "outcomeTranscript" | "outcomeTranscriptCapturedAt" | "outcome" | "outcomeFollowThrough" | "outcomeStatus" | "outcomeNotificationStatus" | "transcriptRetentionDays" | "transcriptExpiresAt" | "transcriptStatus" | "transcriptErrorCode" | "languageMode" | "languageHints" | "keyterms" | "capabilities" | "runtimeState" | "turnMetrics" | "timeline">>): Promise<RecallMeetingRecord | undefined> {
   const session = await getSession(uid);
   const current = session.recallMeetings?.find((meeting) => meeting.id === id && meeting.userId === uid);
   if (!current) return undefined;
@@ -3924,6 +4023,7 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
     if (patch.outcome.title.length > 180 || patch.outcome.summary.length > 2_000 || patch.outcome.decisions.length > 10 || patch.outcome.actionItems.length > 10 || patch.outcome.openQuestions.length > 10) throw new Error("Meeting outcome exceeds storage bounds");
     if ([...patch.outcome.decisions, ...patch.outcome.openQuestions].some((item) => typeof item !== "string" || item.length > 700)
       || patch.outcome.actionItems.some((item) => !item || typeof item.task !== "string" || item.task.length > 500 || typeof item.owner !== "string" || item.owner.length > 120 || (item.dueDate !== undefined && item.dueDate.length > 80))) throw new Error("Meeting outcome contains invalid fields");
+    if (patch.outcome.escalation && (patch.outcome.escalation.nextSteps.length > 10 || patch.outcome.escalation.openQuestions.length > 10 || (patch.outcome.escalation.reason !== undefined && patch.outcome.escalation.reason.length > 1_000) || patch.outcome.escalation.nextSteps.some((step) => step.action.length > 500 || step.owner.length > 120))) throw new Error("Meeting escalation contains invalid fields");
   }
   if (patch.outcomeTranscript !== undefined) {
     if (!Array.isArray(patch.outcomeTranscript) || patch.outcomeTranscript.length > 32) throw new Error("Meeting outcome transcript exceeds turn bounds");
@@ -3940,6 +4040,12 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   if (patch.transcriptExpiresAt !== undefined && (!Number.isSafeInteger(patch.transcriptExpiresAt) || patch.transcriptExpiresAt <= 0)) throw new Error("Meeting transcript expiry is invalid");
   if (patch.transcriptStatus !== undefined && !["processing", "ready", "failed"].includes(patch.transcriptStatus)) throw new Error("Meeting transcript status is invalid");
   if (patch.transcriptErrorCode !== undefined && (typeof patch.transcriptErrorCode !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(patch.transcriptErrorCode))) throw new Error("Meeting transcript error code is invalid");
+  if (patch.languageMode !== undefined && patch.languageMode !== "english" && patch.languageMode !== "multilingual") throw new Error("Meeting language mode is invalid");
+  if (patch.languageHints !== undefined && (!Array.isArray(patch.languageHints) || patch.languageHints.length > 8 || patch.languageHints.some((hint) => typeof hint !== "string" || hint.length > 40))) throw new Error("Meeting language hints are invalid");
+  if (patch.keyterms !== undefined && (!Array.isArray(patch.keyterms) || patch.keyterms.length > 50 || patch.keyterms.some((term) => typeof term !== "string" || term.length > 80))) throw new Error("Meeting keyterms are invalid");
+  if (patch.runtimeState !== undefined && !["healthy", "degraded", "reconnecting", "voice_unavailable", "ended"].includes(patch.runtimeState)) throw new Error("Meeting runtime state is invalid");
+  if (patch.timeline !== undefined && (!Array.isArray(patch.timeline) || patch.timeline.length > 100 || patch.timeline.some((event) => !event || !/^[A-Za-z0-9_-]{1,96}$/.test(event.id) || !Number.isSafeInteger(event.at) || typeof event.summary !== "string" || event.summary.length > 280))) throw new Error("Meeting timeline is invalid");
+  if (patch.turnMetrics !== undefined && (!Number.isSafeInteger(patch.turnMetrics.updatedAt) || patch.turnMetrics.updatedAt <= 0)) throw new Error("Meeting turn metrics are invalid");
   if (patch.outcomeFollowThrough?.notionTool && (patch.outcomeFollowThrough.notionTool.length > 128 || !/^NOTION_[A-Z0-9_]+$/.test(patch.outcomeFollowThrough.notionTool))) throw new Error("Meeting outcome Notion action is invalid");
   if (patch.outcomeFollowThrough?.notionUrl && (patch.outcomeFollowThrough.notionUrl.length > 2_048 || !/^https:\/\/(?:[\w-]+\.)*notion\.so\//.test(patch.outcomeFollowThrough.notionUrl) && !/^https:\/\/(?:[\w-]+\.)*notion\.site\//.test(patch.outcomeFollowThrough.notionUrl))) throw new Error("Meeting outcome Notion URL is invalid");
   if (patch.participantRoster && (patch.participantRoster.length > 40 || patch.participantRoster.some((participant) => !participant || !/^[A-Za-z0-9_-]{1,128}$/.test(participant.id) || typeof participant.name !== "string" || !participant.name.trim() || participant.name.length > 160 || (participant.identityStatus !== undefined && participant.identityStatus !== "named" && participant.identityStatus !== "unknown") || (participant.isHost !== undefined && typeof participant.isHost !== "boolean") || (participant.status !== "present" && participant.status !== "left") || !Number.isSafeInteger(participant.updatedAt)))) throw new Error("Meeting participant roster is invalid");
@@ -3961,6 +4067,46 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
     await backend.deleteRecallTranscript(uid, id);
   }
   return current;
+}
+
+/** Persist content-free live runtime diagnostics and a bounded operator timeline. */
+export async function recordRecallMeetingRuntime(userId: number, meetingId: string, input: {
+  state?: RecallMeetingRuntimeState;
+  eventType?: RecallMeetingTimelineEvent["type"];
+  summary?: string;
+  turn?: { firstAudioMs?: number; finalResponseMs?: number; completed?: boolean; failed?: boolean; fallback?: boolean; resumed?: boolean; eager?: boolean; errorCode?: string };
+}): Promise<RecallMeetingRecord | undefined> {
+  const meeting = await getRecallMeeting(userId, meetingId);
+  if (!meeting) return undefined;
+  const prior = meeting.turnMetrics;
+  const turn = input.turn;
+  const average = (summary: { count: number; averageMs?: number }, sample: number | undefined) => {
+    if (!Number.isFinite(sample) || sample === undefined || sample < 0 || sample > 120_000) return summary;
+    const count = summary.count + 1;
+    return { count, averageMs: Math.round(((summary.averageMs ?? 0) * summary.count + sample) / count) };
+  };
+  const metrics = turn ? {
+    turns: (prior?.turns ?? 0) + 1,
+    eagerTurns: (prior?.eagerTurns ?? 0) + (turn.eager ? 1 : 0),
+    resumedTurns: (prior?.resumedTurns ?? 0) + (turn.resumed ? 1 : 0),
+    completedTurns: (prior?.completedTurns ?? 0) + (turn.completed ? 1 : 0),
+    failedTurns: (prior?.failedTurns ?? 0) + (turn.failed ? 1 : 0),
+    fallbackTurns: (prior?.fallbackTurns ?? 0) + (turn.fallback ? 1 : 0),
+    firstAudio: average(prior?.firstAudio ?? { count: 0 }, turn.firstAudioMs),
+    finalResponse: average(prior?.finalResponse ?? { count: 0 }, turn.finalResponseMs),
+    ...(turn.errorCode ? { lastErrorCode: turn.errorCode } : prior?.lastErrorCode ? { lastErrorCode: prior.lastErrorCode } : {}),
+    updatedAt: Date.now(),
+  } : prior;
+  const eventType = input.eventType ?? (input.state === "ended" ? "ended" : input.state === "voice_unavailable" ? "failed" : undefined);
+  const summary = typeof input.summary === "string" ? input.summary.replace(/[\u0000-\u001F\u007F]/g, " ").trim().slice(0, 280) : "";
+  const timeline = eventType && summary
+    ? [...(meeting.timeline ?? []), { id: `evt_${randomUUID()}`, type: eventType, at: Date.now(), summary }].slice(-100)
+    : meeting.timeline;
+  return updateRecallMeeting(userId, meetingId, {
+    ...(input.state ? { runtimeState: input.state } : {}),
+    ...(metrics ? { turnMetrics: metrics } : {}),
+    ...(timeline ? { timeline } : {}),
+  });
 }
 
 export async function appendRecallMeetingMessages(uid: number, id: string, messages: Message[]): Promise<RecallMeetingRecord | undefined> {

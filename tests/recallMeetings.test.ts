@@ -71,6 +71,30 @@ test("Recall bot request enables live output media and explicitly opts out of re
   assert.equal(request.recording_config?.transcript, null);
 });
 
+test("Recall meeting voice profiles carry bounded multilingual hints and keyterms", () => {
+  const request = buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky Meeting Assistant",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_language_123",
+    userId: 42,
+    languageMode: "multilingual",
+    languageHints: ["en", "es"],
+    keyterms: ["Chusky", "Recall Runtime"],
+  });
+  assert.equal(request.metadata.chusky_language_mode, "multilingual");
+  assert.equal(request.metadata.chusky_language_hints, "en,es");
+  assert.equal(request.metadata.chusky_keyterms, "Chusky,Recall Runtime");
+  assert.throws(() => buildRecallCreateBotRequest({
+    meetingUrl: "https://meet.google.com/abc-defg-hij",
+    botName: "Chusky",
+    mediaPageUrl: "https://voice.example/recall/media",
+    meetingId: "mtg_language_invalid",
+    userId: 42,
+    languageHints: Array.from({ length: 9 }, () => "en"),
+  }), /language hints/i);
+});
+
 test("Recall bot subscribes to chat and live roster events without enabling retained participant artifacts", () => {
   const request = buildRecallCreateBotRequest({
     meetingUrl: "https://meet.google.com/abc-defg-hij",

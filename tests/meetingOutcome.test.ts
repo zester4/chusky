@@ -243,6 +243,27 @@ test("structured meeting outcome parser validates and bounds model output", () =
   assert.throws(() => parseMeetingOutcome(JSON.stringify({ title: "", summary: "x" })), /title/i);
 });
 
+test("meeting outcome creates a bounded post-meeting owner review package", () => {
+  const outcome = parseMeetingOutcome(JSON.stringify({
+    title: "Risk review",
+    summary: "A material implementation risk remains unresolved.",
+    decisions: [],
+    actionItems: [],
+    openQuestions: ["Who owns the mitigation?"],
+    escalation: {
+      required: true,
+      severity: "high",
+      reason: "The launch date depends on an unresolved security review.",
+      nextSteps: [{ action: "Review the security exception and choose a mitigation owner", owner: "Engineering lead" }],
+      openQuestions: ["Can the launch proceed without the exception?"],
+      confidence: "high",
+    },
+  }));
+  assert.equal(outcome.escalation?.required, true);
+  assert.equal(outcome.escalation?.severity, "high");
+  assert.throws(() => parseMeetingOutcome(JSON.stringify({ title: "x", summary: "y", decisions: [], actionItems: [], openQuestions: [], escalation: { required: true, severity: "urgent", nextSteps: [], openQuestions: [], confidence: "high" } })), /status fields/i);
+});
+
 test("Notion page creation is selected only from one exact owner-granted create-page action", () => {
   assert.equal(selectMeetingNotionCreateTool(["NOTION_CREATE_PAGE"]), "NOTION_CREATE_PAGE");
   assert.equal(selectMeetingNotionCreateTool(["NOTION_CREATE_PAGE", "NOTION_CREATE_DATABASE_PAGE"]), undefined);
