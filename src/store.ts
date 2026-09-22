@@ -721,6 +721,16 @@ export interface MissionEventRecord {
   metadata?: Record<string, string | number | boolean>;
 }
 
+/** Encrypted, owner-scoped A2A task notification configuration. */
+export interface MissionA2APushNotificationConfig {
+  id: string;
+  url: string;
+  signingSecretCiphertext: string;
+  tokenCiphertext?: string;
+  authentication?: { scheme: string; credentialsCiphertext?: string };
+  createdAt: number;
+}
+
 export interface MissionRecord {
   id: string;
   userId: number;
@@ -751,6 +761,7 @@ export interface MissionRecord {
   evidence?: MissionEvidenceRecord[];
   verification?: MissionVerification;
   lease?: MissionLease;
+  a2aPushNotifications?: MissionA2APushNotificationConfig[];
   /** Monotonic revision used to prevent concurrent workers from overwriting state. */
   version: number;
 }
@@ -1221,7 +1232,17 @@ export interface OutboxRecord {
   updatedAt: number;
   deliveredAt?: number;
   /** SDK webhooks reuse the durable outbox but are not channel messages. */
-  webhook?: { webhookId: string; url: string; secretCiphertext: string; payload: unknown };
+  webhook?: {
+    webhookId: string;
+    url: string;
+    secretCiphertext: string;
+    payload: unknown;
+    contentType?: string;
+    rawPayload?: boolean;
+    authScheme?: string;
+    authCredentialsCiphertext?: string;
+    notificationTokenCiphertext?: string;
+  };
 }
 
 export interface ChannelConversationRecord {
@@ -4645,6 +4666,14 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.verification.confidence === "number" ? { confidence: Math.max(0, Math.min(1, mission.verification.confidence)) } : {}),
     } : undefined,
     ...(mission.lease && typeof mission.lease === "object" ? { lease: mission.lease } : {}),
+    a2aPushNotifications: Array.isArray(mission.a2aPushNotifications) ? mission.a2aPushNotifications.slice(-10).filter((item): item is MissionA2APushNotificationConfig => Boolean(item) && typeof item === "object" && typeof item.id === "string" && typeof item.url === "string" && typeof item.signingSecretCiphertext === "string").map((item) => ({
+      id: item.id.slice(0, 160),
+      url: item.url.slice(0, 2000),
+      signingSecretCiphertext: item.signingSecretCiphertext.slice(0, 4096),
+      ...(typeof item.tokenCiphertext === "string" ? { tokenCiphertext: item.tokenCiphertext.slice(0, 4096) } : {}),
+      ...(item.authentication && typeof item.authentication === "object" ? { authentication: { scheme: String(item.authentication.scheme ?? "").slice(0, 40), ...(typeof item.authentication.credentialsCiphertext === "string" ? { credentialsCiphertext: item.authentication.credentialsCiphertext.slice(0, 4096) } : {}) } } : {}),
+      createdAt: Number(item.createdAt) || Date.now(),
+    })) : undefined,
     version: Math.max(0, Math.floor(numeric(mission.version, 0))),
   };
 }
@@ -4915,6 +4944,13 @@ export function missionProof(mission: MissionRecord): Record<string, unknown> {
 
 type MissionPatch = Partial<Omit<MissionRecord, "id" | "userId" | "createdAt">>;
 type MissionMutation = (mission: MissionRecord) => MissionPatch | undefined;
+type MissionUpdateNotifier = (mission: MissionRecord) => Promise<void>;
+let missionUpdateNotifier: MissionUpdateNotifier | undefined;
+
+/** Registers the process-local delivery adapter without coupling persistence to HTTP. */
+export function setMissionUpdateNotifier(notifier?: MissionUpdateNotifier): void {
+  missionUpdateNotifier = notifier;
+}
 
 async function mutateMission(userId: number, id: string, mutate: MissionMutation): Promise<MissionRecord | undefined> {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -4924,7 +4960,10 @@ async function mutateMission(userId: number, id: string, mutate: MissionMutation
     if (!patch) return undefined;
     const next = normalizeMission({ ...current, ...patch, id: current.id, userId: current.userId, createdAt: current.createdAt, updatedAt: Date.now(), version: current.version + 1 });
     const saved = await backend.compareAndUpdateMission(userId, id, current.version, next);
-    if (saved) return saved;
+    if (saved) {
+      void missionUpdateNotifier?.(saved).catch((error) => logger.warn({ err: error, missionId: saved.id }, "Mission update notification enqueue failed"));
+      return saved;
+    }
   }
   throw new Error("Mission state changed concurrently; please retry");
 }

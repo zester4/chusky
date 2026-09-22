@@ -7,10 +7,10 @@ import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
-import { enqueueSdkWebhook } from "./lib/webhookOutbox.js";
+import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { listJobOccurrences } from "./store.js";
 import { logger } from "./logger.js";
@@ -161,6 +161,53 @@ function a2aTextMessage(params: unknown): { text: string; taskId?: string } | un
   if (!text) return undefined;
   const taskId = typeof (message as Record<string, unknown>).taskId === "string" ? String((message as Record<string, unknown>).taskId) : typeof value.taskId === "string" ? value.taskId : undefined;
   return { text, ...(taskId ? { taskId } : {}) };
+}
+type A2APushConfigInput = { id?: unknown; url?: unknown; token?: unknown; authentication?: { scheme?: unknown; credentials?: unknown } };
+function a2aPushConfigView(taskId: string, config: MissionA2APushNotificationConfig) {
+  return {
+    taskId,
+    id: config.id,
+    url: config.url,
+    ...(config.authentication ? { authentication: { scheme: config.authentication.scheme } } : {}),
+  };
+}
+function normalizeA2APushConfig(input: unknown): MissionA2APushNotificationConfig {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("A2A pushNotificationConfig is required.");
+  const value = input as A2APushConfigInput;
+  let url: URL;
+  try { url = new URL(String(value.url ?? "")); } catch { throw new Error("A2A pushNotificationConfig.url must be a valid HTTPS URL."); }
+  if (!isSafeWebhookUrl(url)) throw new Error("A2A push notification URLs must use a public HTTPS endpoint.");
+  const id = typeof value.id === "string" && /^[A-Za-z0-9_.-]{1,160}$/.test(value.id) ? value.id : `a2apush_${randomUUID()}`;
+  const auth = value.authentication && typeof value.authentication === "object" ? value.authentication : undefined;
+  const scheme = auth && typeof auth.scheme === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(auth.scheme) ? auth.scheme : undefined;
+  const credentials = auth && typeof auth.credentials === "string" && auth.credentials.length <= 4000 ? auth.credentials : undefined;
+  const token = typeof value.token === "string" && value.token.length <= 4000 ? value.token : undefined;
+  return {
+    id,
+    url: url.toString().slice(0, 2000),
+    signingSecretCiphertext: sealWebhookSecret(`a2a_${randomBytes(24).toString("base64url")}`),
+    ...(token ? { tokenCiphertext: sealWebhookSecret(token) } : {}),
+    ...(scheme ? { authentication: { scheme, ...(credentials ? { credentialsCiphertext: sealWebhookSecret(credentials) } : {}) } } : {}),
+    createdAt: Date.now(),
+  };
+}
+async function attachA2APushConfig(owner: A2AOwner, taskId: string, input: unknown): Promise<MissionA2APushNotificationConfig> {
+  const config = normalizeA2APushConfig(input);
+  const updated = await updateMission(owner.userId, taskId, (mission) => ({ a2aPushNotifications: [...(mission.a2aPushNotifications ?? []).filter((item) => item.id !== config.id), config].slice(-10) }));
+  if (!updated) throw new Error("A2A task not found.");
+  return updated.a2aPushNotifications?.find((item) => item.id === config.id) ?? config;
+}
+async function enqueueA2AMissionUpdate(mission: any): Promise<void> {
+  if (!Array.isArray(mission.a2aPushNotifications) || mission.a2aPushNotifications.length === 0) return;
+  const payload = {
+    statusUpdate: {
+      taskId: mission.id,
+      contextId: `ctx_${digestKey(`a2a:${mission.userId}:${mission.id}`).slice(0, 40)}`,
+      status: { state: a2aState(mission), timestamp: new Date(mission.updatedAt).toISOString() },
+      final: ["completed", "failed", "cancelled"].includes(mission.status),
+    },
+  };
+  await Promise.all(mission.a2aPushNotifications.map((item: MissionA2APushNotificationConfig) => enqueueA2APushNotification(mission.userId, mission.id, item, payload, mission.version)));
 }
 function a2aPageSize(params: unknown): number { const value = params && typeof params === "object" && !Array.isArray(params) ? Number((params as Record<string, unknown>).pageSize ?? 20) : 20; return Number.isFinite(value) ? Math.max(1, Math.min(100, Math.floor(value))) : 20; }
 async function createA2ATask(owner: A2AOwner, body: Record<string, unknown>, idempotencyKey?: string) {
@@ -764,6 +811,7 @@ async function sdkMutation(c: any, fingerprint: string, execute: (userId: number
 
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
+  setMissionUpdateNotifier(enqueueA2AMissionUpdate);
   // A2A is the agent-to-agent boundary. It deliberately reuses project-key
   // identity and mission ownership instead of creating a second tenant model.
   app.get("/a2a/.well-known/agent-card.json", (c) => c.json({
@@ -773,7 +821,7 @@ export function registerSdkApi(app: Hono): void {
     url: new URL(c.req.url).origin,
     protocolVersion: A2A_PROTOCOL_VERSION,
     supportedInterfaces: [{ url: `${new URL(c.req.url).origin}/a2a/rpc`, protocolBinding: "JSONRPC", protocolVersion: A2A_PROTOCOL_VERSION }],
-    capabilities: { streaming: true, pushNotifications: false, stateTransitionHistory: true },
+    capabilities: { streaming: true, pushNotifications: true, stateTransitionHistory: true },
     securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "Chusky project API key" } },
     security: [{ bearerAuth: [] }],
     skills: listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"] })),
@@ -790,7 +838,7 @@ export function registerSdkApi(app: Hono): void {
     // GetTask/ListTasks/SubscribeToTask calls on read scope.
     if (c.req.method === "POST" && (c.req.path === "/a2a/rpc" || c.req.path === "/a2a/v1")) {
       const rpcBody = await c.req.raw.clone().json().catch(() => undefined) as { method?: unknown } | undefined;
-      if (["GetTask", "ListTasks", "SubscribeToTask"].includes(String(rpcBody?.method ?? ""))) requestedScope = "missions:read";
+      if (["GetTask", "ListTasks", "SubscribeToTask", "GetTaskPushNotificationConfig", "ListTaskPushNotificationConfigs", "tasks/pushNotificationConfig/get", "tasks/pushNotificationConfig/list"].includes(String(rpcBody?.method ?? ""))) requestedScope = "missions:read";
     }
     if (!principal.root && !principal.scopes.includes("*") && !principal.scopes.includes(requestedScope) && !principal.scopes.includes("missions:*")) return apiError(c, 403, "insufficient_scope", `This API key lacks ${requestedScope}.`);
     const externalId = (c.req.header("X-Chusky-User-Id") ?? "").trim();
@@ -853,7 +901,11 @@ export function registerSdkApi(app: Hono): void {
           title: typeof record.title === "string" ? record.title : "A2A delegated task",
           definitionOfDone: typeof record.definitionOfDone === "string" ? record.definitionOfDone : "The requested task is completed and its result is verified.",
         }, c.req.header("Idempotency-Key") ?? undefined);
-        return a2aJsonRpcResult(c, id, { task: created.task }, 200);
+        const configuration = record.configuration && typeof record.configuration === "object" && !Array.isArray(record.configuration) ? record.configuration as Record<string, unknown> : undefined;
+        const pushInput = configuration?.pushNotificationConfig;
+        if (pushInput) await attachA2APushConfig(owner, created.mission.id, pushInput);
+        const current = pushInput ? await getMission(owner.userId, created.mission.id) : created.mission;
+        return a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, current ?? created.mission) }, 200);
       }
       if (method === "GetTask" || method === "tasks/get") {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
@@ -864,6 +916,36 @@ export function registerSdkApi(app: Hono): void {
         const missions = await listMissions(owner.userId);
         const result = page(missions, typeof record.pageToken === "string" ? record.pageToken : undefined, String(a2aPageSize(params)));
         return a2aJsonRpcResult(c, id, { tasks: result.data.map((mission) => a2aTaskView(owner, mission)), nextPageToken: result.nextCursor ?? "" });
+      }
+      if (["CreateTaskPushNotificationConfig", "tasks/pushNotificationConfig/set"].includes(method)) {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
+        const configInput = record.pushNotificationConfig ?? record.config;
+        const saved = await attachA2APushConfig(owner, taskId, configInput);
+        return a2aJsonRpcResult(c, id, { pushNotificationConfig: a2aPushConfigView(taskId, saved) });
+      }
+      if (["GetTaskPushNotificationConfig", "tasks/pushNotificationConfig/get"].includes(method)) {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
+        const mission = await getMission(owner.userId, taskId);
+        if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+        const configId = typeof record.configId === "string" ? record.configId : typeof record.id === "string" && record.id !== taskId ? record.id : undefined;
+        const saved = mission.a2aPushNotifications?.find((item) => !configId || item.id === configId);
+        return saved ? a2aJsonRpcResult(c, id, { pushNotificationConfig: a2aPushConfigView(taskId, saved) }) : a2aJsonRpcError(c, id, -32004, "Push notification configuration not found.", 404);
+      }
+      if (["ListTaskPushNotificationConfigs", "tasks/pushNotificationConfig/list"].includes(method)) {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
+        const mission = await getMission(owner.userId, taskId);
+        if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+        return a2aJsonRpcResult(c, id, { pushNotificationConfigs: (mission.a2aPushNotifications ?? []).map((item) => a2aPushConfigView(taskId, item)) });
+      }
+      if (["DeleteTaskPushNotificationConfig", "tasks/pushNotificationConfig/delete"].includes(method)) {
+        if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
+        const configId = typeof record.configId === "string" ? record.configId : typeof record.id === "string" && record.id !== taskId ? record.id : undefined;
+        if (!configId) return a2aJsonRpcError(c, id, -32602, "configId is required.");
+        const mission = await getMission(owner.userId, taskId);
+        if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+        const updated = await updateMission(owner.userId, taskId, (current) => ({ a2aPushNotifications: (current.a2aPushNotifications ?? []).filter((item) => item.id !== configId) }));
+        if (!updated) return a2aJsonRpcError(c, id, -32004, "Push notification configuration not found.", 404);
+        return a2aJsonRpcResult(c, id, {});
       }
       if (method === "CancelTask" || method === "tasks/cancel") {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");

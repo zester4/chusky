@@ -13,9 +13,8 @@ GET https://api.chusky.ai/a2a/.well-known/agent-card.json
 ```
 
 The card advertises the JSON-RPC interface at `/a2a/rpc`, protocol version
-`1.0`, supported outcome skills, bearer authentication, text input, JSON-RPC
-task streaming, and the fact that Chusky does not currently send A2A push
-notifications.
+`1.0`, supported outcome skills, bearer authentication, text input, task
+streaming, and durable A2A push notifications.
 
 ## Authentication and identity
 
@@ -32,9 +31,11 @@ The identity is combined with the project ID to isolate missions, context,
 artifacts, approvals, and results. Do not send a phone number, email address,
 root operator key, or provider credential as the identity.
 
-The project key needs `missions:read` for `GetTask`, `ListTasks`, and
-`SubscribeToTask`, and `missions:write` for `SendMessage`,
-`SendStreamingMessage`, and `CancelTask`.
+The project key needs `missions:read` for `GetTask`, `ListTasks`,
+`SubscribeToTask`, `GetTaskPushNotificationConfig`, and
+`ListTaskPushNotificationConfigs`. It needs `missions:write` for
+`SendMessage`, `SendStreamingMessage`, `CancelTask`, creating push
+configurations, and deleting them.
 
 ## JSON-RPC operations
 
@@ -76,6 +77,33 @@ Chusky's private prompts, credentials, or internal tool traces.
 
 `ListTasks` returns a cursor in `nextPageToken`; send it back as
 `params.pageToken`. All results are owner-scoped.
+
+### Push notifications
+
+An agent may register a callback for a task. Chusky stores callback
+credentials encrypted and enqueues signed `application/a2a+json` status
+updates through the durable webhook outbox. The callback receives no Chusky
+secrets.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "push-1",
+  "method": "CreateTaskPushNotificationConfig",
+  "params": {
+    "taskId": "mis_...",
+    "pushNotificationConfig": {
+      "url": "https://agent.example.com/chusky/a2a",
+      "token": "callback-token",
+      "authentication": { "scheme": "Bearer", "credentials": "callback-credential" }
+    }
+  }
+}
+```
+
+Use `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfigs`, and
+`DeleteTaskPushNotificationConfig` to manage the callback. Returned
+configurations intentionally omit token and authentication credentials.
 
 ### Stream a task
 

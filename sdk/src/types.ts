@@ -26,6 +26,19 @@ export interface A2AAgentCard {
   defaultOutputModes?: string[];
   [key: string]: unknown;
 }
+export interface A2APushNotificationConfig {
+  taskId: string;
+  id?: string;
+  url: string;
+  token?: string;
+  authentication?: { scheme: string; credentials?: string };
+}
+export interface A2AStreamEvent {
+  statusUpdate?: { taskId: string; contextId?: string; status: { state: string; timestamp?: string }; final?: boolean };
+  artifactUpdate?: Record<string, unknown>;
+  task?: A2ATask;
+  [key: string]: unknown;
+}
 export type A2ATaskState = "TASK_STATE_SUBMITTED" | "TASK_STATE_WORKING" | "TASK_STATE_INPUT_REQUIRED" | "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED" | string;
 export interface A2ATask {
   id: string;

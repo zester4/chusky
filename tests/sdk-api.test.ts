@@ -155,6 +155,7 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   assert.equal(cardBody.protocolVersion, "1.0");
   assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
   assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
+  assert.equal((cardBody as { capabilities?: { pushNotifications?: boolean } }).capabilities?.pushNotifications, true);
 
   const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "SendMessage", params: { message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
   assert.equal(send.status, 200);
@@ -179,6 +180,25 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const malformed = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-invalid" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "NotA2AMethod", params: {} }) }));
   assert.equal(malformed.status, 400);
   assert.equal(((await malformed.json()) as { error: { code: number } }).error.code, -32601);
+});
+
+test("A2A push notification configurations are encrypted, owner-scoped, and manageable", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-push-test");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "a2a-push-owner", "Content-Type": "application/a2a+json" };
+  const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "push-send", method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text: "Prepare a callback-enabled task." }] }, configuration: { pushNotificationConfig: { url: "https://agent.example.test/chusky", token: "secret-token", authentication: { scheme: "Bearer", credentials: "agent-credential" } } } } }) }));
+  assert.equal(send.status, 200);
+  const task = (await send.json() as { result: { task: { id: string } } }).result.task;
+  const list = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "push-list", method: "ListTaskPushNotificationConfigs", params: { taskId: task.id } }) }));
+  const configs = (await list.json() as { result: { pushNotificationConfigs: Array<{ id: string; url: string; token?: string; authentication?: { credentials?: string } }> } }).result.pushNotificationConfigs;
+  assert.equal(configs.length, 1);
+  assert.equal(configs[0]?.url, "https://agent.example.test/chusky");
+  assert.equal("token" in (configs[0] ?? {}), false);
+  assert.equal("credentials" in (configs[0]?.authentication ?? {}), false);
+  const get = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "push-get", method: "GetTaskPushNotificationConfig", params: { taskId: task.id, configId: configs[0]?.id } }) }));
+  assert.equal(get.status, 200);
+  const remove = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "push-delete", method: "DeleteTaskPushNotificationConfig", params: { taskId: task.id, configId: configs[0]?.id } }) }));
+  assert.equal(remove.status, 200);
 });
 
 test("SDK conversation lifecycle is owned, archive-aware, and protects active runs", async () => {

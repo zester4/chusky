@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { A2AAgentCard, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -137,6 +137,29 @@ export class Chusky {
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", relayAbort);
+    }
+  }
+
+  /** @internal Long-lived A2A SSE transport. The caller controls cancellation. */
+  async requestA2AStream(path: string, init: RequestInit = {}, options: RequestOptions = {}): Promise<Response> {
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener("abort", relayAbort, { once: true });
+    try {
+      const headers = new Headers(init.headers);
+      headers.set("Authorization", `Bearer ${this.apiKey}`);
+      headers.set("X-Chusky-User-Id", this.userId);
+      headers.set("Accept", "text/event-stream, application/a2a+json");
+      headers.set("User-Agent", this.userAgent);
+      if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/a2a+json");
+      if (options.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
+      for (const [key, value] of new Headers(options.headers)) headers.set(key, value);
+      const response = await this.fetchImpl(`${this.baseUrl}${path}`, { ...init, headers, signal: controller.signal });
+      if (!response.ok) throw await toError(response);
+      return response;
+    } catch (error) {
+      options.signal?.removeEventListener("abort", relayAbort);
+      throw error;
     }
   }
 
@@ -511,10 +534,23 @@ export class OutcomesResource {
 export class A2AResource {
   constructor(private readonly client: Chusky) {}
   card(options?: RequestOptions): Promise<A2AAgentCard> { return this.client.requestA2A("/a2a/.well-known/agent-card.json", {}, options); }
-  async send(text: string, options?: RequestOptions): Promise<A2ATask> {
-    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] } } }) }, options);
+  async send(text: string, options?: RequestOptions, configuration?: { pushNotificationConfig?: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string } }): Promise<A2ATask> {
+    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(configuration ? { configuration } : {}) } }) }, options);
     if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
     return response.result.task;
+  }
+  async *stream(text: string, options?: RequestOptions, configuration?: { pushNotificationConfig?: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string } }): AsyncGenerator<A2AStreamEvent> {
+    const response = await this.client.requestA2AStream("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendStreamingMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(configuration ? { configuration } : {}) } }) }, options);
+    if (!response.body) return;
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+    const consume = (chunk: string): A2AStreamEvent[] => {
+      buffer += chunk; const events: A2AStreamEvent[] = [];
+      const frames = buffer.split(/\r?\n\r?\n/); buffer = frames.pop() ?? "";
+      for (const frame of frames) { const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (!data || data === "[DONE]") continue; try { events.push(JSON.parse(data) as A2AStreamEvent); } catch { /* Ignore keepalive/non-JSON frames. */ } }
+      return events;
+    };
+    while (true) { const next = await reader.read(); if (next.done) break; for (const event of consume(decoder.decode(next.value, { stream: true }))) yield event; }
+    for (const event of consume(decoder.decode())) yield event;
   }
   async get(taskId: string, options?: RequestOptions): Promise<A2ATask> {
     const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTask", params: { id: taskId } }) }, options);
@@ -530,6 +566,32 @@ export class A2AResource {
     const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CancelTask", params: { id: taskId } }) }, options);
     if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
     return response.result.task;
+  }
+  async *subscribe(taskId: string, options?: RequestOptions): AsyncGenerator<A2AStreamEvent> {
+    const response = await this.client.requestA2AStream("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SubscribeToTask", params: { id: taskId } }) }, options);
+    if (!response.body) return;
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+    while (true) {
+      const next = await reader.read(); if (next.done) break; buffer += decoder.decode(next.value, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/); buffer = frames.pop() ?? "";
+      for (const frame of frames) { const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n"); if (!data || data === "[DONE]") continue; try { yield JSON.parse(data) as A2AStreamEvent; } catch { /* Ignore keepalive/non-JSON frames. */ } }
+    }
+  }
+  async createPushNotificationConfig(taskId: string, config: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string }, options?: RequestOptions): Promise<A2APushNotificationConfig> {
+    const response = await this.client.requestA2A<{ result?: { pushNotificationConfig?: A2APushNotificationConfig }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CreateTaskPushNotificationConfig", params: { taskId, pushNotificationConfig: config } }) }, options);
+    if (!response.result?.pushNotificationConfig) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result.pushNotificationConfig;
+  }
+  async getPushNotificationConfig(taskId: string, configId?: string, options?: RequestOptions): Promise<A2APushNotificationConfig> {
+    const response = await this.client.requestA2A<{ result?: { pushNotificationConfig?: A2APushNotificationConfig }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTaskPushNotificationConfig", params: { taskId, ...(configId ? { configId } : {}) } }) }, options);
+    if (!response.result?.pushNotificationConfig) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result.pushNotificationConfig;
+  }
+  async listPushNotificationConfigs(taskId: string, options?: RequestOptions): Promise<A2APushNotificationConfig[]> {
+    const response = await this.client.requestA2A<{ result?: { pushNotificationConfigs?: A2APushNotificationConfig[] }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "ListTaskPushNotificationConfigs", params: { taskId } }) }, options);
+    if (!response.result) throw new Error(response.error?.message ?? "A2A push configurations were not returned"); return response.result.pushNotificationConfigs ?? [];
+  }
+  async deletePushNotificationConfig(taskId: string, configId: string, options?: RequestOptions): Promise<void> {
+    const response = await this.client.requestA2A<{ error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "DeleteTaskPushNotificationConfig", params: { taskId, configId } }) }, options);
+    if (response.error) throw new Error(response.error.message ?? "A2A push configuration could not be deleted");
   }
 }
 

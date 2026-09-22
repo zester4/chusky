@@ -116,6 +116,32 @@ There are three useful execution modes:
    and approval events. Streaming is a delivery channel, not the source of
    truth; persisted run state remains available through `get()` and `events()`.
 
+### Agent-to-agent tasks
+
+The SDK also exposes the standards-shaped A2A boundary. Discover the remote
+Agent Card, submit a durable task, stream or subscribe to updates, and attach
+an encrypted callback for long-running work:
+
+```ts
+const card = await chusky.a2a.card();
+const task = await chusky.a2a.send("Prepare a verified launch brief.", {
+  idempotencyKey: "a2a-launch-brief-2026-09-22",
+});
+
+const callback = await chusky.a2a.createPushNotificationConfig(task.id, {
+  url: "https://your-service.example/a2a/status",
+  token: process.env.A2A_CALLBACK_TOKEN,
+});
+
+for await (const update of chusky.a2a.subscribe(task.id)) {
+  console.log(update.statusUpdate?.status.state);
+}
+```
+
+Push callback credentials are never returned after registration. The Chusky
+runtime delivers signed `application/a2a+json` status updates through its
+durable outbox and keeps task state available through `a2a.get()`.
+
 ## Idempotency and retries
 
 Use an `idempotencyKey` for every durable POST that your server may retry after

@@ -1,4 +1,4 @@
-import { claimOutbox, enqueueOutbox, listOutbox, updateOutbox, type OutboxRecord } from "../store.js";
+import { claimOutbox, enqueueOutbox, listOutbox, updateOutbox, type MissionA2APushNotificationConfig, type OutboxRecord } from "../store.js";
 import { deliverWebhook } from "./webhooks.js";
 import { createHash } from "node:crypto";
 
@@ -18,13 +18,34 @@ export async function enqueueSdkWebhook(userId: number, hook: { id: string; url:
   });
 }
 
+export async function enqueueA2APushNotification(userId: number, missionId: string, config: MissionA2APushNotificationConfig, payload: unknown, version: number): Promise<OutboxRecord> {
+  return enqueueOutbox({
+    idempotencyKey: `a2a-push:${missionId}:${config.id}:${version}`,
+    accountId: `a2a:${userId}`,
+    userId,
+    provider: "webhook",
+    conversationId: missionId,
+    kind: "notification",
+    webhook: {
+      webhookId: config.id,
+      url: config.url,
+      secretCiphertext: config.signingSecretCiphertext,
+      payload,
+      contentType: "application/a2a+json",
+      rawPayload: true,
+      ...(config.authentication?.credentialsCiphertext ? { authScheme: config.authentication.scheme, authCredentialsCiphertext: config.authentication.credentialsCiphertext } : {}),
+      ...(config.tokenCiphertext ? { notificationTokenCiphertext: config.tokenCiphertext } : {}),
+    },
+  });
+}
+
 export async function deliverSdkWebhook(record: OutboxRecord): Promise<OutboxRecord> {
   if (record.provider !== "webhook" || !record.webhook) throw new Error("Not an SDK webhook delivery");
   if (record.status === "delivered") return record;
   if (record.attempts >= MAX_ATTEMPTS) return (await updateOutbox(record.id, { status: "failed", lastError: "retry_exhausted" })) ?? record;
   const claimed = await claimOutbox(record.id, LEASE_MS);
   if (!claimed) return record;
-  const result = await deliverWebhook({ id: claimed.webhook!.webhookId, url: claimed.webhook!.url, secretCiphertext: claimed.webhook!.secretCiphertext }, claimed.webhook!.payload);
+  const result = await deliverWebhook({ ...claimed.webhook!, id: claimed.webhook!.webhookId }, claimed.webhook!.payload);
   return (await updateOutbox(record.id, result.delivered
     ? { status: "delivered", deliveredAt: Date.now(), providerStatus: String(result.status ?? 200), leaseToken: undefined, leaseExpiresAt: undefined, lastError: undefined }
     : { status: "failed", providerStatus: result.status ? String(result.status) : undefined, lastError: result.error ?? "delivery_failed", leaseToken: undefined, leaseExpiresAt: undefined })) ?? claimed;
