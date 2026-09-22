@@ -55,3 +55,18 @@ test("XChat setup fails closed when the webhook ID or token owner is wrong", asy
   assert.equal(mismatch.status, "misconfigured");
   assert.match(mismatch.error ?? "", /does not match/);
 });
+
+test("XChat setup explains rejected bot credentials without exposing the token", async () => {
+  await assert.rejects(
+    () => ensureXchatActivitySubscriptions({
+      accessToken: "secret-token",
+      webhookId: "webhook-1",
+      fetchImpl: async () => json({ title: "Forbidden" }, 403),
+    }),
+    (error: unknown) => {
+      assert.match(error instanceof Error ? error.message : String(error), /required XChat scopes/);
+      assert.doesNotMatch(error instanceof Error ? error.message : String(error), /secret-token/);
+      return true;
+    },
+  );
+});

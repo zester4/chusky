@@ -18,7 +18,12 @@ const REQUIRED_EVENTS: Array<{ eventType: XchatSubscriptionEvent; tag: string }>
 
 function boundedRemoteError(response: Response, body: string): Error {
   const detail = body.replace(/\s+/g, " ").trim().slice(0, 300);
-  return new Error(`XChat API ${response.status}${detail ? `: ${detail}` : ""}`);
+  const guidance = response.status === 401
+    ? " Re-authorize the bot's OAuth 2.0 user access token and confirm it belongs to the XChat bot account."
+    : response.status === 403
+      ? " Verify the bot OAuth 2.0 user token has the required XChat scopes and that the bot account is permitted to use the Activity API."
+      : "";
+  return new Error(`XChat API ${response.status}${detail ? `: ${detail}` : ""}.${guidance}`);
 }
 
 async function readJson(response: Response): Promise<any> {
