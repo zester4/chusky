@@ -798,8 +798,9 @@ analyzed.
 
 The Recall video endpoint is created per bot, so no additional static video
 webhook needs to be registered in the Recall dashboard. Set the same
-`RECALL_REALTIME_SECRET` workspace verification secret on root and
-`chusky-voice`, plus `CHUSKY_RECALL_VISUAL_FRAME_URL` on the voice service.
+`RECALL_WORKSPACE_VERIFICATION_SECRET` workspace verification secret on root
+and `chusky-voice`, plus `CHUSKY_RECALL_VISUAL_FRAME_URL` on the voice service.
+The historical `RECALL_REALTIME_SECRET` name remains supported as a fallback.
 Changed frames are rate-limited; a static screen is refreshed every eight
 seconds into an AES-GCM encrypted Redis cache that expires after twelve seconds.
 Frames are passed as temporary multimodal context to live meeting turns, never

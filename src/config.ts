@@ -73,9 +73,14 @@ export const config = {
   recallBotName: optional("RECALL_BOT_NAME", "Chusky"),
   recallMediaPageUrl: optional("RECALL_MEDIA_PAGE_URL", ""),
   recallWebhookSecret: optional("RECALL_WEBHOOK_SECRET", ""),
-  // Workspace-level Recall verification secret for per-bot real-time endpoints;
-  // this may differ from the Svix secret used by the status webhook above.
-  recallRealtimeSecret: optional("RECALL_REALTIME_SECRET", ""),
+  // Workspace-level Recall verification secret for per-bot real-time endpoints.
+  // Prefer Recall's official name while retaining the historical Chusky name
+  // so existing deployments can migrate without an outage. This may differ
+  // from the Svix secret used by the status webhook above.
+  recallRealtimeSecret: optional(
+    "RECALL_WORKSPACE_VERIFICATION_SECRET",
+    optional("RECALL_REALTIME_SECRET", ""),
+  ),
   recallMediaBridgeSecret: optional("RECALL_MEDIA_BRIDGE_SECRET", ""),
   // Dedicated application-side transcript encryption key; keep stable through
   // the maximum configured transcript-retention window.
