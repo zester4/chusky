@@ -95,6 +95,38 @@ export function recallChatConfigurationStatus(): "configured" | "misconfigured" 
   return recallChatConfigurationReady() ? "configured" : "misconfigured";
 }
 
+export type RecallChatConfigurationIssue =
+  | "meetings_disabled"
+  | "missing_workspace_secret"
+  | "invalid_workspace_secret"
+  | "meeting_configuration_invalid"
+  | "qstash_not_configured"
+  | "durable_store_required"
+  | "invalid_public_webhook"
+  | undefined;
+
+/**
+ * Return a safe operator diagnosis for the deep health endpoint. Never include
+ * configuration values: this is intentionally limited to stable reason codes.
+ */
+export function recallChatConfigurationIssue(): RecallChatConfigurationIssue {
+  if (!config.recallMeetingsEnabled) return "meetings_disabled";
+  if (!config.recallRealtimeSecret.trim()) return "missing_workspace_secret";
+  if (!validRecallVerificationSecret(config.recallRealtimeSecret)) return "invalid_workspace_secret";
+  if (!recallConfigurationReady()) return "meeting_configuration_invalid";
+  if (!config.qstashToken.trim()) return "qstash_not_configured";
+  if (!isDurableStore()) return "durable_store_required";
+  try {
+    const publicWebhook = new URL(config.webhookUrl);
+    if (publicWebhook.protocol !== "https:" || publicWebhook.username || publicWebhook.password || publicWebhook.search || publicWebhook.hash) {
+      return "invalid_public_webhook";
+    }
+  } catch {
+    return "invalid_public_webhook";
+  }
+  return undefined;
+}
+
 /**
  * Transcript retention is an owner opt-in, not a model-selectable default.
  * Keep this check at the native-tool boundary so a model cannot accidentally

@@ -2,7 +2,7 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { initStore, getRecallMeeting, listRecallMeetings, recordRecallMeetingRuntime, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorization, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorization, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationIssue, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
 const originalConfig = {
@@ -87,6 +87,20 @@ test("creates an owner-scoped immediate meeting with no URL leakage or retained 
   assert.equal(stored?.meetingUrlHash.length, 64);
   assert.equal("meetingUrl" in (stored ?? {}), false);
   assert.equal((await getRecallMeeting(ownerId + 1, meeting.id)), undefined);
+});
+
+test("reports a safe, actionable Recall chat configuration diagnosis", () => {
+  const originalSecret = config.recallRealtimeSecret;
+  const originalQstash = config.qstashToken;
+  config.recallRealtimeSecret = "";
+  assert.equal(recallChatConfigurationIssue(), "missing_workspace_secret");
+  config.recallRealtimeSecret = "not-a-recall-secret";
+  assert.equal(recallChatConfigurationIssue(), "invalid_workspace_secret");
+  config.recallRealtimeSecret = originalSecret;
+  config.qstashToken = "";
+  assert.equal(recallChatConfigurationIssue(), "qstash_not_configured");
+  config.qstashToken = originalQstash;
+  assert.equal(recallChatConfigurationIssue(), "durable_store_required");
 });
 
 test("meeting runtime diagnostics persist bounded latency state and timeline events", async () => {
