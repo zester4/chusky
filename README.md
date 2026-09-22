@@ -750,8 +750,10 @@ events provide sanitized transcript-artifact status diagnostics. They do not
 deliver transcript content. The signed per-bot `transcript.data` stream is
 sent separately to `/recall/realtime-webhook` and powers the post-meeting
 analysis. Keep `RECALL_WEBHOOK_SECRET` (workspace dashboard endpoint signing
-secret) separate from `RECALL_REALTIME_SECRET` (real-time endpoint verification
-secret). See the bridge README for the full settings and test procedure.
+secret) separate from `RECALL_WORKSPACE_VERIFICATION_SECRET` (real-time endpoint
+verification secret). The historical `RECALL_REALTIME_SECRET` name remains a
+fallback for existing deployments. See the bridge README for the full settings
+and test procedure.
 
 The voice bridge briefly retries an authenticated `425` while the signed bot
 status webhook is still progressing through joining/waiting-room states. This
@@ -769,7 +771,8 @@ matches; overlapping or uncertain speech stays unattributed. That display name
 follows the turn only in the bridge's short-lived meeting context, then is
 discarded when the meeting ends. Meeting-chat replies can use the signed sender's
 display name directly. Set
-`RECALL_REALTIME_SECRET` to the Recall **workspace verification secret** (this
+`RECALL_WORKSPACE_VERIFICATION_SECRET` to the Recall **workspace verification
+secret** (the historical `RECALL_REALTIME_SECRET` name remains supported; this
 may differ from the Svix `RECALL_WEBHOOK_SECRET`), and ensure Chusky has Redis,
 `QSTASH_TOKEN`, and a public HTTPS `WEBHOOK_URL`. Health reports this separately
 as `checks.recallChat`. Recall sends a short AI/live-processing disclosure on
