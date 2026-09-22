@@ -330,6 +330,9 @@ test("Recall media authorization starts once the owned bot is joining and reject
   const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/media-auth-race" });
 
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  const missing = await getRecallMediaAuthorization(ownerId, "mtg_missing_media_session");
+  assert.equal(missing.state, "denied");
+  assert.match(missing.reason ?? "", /could not be found/i);
   await updateRecallMeeting(ownerId, meeting.id, { status: "creating" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
   await updateRecallMeeting(ownerId, meeting.id, { status: "joining" });

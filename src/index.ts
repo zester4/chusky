@@ -884,12 +884,20 @@ async function main(): Promise<void> {
     });
 
     app.post("/internal/recall/media-authorize", async (c) => {
-      if (!config.recallMeetingsEnabled) return c.text("Not found", 404);
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.recallMediaBridgeSecret)) return c.text("Unauthorized", 401);
+      if (!config.recallMeetingsEnabled) {
+        return c.json({
+          ok: false,
+          code: "meeting_service_disabled",
+          reason: "Meeting audio is disabled on the Chusky service. Enable Recall meetings and redeploy the root service.",
+        }, 503, { "Cache-Control": "no-store" });
+      }
       const body = await c.req.json().catch(() => ({})) as { meetingId?: string; userId?: number };
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
-      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Not found", 404);
+      if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0) {
+        return c.json({ ok: false, code: "invalid_meeting_session", reason: "The meeting session payload is invalid. Join Chusky again." }, 400, { "Cache-Control": "no-store" });
+      }
       const authorization = await getRecallMediaAuthorization(userId, meetingId);
       if (authorization.state === "denied") return c.json({ ok: false, code: "meeting_unavailable", reason: authorization.reason ?? "Meeting audio is unavailable. Join Chusky again." }, 404, { "Cache-Control": "no-store" });
       if (authorization.state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
