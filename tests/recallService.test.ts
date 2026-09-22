@@ -126,6 +126,13 @@ test("meeting runtime diagnostics persist bounded latency state and timeline eve
   assert.equal(fast?.turnMetrics?.firstAudio.p50Ms, 300);
   assert.equal(fast?.turnMetrics?.finalResponse.p95Ms, 4_800);
   assert.equal(fast?.timeline?.at(-1)?.type, "agent_first_token");
+  const stageResults = await Promise.all([
+    recordRecallMeetingRuntime(ownerId, meeting.id, { eventType: "first_audio", summary: "First audio reached the meeting." }),
+    recordRecallMeetingRuntime(ownerId, meeting.id, { eventType: "final_audio", summary: "Final audio reached the meeting." }),
+  ]);
+  const stageTypes = new Set((stageResults.at(-1)?.timeline ?? []).map((event) => event.type));
+  assert.equal(stageTypes.has("first_audio"), true);
+  assert.equal(stageTypes.has("final_audio"), true);
 });
 
 test("meeting joins default to proactive copilot or the enabled representative profile", async () => {

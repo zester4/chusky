@@ -4145,7 +4145,7 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
 }
 
 /** Persist content-free live runtime diagnostics and a bounded operator timeline. */
-export async function recordRecallMeetingRuntime(userId: number, meetingId: string, input: {
+async function recordRecallMeetingRuntimeUnlocked(userId: number, meetingId: string, input: {
   state?: RecallMeetingRuntimeState;
   eventType?: RecallMeetingTimelineEvent["type"];
   summary?: string;
@@ -4194,6 +4194,27 @@ export async function recordRecallMeetingRuntime(userId: number, meetingId: stri
     ...(metrics ? { turnMetrics: metrics } : {}),
     ...(timeline ? { timeline } : {}),
   });
+}
+
+/** Serialize short runtime diagnostics updates so concurrent voice callbacks cannot lose timeline events in Redis. */
+export async function recordRecallMeetingRuntime(userId: number, meetingId: string, input: Parameters<typeof recordRecallMeetingRuntimeUnlocked>[2]): Promise<RecallMeetingRecord | undefined> {
+  const leaseKey = `recall-runtime:${userId}:${meetingId}`;
+  const token = randomUUID();
+  let acquired = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const lease = await claimDeliveryLease(leaseKey, token, 5_000);
+    if (lease === "acquired") {
+      acquired = true;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  if (!acquired) return undefined;
+  try {
+    return await recordRecallMeetingRuntimeUnlocked(userId, meetingId, input);
+  } finally {
+    await releaseDeliveryLease(leaseKey, token).catch(() => undefined);
+  }
 }
 
 export async function appendRecallMeetingMessages(uid: number, id: string, messages: Message[]): Promise<RecallMeetingRecord | undefined> {
