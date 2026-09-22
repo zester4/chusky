@@ -162,14 +162,20 @@ function a2aTextMessage(params: unknown): { text: string; taskId?: string } | un
   const taskId = typeof (message as Record<string, unknown>).taskId === "string" ? String((message as Record<string, unknown>).taskId) : typeof value.taskId === "string" ? value.taskId : undefined;
   return { text, ...(taskId ? { taskId } : {}) };
 }
-type A2APushConfigInput = { id?: unknown; url?: unknown; token?: unknown; authentication?: { scheme?: unknown; credentials?: unknown } };
+type A2APushConfigInput = { taskId?: unknown; id?: unknown; url?: unknown; token?: unknown; authentication?: { scheme?: unknown; schemes?: unknown; credentials?: unknown } };
 function a2aPushConfigView(taskId: string, config: MissionA2APushNotificationConfig) {
   return {
     taskId,
     id: config.id,
     url: config.url,
-    ...(config.authentication ? { authentication: { scheme: config.authentication.scheme } } : {}),
+    ...(config.authentication?.schemes.length ? { authentication: { schemes: config.authentication.schemes } } : {}),
   };
+}
+function a2aPushConfigResult(method: string, taskId: string, config: MissionA2APushNotificationConfig): Record<string, unknown> {
+  const view = a2aPushConfigView(taskId, config);
+  if (method === "CreateTaskPushNotificationConfig" || method === "GetTaskPushNotificationConfig") return view;
+  const { taskId: _taskId, ...legacyView } = view;
+  return { taskId, pushNotificationConfig: legacyView };
 }
 function normalizeA2APushConfig(input: unknown): MissionA2APushNotificationConfig {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("A2A pushNotificationConfig is required.");
@@ -179,7 +185,7 @@ function normalizeA2APushConfig(input: unknown): MissionA2APushNotificationConfi
   if (!isSafeWebhookUrl(url)) throw new Error("A2A push notification URLs must use a public HTTPS endpoint.");
   const id = typeof value.id === "string" && /^[A-Za-z0-9_.-]{1,160}$/.test(value.id) ? value.id : `a2apush_${randomUUID()}`;
   const auth = value.authentication && typeof value.authentication === "object" ? value.authentication : undefined;
-  const scheme = auth && typeof auth.scheme === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(auth.scheme) ? auth.scheme : undefined;
+  const schemes = auth ? (Array.isArray(auth.schemes) ? auth.schemes : [auth.scheme]).filter((item): item is string => typeof item === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(item)).slice(0, 8) : [];
   const credentials = auth && typeof auth.credentials === "string" && auth.credentials.length <= 4000 ? auth.credentials : undefined;
   const token = typeof value.token === "string" && value.token.length <= 4000 ? value.token : undefined;
   return {
@@ -187,7 +193,7 @@ function normalizeA2APushConfig(input: unknown): MissionA2APushNotificationConfi
     url: url.toString().slice(0, 2000),
     signingSecretCiphertext: sealWebhookSecret(`a2a_${randomBytes(24).toString("base64url")}`),
     ...(token ? { tokenCiphertext: sealWebhookSecret(token) } : {}),
-    ...(scheme ? { authentication: { scheme, ...(credentials ? { credentialsCiphertext: sealWebhookSecret(credentials) } : {}) } } : {}),
+    ...(schemes.length ? { authentication: { schemes, ...(credentials ? { credentialsCiphertext: sealWebhookSecret(credentials) } : {}) } } : {}),
     createdAt: Date.now(),
   };
 }
@@ -902,7 +908,7 @@ export function registerSdkApi(app: Hono): void {
           definitionOfDone: typeof record.definitionOfDone === "string" ? record.definitionOfDone : "The requested task is completed and its result is verified.",
         }, c.req.header("Idempotency-Key") ?? undefined);
         const configuration = record.configuration && typeof record.configuration === "object" && !Array.isArray(record.configuration) ? record.configuration as Record<string, unknown> : undefined;
-        const pushInput = configuration?.pushNotificationConfig;
+        const pushInput = configuration?.taskPushNotificationConfig ?? configuration?.pushNotificationConfig;
         if (pushInput) await attachA2APushConfig(owner, created.mission.id, pushInput);
         const current = pushInput ? await getMission(owner.userId, created.mission.id) : created.mission;
         return a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, current ?? created.mission) }, 200);
@@ -919,33 +925,38 @@ export function registerSdkApi(app: Hono): void {
       }
       if (["CreateTaskPushNotificationConfig", "tasks/pushNotificationConfig/set"].includes(method)) {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
-        const configInput = record.pushNotificationConfig ?? record.config;
+        const configInput = method === "CreateTaskPushNotificationConfig" ? record.pushNotificationConfig ?? record.config ?? record : record.pushNotificationConfig ?? record.config;
         const saved = await attachA2APushConfig(owner, taskId, configInput);
-        return a2aJsonRpcResult(c, id, { pushNotificationConfig: a2aPushConfigView(taskId, saved) });
+        return a2aJsonRpcResult(c, id, a2aPushConfigResult(method, taskId, saved));
       }
       if (["GetTaskPushNotificationConfig", "tasks/pushNotificationConfig/get"].includes(method)) {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
         const mission = await getMission(owner.userId, taskId);
         if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
-        const configId = typeof record.configId === "string" ? record.configId : typeof record.id === "string" && record.id !== taskId ? record.id : undefined;
+        const configId = method === "GetTaskPushNotificationConfig"
+          ? (typeof record.id === "string" && record.id !== taskId ? record.id : typeof record.configId === "string" ? record.configId : undefined)
+          : (typeof record.pushNotificationConfigId === "string" ? record.pushNotificationConfigId : typeof record.configId === "string" ? record.configId : undefined);
         const saved = mission.a2aPushNotifications?.find((item) => !configId || item.id === configId);
-        return saved ? a2aJsonRpcResult(c, id, { pushNotificationConfig: a2aPushConfigView(taskId, saved) }) : a2aJsonRpcError(c, id, -32004, "Push notification configuration not found.", 404);
+        return saved ? a2aJsonRpcResult(c, id, a2aPushConfigResult(method, taskId, saved)) : a2aJsonRpcError(c, id, -32004, "Push notification configuration not found.", 404);
       }
       if (["ListTaskPushNotificationConfigs", "tasks/pushNotificationConfig/list"].includes(method)) {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
         const mission = await getMission(owner.userId, taskId);
         if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
-        return a2aJsonRpcResult(c, id, { pushNotificationConfigs: (mission.a2aPushNotifications ?? []).map((item) => a2aPushConfigView(taskId, item)) });
+        const configs = (mission.a2aPushNotifications ?? []).map((item) => a2aPushConfigView(taskId, item));
+        return a2aJsonRpcResult(c, id, method === "ListTaskPushNotificationConfigs" ? { configs, nextPageToken: "" } : { pushNotificationConfigs: configs });
       }
       if (["DeleteTaskPushNotificationConfig", "tasks/pushNotificationConfig/delete"].includes(method)) {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "taskId is required.");
-        const configId = typeof record.configId === "string" ? record.configId : typeof record.id === "string" && record.id !== taskId ? record.id : undefined;
+        const configId = method === "DeleteTaskPushNotificationConfig"
+          ? (typeof record.id === "string" && record.id !== taskId ? record.id : typeof record.configId === "string" ? record.configId : undefined)
+          : (typeof record.pushNotificationConfigId === "string" ? record.pushNotificationConfigId : typeof record.configId === "string" ? record.configId : undefined);
         if (!configId) return a2aJsonRpcError(c, id, -32602, "configId is required.");
         const mission = await getMission(owner.userId, taskId);
         if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
         const updated = await updateMission(owner.userId, taskId, (current) => ({ a2aPushNotifications: (current.a2aPushNotifications ?? []).filter((item) => item.id !== configId) }));
         if (!updated) return a2aJsonRpcError(c, id, -32004, "Push notification configuration not found.", 404);
-        return a2aJsonRpcResult(c, id, {});
+        return a2aJsonRpcResult(c, id, method === "DeleteTaskPushNotificationConfig" ? null : {});
       }
       if (method === "CancelTask" || method === "tasks/cancel") {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");

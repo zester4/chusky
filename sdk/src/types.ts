@@ -31,7 +31,7 @@ export interface A2APushNotificationConfig {
   id?: string;
   url: string;
   token?: string;
-  authentication?: { scheme: string; credentials?: string };
+  authentication?: { schemes: string[]; credentials?: string; scheme?: string };
 }
 export interface A2AStreamEvent {
   statusUpdate?: { taskId: string; contextId?: string; status: { state: string; timestamp?: string }; final?: boolean };

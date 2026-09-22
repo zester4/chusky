@@ -535,12 +535,14 @@ export class A2AResource {
   constructor(private readonly client: Chusky) {}
   card(options?: RequestOptions): Promise<A2AAgentCard> { return this.client.requestA2A("/a2a/.well-known/agent-card.json", {}, options); }
   async send(text: string, options?: RequestOptions, configuration?: { pushNotificationConfig?: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string } }): Promise<A2ATask> {
-    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(configuration ? { configuration } : {}) } }) }, options);
+    const taskPushNotificationConfig = configuration?.pushNotificationConfig ? { taskId: "", ...configuration.pushNotificationConfig } : undefined;
+    const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(taskPushNotificationConfig ? { configuration: { taskPushNotificationConfig } } : {}) } }) }, options);
     if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
     return response.result.task;
   }
   async *stream(text: string, options?: RequestOptions, configuration?: { pushNotificationConfig?: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string } }): AsyncGenerator<A2AStreamEvent> {
-    const response = await this.client.requestA2AStream("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendStreamingMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(configuration ? { configuration } : {}) } }) }, options);
+    const taskPushNotificationConfig = configuration?.pushNotificationConfig ? { taskId: "", ...configuration.pushNotificationConfig } : undefined;
+    const response = await this.client.requestA2AStream("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SendStreamingMessage", params: { message: { role: "ROLE_USER", parts: [{ text }] }, ...(taskPushNotificationConfig ? { configuration: { taskPushNotificationConfig } } : {}) } }) }, options);
     if (!response.body) return;
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
     const consume = (chunk: string): A2AStreamEvent[] => {
@@ -578,19 +580,19 @@ export class A2AResource {
     }
   }
   async createPushNotificationConfig(taskId: string, config: Omit<A2APushNotificationConfig, "taskId" | "id"> & { id?: string }, options?: RequestOptions): Promise<A2APushNotificationConfig> {
-    const response = await this.client.requestA2A<{ result?: { pushNotificationConfig?: A2APushNotificationConfig }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CreateTaskPushNotificationConfig", params: { taskId, pushNotificationConfig: config } }) }, options);
-    if (!response.result?.pushNotificationConfig) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result.pushNotificationConfig;
+    const response = await this.client.requestA2A<{ result?: A2APushNotificationConfig; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CreateTaskPushNotificationConfig", params: { taskId, ...config } }) }, options);
+    if (!response.result?.url) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result;
   }
   async getPushNotificationConfig(taskId: string, configId?: string, options?: RequestOptions): Promise<A2APushNotificationConfig> {
-    const response = await this.client.requestA2A<{ result?: { pushNotificationConfig?: A2APushNotificationConfig }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTaskPushNotificationConfig", params: { taskId, ...(configId ? { configId } : {}) } }) }, options);
-    if (!response.result?.pushNotificationConfig) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result.pushNotificationConfig;
+    const response = await this.client.requestA2A<{ result?: A2APushNotificationConfig; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTaskPushNotificationConfig", params: { taskId, ...(configId ? { id: configId } : {}) } }) }, options);
+    if (!response.result?.url) throw new Error(response.error?.message ?? "A2A push configuration was not returned"); return response.result;
   }
   async listPushNotificationConfigs(taskId: string, options?: RequestOptions): Promise<A2APushNotificationConfig[]> {
-    const response = await this.client.requestA2A<{ result?: { pushNotificationConfigs?: A2APushNotificationConfig[] }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "ListTaskPushNotificationConfigs", params: { taskId } }) }, options);
-    if (!response.result) throw new Error(response.error?.message ?? "A2A push configurations were not returned"); return response.result.pushNotificationConfigs ?? [];
+    const response = await this.client.requestA2A<{ result?: { configs?: A2APushNotificationConfig[] }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "ListTaskPushNotificationConfigs", params: { taskId } }) }, options);
+    if (!response.result) throw new Error(response.error?.message ?? "A2A push configurations were not returned"); return response.result.configs ?? [];
   }
   async deletePushNotificationConfig(taskId: string, configId: string, options?: RequestOptions): Promise<void> {
-    const response = await this.client.requestA2A<{ error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "DeleteTaskPushNotificationConfig", params: { taskId, configId } }) }, options);
+    const response = await this.client.requestA2A<{ error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "DeleteTaskPushNotificationConfig", params: { taskId, id: configId } }) }, options);
     if (response.error) throw new Error(response.error.message ?? "A2A push configuration could not be deleted");
   }
 }

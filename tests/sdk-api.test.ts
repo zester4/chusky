@@ -190,7 +190,7 @@ test("A2A push notification configurations are encrypted, owner-scoped, and mana
   assert.equal(send.status, 200);
   const task = (await send.json() as { result: { task: { id: string } } }).result.task;
   const list = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "push-list", method: "ListTaskPushNotificationConfigs", params: { taskId: task.id } }) }));
-  const configs = (await list.json() as { result: { pushNotificationConfigs: Array<{ id: string; url: string; token?: string; authentication?: { credentials?: string } }> } }).result.pushNotificationConfigs;
+  const configs = (await list.json() as { result: { configs: Array<{ id: string; url: string; token?: string; authentication?: { credentials?: string } }> } }).result.configs;
   assert.equal(configs.length, 1);
   assert.equal(configs[0]?.url, "https://agent.example.test/chusky");
   assert.equal("token" in (configs[0] ?? {}), false);

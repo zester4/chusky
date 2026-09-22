@@ -92,18 +92,19 @@ secrets.
   "method": "CreateTaskPushNotificationConfig",
   "params": {
     "taskId": "mis_...",
-    "pushNotificationConfig": {
-      "url": "https://agent.example.com/chusky/a2a",
-      "token": "callback-token",
-      "authentication": { "scheme": "Bearer", "credentials": "callback-credential" }
-    }
+    "id": "callback-1",
+    "url": "https://agent.example.com/chusky/a2a",
+    "token": "callback-token",
+    "authentication": { "schemes": ["Bearer"], "credentials": "callback-credential" }
   }
 }
 ```
 
 Use `GetTaskPushNotificationConfig`, `ListTaskPushNotificationConfigs`, and
 `DeleteTaskPushNotificationConfig` to manage the callback. Returned
-configurations intentionally omit token and authentication credentials.
+configurations follow the current flattened A2A v1 shape and intentionally omit
+token and authentication credentials. Chusky also accepts the older
+`tasks/pushNotificationConfig/*` method names and wrapper shape.
 
 ### Stream a task
 

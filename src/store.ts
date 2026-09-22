@@ -727,7 +727,7 @@ export interface MissionA2APushNotificationConfig {
   url: string;
   signingSecretCiphertext: string;
   tokenCiphertext?: string;
-  authentication?: { scheme: string; credentialsCiphertext?: string };
+  authentication?: { schemes: string[]; credentialsCiphertext?: string };
   createdAt: number;
 }
 
@@ -4671,7 +4671,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       url: item.url.slice(0, 2000),
       signingSecretCiphertext: item.signingSecretCiphertext.slice(0, 4096),
       ...(typeof item.tokenCiphertext === "string" ? { tokenCiphertext: item.tokenCiphertext.slice(0, 4096) } : {}),
-      ...(item.authentication && typeof item.authentication === "object" ? { authentication: { scheme: String(item.authentication.scheme ?? "").slice(0, 40), ...(typeof item.authentication.credentialsCiphertext === "string" ? { credentialsCiphertext: item.authentication.credentialsCiphertext.slice(0, 4096) } : {}) } } : {}),
+      ...(item.authentication && typeof item.authentication === "object" ? { authentication: { schemes: (Array.isArray(item.authentication.schemes) ? item.authentication.schemes : [String((item.authentication as { scheme?: unknown }).scheme ?? "")]).filter((scheme): scheme is string => typeof scheme === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,39}$/.test(scheme)).slice(0, 8), ...(typeof item.authentication.credentialsCiphertext === "string" ? { credentialsCiphertext: item.authentication.credentialsCiphertext.slice(0, 4096) } : {}) } } : {}),
       createdAt: Number(item.createdAt) || Date.now(),
     })) : undefined,
     version: Math.max(0, Math.floor(numeric(mission.version, 0))),

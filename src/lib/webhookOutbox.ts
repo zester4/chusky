@@ -33,7 +33,7 @@ export async function enqueueA2APushNotification(userId: number, missionId: stri
       payload,
       contentType: "application/a2a+json",
       rawPayload: true,
-      ...(config.authentication?.credentialsCiphertext ? { authScheme: config.authentication.scheme, authCredentialsCiphertext: config.authentication.credentialsCiphertext } : {}),
+      ...(config.authentication?.credentialsCiphertext && config.authentication.schemes[0] ? { authScheme: config.authentication.schemes[0], authCredentialsCiphertext: config.authentication.credentialsCiphertext } : {}),
       ...(config.tokenCiphertext ? { notificationTokenCiphertext: config.tokenCiphertext } : {}),
     },
   });
