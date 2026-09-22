@@ -59,7 +59,7 @@ import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
-import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, readRecallVisualContextFrame, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, receiveRecallVisualFrame, resolveRecallChatWebhook, resolveRecallTranscriptWebhook, sendRecallMeetingChat, leaveRecallMeeting, reconcileCalendarMeetingAutoJoin, cancelAutomaticCalendarMeetingJoins, lookupRecallMeetingContext, joinRecallMeeting, prepareRecallMeetingMission, joinPreparedCalendarMeeting } from "./meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, readRecallVisualContextFrame, getRecallMediaAuthorization, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationStatus, recallConfigurationReady, receiveRecallVisualFrame, resolveRecallChatWebhook, resolveRecallTranscriptWebhook, sendRecallMeetingChat, leaveRecallMeeting, reconcileCalendarMeetingAutoJoin, cancelAutomaticCalendarMeetingJoins, lookupRecallMeetingContext, joinRecallMeeting, prepareRecallMeetingMission, joinPreparedCalendarMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook, receiveRecallTranscriptWebhook } from "./meetings/webhook.js";
 import { mcpClient } from "./mcp/client.js";
@@ -890,9 +890,9 @@ async function main(): Promise<void> {
       const meetingId = String(body.meetingId ?? "").trim();
       const userId = Number(body.userId);
       if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(meetingId) || !Number.isSafeInteger(userId) || userId <= 0) return c.text("Not found", 404);
-      const state = await getRecallMediaAuthorizationState(userId, meetingId);
-      if (state === "denied") return c.text("Not found", 404, { "Cache-Control": "no-store" });
-      if (state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
+      const authorization = await getRecallMediaAuthorization(userId, meetingId);
+      if (authorization.state === "denied") return c.json({ ok: false, code: "meeting_unavailable", reason: authorization.reason ?? "Meeting audio is unavailable. Join Chusky again." }, 404, { "Cache-Control": "no-store" });
+      if (authorization.state === "pending") return c.body(null, 425, { "Cache-Control": "no-store", "Retry-After": "1" });
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || !["joining", "waiting_room", "in_call"].includes(meeting.status)) return c.text("Not found", 404, { "Cache-Control": "no-store" });
       const interactionMode = meeting.interactionMode === "representative" || meeting.interactionMode === "copilot"

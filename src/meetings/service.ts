@@ -309,7 +309,29 @@ async function cleanupRecallBot(providerBotId: string, joinAt?: string): Promise
   }
 }
 
-async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSignal) {
+type RecallProviderStatus = {
+  status: ReturnType<typeof mapRecallBotStatus>;
+  code?: string;
+  subCode?: string;
+};
+
+function safeRecallSubCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : undefined;
+}
+
+function meetingProviderReason(platform: RecallMeetingRecord["platform"], status: "ended" | "failed", subCode?: string, error?: string): string {
+  const code = subCode ?? (error?.match(/\(([A-Za-z0-9_-]{1,100})\)\s*$/)?.[1]);
+  if (status === "failed" && platform === "google_meet" && code && /google_meet_(?:bot_)?(?:blocked|permission_denied|not_authenticated|login_required)/i.test(code)) {
+    return "Google Meet did not admit Chusky. Ask the host to allow participants with the meeting link, or configure a signed-in Meet bot, then join Chusky again.";
+  }
+  if (status === "failed" && code && /permission|blocked|denied|authentication|login/i.test(code)) {
+    return "The meeting provider rejected Chusky. Check the host admission, bot account, and meeting permissions, then join Chusky again.";
+  }
+  if (status === "failed") return "The meeting provider could not keep Chusky in the call. Check the meeting settings and join Chusky again.";
+  return "The meeting assistant has ended. If the call is still open, join Chusky again.";
+}
+
+async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSignal): Promise<RecallProviderStatus> {
   const bot = await recallApiRequest(config.recallRegion, config.recallApiKey, `/bot/${providerBotId}/`, {
     method: "GET", signal, timeoutMs: 8_000,
   });
@@ -317,7 +339,11 @@ async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSign
     ? (bot.status as Record<string, unknown>).code
     : bot.status;
   const current = mapRecallBotStatus(providerStatus);
-  if (current) return current;
+  const currentCode = typeof providerStatus === "string" ? providerStatus : undefined;
+  const currentSubCode = bot.status && typeof bot.status === "object" && !Array.isArray(bot.status)
+    ? safeRecallSubCode((bot.status as Record<string, unknown>).sub_code)
+    : undefined;
+  if (current) return { status: current, ...(currentCode ? { code: currentCode } : {}), ...(currentSubCode ? { subCode: currentSubCode } : {}) };
   // Recall's retrieve response also exposes status_changes. During webhook
   // delivery races the top-level status can be omitted or briefly lag the
   // latest lifecycle event. Use the newest recognizable event only as a
@@ -325,11 +351,12 @@ async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSign
   const changes = Array.isArray(bot.status_changes) ? bot.status_changes : [];
   for (const change of [...changes].reverse()) {
     if (!change || typeof change !== "object" || Array.isArray(change)) continue;
-    const code = (change as Record<string, unknown>).code;
+    const changeRecord = change as Record<string, unknown>;
+    const code = changeRecord.code;
     const mapped = mapRecallBotStatus(code);
-    if (mapped) return mapped;
+    if (mapped) return { status: mapped, ...(typeof code === "string" ? { code } : {}), ...(safeRecallSubCode(changeRecord.sub_code) ? { subCode: safeRecallSubCode(changeRecord.sub_code) } : {}) };
   }
-  return undefined;
+  return { status: undefined };
 }
 
 function assertUserId(userId: number): void {
@@ -737,20 +764,25 @@ export async function getRecallMeetingForUser(userId: number, id: string) {
 
 export type RecallMediaAuthorizationState = "authorized" | "pending" | "denied";
 
-export async function getRecallMediaAuthorizationState(userId: number, id: string): Promise<RecallMediaAuthorizationState> {
-  if (!config.recallMeetingsEnabled || !config.recallMediaBridgeSecret) return "denied";
+export type RecallMediaAuthorization = {
+  state: RecallMediaAuthorizationState;
+  reason?: string;
+};
+
+export async function getRecallMediaAuthorization(userId: number, id: string): Promise<RecallMediaAuthorization> {
+  if (!config.recallMeetingsEnabled || !config.recallMediaBridgeSecret) return { state: "denied", reason: "Meeting audio is not configured on the Chusky service." };
   assertUserId(userId);
-  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return "denied";
+  if (!/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return { state: "denied", reason: "The meeting session is invalid. Join Chusky again." };
   const meeting = await getRecallMeeting(userId, id);
-  if (!meeting) return "denied";
+  if (!meeting) return { state: "denied", reason: "The meeting session could not be found. Join Chusky again." };
   // Recall starts the Output Media page while the bot is joining (and, on
   // some platforms, while it is in a waiting room).  The signed ticket and
   // owner-scoped record still protect this bridge; waiting for in_call here
   // creates a startup loop where the page cannot be ready when Recall admits
   // the bot.  No meeting audio is available to the page before Recall has
   // actually connected it to the call.
-  if (["joining", "waiting_room", "in_call"].includes(meeting.status)) return "authorized";
-  if (["creating", "scheduled"].includes(meeting.status)) return "pending";
+  if (["joining", "waiting_room", "in_call"].includes(meeting.status)) return { state: "authorized" };
+  if (["creating", "scheduled"].includes(meeting.status)) return { state: "pending" };
   // A status webhook can arrive out of order, or a provider retry can be
   // delayed while Recall has already admitted the bot. Before denying the
   // Output Media page, reconcile a recently terminal local record against
@@ -762,29 +794,35 @@ export async function getRecallMediaAuthorizationState(userId: number, id: strin
     if ((await claimDeliveryLease(leaseKey, leaseToken, 5_000)) === "acquired") {
       try {
         const providerStatus = await retrieveRecallBotStatus(meeting.providerBotId);
-        if (providerStatus && ["joining", "waiting_room", "in_call"].includes(providerStatus)) {
+        if (providerStatus.status && ["joining", "waiting_room", "in_call"].includes(providerStatus.status)) {
           await updateRecallMeeting(userId, id, {
-            status: providerStatus,
+            status: providerStatus.status,
             error: undefined,
-            ...(providerStatus === "in_call" ? { runtimeState: "healthy" as const } : {}),
+            ...(providerStatus.status === "in_call" ? { runtimeState: "healthy" as const } : {}),
           });
-          return "authorized";
+          return { state: "authorized" };
         }
         // An explicit provider terminal state is authoritative. An unknown
         // response, however, is usually a short webhook/API race; keep the
         // bridge pending so the voice service can retry instead of showing a
         // misleading "meeting unavailable" screen.
-        if (!providerStatus) return "pending";
+        if (!providerStatus.status) return { state: "pending" };
+        if (providerStatus.status !== "ended" && providerStatus.status !== "failed") return { state: "pending" };
+        return { state: "denied", reason: meetingProviderReason(meeting.platform, providerStatus.status, providerStatus.subCode, meeting.error) };
       } catch {
         // Do not authorize on an unavailable provider check, but do not turn a
         // transient Recall/API failure into a terminal browser error either.
-        return "pending";
+        return { state: "pending" };
       } finally {
         await releaseDeliveryLease(leaseKey, leaseToken).catch(() => undefined);
       }
     }
   }
-  return "denied";
+  return { state: "denied", reason: meetingProviderReason(meeting.platform, meeting.status === "failed" ? "failed" : "ended", undefined, meeting.error) };
+}
+
+export async function getRecallMediaAuthorizationState(userId: number, id: string): Promise<RecallMediaAuthorizationState> {
+  return (await getRecallMediaAuthorization(userId, id)).state;
 }
 
 export async function authorizeRecallMedia(userId: number, id: string): Promise<boolean> {
@@ -827,7 +865,7 @@ export async function leaveRecallMeeting(userId: number, id: string, signal?: Ab
     // instead of leaving Chusky's local meeting record stuck as active.
     if (error instanceof RecallApiError && error.status === 400 && meeting.providerBotId) {
       let providerStatus: ReturnType<typeof mapRecallBotStatus>;
-      try { providerStatus = await retrieveRecallBotStatus(meeting.providerBotId, signal); }
+      try { providerStatus = (await retrieveRecallBotStatus(meeting.providerBotId, signal)).status; }
       catch { providerStatus = undefined; }
       if (providerStatus === "ended" || providerStatus === "failed") {
         const finished = await updateRecallMeeting(userId, id, { status: providerStatus });

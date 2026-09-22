@@ -542,8 +542,14 @@ export function mapRecallBotStatus(code: unknown): "joining" | "waiting_room" | 
     case "recording_permission_allowed":
     case "recording_permission_denied":
     case "in_call_recording": return "in_call";
+    // These are post-call/media lifecycle states. They must never be treated
+    // as an active meeting when the Output Media page reconnects.
+    case "recording_done":
     case "call_ended":
-    case "done": return "ended";
+    case "done":
+    case "media_expired":
+    case "analysis_done":
+    case "analysis_failed": return "ended";
     case "fatal": return "failed";
     default: return undefined;
   }

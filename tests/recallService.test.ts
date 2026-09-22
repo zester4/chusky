@@ -2,7 +2,7 @@ import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { initStore, getRecallMeeting, listRecallMeetings, recordRecallMeetingRuntime, updateRecallMeeting, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
+import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, getRecallMediaAuthorization, getRecallMediaAuthorizationState, joinRecallMeeting, leaveRecallMeeting, recallChatConfigurationReady, recallConfigurationReady, resolveRecallChatWebhook, sendRecallMeetingChat } from "../src/meetings/service.js";
 import { verifyRecallMediaTicket } from "../src/meetings/recall.js";
 
 const originalConfig = {
@@ -386,6 +386,23 @@ test("Recall media authorization stays pending when provider reconciliation is t
   const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/pending-media-race" });
   await updateRecallMeeting(ownerId, meeting.id, { status: "ended", error: "stale webhook" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
+});
+
+test("Recall media authorization surfaces a safe Google Meet admission reason", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: "bot_google_blocked" }), { status: 201 });
+    if (url.endsWith("/bot/bot_google_blocked/") && init?.method === "GET") {
+      return new Response(JSON.stringify({ status: { code: "fatal", sub_code: "google_meet_bot_blocked" } }), { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/admission-settings" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "failed", error: "Recall could not join the meeting (google_meet_bot_blocked)" });
+  const authorization = await getRecallMediaAuthorization(ownerId, meeting.id);
+  assert.equal(authorization.state, "denied");
+  assert.match(authorization.reason ?? "", /Google Meet did not admit Chusky/);
+  assert.match(authorization.reason ?? "", /signed-in Meet bot/);
 });
 
 test("an ended representative meeting schedules post-meeting follow-through and retries can re-enqueue it", async () => {
