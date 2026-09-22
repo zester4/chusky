@@ -339,7 +339,9 @@ test("Recall media authorization starts once the owned bot is joining and reject
   await updateRecallMeeting(ownerId, meeting.id, { status: "in_call" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   await updateRecallMeeting(ownerId, meeting.id, { status: "ended" });
-  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "denied");
+  // An ambiguous provider response remains retryable for a short bounded
+  // window; an explicit Recall terminal code is still denied.
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
   assert.equal(await getRecallMediaAuthorizationState(ownerId + 1, meeting.id), "denied");
 });
 
@@ -354,6 +356,36 @@ test("Recall media authorization repairs a stale terminal webhook before denying
   await updateRecallMeeting(ownerId, meeting.id, { status: "ended", error: "Recall could not join the meeting" });
   assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
   assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "in_call");
+});
+
+test("Recall media authorization uses provider status history during a webhook race", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: "bot_history_media" }), { status: 201 });
+    if (url.endsWith("/bot/bot_history_media/") && init?.method === "GET") {
+      return new Response(JSON.stringify({ status: { code: "ready" }, status_changes: [
+        { code: "joining_call" },
+        { code: "in_call_recording" },
+      ] }), { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/history-media-race" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "failed", error: "stale webhook" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "authorized");
+  assert.equal((await getRecallMeeting(ownerId, meeting.id))?.status, "in_call");
+});
+
+test("Recall media authorization stays pending when provider reconciliation is temporarily unavailable", async () => {
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/bot/") && init?.method === "POST") return new Response(JSON.stringify({ id: "bot_pending_media" }), { status: 201 });
+    if (url.endsWith("/bot/bot_pending_media/") && init?.method === "GET") return new Response("upstream timeout", { status: 503 });
+    return new Response(null, { status: 204 });
+  };
+  const meeting = await joinRecallMeeting(ownerId, { meetingUrl: "https://meet.google.com/pending-media-race" });
+  await updateRecallMeeting(ownerId, meeting.id, { status: "ended", error: "stale webhook" });
+  assert.equal(await getRecallMediaAuthorizationState(ownerId, meeting.id), "pending");
 });
 
 test("an ended representative meeting schedules post-meeting follow-through and retries can re-enqueue it", async () => {

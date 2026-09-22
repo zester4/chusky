@@ -316,7 +316,20 @@ async function retrieveRecallBotStatus(providerBotId: string, signal?: AbortSign
   const providerStatus = bot.status && typeof bot.status === "object" && !Array.isArray(bot.status)
     ? (bot.status as Record<string, unknown>).code
     : bot.status;
-  return mapRecallBotStatus(providerStatus);
+  const current = mapRecallBotStatus(providerStatus);
+  if (current) return current;
+  // Recall's retrieve response also exposes status_changes. During webhook
+  // delivery races the top-level status can be omitted or briefly lag the
+  // latest lifecycle event. Use the newest recognizable event only as a
+  // reconciliation fallback; an explicit current terminal status still wins.
+  const changes = Array.isArray(bot.status_changes) ? bot.status_changes : [];
+  for (const change of [...changes].reverse()) {
+    if (!change || typeof change !== "object" || Array.isArray(change)) continue;
+    const code = (change as Record<string, unknown>).code;
+    const mapped = mapRecallBotStatus(code);
+    if (mapped) return mapped;
+  }
+  return undefined;
 }
 
 function assertUserId(userId: number): void {
@@ -757,9 +770,15 @@ export async function getRecallMediaAuthorizationState(userId: number, id: strin
           });
           return "authorized";
         }
+        // An explicit provider terminal state is authoritative. An unknown
+        // response, however, is usually a short webhook/API race; keep the
+        // bridge pending so the voice service can retry instead of showing a
+        // misleading "meeting unavailable" screen.
+        if (!providerStatus) return "pending";
       } catch {
-        // The bridge will return the safe terminal state if Recall cannot be
-        // checked. Provider failures must not turn into a false authorization.
+        // Do not authorize on an unavailable provider check, but do not turn a
+        // transient Recall/API failure into a terminal browser error either.
+        return "pending";
       } finally {
         await releaseDeliveryLease(leaseKey, leaseToken).catch(() => undefined);
       }
