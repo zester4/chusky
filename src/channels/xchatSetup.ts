@@ -46,6 +46,7 @@ function authHeaders(accessToken: string): Record<string, string> {
  */
 export async function ensureXchatActivitySubscriptions(options: {
   accessToken: string;
+  listAccessToken?: string;
   webhookId: string;
   expectedUsername?: string;
   apiBaseUrl?: string;
@@ -65,6 +66,12 @@ export async function ensureXchatActivitySubscriptions(options: {
   const fetchImpl = options.fetchImpl ?? fetch;
   const baseUrl = (options.apiBaseUrl || "https://api.x.com").replace(/\/+$/, "");
   const headers = authHeaders(accessToken);
+  // X currently requires app-only bearer auth to list Activity API
+  // subscriptions, while the bot's OAuth2 user token is required to resolve
+  // the bot and create private chat subscriptions. Keep the fallback for
+  // existing installations whose app token is not yet configured, but surface
+  // X's actionable 403 guidance if the fallback is rejected.
+  const listHeaders = authHeaders(options.listAccessToken?.trim() || accessToken);
   const identity = await readJson(await fetchImpl(`${baseUrl}/2/users/me`, {
     headers,
     signal: AbortSignal.timeout(15_000),
@@ -84,7 +91,7 @@ export async function ensureXchatActivitySubscriptions(options: {
   }
 
   const listed = await readJson(await fetchImpl(`${baseUrl}/2/activity/subscriptions`, {
-    headers,
+    headers: listHeaders,
     signal: AbortSignal.timeout(15_000),
   }));
   const existing = Array.isArray(listed?.data) ? listed.data : [];

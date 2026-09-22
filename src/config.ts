@@ -135,6 +135,7 @@ export const config = {
   twilioSmsStatusCallbackUrl: optional("TWILIO_SMS_STATUS_CALLBACK_URL", ""),
   xchatEnabled: optional("XCHAT_ENABLED", "false") === "true",
   xchatBotToken: optional("XCHAT_BOT_TOKEN", ""),
+  xchatAppBearerToken: optional("X_BEARER_TOKEN", ""),
   xchatPin: optional("XCHAT_PIN", ""),
   xchatConsumerSecret: optional("X_CONSUMER_SECRET", ""),
   xchatBotUsername: optional("X_BOT_USERNAME", ""),

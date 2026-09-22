@@ -7,16 +7,17 @@ function json(value: unknown, status = 200): Response {
 }
 
 test("XChat setup resolves the bot and creates only missing activity subscriptions", async () => {
-  const calls: Array<{ url: string; method: string; body?: unknown }> = [];
+  const calls: Array<{ url: string; method: string; body?: unknown; authorization?: string }> = [];
   const result = await ensureXchatActivitySubscriptions({
     accessToken: "bot-token",
+    listAccessToken: "app-token",
     webhookId: "webhook-1",
     expectedUsername: "@chusky_bot",
     apiBaseUrl: "https://x.test",
     fetchImpl: async (input, init) => {
       const request = new Request(input, init);
       const body = request.method === "POST" ? JSON.parse(await request.text()) : undefined;
-      calls.push({ url: request.url, method: request.method, body });
+      calls.push({ url: request.url, method: request.method, body, authorization: request.headers.get("authorization") ?? undefined });
       if (request.url.endsWith("/2/users/me")) return json({ data: { id: "42", username: "chusky_bot" } });
       if (request.url.endsWith("/2/activity/subscriptions") && request.method === "GET") {
         return json({ data: [{ event_type: "chat.received", webhook_id: "webhook-1", filter: { user_id: "42" } }] });
@@ -33,6 +34,9 @@ test("XChat setup resolves the bot and creates only missing activity subscriptio
     { eventType: "chat.conversation.join", status: "created" },
   ]);
   assert.equal(calls.length, 3);
+  assert.equal(calls[0]?.authorization, "Bearer bot-token");
+  assert.equal(calls[1]?.authorization, "Bearer app-token");
+  assert.equal(calls[2]?.authorization, "Bearer bot-token");
   assert.deepEqual(calls[2]?.body, {
     event_type: "chat.conversation.join",
     filter: { user_id: "42" },

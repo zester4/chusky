@@ -316,6 +316,7 @@ async function main(): Promise<void> {
         try {
           xchatSetup = await ensureXchatActivitySubscriptions({
             accessToken: config.xchatBotToken,
+            listAccessToken: config.xchatAppBearerToken || undefined,
             webhookId: config.xchatWebhookId,
             expectedUsername: config.xchatBotUsername || undefined,
           });

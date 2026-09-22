@@ -592,6 +592,8 @@ Enable it only when the XChat bot has been provisioned with an OAuth access toke
 ```text
 XCHAT_ENABLED=true
 XCHAT_BOT_TOKEN=<X OAuth access token>
+# App-only bearer token used to list Activity subscriptions during startup
+X_BEARER_TOKEN=<X app bearer token>
 XCHAT_PIN=<Juicebox PIN>
 X_CONSUMER_SECRET=<X app consumer secret>
 X_BOT_USERNAME=<optional bot handle>
@@ -600,7 +602,7 @@ XCHAT_WEBHOOK_URL=https://your-domain.example/xchat/webhook
 XCHAT_WEBHOOK_ID=<webhook id returned by X>
 ```
 
-Configure both `GET` and `POST https://your-domain.example/xchat/webhook` in X, then copy the created webhook ID into `XCHAT_WEBHOOK_ID`. On startup Chusky verifies the token owner, creates or reuses the `chat.received` and `chat.conversation.join` activity subscriptions, and reports the setup state through `/health`. The bot account must already have registered XChat public keys and Juicebox private-key storage for `XCHAT_PIN`; webhook registration alone is not enough. From Telegram, use `/channel link xchat`, then send the generated `/link <code>` from the personal X account in a DM to the bot account. The personal account must be able to follow or trust the bot before its first encrypted DM. Group messages are handled when the bot is explicitly mentioned; they use shared channel context and never inherit private Telegram history.
+Configure both `GET` and `POST https://your-domain.example/xchat/webhook` in X, then copy the created webhook ID into `XCHAT_WEBHOOK_ID`. On startup Chusky verifies the bot user token, lists existing subscriptions with the app bearer token, creates or reuses the `chat.received` and `chat.conversation.join` activity subscriptions with the bot user token, and reports the setup state through `/health`. The bot account must already have registered XChat public keys and Juicebox private-key storage for `XCHAT_PIN`; webhook registration alone is not enough. From Telegram, use `/channel link xchat`, then send the generated `/link <code>` from the personal X account in a DM to the bot account. The personal account must be able to follow or trust the bot before its first encrypted DM. Group messages are handled when the bot is explicitly mentioned; they use shared channel context and never inherit private Telegram history.
 
 ### Sendblue iMessage channel
 
@@ -995,6 +997,12 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `WHATSAPP_VERIFY_TOKEN` | WhatsApp | — | Webhook verification token |
 | `WHATSAPP_APP_SECRET` | WhatsApp | — | Meta app secret for `X-Hub-Signature-256` |
 | `WHATSAPP_GRAPH_VERSION` | — | `v23.0` | Graph API version |
+| `XCHAT_ENABLED` | — | `false` | Enable the encrypted XChat adapter |
+| `XCHAT_BOT_TOKEN` | X OAuth 2.0 | — | OAuth 2.0 user token for the XChat bot account |
+| `X_BEARER_TOKEN` | X developer app | — | App-only bearer token used to list Activity API subscriptions |
+| `XCHAT_PIN` | Juicebox | — | PIN used to unlock the bot's encrypted XChat keys |
+| `X_CONSUMER_SECRET` | X developer app | — | Consumer secret used for webhook CRC/signature verification |
+| `XCHAT_WEBHOOK_ID` | X developer app | — | Existing X Activity API webhook ID |
 | `SENDBLUE_ENABLED` | — | `false` | Enable the Sendblue iMessage adapter |
 | `SENDBLUE_API_KEY` | Sendblue | — | Sendblue API key ID |
 | `SENDBLUE_API_SECRET` | Sendblue | — | Sendblue API secret |
