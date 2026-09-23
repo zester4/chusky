@@ -1349,8 +1349,12 @@ export async function runAgent(
         } else if (slug.startsWith("MCP_")) {
           execResult = await mcpClient.callTool(userId, slug, executionArgs, signal);
         } else if (slug === "CHUCK_LIST_CONNECTED_ACCOUNTS") {
-          const toolkit = args.toolkit === undefined ? undefined : String(args.toolkit).trim().slice(0, 120);
-          if (toolkit === "") throw new Error("toolkit must not be empty when provided");
+          // `toolkit` is an optional model-facing filter. Models frequently
+          // emit an empty string for an optional field; treat that exactly as
+          // omitted so account discovery remains safe and idempotent instead
+          // of turning a valid unfiltered request into a production error.
+          const normalizedToolkit = args.toolkit === undefined ? undefined : String(args.toolkit).trim().slice(0, 120);
+          const toolkit = normalizedToolkit || undefined;
           const rawLimit = args.limit === undefined ? 20 : Number(args.limit);
           const limit = Number.isInteger(rawLimit) && rawLimit >= 1 && rawLimit <= 50 ? rawLimit : (() => { throw new Error("limit must be an integer from 1 to 50"); })();
           const accounts = await listConnectedAccounts(userId, toolkit || undefined);

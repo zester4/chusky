@@ -462,6 +462,42 @@ test("agent uses the native account boundary and hides the raw Composio account 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("treats an empty optional connected-account toolkit filter as omitted", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830018);
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const session = {
+    sessionId: "empty-toolkit-session",
+    tools: async () => [],
+    execute: async () => { throw new Error("No provider tool should be executed for native account discovery"); },
+  };
+  setAgentDependenciesForTests({
+    composio: {
+      create: async () => session,
+      connectedAccounts: {
+        list: async (options?: { toolkitSlugs?: string[] }) => {
+          assert.deepEqual(options, undefined);
+          return { items: [{ id: "ca_gmail", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] };
+        },
+      },
+    },
+  });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    requests.push(JSON.parse(String(init?.body)));
+    return requests.length === 1
+      ? toolResponse("CHUCK_LIST_CONNECTED_ACCOUNTS", JSON.stringify({ toolkit: "", limit: 20 }))
+      : chatResponse({ role: "assistant", content: "I found your connected accounts." });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(830018, "Which accounts are connected?", [], "test/model");
+    assert.equal(result.text, "I found your connected accounts.");
+    const toolMessage = requests[1].messages.find((message: any) => message.role === "tool");
+    assert.deepEqual(JSON.parse(toolMessage.content), [{ id: "ca_gmail", alias: "work-gmail", toolkit: "gmail", status: "ACTIVE" }]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("materially risky tool calls stop before execution and approved exact calls execute once", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830003);
