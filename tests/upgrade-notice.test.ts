@@ -30,6 +30,15 @@ test("mission upgrade preset contains bounded, accurate release highlights", () 
   assert.match(bullets[2], /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
 });
 
+test("autonomy upgrade preset covers the current orchestration surfaces", () => {
+  const bullets = getAgentUpgradePreset("autonomy");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.autonomy]);
+  assert.match(bullets[0], /personal and business autonomy queues/);
+  assert.match(bullets[1], /dependency-graph workflow composer/);
+  assert.match(bullets[2], /Daytona browser and artifact execution/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -43,12 +52,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the mission release", async () => {
+test("current upgrade manifest announces the autonomy release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-3.3.0");
-  assert.equal(notice?.version, "3.3.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Chusky autonomous missions are now live/);
-  assert.match(formatAgentUpgradeNotice(notice!), /dependency-aware steps/);
-  assert.match(formatAgentUpgradeNotice(notice!), /provider events/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
+  assert.equal(notice?.id, "release-4.1.0");
+  assert.equal(notice?.version, "4.1.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Chusky autonomy and orchestration are now live/);
+  assert.match(formatAgentUpgradeNotice(notice!), /personal and business autonomy queues/);
+  assert.match(formatAgentUpgradeNotice(notice!), /dependency-graph workflow composer/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Daytona browser and artifact execution/);
 });

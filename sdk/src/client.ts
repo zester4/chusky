@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -37,6 +37,7 @@ export class Chusky {
   readonly departments: DepartmentsResource;
   readonly outcomes: OutcomesResource;
   readonly autonomy: AutonomyResource;
+  readonly workflows: WorkflowsResource;
   readonly a2a: A2AResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -88,6 +89,7 @@ export class Chusky {
     this.departments = new DepartmentsResource(this);
     this.outcomes = new OutcomesResource(this);
     this.autonomy = new AutonomyResource(this);
+    this.workflows = new WorkflowsResource(this);
     this.a2a = new A2AResource(this);
   }
 
@@ -544,6 +546,14 @@ export class AutonomyResource {
   reconcile(mode: "personal" | "business" = "personal", maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request("/account/autonomy/reconcile", { method: "POST", body: JSON.stringify({ mode, ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
   businessQueue(projectId: string, options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/queue`, {}, options); }
   businessReconcile(projectId: string, maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/reconcile`, { method: "POST", body: JSON.stringify({ ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
+}
+
+export class WorkflowsResource {
+  constructor(private readonly client: Chusky) {}
+  list(options?: RequestOptions): Promise<{ data: WorkflowComposerRecord[] }> { return this.client.request("/workflows/composer", {}, options); }
+  create(input: { name: string; description?: string; stages: ComposerStageInput[] }, options?: RequestOptions): Promise<WorkflowComposerRecord> { return this.client.request("/workflows/composer", { method: "POST", body: JSON.stringify(input) }, options); }
+  update(workflowId: string, input: Partial<{ name: string; description: string; stages: ComposerStageInput[] }>, options?: RequestOptions): Promise<WorkflowComposerRecord> { return this.client.request(`/workflows/composer/${encodeURIComponent(workflowId)}`, { method: "PATCH", body: JSON.stringify(input) }, options); }
+  start(workflowId: string, options?: RequestOptions): Promise<WorkflowComposerRecord & { taskId?: string; workflowRunId?: string }> { return this.client.request(`/workflows/composer/${encodeURIComponent(workflowId)}/start`, { method: "POST", body: "{}" }, options); }
 }
 
 export class A2AResource {

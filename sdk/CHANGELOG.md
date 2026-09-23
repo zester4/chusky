@@ -4,6 +4,15 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
 ## Unreleased
 
+## 1.5.0 - 2026-09-23
+
+- Added the owner-scoped autonomy queue and bounded reconciliation resources
+  for personal and business work.
+- Added typed workflow-composer resources for dependency-aware prechains,
+  parallel-ready stages, retry/budget controls, and approval checkpoints.
+- Published the current autonomy, meeting, A2A, artifact, and browser-capable
+  API contract with synchronized package metadata and release documentation.
+
 ## 0.4.0 - 2026-09-22
 
 - Added typed A2A discovery and durable task operations through `chusky.a2a`.

@@ -12,6 +12,11 @@ const MAX_BULLET_LENGTH = 240;
  * omitted.
  */
 export const AGENT_UPGRADE_PRESETS = {
+  autonomy: [
+    "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
+    "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
+    "Extended the governed runtime across meetings, A2A, Daytona browser and artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
+  ],
   missions: [
     "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, and restart-safe execution.",
     "Missions can fan out independent work, wait for timers or exact provider events, pause, resume, repair, replan, and attach evidence before verification and completion.",

@@ -43,6 +43,13 @@ paths:
     get: { summary: Read the unified business autonomy queue under a company project policy, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: projectId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Company autonomy snapshot }, '404': { description: Not found } } }
   /account/projects/{projectId}/autonomy/reconcile:
     post: { summary: Run due company autonomy watches under the project policy, parameters: [{ name: projectId, in: path, required: true, schema: { type: string } }], requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { maxWatches: { type: integer, minimum: 1, maximum: 20 } } } } } }, responses: { '200': { description: Company reconciliation results }, '404': { description: Not found }, '409': { description: Autonomy disabled } } }
+  /workflows/composer:
+    get: { summary: List owner-scoped dependency-aware workflow composer records, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Workflow composer records } }
+    post: { summary: Create a persisted dependency-aware workflow composer graph, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created }, '400': { description: Invalid workflow graph } } }
+  /workflows/composer/{workflowId}:
+    patch: { summary: Update an owner-scoped workflow composer graph before or during execution, parameters: [{ name: workflowId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated }, '400': { description: Invalid workflow graph }, '404': { description: Not found } } }
+  /workflows/composer/{workflowId}/start:
+    post: { summary: Start a workflow composer graph and enqueue ready stages, parameters: [{ name: workflowId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Started or reconciled }, '400': { description: Workflow could not be started } } }
   /account/projects/{projectId}/agents:
     get: { summary: List organization project agent profiles as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
     post: { summary: Create a template-based company agent profile as an owner or admin, responses: { '201': { description: Created }, '404': { description: Not found } } }

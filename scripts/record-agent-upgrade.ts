@@ -28,7 +28,7 @@ if (preset) {
 }
 
 if (!version || !bullets.length) {
-  console.error("Usage: npm run agent:upgrade -- --version 3.3.0 --preset missions");
+  console.error("Usage: npm run agent:upgrade -- --version 4.1.0 --preset autonomy");
   console.error("   or: npm run agent:upgrade -- --version 3.1.0 --bullet \"Change one\" [--bullet \"Change two\"] [--bullet \"Change three\"]");
   process.exit(1);
 }

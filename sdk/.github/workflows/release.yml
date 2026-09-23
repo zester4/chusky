@@ -52,6 +52,16 @@ jobs:
             echo "@chusky/sdk@$VERSION is already published"
             exit 1
           fi
+      - name: Ensure npm publishing is configured
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: test -n "$NPM_TOKEN"
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # npm provenance currently rejects private GitHub source repositories.
+        # The package remains public; authentication is provided by NPM_TOKEN.
+        run: npm publish --access public
       - name: Commit and tag release
         env:
           VERSION: ${{ inputs.version }}
@@ -69,12 +79,6 @@ jobs:
             git tag -a "sdk-v$VERSION" -m "Chusky SDK v$VERSION"
             git push origin "sdk-v$VERSION"
           fi
-      - name: Publish package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        # npm provenance currently rejects private GitHub source repositories.
-        # The package remains public; authentication is provided by NPM_TOKEN.
-        run: npm publish --access public
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

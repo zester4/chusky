@@ -278,10 +278,18 @@ test("SDK exposes mission proof, context, department, and outcome resources", as
   await sdk.outcomes.list();
   await sdk.outcomes.get("qualified-fintech-leads");
   await sdk.outcomes.plan("qualified-fintech-leads", { "lead count": 10 });
+  await sdk.workflows.list();
+  await sdk.workflows.create({ name: "Research then draft", stages: [{ id: "research", title: "Research", objective: "Collect sources." }] });
+  await sdk.workflows.update("wf_1", { description: "Updated" });
+  await sdk.workflows.start("wf_1", { idempotencyKey: "workflow_1" });
   assert.ok(calls.includes("GET:https://example.test/v1/missions"));
   assert.ok(calls.includes("GET:https://example.test/v1/missions/mis_1/proof"));
   assert.ok(calls.includes("POST:https://example.test/v1/missions/mis_1/events"));
   assert.ok(calls.includes("GET:https://example.test/v1/context?purpose=sales&limit=10"));
   assert.ok(calls.includes("GET:https://example.test/v1/departments/catalog"));
   assert.ok(calls.includes("GET:https://example.test/v1/outcomes"));
+  assert.ok(calls.includes("GET:https://example.test/v1/workflows/composer"));
+  assert.ok(calls.includes("POST:https://example.test/v1/workflows/composer"));
+  assert.ok(calls.includes("PATCH:https://example.test/v1/workflows/composer/wf_1"));
+  assert.ok(calls.includes("POST:https://example.test/v1/workflows/composer/wf_1/start"));
 });

@@ -85,6 +85,28 @@ change.
 - Prefer small composable modules and shared behavior across Telegram, CLI,
   dashboard, and other channels instead of transport-specific forks.
 
+## Major capability and SDK releases
+
+- A substantial cross-surface capability (for example autonomy, missions,
+  dependency-aware workflow composition/prechains, meetings, channels,
+  browser/computer execution, or artifact delivery) requires a user-facing
+  upgrade notice. Record it with `npm run agent:upgrade -- --version
+  <semver> --preset <preset>` or explicit bounded bullets, then add or update
+  the matching preset and focused test in `src/upgradeNotice.ts` and
+  `tests/upgrade-notice.test.ts`.
+- If the capability changes the public Developer API or SDK, release the SDK
+  in the same change: bump `sdk/package.json` and `sdk/package-lock.json`, add
+  a dated `sdk/CHANGELOG.md` entry, update the SDK docs/OpenAPI surface, and
+  run `npm run sdk:check`. Use the exact-version CLI preflight/publish path
+  (`npm run sdk:publish -- --version <x.y.z> --dry-run`, then without
+  `--dry-run`) or the guarded `Chusky SDK Release` workflow. A publish is not
+  complete until npm, the `sdk-v<x.y.z>` tag, and the release workflow (or
+  equivalent registry evidence) confirm it.
+- Treat public SDK publication as a release action: verify the package
+  contents, NPM credentials, changelog, lockfile, and clean diff before
+  publishing. Never publish a feature that is not represented by the
+  authenticated API, tests, and SDK types.
+
 ## UI/UX quality bar
 
 Build interfaces that feel intentional, calm, and product-grade—not generic

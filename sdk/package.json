@@ -1,11 +1,11 @@
 {
   "name": "@chusky/sdk",
-  "version": "0.4.0",
+  "version": "1.5.0",
   "description": "TypeScript SDK for Chusky's developer API.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zester4/chusky-sdk.git"
+    "url": "git+https://github.com/zester4/chusky-sdk.git"
   },
   "bugs": {
     "url": "https://github.com/zester4/chusky-sdk/issues"
