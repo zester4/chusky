@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, pauseMission, resumeMission, cancelMission,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
   searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
@@ -2582,6 +2582,15 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
+      for (const candidate of await listTasks(ctx.from.id, ["blocked"])) {
+        if (!candidate.missionId) continue;
+        const mission = await getMission(ctx.from.id, candidate.missionId);
+        if (mission?.waiting?.kind === "approval" && mission.waiting.key === approval.id) {
+          await updateMission(ctx.from.id, mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${approval.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
+          await editApprovalOutcome(ctx, "🛑 Action denied. The mission is blocked at its checkpoint; revise the action before resuming.");
+          return;
+        }
+      }
       await editApprovalOutcome(ctx, "🛑 Action denied. Nothing was executed.");
       return;
     }
@@ -2612,6 +2621,45 @@ export function registerHandlers(bot: Bot): void {
       }
       return;
     }
+    let missionTask: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
+    for (const candidate of await listTasks(ctx.from.id, ["blocked"])) {
+      if (!candidate.missionId) continue;
+      const mission = await getMission(ctx.from.id, candidate.missionId);
+      if (mission?.waiting?.kind === "approval" && mission.waiting.key === approval.id) {
+        missionTask = candidate;
+        break;
+      }
+    }
+    if (missionTask?.missionId) {
+      const lockToken = randomUUID();
+      if (!(await acquireUserLock(ctx.from.id, lockToken))) {
+        await setApprovalStatus(ctx.from.id, approval.id, "pending");
+        await editApprovalOutcome(ctx, "⏳ Another request is still running. This approval remains pending; please approve it again shortly.");
+        return;
+      }
+      try {
+        const resumedMission = await resumeMission(ctx.from.id, missionTask.missionId);
+        const retriedTask = await retryTask(ctx.from.id, missionTask.id);
+        if (!resumedMission || !retriedTask) {
+          await setApprovalStatus(ctx.from.id, approval.id, "pending");
+          await editApprovalOutcome(ctx, "⚠️ The mission could not be resumed. The approval remains pending; retry after checking the mission status.");
+          return;
+        }
+        await updateTask(ctx.from.id, missionTask.id, { approvedApprovalId: approval.id });
+        const workflowRunId = await enqueueTaskWithClaim(ctx.from.id, missionTask.id, retriedTask.runAt ?? Date.now());
+        if (!workflowRunId) {
+          await editApprovalOutcome(ctx, "✅ Approved. The mission task is already being queued; check the mission status for its update.");
+          return;
+        }
+        await editApprovalOutcome(ctx, "✅ Approved. The original mission is resuming from its saved checkpoint.");
+      } catch (error) {
+        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, missionId: missionTask.missionId, taskId: missionTask.id }, "Mission approval resume failed");
+        await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the mission could not be queued. Check its status and retry the mission from the saved checkpoint.");
+      } finally {
+        await releaseUserLock(ctx.from.id, lockToken);
+      }
+      return;
+    }
     try {
       // Preserve exact execution for any historical phone-call approval that
       // is still pending after the policy change. New calls do not create one.
@@ -2630,6 +2678,11 @@ export function registerHandlers(bot: Bot): void {
       await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);
       await sendGeneratedArtifacts(ctx, result.generatedFiles);
     } catch (e) {
+      if (e instanceof ApprovalRequiredError) {
+        await ctx.reply("The resumed request reached another action that needs your review:");
+        await replyCard(ctx, approvalCard(e.toolSlug, e.approvalId));
+        return;
+      }
       await ctx.reply(`❌ Approval execution failed: ${String(e).slice(0, 400)}`);
     }
   });
