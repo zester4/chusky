@@ -541,7 +541,9 @@ export class OutcomesResource {
 export class AutonomyResource {
   constructor(private readonly client: Chusky) {}
   queue(mode: "personal" | "business" = "personal", options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/autonomy/queue?mode=${mode}`, {}, options); }
+  reconcile(mode: "personal" | "business" = "personal", maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request("/account/autonomy/reconcile", { method: "POST", body: JSON.stringify({ mode, ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
   businessQueue(projectId: string, options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/queue`, {}, options); }
+  businessReconcile(projectId: string, maxWatches?: number, options?: RequestOptions): Promise<{ data: Array<Record<string, unknown>> }> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/reconcile`, { method: "POST", body: JSON.stringify({ ...(maxWatches === undefined ? {} : { maxWatches }) }) }, options); }
 }
 
 export class A2AResource {

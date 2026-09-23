@@ -54,6 +54,7 @@ import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisi
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { scheduleMissionSteps } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
+import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -1617,6 +1618,15 @@ export function registerSdkApi(app: Hono): void {
     return c.json(await getAutonomySnapshot(owner.userId, mode));
   });
 
+  app.post("/v1/account/autonomy/reconcile", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before running autonomy reconciliation.");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const mode = body.mode === "business" ? "business" : "personal";
+    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(body.maxWatches))));
+    return c.json({ data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) });
+  });
+
   app.get("/v1/account/projects/:projectId/autonomy/queue", async (c) => {
     const control = await getSession(0);
     const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
@@ -1633,6 +1643,25 @@ export function registerSdkApi(app: Hono): void {
       ...(policy.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: policy.maxAutonomousActionsPerDay } : {}),
       ...(policy.notifyOn ? { notifyOn: policy.notifyOn } : {}),
     } : {}));
+  });
+
+  app.post("/v1/account/projects/:projectId/autonomy/reconcile", async (c) => {
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Company project not found.");
+    const owner = (await linkedWebCallOwner(c)) ?? sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this company project to an owner before running autonomy reconciliation.");
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const policy = project.companyPolicy?.autonomy;
+    if (policy?.enabled === false) return apiError(c, 409, "autonomy_disabled", "Autonomy is disabled for this company project.");
+    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(body.maxWatches))));
+    return c.json({ data: await runDueAutonomyWatches(owner.userId, { mode: "business", maxWatches, profileOverrides: policy ? {
+      ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
+      ...(policy.allowedDomains ? { allowedDomains: [...policy.allowedDomains] } : {}),
+      ...(policy.deniedDomains ? { deniedDomains: [...policy.deniedDomains] } : {}),
+      ...(policy.maxChecksPerDay !== undefined ? { maxChecksPerDay: policy.maxChecksPerDay } : {}),
+      ...(policy.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: policy.maxAutonomousActionsPerDay } : {}),
+    } : undefined }) });
   });
 
   app.get("/v1/account/projects", async (c) => {

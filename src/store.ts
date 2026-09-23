@@ -1062,7 +1062,9 @@ export interface StandingOrderRecord {
 }
 export interface AutonomyWatchRecord {
   id: string; userId: number; name: string; domain: string; toolkit?: string;
-  objective: string; query?: string; cadenceSeconds: number;
+  objective: string; query?: string; /** Exact owner-selected read-only Composio/native slugs. */
+  toolSlugs?: string[]; cursor?: string; lastDigestKey?: string; consecutiveFailures?: number;
+  cadenceSeconds: number;
   authority: "observe" | "prepare" | "execute_reversible";
   status: "active" | "paused" | "revoked";
   nextCheckAt?: number; lastCheckedAt?: number; lastChangedAt?: number;
@@ -1074,6 +1076,7 @@ export interface AutonomyProfileRecord {
   enabled: boolean; defaultAuthority: "observe" | "prepare" | "execute_reversible";
   quietHoursUtc?: { startMinute: number; endMinute: number };
   maxChecksPerDay: number; maxAutonomousActionsPerDay: number;
+  checksToday?: number; checksDayUtc?: string; autonomousActionsToday?: number; actionsDayUtc?: string;
   notifyOn: "important" | "changes" | "all" | "silent";
   allowedDomains: string[]; deniedDomains: string[];
   createdAt: number; updatedAt: number;
@@ -6036,13 +6039,14 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
     };
     case "autonomy-watches": return {
       ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
+      toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)),
       cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
       nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),
     };
     case "autonomy-profiles": return {
       ...base, mode: raw.mode === "business" ? "business" : "personal", enabled: attentionBoolean(raw.enabled, "enabled", true), defaultAuthority: attentionStatus(raw.defaultAuthority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyProfileRecord["defaultAuthority"],
       quietHoursUtc: raw.quietHoursUtc && typeof raw.quietHoursUtc === "object" && !Array.isArray(raw.quietHoursUtc) ? { startMinute: Math.round(attentionNumber((raw.quietHoursUtc as any).startMinute, "quietHoursUtc.startMinute", 0, 0, 1439)), endMinute: Math.round(attentionNumber((raw.quietHoursUtc as any).endMinute, "quietHoursUtc.endMinute", 0, 0, 1439)) } : undefined,
-      maxChecksPerDay: Math.round(attentionNumber(raw.maxChecksPerDay, "maxChecksPerDay", 24, 0, 1000)), maxAutonomousActionsPerDay: Math.round(attentionNumber(raw.maxAutonomousActionsPerDay, "maxAutonomousActionsPerDay", 20, 0, 1000)), notifyOn: attentionStatus(raw.notifyOn, ["important", "changes", "all", "silent"], "important") as AutonomyProfileRecord["notifyOn"], allowedDomains: attentionArray(raw.allowedDomains, "allowedDomains", 100) ?? [], deniedDomains: attentionArray(raw.deniedDomains, "deniedDomains", 100) ?? [],
+      maxChecksPerDay: Math.round(attentionNumber(raw.maxChecksPerDay, "maxChecksPerDay", 24, 0, 1000)), maxAutonomousActionsPerDay: Math.round(attentionNumber(raw.maxAutonomousActionsPerDay, "maxAutonomousActionsPerDay", 20, 0, 1000)), checksToday: Math.round(attentionNumber(raw.checksToday, "checksToday", 0, 0, 1000)), checksDayUtc: attentionText(raw.checksDayUtc, "checksDayUtc", 20), autonomousActionsToday: Math.round(attentionNumber(raw.autonomousActionsToday, "autonomousActionsToday", 0, 0, 1000)), actionsDayUtc: attentionText(raw.actionsDayUtc, "actionsDayUtc", 20), notifyOn: attentionStatus(raw.notifyOn, ["important", "changes", "all", "silent"], "important") as AutonomyProfileRecord["notifyOn"], allowedDomains: attentionArray(raw.allowedDomains, "allowedDomains", 100) ?? [], deniedDomains: attentionArray(raw.deniedDomains, "deniedDomains", 100) ?? [],
     };
     case "delivery-preferences": return {
       ...base, provider: attentionProvider(raw.provider, "provider", "telegram")!, conversationId: attentionText(raw.conversationId, "conversationId", 300), enabled: attentionBoolean(raw.enabled, "enabled", true),

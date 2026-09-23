@@ -37,8 +37,12 @@ paths:
     put: { summary: Replace project tool grants and per-run budgets as an owner or admin, responses: { '200': { description: Updated }, '400': { description: Invalid policy }, '404': { description: Not found } } }
   /account/autonomy/queue:
     get: { summary: Read the authenticated owner's unified personal or business autonomy queue, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: mode, in: query, required: false, schema: { type: string, enum: [personal, business] } }], responses: { '200': { description: Owner-scoped autonomy snapshot including profile, watches, blockers, and next checks }, '403': { description: Owner link required } } }
+  /account/autonomy/reconcile:
+    post: { summary: Run due owner-configured read-only autonomy watches and persist checkpoints, requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { mode: { type: string, enum: [personal, business] }, maxWatches: { type: integer, minimum: 1, maximum: 20 } } } } } }, responses: { '200': { description: Bounded reconciliation results and gap candidates }, '403': { description: Owner link required } } }
   /account/projects/{projectId}/autonomy/queue:
     get: { summary: Read the unified business autonomy queue under a company project policy, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: projectId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Company autonomy snapshot }, '404': { description: Not found } } }
+  /account/projects/{projectId}/autonomy/reconcile:
+    post: { summary: Run due company autonomy watches under the project policy, parameters: [{ name: projectId, in: path, required: true, schema: { type: string } }], requestBody: { required: false, content: { application/json: { schema: { type: object, properties: { maxWatches: { type: integer, minimum: 1, maximum: 20 } } } } } }, responses: { '200': { description: Company reconciliation results }, '404': { description: Not found }, '409': { description: Autonomy disabled } } }
   /account/projects/{projectId}/agents:
     get: { summary: List organization project agent profiles as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
     post: { summary: Create a template-based company agent profile as an owner or admin, responses: { '201': { description: Created }, '404': { description: Not found } } }

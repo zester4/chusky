@@ -44,6 +44,9 @@ import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { scheduleMissionSteps } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
+import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
+import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
+import type { BusinessGap } from "./autonomy/gapDetectors.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -311,7 +314,10 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
     return updated;
   }
   const input = attentionInput(args);
-  if (kind === "autonomy_watch" && typeof args.query === "string" && args.query.trim()) input.query = text(args.query);
+  if (kind === "autonomy_watch") {
+    const query = typeof args.query === "string" ? args.query : args.queryText;
+    if (typeof query === "string" && query.trim()) input.query = text(query);
+  }
   const requiredByKind: Partial<Record<AttentionEntityKind, string[]>> = {
     observation: ["source", "eventType", "summary"], open_loop: ["title", "nextAction"], attention_candidate: ["candidateType", "reason"],
     standing_order: ["name", "instruction", "authority"], delivery_preference: ["provider"], relationship: ["personKey"], project_state: ["projectKey", "name", "summary"],
@@ -319,6 +325,32 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
   };
   for (const field of requiredByKind[kind] ?? []) if (!(field in input) || input[field] === undefined || input[field] === null || input[field] === "") throw new Error(`${field} is required for ${kind}`);
   return createAttentionRecord(userId, kind, input);
+}
+
+async function autonomyReconcileTool(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+  if (runtime.sharedConversation) throw new Error("Autonomy reconciliation is only available in a private owner conversation");
+  const mode = args.mode === "business" ? "business" : "personal";
+  const maxWatches = args.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(args.maxWatches))));
+  const results = await runDueAutonomyWatches(userId, { mode, maxWatches });
+  return { mode, checked: results.length, results, message: results.length ? "Due watches were reconciled with read-only scopes; proposed gaps remain subject to the normal approval boundary." : "No autonomy watches are due." };
+}
+
+async function autonomyPlaybookTool(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+  if (runtime.sharedConversation) throw new Error("Autonomy playbooks are only available in a private owner conversation");
+  const raw = args.gap && typeof args.gap === "object" ? args.gap as Record<string, unknown> : {};
+  const gap = {
+    key: text(raw.key), type: String(raw.type ?? "") as BusinessGap["type"], severity: (String(raw.severity ?? "medium") as BusinessGap["severity"]), title: text(raw.title), reason: text(raw.reason), recommendedNextAction: text(raw.recommendedNextAction), requiresApproval: raw.requiresApproval !== false, evidence: Array.isArray(raw.evidence) ? raw.evidence as BusinessGap["evidence"] : [], detectedAt: Number(raw.detectedAt ?? Date.now()),
+  } satisfies BusinessGap;
+  const planned = planBusinessGapPlaybook(gap, args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
+  if (args.action !== "start") return { action: "plan", ...planned };
+  if (planned.missingInputs.length) return { action: "blocked_missing_inputs", ...planned };
+  const mission = await createMission(userId, { title: planned.outcome.name, objective: planned.objective, definitionOfDone: planned.definitionOfDone, idempotencyKey: `gap:${gap.key}`, requiredEvidence: planned.outcome.evidenceRequired, verificationMode: "strict", steps: planned.steps, budget: planned.outcome.budget });
+  if (mission.status === "queued") {
+    const started = await startMission(userId, mission.id);
+    if (started && !started.rootTaskId) return (await scheduleMissionSteps(userId, started, enqueueTaskWorkflow)) ?? started;
+    return started ?? mission;
+  }
+  return mission;
 }
 
 export function workflowUrl(configured: string, label: string, path: string): string {
@@ -372,6 +404,8 @@ const ATTENTION_PULSE_TOOLS = [
   "CHUCK_LIST_JOBS",
   "CHUCK_HANDOFF_SUBAGENT",
   "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+  "CHUCK_AUTONOMY_RECONCILE",
+  "CHUCK_AUTONOMY_PLAYBOOK",
 ];
 const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
   worker: "elena",
@@ -744,6 +778,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
     case "CHUCK_AUTONOMY_STATUS": return getAutonomySnapshot(userId);
+    case "CHUCK_AUTONOMY_RECONCILE": return autonomyReconcileTool(userId, args, runtime);
+    case "CHUCK_AUTONOMY_PLAYBOOK": return autonomyPlaybookTool(userId, args, runtime);
     case "CHUCK_START_PHONE_CALL": {
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";
