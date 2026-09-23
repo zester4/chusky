@@ -151,7 +151,7 @@ never map a channel by display name or an unauthenticated user ID.
 You can map a domain such as:
 
 ```text
-https://chusky.selithub.shop
+https://chusky.example.com
 ```
 
 Create the Cloud Run domain mapping and follow the exact DNS records Google provides. Do not guess the DNS target. After the certificate is active:
@@ -159,7 +159,7 @@ Create the Cloud Run domain mapping and follow the exact DNS records Google prov
 ```bash
 gcloud run services update chusky \
   --region europe-west2 \
-  --update-env-vars WEBHOOK_URL=https://chusky.selithub.shop
+  --update-env-vars WEBHOOK_URL=https://chusky.example.com
 ```
 
 Cloud Run manages HTTPS for the mapped domain. Nginx is not required in front of Cloud Run.

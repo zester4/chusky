@@ -7,7 +7,7 @@ This guide deploys Chusky on an Oracle Compute instance while keeping other appl
 ```text
 Telegram / terminal / Composio / QStash
                   |
-        https://chusky.selithub.shop
+        https://chusky.example.com
                   |
        Hostinger DNS A record
                   |
@@ -47,13 +47,13 @@ TTL: 300 or default
 This creates:
 
 ```text
-chusky.selithub.shop → YOUR_ORACLE_PUBLIC_IP
+chusky.example.com → YOUR_ORACLE_PUBLIC_IP
 ```
 
 Verify from Windows:
 
 ```powershell
-nslookup chusky.selithub.shop
+nslookup chusky.example.com
 ```
 
 The result should contain the Oracle public IP. A resolver timeout followed by the correct IP is normally not a Chusky problem. Remove an incorrect `AAAA` record unless IPv6 is intentionally configured.
@@ -99,7 +99,7 @@ npm run setup
 Choose `webhook` mode and enter:
 
 ```text
-https://chusky.selithub.shop
+https://chusky.example.com
 ```
 
 The wizard preserves existing values, masks secrets, generates missing webhook secrets, and lets you skip optional integrations.
@@ -110,7 +110,7 @@ The essential `.env` values are:
 TELEGRAM_BOT_TOKEN=your_telegram_token
 OPENROUTER_API_KEY=your_openrouter_key
 COMPOSIO_API_KEY=your_composio_key
-WEBHOOK_URL=https://chusky.selithub.shop
+WEBHOOK_URL=https://chusky.example.com
 PORT=3003
 WEBHOOK_SECRET=generated_random_value
 COMPOSIO_WEBHOOK_SECRET=generated_random_value
@@ -125,9 +125,9 @@ For durable workflows:
 
 ```env
 QSTASH_TOKEN=your_qstash_token
-VIDEO_WORKFLOW_URL=https://chusky.selithub.shop/workflows/video
-REMINDER_WORKFLOW_URL=https://chusky.selithub.shop/workflows/reminder
-JOB_WORKFLOW_URL=https://chusky.selithub.shop/workflows/job
+VIDEO_WORKFLOW_URL=https://chusky.example.com/workflows/video
+REMINDER_WORKFLOW_URL=https://chusky.example.com/workflows/reminder
+JOB_WORKFLOW_URL=https://chusky.example.com/workflows/job
 ```
 
 ### Production Better Auth database (Neon Postgres)
@@ -158,7 +158,7 @@ SLACK_SIGNING_SECRET=
 SLACK_BOT_TOKEN=
 SLACK_CLIENT_ID=
 SLACK_CLIENT_SECRET=
-SLACK_REDIRECT_URI=https://chusky.selithub.shop/slack/oauth/callback
+SLACK_REDIRECT_URI=https://chusky.example.com/slack/oauth/callback
 WHATSAPP_ENABLED=false
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
@@ -167,11 +167,11 @@ WHATSAPP_APP_SECRET=
 WHATSAPP_GRAPH_VERSION=v23.0
 ```
 
-Slack Event Subscriptions should target `https://chusky.selithub.shop/slack/events` and
-Interactivity should target `https://chusky.selithub.shop/slack/interactions`. In Telegram,
+Slack Event Subscriptions should target `https://chusky.example.com/slack/events` and
+Interactivity should target `https://chusky.example.com/slack/interactions`. In Telegram,
 run `/channel link slack`; open the generated installation link to bind the installing Slack
 user. WhatsApp Cloud API webhook verification and events both use
-`https://chusky.selithub.shop/whatsapp/webhook`; run `/channel link whatsapp` in Telegram and
+`https://chusky.example.com/whatsapp/webhook`; run `/channel link whatsapp` in Telegram and
 send the one-time code from the WhatsApp account. The gateway rejects invalid signatures,
 isolates unlinked users, deduplicates provider events in Redis, and persists outbound receipts.
 
@@ -219,7 +219,7 @@ server {
     listen 80;
     listen [::]:80;
 
-    server_name chusky.selithub.shop;
+    server_name chusky.example.com;
 
     location / {
         proxy_pass http://127.0.0.1:3003;
@@ -269,7 +269,7 @@ sudo ufw reload
 ```bash
 sudo apt update
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d chusky.selithub.shop
+sudo certbot --nginx -d chusky.example.com
 ```
 
 Choose the HTTP-to-HTTPS redirect. Then test:
@@ -277,7 +277,7 @@ Choose the HTTP-to-HTTPS redirect. Then test:
 ```bash
 sudo nginx -t
 sudo systemctl reload nginx
-curl -I https://chusky.selithub.shop
+curl -I https://chusky.example.com
 ```
 
 ## 9. Build and test Chusky
@@ -294,7 +294,7 @@ npm start
 Keep the first process open. From another SSH session:
 
 ```bash
-curl https://chusky.selithub.shop/health
+curl https://chusky.example.com/health
 ```
 
 A successful JSON response confirms DNS, HTTPS, Nginx, Chusky, and the Telegram token are working together.
@@ -356,15 +356,15 @@ pm2 save
 Register this Composio webhook URL:
 
 ```text
-https://chusky.selithub.shop/composio/triggers
+https://chusky.example.com/composio/triggers
 ```
 
 Workflow endpoints:
 
 ```text
-https://chusky.selithub.shop/workflows/video
-https://chusky.selithub.shop/workflows/reminder
-https://chusky.selithub.shop/workflows/job
+https://chusky.example.com/workflows/video
+https://chusky.example.com/workflows/reminder
+https://chusky.example.com/workflows/job
 ```
 
 Use verified webhook secrets. Workflow handlers re-read durable records before delivery, so a cancelled reminder will not send even if a queued workflow runs later.
@@ -382,7 +382,7 @@ On Windows:
 ```powershell
 cd C:\Users\mseyy\Downloads\tg-agent
 npm.cmd run build
-node dist\cli.js auth link --server https://chusky.selithub.shop --code YOUR_CODE --name my-laptop
+node dist\cli.js auth link --server https://chusky.example.com --code YOUR_CODE --name my-laptop
 node dist\cli.js chat
 ```
 
@@ -401,7 +401,7 @@ Manage devices in Telegram:
 cd /home/ubuntu/chusky
 git status
 npm run doctor
-curl https://chusky.selithub.shop/health
+curl https://chusky.example.com/health
 pm2 status
 ```
 
@@ -420,7 +420,7 @@ sudo nginx -t
 
 ### Telegram webhook fails
 
-Confirm that `WEBHOOK_URL` is exactly `https://chusky.selithub.shop`, the domain resolves to Oracle, HTTPS is valid, Oracle allows port `443`, and only one Chusky instance owns the bot webhook.
+Confirm that `WEBHOOK_URL` is exactly `https://chusky.example.com`, the domain resolves to Oracle, HTTPS is valid, Oracle allows port `443`, and only one Chusky instance owns the bot webhook.
 
 ### CLI pairing fails
 
@@ -428,7 +428,7 @@ CLI routes require webhook mode. Confirm:
 
 ```bash
 grep '^WEBHOOK_URL=' .env
-curl https://chusky.selithub.shop/health
+curl https://chusky.example.com/health
 ```
 
 Pairing codes expire after ten minutes and work once only.
@@ -450,7 +450,7 @@ Inspect Nginx without changing it:
 sudo nginx -T
 ```
 
-Chusky should have its own `server_name chusky.selithub.shop` block. Do not replace existing Nginx configuration.
+Chusky should have its own `server_name chusky.example.com` block. Do not replace existing Nginx configuration.
 
 ## Security rules
 

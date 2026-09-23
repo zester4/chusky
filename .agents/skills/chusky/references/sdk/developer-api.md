@@ -106,7 +106,7 @@ Composio, Redis, internal native-tool, and operator-secret dependencies.
   operator; list responses contain only the safe prefix. The root key must never be
   bundled into browser code or a public npm example.
 - Self-hosted consumers should pass `CHUSKY_BASE_URL` (for example,
-  `https://chusky.selithub.shop`) rather than relying on the hosted default.
+  `https://your-self-hosted.example.com`) rather than relying on the hosted default.
 - The npm package uses MIT metadata, includes `dist`, public docs, and `LICENSE`,
   and runs typecheck/build/tests through `prepublishOnly`. If generated `dist` is
   committed, update it together with the TypeScript source.

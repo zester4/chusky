@@ -324,7 +324,7 @@ Verify that it is listening on the configured Chusky port and that Nginx can rea
 ```bash
 pm2 status
 sudo ss -ltnp | grep :3003
-curl -i https://chusky.selithub.shop/health
+curl -i https://YOUR_PUBLIC_URL/health
 ```
 
 Do not run `npm start` while `pm2 status` shows Chusky as online: both processes try to
@@ -855,14 +855,14 @@ Twilio handles inbound calls and default outbound calls; Bland can be enabled
 as an optional outbound alternative. Outbound calls start after normal destination and purpose validation. Verify
 `TWILIO_CALLER_ID` in Twilio, then configure
 `TWILIO_VOICE_ENABLED=true`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
-`TWILIO_WEBHOOK_BASE_URL=https://chusky.selithub.shop`, and
+`TWILIO_WEBHOOK_BASE_URL=https://chusky.up.railway.app`, and
 `TWILIO_MEDIA_STREAM_URL=wss://voice.selithub.shop/twilio/stream`, plus the
 same high-entropy `TWILIO_MEDIA_BRIDGE_SECRET` in Chusky and `chusky-voice`.
 The bridge implementation lives in [`chusky-voice/`](chusky-voice/README.md).
 Chusky validates signed TwiML and status callbacks; the bridge uses Twilio's
 bidirectional Media Streams with Deepgram and stores only safe call metadata.
 For inbound calls, purchase a Twilio voice number and configure its incoming
-Voice URL as `https://chusky.selithub.shop/twilio/inbound` (POST). Set
+Voice URL as `https://chusky.up.railway.app/twilio/inbound` (POST). Set
 `TWILIO_INBOUND_ENABLED=true`, `TWILIO_INBOUND_OWNER_USER_ID` to the owner’s
 Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
 E.164 allowlist. Unknown callers are rejected before they can access private

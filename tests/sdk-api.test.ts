@@ -289,7 +289,7 @@ test("root key provisions hash-only project keys with isolated SDK users and rev
 
 test("root-only admin routes never require an SDK end-user header", async () => {
   const api = app();
-  const response = await api.fetch(new Request("https://chusky.selithub.shop/v1/admin/projects", { headers: { Authorization: "Bearer sdk-test-key" } }));
+  const response = await api.fetch(new Request("https://local.test/v1/admin/projects", { headers: { Authorization: "Bearer sdk-test-key" } }));
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { data: [] });
 });
