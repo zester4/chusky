@@ -26,6 +26,10 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   // the exact email action already granted by the owner.
   "CHUCK_MEETING_CONTEXT_LOOKUP", "CHUCK_MEETING_CONTACT_CAPTURE", "CHUCK_MEETING_CONTACTS_LIST", "CHUCK_MEETING_FOLLOWUP_SCHEDULE",
   "CHUCK_ATTENTION_STATE",
+  // Autonomy controls inspect owner-scoped state, run bounded read-only
+  // reconciliation, or start an internal durable mission. Provider side
+  // effects remain governed by the normal tool approval boundary.
+  "CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK",
   "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
   "CHUCK_SCHEDULE_JOB", "CHUCK_PAUSE_JOB", "CHUCK_RESUME_JOB", "CHUCK_RUN_JOB_NOW", "CHUCK_SCRATCHPAD_READ",
@@ -73,7 +77,8 @@ const APPROVAL_NATIVE_TOOLS = new Set([
  * approvals belong at the external/high-impact action boundary, not around
  * proof, evidence, checkpoints, or recovery metadata.
  */
-const AUTONOMOUS_MISSION_CONTROL_TOOLS = new Set([
+const AUTONOMOUS_CONTROL_TOOLS = new Set([
+  "CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_PROOF",
   "CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE",
   "CHUCK_MISSION_REPLAN", "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL",
@@ -265,12 +270,12 @@ export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): b
 /**
  * Shared approval decision for execution paths that can add a stricter
  * per-run policy. Explicit run policies may tighten ordinary actions, but
- * cannot turn owner-scoped mission control into an approval loop. High-impact
- * actions always retain the central policy boundary.
+ * cannot turn owner-scoped autonomy/mission bookkeeping into an approval
+ * loop. High-impact actions always retain the central policy boundary.
  */
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false): boolean {
   if (isRiskyToolSlug(slug, args)) return true;
-  if (AUTONOMOUS_MISSION_CONTROL_TOOLS.has(slug)) return false;
+  if (AUTONOMOUS_CONTROL_TOOLS.has(slug)) return false;
   return forceApproval;
 }
 

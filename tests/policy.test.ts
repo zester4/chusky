@@ -76,6 +76,16 @@ test("mission proof, evidence, verification, and repair stay autonomous even in 
   assert.equal(requiresToolApproval("GOOGLECALENDAR_CREATE_EVENT", {}, true), true);
 });
 
+test("owner-scoped autonomy controls do not become approval prompts in strict runs", () => {
+  for (const slug of ["CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK"]) {
+    assert.equal(toolApprovalPolicy(slug), "private", slug);
+    assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} must not require approval`);
+  }
+  // Starting internal work stays autonomous, but external high-impact actions
+  // invoked by that work still use the central risk classification.
+  assert.equal(requiresToolApproval("STRIPE_CREATE_PAYMENT", {}, false), true);
+});
+
 test("provider metadata classifies dynamic Composio tools before heuristic fallback", () => {
   clearComposioToolMetadata();
   registerComposioToolMetadata({ name: "MYSTERY_READ", annotations: { readOnlyHint: true } });
