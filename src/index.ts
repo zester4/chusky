@@ -304,6 +304,7 @@ async function main(): Promise<void> {
         accessToken: config.xchatBotToken,
         pin: config.xchatPin || undefined,
         consumerSecret: config.xchatConsumerSecret,
+        redisUrl: config.redisUrl,
         userName: config.xchatBotUsername || undefined,
         verifySignatures: config.xchatVerifySignatures,
         processInbound: (message) => channelGateway.processInbound(message),

@@ -23,6 +23,7 @@
     "auth:migrate": "tsx src/migrate-auth.ts",
     "doctor": "tsx src/cli.ts doctor",
     "setup:bland-tool": "tsx scripts/setup-bland-consult-tool.ts",
+    "daytona:live-smoke": "tsx scripts/daytona-live-smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts"
@@ -31,6 +32,7 @@
     "@aws-sdk/client-s3": "^3.800.0",
     "@aws-sdk/s3-request-presigner": "^3.800.0",
     "@better-auth/redis-storage": "^1.7.2",
+    "@chat-adapter/state-ioredis": "^4.40.0",
     "@chat-adapter/state-memory": "^4.40.0",
     "@chat-adapter/x": "^4.40.0",
     "@composio/core": "^0.19.0",

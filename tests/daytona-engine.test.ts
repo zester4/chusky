@@ -803,6 +803,30 @@ test("surfaces isolated PDF renderer exceptions and preserves the canonical depe
   assert.equal(renderer.state, "destroyed");
 });
 
+test("retries PDF generation in the full-access workspace when Daytona lacks disk for a renderer", async () => {
+  const source = fakeSandbox("source-pdf-capacity");
+  let generatorRuns = 0;
+  source.process.executeCommand = async (command: string) => {
+    if (command.includes("pdf-generator-")) {
+      generatorRuns++;
+      return generatorRuns === 1
+        ? { exitCode: 1, result: "ReportLab is unavailable" }
+        : { exitCode: 0, result: "generated in workspace" };
+    }
+    return { exitCode: 0, result: "validated" };
+  };
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async (params: any) => params.labels?.purpose === "artifact-pdf-generation"
+      ? (() => { throw new Error("Total disk limit exceeded. Maximum allowed: 30GiB."); })()
+      : source,
+  } as any));
+
+  const result = await e.createPdf(820044, { title: "Workspace PDF Fallback", sections: [{ body: "Generated without a second sandbox" }] });
+  assert.equal(result.generated, true);
+  assert.equal(generatorRuns, 2);
+});
+
 test("creates a presentation with the built-in generator before Daytona delivery", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820020) as any;
@@ -1049,13 +1073,13 @@ for (const outcome of ["success", "invalid-document", "missing-tools", "create-f
       get: async () => source,
       create: async (params: any) => {
         if (params.labels.purpose !== "artifact-qa") return source;
-        assert.equal(params.networkBlockAll, true);
-        assert.deepEqual(params.resources, { cpu: 2, memory: 4, disk: 8 });
+        assert.equal(params.networkBlockAll, false);
+        assert.deepEqual(params.resources, { cpu: 1, memory: 2, disk: 4 });
+        assert.match(params.image.dockerfile, /libreoffice-writer/);
+        assert.match(params.image.dockerfile, /poppler-utils/);
         assert.equal(params.autoDeleteInterval, 0);
         assert.equal(params.ttlMinutes, 30);
         assert.equal(params.labels.source_sandbox, source.id);
-        assert.match(params.image.dockerfile, /libreoffice-writer/);
-        assert.match(params.image.dockerfile, /poppler-utils/);
         if (outcome === "create-failed") throw new Error("provider failure");
         rendererCreated = true;
         return renderer;
@@ -1073,9 +1097,90 @@ for (const outcome of ["success", "invalid-document", "missing-tools", "create-f
     }
     assert.equal((await getDaytonaWorkspace(820040))?.sandboxId, source.id);
     assert.equal(source.state, "started");
-    if (rendererCreated) assert.equal(renderer.state, "destroyed");
+    if (rendererCreated) {
+      assert.equal(renderer.state, "destroyed");
+    }
   });
 }
+
+test("uses an on-demand renderer with network access enabled for isolated visual QA", async () => {
+  const source = fakeSandbox("tier-source");
+  const renderer = fakeSandbox("tier-renderer");
+  source.process.executeCommand = async (command: string) => {
+    const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
+    return { exitCode: script.includes("require_renderer") ? 3 : 0, result: "CHUSKY_RENDERER_UNAVAILABLE" };
+  };
+  source.fs.downloadFile = async () => Buffer.from("original document");
+  renderer.process.executeCommand = async () => ({ exitCode: 0, result: "visual QA passed" });
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async (params: any) => {
+      if (params.labels?.purpose !== "artifact-qa") return source;
+      assert.equal(params.networkBlockAll, false);
+      assert.deepEqual(params.resources, { cpu: 1, memory: 2, disk: 4 });
+      return renderer;
+    },
+  } as any));
+
+  const artifact = await e.artifact(820041, { action: "register", type: "docx", path: "workspace/form.docx" }) as any;
+  assert.equal(artifact.path, "workspace/form.docx");
+  assert.equal(renderer.state, "destroyed");
+});
+
+test("retries a transient isolated renderer creation without changing its open network policy", async () => {
+  const source = fakeSandbox("retry-source");
+  const renderer = fakeSandbox("retry-renderer");
+  let attempts = 0;
+  source.process.executeCommand = async (command: string) => {
+    const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
+    return { exitCode: script.includes("require_renderer") ? 3 : 0, result: "CHUSKY_RENDERER_UNAVAILABLE" };
+  };
+  source.fs.downloadFile = async () => Buffer.from("original document");
+  renderer.process.executeCommand = async () => ({ exitCode: 0, result: "visual QA passed" });
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async (params: any) => {
+      if (params.labels?.purpose !== "artifact-qa") return source;
+      attempts++;
+      assert.equal(params.networkBlockAll, false);
+      if (attempts < 3) throw new Error("renderer build temporarily queued");
+      return renderer;
+    },
+  } as any));
+
+  const artifact = await e.artifact(820042, { action: "register", type: "docx", path: "workspace/form.docx" }) as any;
+  assert.equal(artifact.path, "workspace/form.docx");
+  assert.equal(attempts, 3);
+  assert.equal(renderer.state, "destroyed");
+});
+
+test("uses full-access workspace rendering when Daytona cannot allocate a second sandbox", async () => {
+  const source = fakeSandbox("capacity-source");
+  let installed = false;
+  let qaRuns = 0;
+  source.process.executeCommand = async (command: string) => {
+    if (command.includes("apt-get install")) {
+      installed = true;
+      assert.match(command, /sudo -n apt-get update/);
+      assert.match(command, /sudo -n env DEBIAN_FRONTEND=noninteractive apt-get/);
+      return { exitCode: 0, result: "installed" };
+    }
+    const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
+    if (script.includes("require_renderer") && !installed) return { exitCode: 3, result: "CHUSKY_RENDERER_UNAVAILABLE" };
+    qaRuns++;
+    return { exitCode: 0, result: "visual QA passed" };
+  };
+  source.fs.downloadFile = async () => Buffer.from("original document");
+  const e = new DaytonaEngine(() => ({
+    get: async () => source,
+    create: async () => { throw new Error("Total disk limit exceeded. Maximum allowed: 30GiB."); },
+  } as any));
+
+  const artifact = await e.artifact(820043, { action: "register", type: "docx", path: "workspace/form.docx" }) as any;
+  assert.equal(artifact.path, "workspace/form.docx");
+  assert.equal(installed, true);
+  assert.equal(qaRuns, 1);
+});
 
 test("turns a missing artifact path into an actionable input error", async () => {
   const e = engine();

@@ -15,6 +15,7 @@ import { getDaytonaClient } from "./client.js";
 import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaBrowserSessionResult, DaytonaCodeResult, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
+const rendererDependencyInstallPromises = new Map<string, Promise<void>>();
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
 // Daytona rejects autoPauseInterval for container sandboxes. Keep it disabled
 // by default and let deployments opt in after choosing a pausable target.
@@ -26,6 +27,8 @@ const DAYTONA_MAX_OUTPUT_CHARS = 12000;
 const DAYTONA_MAX_FILE_CONTENT = 48000;
 const DAYTONA_MAX_PTY_OUTPUT = 12000;
 const DAYTONA_MAX_ARTIFACT_BYTES = 45 * 1024 * 1024;
+const DAYTONA_RENDERER_RESOURCES = { cpu: 1, memory: 2, disk: 4 };
+const DAYTONA_RENDERER_CREATE_RETRY_DELAYS = [0, 1_000, 3_000];
 const REPORTLAB_DEPENDENCY_DIR = "workspace/.chusky/python-reportlab";
 const DAYTONA_MAX_EXECUTION_SECONDS = 900;
 const DAYTONA_PREVIEW_MIN_SECONDS = 60;
@@ -33,6 +36,7 @@ const DAYTONA_PREVIEW_MAX_SECONDS = 24 * 60 * 60;
 const APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS = 3;
 const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo)\b|network\s+(?:request|error)/i;
 const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and cannot be overridden|tier[- ]based network restriction/i;
+const DAYTONA_RENDERER_CAPACITY_RESTRICTION = /total disk limit exceeded|concurrency limits|insufficient (?:disk|storage|capacity)|resource quota/i;
 const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|connection reset|transport.*closed/i;
 
 function isTransientComputerConnection(error: unknown): boolean {
@@ -2670,32 +2674,95 @@ export class DaytonaEngine {
     }
   }
 
+  /**
+   * Renderer image builds are isolated from the user's retained workspace and
+   * can be briefly queued by Daytona. Retry creation only; an artifact is
+   * never generated, uploaded, or delivered twice as a consequence.
+   */
+  private async createArtifactRenderer(params: Record<string, unknown>): Promise<Sandbox> {
+    let lastError: unknown;
+    for (const delayMs of DAYTONA_RENDERER_CREATE_RETRY_DELAYS) {
+      if (delayMs) await sleep(delayMs);
+      try {
+        return config.daytonaRendererSnapshot
+          ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot } as any, { timeout: 120 })
+          : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: DAYTONA_RENDERER_RESOURCES } as any, { timeout: 900 });
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * If Daytona cannot allocate a second sandbox because the organization is at
+   * its storage/concurrency ceiling, retain real rendering by installing the
+   * renderer packages in the already-owned workspace. This is deliberately
+   * limited to an explicit provider capacity response: normal operation keeps
+   * the renderer isolated and never mutates the user's workspace dependencies.
+   */
+  private async validateWithWorkspaceRenderer(source: Sandbox, path: string, type: ArtifactType) {
+    let install = rendererDependencyInstallPromises.get(source.id);
+    if (!install) {
+      install = (async () => {
+        const result = await source.process.executeCommand(
+          "sudo -n apt-get update && sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils qpdf fonts-dejavu-core fonts-liberation fonts-noto-core",
+          await source.getUserHomeDir(),
+          undefined,
+          900,
+        );
+        if (result.exitCode !== 0) {
+          throw new DaytonaInputError(`Daytona could not install workspace rendering dependencies after its isolated renderer hit a capacity limit: ${commandOutput(result).slice(-1000) || "unknown package-manager error"}`);
+        }
+      })();
+      rendererDependencyInstallPromises.set(source.id, install);
+    }
+    try {
+      await install;
+    } catch (error) {
+      rendererDependencyInstallPromises.delete(source.id);
+      throw error;
+    }
+    const encoded = Buffer.from(artifactVisualQaScript(type, path), "utf8").toString("base64");
+    return source.process.executeCommand(
+      'python3 -c "import base64;exec(base64.b64decode(\'' + encoded + '\'))"',
+      await source.getUserHomeDir(),
+      undefined,
+      900,
+    );
+  }
+
   private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType) {
     const bytes = Buffer.from(await source.fs.downloadFile(path));
     if (!bytes.length || bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) {
       throw new DaytonaInputError("Artifact is empty or exceeds the rendering size limit");
     }
     let renderer: Sandbox | undefined;
+    let rendererPhase = "creating the isolated renderer";
     try {
       const params = {
         name: "chusky-qa-" + randomUUID(),
         language: "python",
-        // The on-demand renderer image installs LibreOffice and Poppler while
-        // Daytona prepares the image. A blocked sandbox cannot prepare that
-        // image reliably. A prebuilt snapshot can remain network-blocked.
-         networkBlockAll: true,
+        networkBlockAll: false,
         public: false,
         autoStopInterval: 15,
         autoDeleteInterval: 0,
         ttlMinutes: 30,
         labels: { agent: "chusky", purpose: "artifact-qa", source_sandbox: source.id },
       };
-      renderer = config.daytonaRendererSnapshot
-        ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
-        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 8 } }, { timeout: 900 });
+      try {
+        renderer = await this.createArtifactRenderer(params);
+      } catch (error) {
+        if (DAYTONA_RENDERER_CAPACITY_RESTRICTION.test(String((error as { message?: unknown })?.message ?? error))) {
+          return this.validateWithWorkspaceRenderer(source, path, type);
+        }
+        throw error;
+      }
+      rendererPhase = "uploading the artifact to the renderer";
       const renderPath = "document." + ARTIFACT_EXTENSION[type];
       await renderer.fs.uploadFile(bytes, renderPath);
       const encoded = Buffer.from(artifactVisualQaScript(type, renderPath), "utf8").toString("base64");
+      rendererPhase = "running visual QA";
       const result = await renderer.process.executeCommand(
         'python3 -c "import base64;exec(base64.b64decode(\'' + encoded + '\'))"',
         await renderer.getUserHomeDir(), undefined, 900,
@@ -2707,7 +2774,7 @@ export class DaytonaEngine {
     } catch (error) {
       // Do not disclose provider responses that might contain credentials.
       const reason = error instanceof DaytonaInputError ? error.message : "Daytona could not prepare or run the isolated renderer. Check provider build logs, quota and snapshot configuration.";
-      throw new DaytonaInputError("Rendering infrastructure failed for '" + path + "': " + reason + " The original file is preserved; retry registration, not generation.");
+      throw new DaytonaInputError("Rendering infrastructure failed for '" + path + "' while " + rendererPhase + ": " + reason + " The original file is preserved; retry registration, not generation.");
     } finally {
       if (renderer) {
         try { await renderer.delete(); } catch { /* TTL and auto-delete bound orphan lifetime. */ }
@@ -2825,7 +2892,7 @@ export class DaytonaEngine {
       if (result.exitCode !== 0) {
         const output = commandOutput(result);
         if (/ReportLab.*unavailable|No module named ['"]?(reportlab|pypdf)|pypdf.*unavailable/i.test(output)) {
-          await this.generatePdfInRenderer(sandbox, script, attemptPath);
+          await this.generatePdfInRenderer(sandbox, scriptPath, script, attemptPath);
         } else {
           throw new DaytonaInputError(`PDF generation failed: ${output || "unknown renderer error"}`);
         }
@@ -2837,14 +2904,26 @@ export class DaytonaEngine {
     return { ...artifact, generated: true };
   }
 
-  private async generatePdfInRenderer(source: Sandbox, script: string, path: string): Promise<void> {
+  private async generatePdfInWorkspace(source: Sandbox, scriptPath: string): Promise<void> {
+    const result = await source.process.executeCommand(`python3 ${scriptPath}`, await source.getUserHomeDir(), undefined, 240);
+    if (result.exitCode !== 0) {
+      throw new DaytonaInputError(`PDF generation could not recover in the full-access workspace after Daytona could not allocate an isolated renderer:\n${commandOutput(result).slice(-4000) || "unknown workspace generator error"}`);
+    }
+  }
+
+  private async generatePdfInRenderer(source: Sandbox, sourceScriptPath: string, script: string, path: string): Promise<void> {
     let renderer: Sandbox | undefined;
     let rendererScriptPath: string | undefined;
     try {
-      const params = { name: `chusky-pdf-${randomUUID()}`, language: "python", networkBlockAll: true, public: false, autoStopInterval: 15, autoDeleteInterval: 0, ttlMinutes: 30, labels: { agent: "chusky", purpose: "artifact-pdf-generation", source_sandbox: source.id } };
-      renderer = config.daytonaRendererSnapshot
-        ? await this.clientFactory().create({ ...params, snapshot: config.daytonaRendererSnapshot }, { timeout: 120 })
-        : await this.clientFactory().create({ ...params, image: artifactRendererImage(), resources: { cpu: 2, memory: 4, disk: 8 } }, { timeout: 900 });
+      const params = { name: `chusky-pdf-${randomUUID()}`, language: "python", networkBlockAll: false, public: false, autoStopInterval: 15, autoDeleteInterval: 0, ttlMinutes: 30, labels: { agent: "chusky", purpose: "artifact-pdf-generation", source_sandbox: source.id } };
+      try {
+        renderer = await this.createArtifactRenderer(params);
+      } catch (error) {
+        if (DAYTONA_RENDERER_CAPACITY_RESTRICTION.test(String((error as { message?: unknown })?.message ?? error))) {
+          return this.generatePdfInWorkspace(source, sourceScriptPath);
+        }
+        throw error;
+      }
       rendererScriptPath = safeDaytonaPath(`artifacts/.chusky/pdf-generator-${randomUUID()}.py`, "generator path");
       // Keep the renderer on the same canonical dependency path as the source
       // sandbox. A second /tmp install made failures version- and path-dependent.

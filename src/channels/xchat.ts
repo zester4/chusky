@@ -22,11 +22,29 @@ export interface XchatAdapterOptions {
   accessToken: string;
   pin?: string;
   consumerSecret: string;
+  /** Chusky's durable Redis endpoint; required whenever XChat runs in production. */
+  redisUrl?: string;
   userName?: string;
   verifySignatures?: boolean;
   sendReadReceipts?: boolean;
   maxInboundBytes?: number;
   processInbound: (message: InboundMessage) => Promise<unknown>;
+}
+
+type XchatStateConfig =
+  | { kind: "ioredis"; url: string }
+  | { kind: "memory" };
+
+/**
+ * The official Chat SDK owns encryption-aware XChat dispatch, but Chusky owns
+ * durable account history. Its small SDK state layer still needs durable
+ * subscriptions and locks in a multi-replica production service.
+ */
+export function resolveXchatStateConfig(redisUrl: string | undefined, production = process.env.NODE_ENV === "production"): XchatStateConfig {
+  const url = redisUrl?.trim();
+  if (url) return { kind: "ioredis", url };
+  if (production) throw new Error("XChat requires REDIS_URL in production; refusing in-memory Chat SDK state");
+  return { kind: "memory" };
 }
 
 const REACTION_EMOJI: Record<NonNullable<OutboundMessage["kind"]> | "love" | "like" | "dislike" | "laugh" | "emphasize" | "question", string> = {
@@ -87,9 +105,10 @@ export class XchatAdapter implements ChannelAdapter {
 
   private async load(): Promise<void> {
     if (this.official && this.chat) return;
+    const stateConfig = resolveXchatStateConfig(this.options.redisUrl);
     const [chatModule, stateModule, xchatModule] = await Promise.all([
       nativeImport("chat"),
-      nativeImport("@chat-adapter/state-memory"),
+      nativeImport(stateConfig.kind === "ioredis" ? "@chat-adapter/state-ioredis" : "@chat-adapter/state-memory"),
       nativeImport("@chat-adapter/x/chat"),
     ]);
     this.official = xchatModule.createXchatAdapter({
@@ -103,7 +122,9 @@ export class XchatAdapter implements ChannelAdapter {
     this.chat = new chatModule.Chat({
       userName: this.options.userName || "chusky",
       adapters: { xchat: this.official },
-      state: stateModule.createMemoryState(),
+      state: stateConfig.kind === "ioredis"
+        ? stateModule.createIoRedisState({ url: stateConfig.url, keyPrefix: "chuck:xchat" })
+        : stateModule.createMemoryState(),
     });
     this.chat!.onDirectMessage(async (_thread: unknown, message) => { await this.dispatch(message as Message<XchatRawMessage>); });
     this.chat!.onNewMention(async (_thread: unknown, message) => { await this.dispatch(message as Message<XchatRawMessage>); });
