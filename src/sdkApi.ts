@@ -17,6 +17,7 @@ import { listJobOccurrences } from "./store.js";
 import { logger } from "./logger.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
+import { findMissionApprovalTarget, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import type { ContentPart } from "./types.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { listBlandCuratedVoices } from "./calls/blandVoices.js";
@@ -2376,13 +2377,9 @@ export function registerSdkApi(app: Hono): void {
     if (body.decision === "deny") {
       await setApprovalStatus(owner.userId, pending.id, "denied");
       await rejectComposerApproval(owner.userId, pending.id);
-      for (const candidate of await listTasks(owner.userId)) {
-        if (!candidate.missionId) continue;
-        const candidateMission = await getMission(owner.userId, candidate.missionId);
-        if (candidateMission?.waiting?.kind === "approval" && candidateMission.waiting.key === pending.id) {
-          await updateMission(owner.userId, candidateMission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${pending.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
-          break;
-        }
+      const missionTarget = await findMissionApprovalTarget(owner.userId, pending.id);
+      if (missionTarget) {
+        await updateMission(owner.userId, missionTarget.mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${pending.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
       }
       return c.json({ id: pending.id, status: "denied" });
     }
@@ -2416,19 +2413,13 @@ export function registerSdkApi(app: Hono): void {
           return apiError(c, 502, "call_start_failed", error instanceof Error ? error.message : "Phone call could not be started.");
         }
       }
-      let missionTask: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
-      for (const candidate of await listTasks(owner.userId)) {
-        if (!candidate.missionId || candidate.status !== "blocked") continue;
-        const candidateMission = await getMission(owner.userId, candidate.missionId);
-        if (candidateMission?.waiting?.kind === "approval" && candidateMission.waiting.key === approval.id) { missionTask = candidate; break; }
-      }
-      if (missionTask?.missionId) {
-        const resumedMission = await resumeMission(owner.userId, missionTask.missionId);
-        const retried = await retryTask(owner.userId, missionTask.id);
-        if (!resumedMission || !retried) return apiError(c, 409, "mission_not_resumable", "The mission approval could not be resumed.");
-        await updateTask(owner.userId, missionTask.id, { approvedApprovalId: approval.id });
-        const workflowRunId = await enqueueTaskWithClaim(owner.userId, missionTask.id, retried.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
-        if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "The mission task is already being queued.");
+      const missionResume = await resumeMissionTaskAfterApproval(owner.userId, approval.id, sdkTaskWorkflowEnqueuer);
+      if (missionResume.status !== "not_mission") {
+        if (missionResume.status === "task_running") return apiError(c, 409, "mission_task_running", "The mission task is already running; its current worker will settle before another slice starts.");
+        if (missionResume.status === "not_resumable") return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");
+        if (missionResume.status === "enqueue_failed") return apiError(c, 503, "mission_enqueue_failed", "Approval was recorded, but the mission could not be queued. The checkpoint is preserved for recovery.");
+        const resumedMission = missionResume.mission;
+        if (!resumedMission) return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");
         return c.json({ id: approval.id, status: "approved", mission: await getMission(owner.userId, resumedMission.id) ?? resumedMission }, 202);
       }
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));

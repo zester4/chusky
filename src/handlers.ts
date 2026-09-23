@@ -28,6 +28,7 @@ import { createLinkCode, linkChannelIdentity, listLinkedChannels, setProactivePr
 import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.js";
 import { notifyTriggerApproval, enqueueAutonomyApprovalResume } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
+import { findMissionApprovalTarget, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
@@ -2380,10 +2381,31 @@ export function registerHandlers(bot: Bot): void {
         if (command === "missions") {
           const [action, missionId] = String(ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
           if (action && ["pause", "resume", "cancel"].includes(action) && missionId) {
-            const updated = action === "pause" ? await pauseMission(uid, missionId, "Mission paused from Telegram.") : action === "resume" ? await resumeMission(uid, missionId) : await cancelMission(uid, missionId, "Mission cancelled from Telegram.");
+            let resumedApprovalWait = false;
+            let updated: Awaited<ReturnType<typeof getMission>>;
+            if (action === "pause") updated = await pauseMission(uid, missionId, "Mission paused from Telegram.");
+            else if (action === "cancel") updated = await cancelMission(uid, missionId, "Mission cancelled from Telegram.");
+            else {
+              const current = await getMission(uid, missionId);
+              if (current?.status === "waiting" && current.waiting?.kind === "approval" && current.waiting.key) {
+                const resumed = await resumeMissionTaskAfterApproval(uid, current.waiting.key);
+                if (resumed.status === "resumed" || resumed.status === "already_queued") {
+                  updated = resumed.mission;
+                  resumedApprovalWait = true;
+                } else {
+                  const message = resumed.status === "enqueue_failed"
+                    ? "Approval is recorded, but the mission task could not be queued. Its checkpoint is preserved; retry when workflow service is available."
+                    : resumed.status === "task_running"
+                      ? "The approved mission task is already running. Check its status after the current worker settles."
+                      : "That approval no longer matches a resumable task. Inspect the mission state before retrying.";
+                  await replyHtml(ctx, escapeTelegramHtml(message));
+                  return;
+                }
+              } else updated = await resumeMission(uid, missionId);
+            }
             if (!updated) { await replyHtml(ctx, `Could not ${action} that mission. Check <code>/missions</code> for its current state.`); return; }
             if (action === "pause" || action === "cancel") { if (updated.rootTaskId) await cancelTask(uid, updated.rootTaskId); }
-            if (action === "resume" && updated.rootTaskId) {
+            if (action === "resume" && !resumedApprovalWait && updated.rootTaskId) {
               const task = await retryTask(uid, updated.rootTaskId);
               if (task) await enqueueTaskWithClaim(uid, task.id, task.runAt ?? Date.now());
             }
@@ -2582,14 +2604,11 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (approval.triggerEventId) await notifyTriggerApproval(approval.id, false, approval.triggerEventId).catch((error) => logger.warn({ err: error }, "Trigger approval notification failed"));
-      for (const candidate of await listTasks(ctx.from.id, ["blocked"])) {
-        if (!candidate.missionId) continue;
-        const mission = await getMission(ctx.from.id, candidate.missionId);
-        if (mission?.waiting?.kind === "approval" && mission.waiting.key === approval.id) {
-          await updateMission(ctx.from.id, mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${approval.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
-          await editApprovalOutcome(ctx, "🛑 Action denied. The mission is blocked at its checkpoint; revise the action before resuming.");
-          return;
-        }
+      const missionTarget = await findMissionApprovalTarget(ctx.from.id, approval.id);
+      if (missionTarget) {
+        await updateMission(ctx.from.id, missionTarget.mission.id, { status: "blocked", waiting: undefined, error: `Approval denied for ${approval.toolSlug}.`, nextAction: "Review the mission checkpoint and resume only after revising the action." });
+        await editApprovalOutcome(ctx, "🛑 Action denied. The mission is blocked at its checkpoint; revise the action before resuming.");
+        return;
       }
       await editApprovalOutcome(ctx, "🛑 Action denied. Nothing was executed.");
       return;
@@ -2621,16 +2640,8 @@ export function registerHandlers(bot: Bot): void {
       }
       return;
     }
-    let missionTask: Awaited<ReturnType<typeof listTasks>>[number] | undefined;
-    for (const candidate of await listTasks(ctx.from.id, ["blocked"])) {
-      if (!candidate.missionId) continue;
-      const mission = await getMission(ctx.from.id, candidate.missionId);
-      if (mission?.waiting?.kind === "approval" && mission.waiting.key === approval.id) {
-        missionTask = candidate;
-        break;
-      }
-    }
-    if (missionTask?.missionId) {
+    const missionTarget = await findMissionApprovalTarget(ctx.from.id, approval.id);
+    if (missionTarget) {
       const lockToken = randomUUID();
       if (!(await acquireUserLock(ctx.from.id, lockToken))) {
         await setApprovalStatus(ctx.from.id, approval.id, "pending");
@@ -2638,22 +2649,23 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       try {
-        const resumedMission = await resumeMission(ctx.from.id, missionTask.missionId);
-        const retriedTask = await retryTask(ctx.from.id, missionTask.id);
-        if (!resumedMission || !retriedTask) {
+        const resumed = await resumeMissionTaskAfterApproval(ctx.from.id, approval.id);
+        if (resumed.status === "not_resumable" || resumed.status === "task_running" || resumed.status === "not_mission") {
           await setApprovalStatus(ctx.from.id, approval.id, "pending");
-          await editApprovalOutcome(ctx, "⚠️ The mission could not be resumed. The approval remains pending; retry after checking the mission status.");
+          await editApprovalOutcome(ctx, "⚠️ The mission task is not ready to resume. The approval remains pending; check the mission status before retrying.");
           return;
         }
-        await updateTask(ctx.from.id, missionTask.id, { approvedApprovalId: approval.id });
-        const workflowRunId = await enqueueTaskWithClaim(ctx.from.id, missionTask.id, retriedTask.runAt ?? Date.now());
-        if (!workflowRunId) {
+        if (resumed.status === "enqueue_failed") {
+          await editApprovalOutcome(ctx, "✅ Approved, but the mission could not be queued. Its checkpoint is preserved; retry the mission after workflow service recovers.");
+          return;
+        }
+        if (resumed.status === "already_queued") {
           await editApprovalOutcome(ctx, "✅ Approved. The mission task is already being queued; check the mission status for its update.");
           return;
         }
         await editApprovalOutcome(ctx, "✅ Approved. The original mission is resuming from its saved checkpoint.");
       } catch (error) {
-        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, missionId: missionTask.missionId, taskId: missionTask.id }, "Mission approval resume failed");
+        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, missionId: missionTarget.mission.id, taskId: missionTarget.task.id }, "Mission approval resume failed");
         await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the mission could not be queued. Check its status and retry the mission from the saved checkpoint.");
       } finally {
         await releaseUserLock(ctx.from.id, lockToken);

@@ -5170,6 +5170,22 @@ export async function resumeMission(userId: number, id: string): Promise<Mission
   return mutateMission(userId, id, (mission) => !["paused", "blocked", "failed"].includes(mission.status) ? undefined : { status: "running", error: undefined, waiting: undefined, events: [...mission.events, missionEvent("resumed", "Mission resumed")] });
 }
 
+/** Resume a mission only when this exact owner-approved action released its wait. */
+export async function resumeMissionFromApproval(userId: number, id: string, approvalId: string): Promise<MissionRecord | undefined> {
+  const approval = await getApproval(userId, approvalId);
+  if (!approval || approval.status !== "approved" || approval.expiresAt <= Date.now()) return undefined;
+  return mutateMission(userId, id, (mission) => {
+    if (mission.status !== "waiting" || mission.waiting?.kind !== "approval" || mission.waiting.key !== approvalId) return undefined;
+    return {
+      status: "running",
+      error: undefined,
+      waiting: undefined,
+      nextAction: "Continue from the saved mission checkpoint after the approved action.",
+      events: [...mission.events, missionEvent("resumed", `Approval ${approvalId} granted; mission resumed from its checkpoint.`)],
+    };
+  });
+}
+
 export async function waitMission(userId: number, id: string, waiting: MissionRecord["waiting"], checkpoint?: string, nextAction?: string): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "waiting", waiting, checkpoint: checkpoint ?? mission.checkpoint, nextAction: nextAction ?? mission.nextAction, events: [...mission.events, missionEvent("waiting", nextAction ?? "Mission is waiting for an external event.")] });
 }

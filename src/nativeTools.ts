@@ -2,6 +2,7 @@ import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
+import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
@@ -1031,7 +1032,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_RESUME": {
-      const mission = await resumeMission(userId, text(args.id));
+      const missionId = text(args.id);
+      const existing = await getMission(userId, missionId);
+      if (existing?.status === "waiting" && existing.waiting?.kind === "approval" && existing.waiting.key) {
+        const resumed = await resumeMissionTaskAfterApproval(userId, existing.waiting.key);
+        if (resumed.status === "resumed" || resumed.status === "already_queued") return resumed.mission;
+        if (resumed.status === "enqueue_failed") throw new Error("The approved mission action is saved, but its original task could not be queued. Retry after the workflow service recovers.");
+        if (resumed.status === "task_running") throw new Error("The approved mission task is already running; wait for that worker to settle.");
+        throw new Error("The mission approval no longer matches a resumable task. Inspect the mission checkpoint before retrying.");
+      }
+      const mission = await resumeMission(userId, missionId);
       if (!mission) throw new Error("Only paused, blocked, or failed missions you own can be resumed");
       return (await scheduleMissionSteps(userId, mission, enqueueTaskWorkflow)) ?? mission;
     }
