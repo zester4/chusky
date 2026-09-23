@@ -1,11 +1,14 @@
 name: Release Chusky SDK
 
 on:
+  push:
+    tags:
+      - "sdk-v*"
   workflow_dispatch:
     inputs:
       version:
         description: "Exact SDK version to publish (x.y.z)"
-        required: true
+        required: false
         type: string
 
 permissions:
@@ -31,14 +34,25 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - name: Set requested version
+        id: version
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION_INPUT: ${{ inputs.version }}
+          TAG_VERSION: ${{ startsWith(github.ref, 'refs/tags/sdk-v') && github.ref_name || '' }}
         run: |
-          current=$(node -p "require('./package.json').version")
-          if [ "$current" != "$VERSION" ]; then
-            npm version "$VERSION" --no-git-tag-version
+          version="$VERSION_INPUT"
+          if [ -z "$version" ] && [ -n "$TAG_VERSION" ]; then
+            version="${TAG_VERSION#sdk-v}"
           fi
-          test "$(node -p "require('./package.json').version")" = "$VERSION"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "A valid SDK version is required, either as workflow input or sdk-vX.Y.Z tag"
+            exit 1
+          fi
+          current=$(node -p "require('./package.json').version")
+          if [ "$current" != "$version" ]; then
+            npm version "$version" --no-git-tag-version
+          fi
+          test "$(node -p "require('./package.json').version")" = "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Verify package
         run: |
           npm run typecheck
@@ -46,7 +60,7 @@ jobs:
           npm test
       - name: Ensure version is not already published
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           if npm view "@chusky/sdk@$VERSION" version >/dev/null 2>&1; then
             echo "@chusky/sdk@$VERSION is already published"
@@ -64,7 +78,7 @@ jobs:
         run: npm publish --access public
       - name: Commit and tag release
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

@@ -3,7 +3,7 @@ title: SDK releases
 description: Validate, version, publish, and track Chusky SDK releases.
 ---
 
-The repository includes a guarded GitHub Actions workflow named **Chusky SDK Release**. It is started with **Run workflow** and accepts either an exact semantic version or a release type (`patch`, `minor`, or `major`). The local repository also exposes an exact-version CLI path so an operator can preflight or publish from a trusted release environment. The workflow:
+The repository includes a guarded GitHub Actions workflow named **Chusky SDK Release**. It accepts an exact semantic version from **Run workflow** or from a pushed `sdk-vX.Y.Z` tag. The local repository also exposes an exact-version CLI path so an operator can preflight or publish from a trusted release environment. The workflow:
 
 1. Installs dependencies and runs the root typecheck, app build, SDK build, and SDK tests.
 2. Updates `sdk/package.json` and `sdk/package-lock.json` with the requested version.

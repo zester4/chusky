@@ -1,6 +1,9 @@
 name: Chusky SDK Release
 
 on:
+  push:
+    tags:
+      - "sdk-v*"
   workflow_dispatch:
     inputs:
       version:
@@ -55,8 +58,11 @@ jobs:
         env:
           VERSION_INPUT: ${{ inputs.version }}
           RELEASE_TYPE: ${{ inputs.release_type }}
+          TAG_VERSION: ${{ startsWith(github.ref, 'refs/tags/sdk-v') && github.ref_name || '' }}
         run: |
-          if [ -n "$VERSION_INPUT" ]; then
+          if [ -n "$TAG_VERSION" ]; then
+            npm run sdk:version -- "${TAG_VERSION#sdk-v}"
+          elif [ -n "$VERSION_INPUT" ]; then
             npm run sdk:version -- "$VERSION_INPUT"
           else
             npm run sdk:version -- "$RELEASE_TYPE"
