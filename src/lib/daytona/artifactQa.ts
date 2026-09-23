@@ -91,7 +91,10 @@ with tempfile.TemporaryDirectory(prefix='chusky-artifact-qa-') as tmp:
             if extracted.returncode != 0:
                 fail('PDF text inspection failed on page ' + str(page))
             mono_prefix=prefix + '-mono'
-            monochrome=subprocess.run([shutil.which('pdftoppm'), '-f', str(page), '-l', str(page), '-singlefile', '-scale-to', '800', '-mono', '-pbm', pdf, mono_prefix], capture_output=True, timeout=30)
+            # -mono already selects PBM output. pdftoppm has no -pbm
+            # flag, so passing it makes otherwise valid Office exports fail
+            # the semantic-render stage after successful conversion.
+            monochrome=subprocess.run([shutil.which('pdftoppm'), '-f', str(page), '-l', str(page), '-singlefile', '-scale-to', '800', '-mono', pdf, mono_prefix], capture_output=True, timeout=30)
             mono=mono_prefix + '.pbm'
             if monochrome.returncode != 0 or not os.path.isfile(mono):
                 fail('PDF semantic render failed on page ' + str(page))

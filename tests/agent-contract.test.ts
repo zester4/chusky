@@ -477,7 +477,7 @@ test("treats an empty optional connected-account toolkit filter as omitted", asy
       create: async () => session,
       connectedAccounts: {
         list: async (options?: { toolkitSlugs?: string[] }) => {
-          assert.deepEqual(options, undefined);
+          assert.deepEqual(options, { userIds: ["user_830018"] });
           return { items: [{ id: "ca_gmail", alias: "work-gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] };
         },
       },

@@ -205,7 +205,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_ARTIFACT: "📦 I’m preparing your deliverable…",
   CHUCK_EMAIL_ARTIFACT: "✉️ I’m attaching the deliverable to email…",
   CHUCK_CREATE_PDF: "📄 I’m building and checking your PDF…",
-  CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking the presentation…",
+  CHUCK_CREATE_PRESENTATION: "📊 I’m building and checking your presentation…",
   CHUCK_TASK_CREATE: "📌 I’m setting up a durable task…",
   CHUCK_TASK_LIST: "📋 I’m checking the tasks…",
   CHUCK_TASK_GET: "📋 I’m checking the task…",

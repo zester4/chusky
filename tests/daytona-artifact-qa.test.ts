@@ -52,6 +52,12 @@ test("emitted QA renders every parsed PDF page", () => {
   assert.match(result.stdout, /RENDER_CALLS=3/);
 });
 
+test("semantic spreadsheet QA uses Poppler's supported monochrome invocation", () => {
+  const script = artifactVisualQaScript("spreadsheet", "source.xlsx");
+  assert.match(script, /'-mono', pdf, mono_prefix/);
+  assert.doesNotMatch(script, /'-pbm'/);
+});
+
 for (const scenario of ["bad-pdf", "empty", "partial"]) {
   test("QA fails closed for " + scenario, () => {
     const result = runQa(scenario);

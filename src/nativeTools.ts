@@ -98,9 +98,9 @@ export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTest
   phoneCallLauncherForTests = launcher;
 }
 
-function text(value: unknown): string {
+function text(value: unknown, max = MAX_TEXT): string {
   const result = String(value ?? "").trim();
-  if (!result || result.length > MAX_TEXT) throw new Error(`Text must be 1-${MAX_TEXT} characters`);
+  if (!result || result.length > max) throw new Error(`Text must be 1-${max} characters`);
   return result;
 }
 
@@ -1020,12 +1020,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return missionProof(mission);
     }
     case "CHUCK_MISSION_CHECKPOINT": {
-      const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint), args.nextAction ? text(args.nextAction) : undefined);
+      const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint, 8000), args.nextAction ? text(args.nextAction, 2000) : undefined);
       if (!mission) throw new Error("Only running missions you own can be checkpointed");
       return mission;
     }
     case "CHUCK_MISSION_PAUSE": {
-      const mission = await pauseMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
+      const mission = await pauseMission(userId, text(args.id), args.reason ? text(args.reason, 2000) : undefined);
       if (!mission) throw new Error("Only running or waiting missions you own can be paused");
       await cancelMissionTasks(userId, mission.id);
       return mission;
@@ -1036,7 +1036,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return (await scheduleMissionSteps(userId, mission, enqueueTaskWorkflow)) ?? mission;
     }
     case "CHUCK_MISSION_CANCEL": {
-      const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason) : undefined);
+      const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason, 2000) : undefined);
       if (!mission) throw new Error("Only unfinished missions you own can be cancelled");
       await cancelMissionTasks(userId, mission.id);
       return mission;
@@ -1046,20 +1046,20 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!mission || !["running", "waiting"].includes(mission.status)) throw new Error("Only a running mission you own can wait for a provider event");
       const provider = text(args.provider).slice(0, 120);
       const providerEventId = text(args.providerEventId).slice(0, 240);
-      const request: MissionWaitRequest = { provider, providerEventId, stepId: args.stepId ? text(args.stepId) : mission.currentStepId, checkpoint: args.checkpoint ? text(args.checkpoint) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
+      const request: MissionWaitRequest = { provider, providerEventId, stepId: args.stepId ? text(args.stepId, 160) : mission.currentStepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
       runtime.requestMissionWait?.(request);
       return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };
     }
     case "CHUCK_MISSION_STEP_COMPLETE": {
-      const mission = await completeMissionStep(userId, text(args.id), text(args.stepId), text(args.result));
+      const mission = await completeMissionStep(userId, text(args.id), text(args.stepId, 160), text(args.result, 12000));
       if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
       return mission;
     }
     case "CHUCK_MISSION_EVIDENCE": {
       const rawEvidence = Array.isArray(args.evidence) ? args.evidence : [];
       if (!rawEvidence.length) throw new Error("At least one evidence record is required");
-      const evidence = rawEvidence.map((item: Record<string, unknown>) => ({ id: `evidence_${randomUUID()}`, kind: text(item.kind) as "source", summary: text(item.summary), ...(item.source ? { source: text(item.source) } : {}), ...(item.ref ? { ref: text(item.ref) } : {}), ...(item.hash ? { hash: text(item.hash) } : {}), verified: item.verified === true, ...(item.verifiedBy ? { verifiedBy: text(item.verifiedBy) as "agent" } : {}) }));
-      const mission = await recordMissionEvidence(userId, text(args.id), evidence, args.stepId ? text(args.stepId) : undefined);
+      const evidence = rawEvidence.map((item: Record<string, unknown>) => ({ id: `evidence_${randomUUID()}`, kind: text(item.kind) as "source", summary: text(item.summary, 2000), ...(item.source ? { source: text(item.source, 500) } : {}), ...(item.ref ? { ref: text(item.ref, 500) } : {}), ...(item.hash ? { hash: text(item.hash, 128) } : {}), verified: item.verified === true, ...(item.verifiedBy ? { verifiedBy: text(item.verifiedBy) as "agent" } : {}) }));
+      const mission = await recordMissionEvidence(userId, text(args.id), evidence, args.stepId ? text(args.stepId, 160) : undefined);
       if (!mission) throw new Error("Mission not found, finished, or not owned by you");
       return mission;
     }
@@ -1069,7 +1069,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_REPAIR": {
-      const mission = await repairMission(userId, text(args.id), { reason: text(args.reason), nextAction: args.nextAction ? text(args.nextAction) : undefined });
+      const mission = await repairMission(userId, text(args.id), { reason: text(args.reason, 2000), nextAction: args.nextAction ? text(args.nextAction, 2000) : undefined });
       if (!mission) throw new Error("Mission not found, finished, or not owned by you");
       return mission;
     }
@@ -1087,23 +1087,23 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
     case "CHUCK_MISSION_REPLAN": {
       const steps = Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
-        id: typeof step.id === "string" ? step.id : undefined,
-        title: text(step.title),
-        objective: text(step.objective),
+        id: typeof step.id === "string" ? text(step.id, 160) : undefined,
+        title: text(step.title, 240),
+        objective: text(step.objective, 4000),
         dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined,
         retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit),
       })) : [];
-      const mission = await replanMission(userId, text(args.id), steps, text(args.reason));
+      const mission = await replanMission(userId, text(args.id), steps, text(args.reason, 2000));
       if (!mission) throw new Error("Only an unfinished mission you own can be replanned");
       return mission;
     }
     case "CHUCK_MISSION_BLOCK": {
-      const mission = await blockMission(userId, text(args.id), text(args.reason), args.nextAction ? text(args.nextAction) : undefined);
+      const mission = await blockMission(userId, text(args.id), text(args.reason, 2000), args.nextAction ? text(args.nextAction, 2000) : undefined);
       if (!mission) throw new Error("Only unfinished missions you own can be blocked");
       return mission;
     }
     case "CHUCK_MISSION_COMPLETE": {
-      const mission = await completeMission(userId, text(args.id), text(args.result));
+      const mission = await completeMission(userId, text(args.id), text(args.result, 12000));
       if (!mission) throw new Error("Only unfinished missions you own can be completed");
       return mission;
     }
