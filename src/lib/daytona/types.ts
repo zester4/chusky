@@ -1,6 +1,6 @@
 export type DaytonaWorkspaceAction = "get" | "create" | "status" | "pause" | "archive" | "delete";
 
-export type DaytonaSandboxAction = "status" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle";
+export type DaytonaSandboxAction = "status" | "health" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle" | "wait_started" | "wait_stopped";
 
 export interface DaytonaWorkspaceInfo {
   id: string;
@@ -18,6 +18,14 @@ export interface DaytonaWorkspaceInfo {
   autoPauseInterval?: number;
   networkBlockAll?: boolean;
   domainAllowList?: string;
+  capabilities?: {
+    computerUse: boolean;
+    processSessions: boolean;
+    codeInterpreter: boolean;
+    lsp: boolean;
+    streamingFiles: boolean;
+    volumes: boolean;
+  };
 }
 
 export interface DaytonaSandboxMetrics {
@@ -113,6 +121,35 @@ export interface DaytonaSessionResult {
   timedOut?: boolean;
   sessions?: unknown[];
   session?: unknown;
+  streamed?: boolean;
+}
+
+export interface DaytonaVolumeResult {
+  id?: string;
+  name?: string;
+  action: string;
+  mountPath?: string;
+  subpath?: string;
+  volumes?: unknown[];
+  deleted?: boolean;
+}
+
+export interface DaytonaBrowserSessionResult {
+  sandboxId: string;
+  sessionId?: string;
+  action: string;
+  sessions?: unknown[];
+  expiresAt?: number;
+  currentOrigin?: string;
+  released?: boolean;
+  requestedUrl?: string;
+  observedUrl?: string;
+  title?: string;
+  loadState?: "settled" | "unknown";
+  observationMethod?: "address_bar" | "requested_only" | "unavailable";
+  stable?: boolean;
+  file?: DaytonaFileInfo;
+  files?: DaytonaFileInfo[];
 }
 
 export interface DaytonaCodeResult {

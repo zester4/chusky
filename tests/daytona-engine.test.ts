@@ -8,6 +8,7 @@ let sandboxes: Map<string, any>;
 let creates: number;
 let lastCreateParams: Record<string, unknown> | undefined;
 let movedFiles: Array<{ source: string; destination: string }>;
+let volumes: Map<string, any>;
 
 function fakeSandbox(id: string, state = "started") {
   const ptyOutputs = new Map<string, (data: Uint8Array) => void>();
@@ -33,6 +34,8 @@ function fakeSandbox(id: string, state = "started") {
     recover: async () => { sandbox.state = "started"; sandbox.recoverable = false; },
     pause: async () => { sandbox.state = "paused"; },
     stop: async () => { sandbox.state = "stopped"; },
+    waitUntilStarted: async () => { sandbox.state = "started"; },
+    waitUntilStopped: async () => { sandbox.state = "stopped"; },
     archive: async () => { sandbox.state = "archived"; },
     delete: async () => { sandbox.state = "destroyed"; sandboxes.delete(id); },
     process: {
@@ -46,7 +49,11 @@ function fakeSandbox(id: string, state = "started") {
       listSessions: async () => [...processSessions.values()],
       getSession: async (sessionId: string) => processSessions.get(sessionId),
       executeSessionCommand: async (sessionId: string, request: any) => { const commandId = `cmd-${Date.now()}`; const session = processSessions.get(sessionId); session.commands.push({ id: commandId, command: request.command, exitCode: 0 }); return { cmdId: commandId, output: `ran:${request.command}`, stdout: `ran:${request.command}`, stderr: "", exitCode: 0 }; },
-      getSessionCommandLogs: async (_sessionId: string, commandId: string) => ({ output: `logs:${commandId}`, stdout: `logs:${commandId}`, stderr: "" }),
+      getSessionCommandLogs: async (_sessionId: string, commandId: string, onStdout?: (chunk: string) => void, onStderr?: (chunk: string) => void) => {
+        if (onStdout) { onStdout(`live:${commandId}:1`); onStdout(`live:${commandId}:2`); }
+        if (onStderr) onStderr(`err:${commandId}`);
+        return { output: `logs:${commandId}`, stdout: `logs:${commandId}`, stderr: "" };
+      },
       sendSessionCommandInput: async () => undefined,
       deleteSession: async (sessionId: string) => { processSessions.delete(sessionId); },
     },
@@ -62,6 +69,11 @@ function fakeSandbox(id: string, state = "started") {
       findFiles: async () => [],
       searchFiles: async () => ({ files: [] }),
       getFileDetails: async () => ({ name: "file.txt", path: "file.txt", size: 10 }),
+      downloadFileStream: async () => {
+        const { Readable } = await import("node:stream");
+        return Readable.from([Buffer.from("persisted content")]);
+      },
+      uploadFileStream: async () => undefined,
       createFolder: async () => undefined,
       moveFiles: async (source: string, destination: string) => { movedFiles.push({ source, destination }); },
       deleteFile: async () => undefined,
@@ -70,6 +82,7 @@ function fakeSandbox(id: string, state = "started") {
     },
     getPreviewLink: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/${port}` }),
     getSignedPreviewUrl: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/signed/${port}` }),
+    downloadUrl: async (path: string, ttlSeconds: number) => `https://download.test/${encodeURIComponent(path)}?ttl=${ttlSeconds}`,
     createSnapshot: async () => undefined,
     fork: async () => undefined,
     codeInterpreter: {
@@ -89,6 +102,7 @@ function fakeSandbox(id: string, state = "started") {
       accessibility: { getTree: async () => ({ root: {} }), findNodes: async () => ({ matches: [] }), focusNode: async () => undefined, invokeNode: async () => undefined, setNodeValue: async () => undefined },
     },
     createLspServer: async () => ({ start: async () => undefined, stop: async () => undefined, documentSymbols: async () => [{ name: "main", kind: 12 }], sandboxSymbols: async () => [{ name: "main", kind: 12 }], completions: async () => ({ isIncomplete: false, items: [{ label: "main" }] }) }),
+    volumes: [],
   };
   sandboxes.set(id, sandbox);
   return sandbox;
@@ -97,6 +111,7 @@ function fakeSandbox(id: string, state = "started") {
 beforeEach(async () => {
   await initStore({ memoryOnly: true });
   sandboxes = new Map();
+  volumes = new Map();
   creates = 0;
   lastCreateParams = undefined;
   movedFiles = [];
@@ -111,6 +126,19 @@ function engine() {
     },
     create: async (params: Record<string, unknown>) => { creates++; lastCreateParams = params; return fakeSandbox(`sandbox-${creates}`); },
     fork: async (source: any, params: { name?: string }) => { const child = fakeSandbox(`fork-${creates + 1}`); child.name = params.name ?? child.name; child.labels = { agent: "chusky", user_id: "820060", parent_sandbox: source.id }; return child; },
+    volume: {
+      get: async (name: string, create?: boolean) => {
+        const existing = volumes.get(name);
+        if (existing) return existing;
+        if (!create) throw new Error("404 volume not found");
+        const volume = { id: `vol-${volumes.size + 1}`, name, state: "ready" };
+        volumes.set(name, volume);
+        return volume;
+      },
+      list: async () => [...volumes.values()],
+      create: async (name: string) => { const volume = { id: `vol-${volumes.size + 1}`, name, state: "ready" }; volumes.set(name, volume); return volume; },
+      delete: async (volume: any) => { volumes.delete(volume.name); },
+    },
   } as any));
 }
 
@@ -213,6 +241,26 @@ test("persists and resumes owned Daytona process sessions", async () => {
   assert.equal((await getDaytonaWorkspace(820060))?.processSessions?.length ?? 0, 0);
 });
 
+test("streams native Daytona process-session logs with bounded callbacks", async () => {
+  const e = engine();
+  await e.session(820060, { action: "create", id: "stream-session" });
+  const chunks: string[] = [];
+  const result = await e.session(820060, { action: "stream_logs", id: "stream-session", commandId: "cmd-live" }, (stream, chunk) => { chunks.push(`${stream}:${chunk}`); });
+  assert.equal(result.streamed, true);
+  assert.deepEqual(chunks, ["stdout:live:cmd-live:1", "stdout:live:cmd-live:2", "stderr:err:cmd-live"]);
+});
+
+test("creates an account-owned persistent volume and mounts it on the next sandbox creation", async () => {
+  const e = engine();
+  const created = await e.volume(820063, { action: "create", name: "research" });
+  assert.equal(created.name, "research");
+  const mounted = await e.volume(820063, { action: "mount", name: "research", mountPath: "/home/user/workspace/data", subpath: "reports" });
+  assert.equal(mounted.mountPath, "/home/user/workspace/data");
+  await e.getOrCreateWorkspace(820063);
+  assert.deepEqual(lastCreateParams?.volumes, [{ volumeId: created.id, mountPath: "/home/user/workspace/data", subpath: "reports" }]);
+  await assert.rejects(() => e.volume(820063, { action: "unmount", name: "research" }), /fixed for an existing sandbox/);
+});
+
 test("supports interpreter contexts, sandbox metrics, and LSP inspection", async () => {
   const e = engine();
   const context = await e.code(820061, { action: "create_context" });
@@ -225,6 +273,14 @@ test("supports interpreter contexts, sandbox metrics, and LSP inspection", async
   const symbols = await e.lsp(820061, { action: "document_symbols", path: "workspace/src/index.ts" }) as any;
   assert.equal(symbols.symbols[0].name, "main");
   await e.code(820061, { action: "delete_context", contextId: context.contextId });
+});
+
+test("reports sandbox health and capability evidence", async () => {
+  const result = await engine().sandbox(820064, { action: "health" }) as any;
+  assert.equal(result.healthy, true);
+  assert.equal(result.capabilities.computerUse, true);
+  assert.equal(result.capabilities.streamingFiles, true);
+  assert.equal(result.metrics.cpuUsedPct, 12);
 });
 
 test("creates an account-owned fork and refuses arbitrary sandbox IDs", async () => {
@@ -391,6 +447,44 @@ test("browser navigation persists safe URL state and rejects embedded credential
   await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
 });
 
+test("browser navigation captures a sanitized address-bar redirect observation when available", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200101) as any;
+  sandbox.computerUse.accessibility.getTree = async () => ({ root: { role: "textbox", value: "https://redirect.example/final?token=private" } });
+  const opened = await e.browser(8200101, { action: "open", url: "https://start.example" }) as any;
+  assert.equal(opened.observedUrl, "https://redirect.example/final");
+  assert.equal(opened.observationMethod, "address_bar");
+  assert.equal((await getDaytonaWorkspace(8200101))?.browser?.lastUrl, "https://redirect.example/final");
+});
+
+test("browser wait_download only returns after a file has a stable non-zero size", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200102) as any;
+  let calls = 0;
+  sandbox.fs.listFiles = async () => {
+    calls++;
+    return calls === 1 ? [] : [{ name: "report.pdf", path: "workspace/Downloads/report.pdf", isDir: false, size: 42 }];
+  };
+  const result = await e.browser(8200102, { action: "wait_download", path: "workspace/Downloads/report.pdf", timeoutSeconds: 5 }) as any;
+  assert.equal(result.stable, true);
+  assert.equal(result.file.path, "workspace/Downloads/report.pdf");
+  assert.ok(calls >= 4);
+});
+
+test("serializes browser control with leases and promotes a download to an artifact", async () => {
+  const e = engine();
+  const lease = await e.browser(820011, { action: "session_acquire", sessionName: "research" }) as any;
+  assert.match(lease.sessionId, /^br_/);
+  await assert.rejects(() => e.browser(820011, { action: "session_acquire", sessionName: "other" }), /already leased/);
+  const opened = await e.browser(820011, { action: "open", sessionId: lease.sessionId, url: "https://example.com" }) as any;
+  assert.equal(opened.opened, "https://example.com");
+  const artifact = await e.browser(820011, { action: "download_register", sessionId: lease.sessionId, path: "workspace/Downloads/report.md", type: "report", name: "report.md" }) as any;
+  assert.equal(artifact.type, "report");
+  const listed = await e.browser(820011, { action: "session_list" }) as any;
+  assert.equal(listed.sessions.length, 1);
+  await e.browser(820011, { action: "session_release", sessionId: lease.sessionId });
+});
+
 test("returns a signed browser-accessible preview URL and rejects provider URL failures", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820014) as any;
@@ -478,6 +572,15 @@ test("creates and persists a text artifact without placing bytes in session hist
   assert.equal(session.history.length, 0);
   const listed = await e.artifact(820011, { action: "list" }) as any[];
   assert.equal(listed[0].id, result.id);
+});
+
+test("returns a short-lived signed URL for an owned artifact without downloading bytes", async () => {
+  const e = engine();
+  const result = await e.artifact(820011, { action: "create", type: "report", name: "signed.md", content: "# Signed" }) as any;
+  const signed = await e.artifact(820011, { action: "download_url", id: result.id, ttlSeconds: 120 }) as any;
+  assert.equal(signed.id, result.id);
+  assert.match(signed.url, /ttl=120/);
+  assert.ok(signed.expiresAt > Date.now());
 });
 
 test("registers DOCX as a first-class artifact after Daytona structure validation", async () => {
@@ -946,7 +1049,7 @@ for (const outcome of ["success", "invalid-document", "missing-tools", "create-f
       get: async () => source,
       create: async (params: any) => {
         if (params.labels.purpose !== "artifact-qa") return source;
-        assert.equal(params.networkBlockAll, false);
+        assert.equal(params.networkBlockAll, true);
         assert.deepEqual(params.resources, { cpu: 2, memory: 4, disk: 8 });
         assert.equal(params.autoDeleteInterval, 0);
         assert.equal(params.ttlMinutes, 30);

@@ -612,14 +612,19 @@ export interface DaytonaWorkspaceRecord {
   lastKnownState?: string;
   ptySessions?: Array<{ id: string; createdAt: number }>;
   /** Owned Daytona process sessions that may be resumed after a worker restart. */
-  processSessions?: Array<{ id: string; createdAt: number; updatedAt: number }>;
+  processSessions?: Array<{ id: string; sandboxId?: string; createdAt: number; updatedAt: number }>;
   /** Owned Python interpreter contexts. The provider remains the source of truth. */
-  interpreterContexts?: Array<{ id: string; createdAt: number; updatedAt: number }>;
+  interpreterContexts?: Array<{ id: string; sandboxId?: string; createdAt: number; updatedAt: number }>;
   /** Copy-on-write child sandboxes created from this owner's primary workspace. */
   forks?: Array<{ id: string; name: string; createdAt: number; updatedAt: number; lastKnownState?: string }>;
+  /** Daytona volumes created for this account. The provider volume is never exposed as a cross-account resource. */
+  volumes?: Array<{ id: string; name: string; createdAt: number; updatedAt: number; mountPath?: string; subpath?: string }>;
+  /** Logical browser leases used to prevent concurrent agents from steering one desktop. */
+  browserSessions?: Array<{ id: string; name: string; missionId?: string; createdAt: number; updatedAt: number; expiresAt: number; currentOrigin?: string }>;
   /** Bounded control-plane records for web apps running in the owned workspace. */
   apps?: DaytonaAppRecord[];
-  browser?: { lastUrl?: string; updatedAt: number };
+  /** Safe browser evidence only; never persist page bodies, cookies, or credentials. */
+  browser?: { lastUrl?: string; requestedUrl?: string; sessionId?: string; observedAt?: number; observationMethod?: "address_bar" | "requested_only"; updatedAt: number };
 }
 
 export type DaytonaAppFramework = "vite-react" | "nextjs";

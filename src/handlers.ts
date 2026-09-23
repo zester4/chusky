@@ -38,6 +38,7 @@ import { telegramCardFallbackHtml, telegramCardFallbackKeyboard, telegramCardRic
 import { MODEL_PROVIDER_LABELS, isModelProvider, modelsForProvider, type ModelProvider } from "./modelProviders.js";
 import { listBlandCuratedVoices, type BlandSelectableVoice } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voiceSettings.js";
+import { daytonaEngine } from "./lib/daytona/index.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
 import { browserSessionHealth } from "./vault/vault.js";
 import {
@@ -807,7 +808,10 @@ async function isTelegramGroupAdmin(ctx: Context): Promise<boolean> {
 async function sendGeneratedArtifacts(ctx: Context, files: Array<{ data: Buffer; name: string; contentType: string; artifactId: string; type: string }> | undefined): Promise<void> {
   for (const file of files ?? []) {
     try {
-      await ctx.replyWithDocument(new InputFile(file.data, file.name), { caption: `📦 ${file.name}\nArtifact ID: ${file.artifactId}` });
+      const input = file.data.length
+        ? new InputFile(file.data, file.name)
+        : new InputFile((await daytonaEngine.streamArtifact(ctx.from?.id ?? 0, file.artifactId)).stream, file.name);
+      await ctx.replyWithDocument(input, { caption: `📦 ${file.name}\nArtifact ID: ${file.artifactId}` });
     } catch (error) {
       logger.warn({ err: error, userId: ctx.from?.id, artifactId: file.artifactId }, "Artifact delivery failed");
       await ctx.reply(`I created ${file.name}, but Telegram could not deliver the file. Artifact ID: ${file.artifactId}`);

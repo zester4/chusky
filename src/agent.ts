@@ -490,7 +490,7 @@ async function sendArtifactEmail(
   const files: ArtifactEmailFile[] = [];
   for (const artifactId of artifactIds) {
     const inTurn = generatedFiles.find((file) => file.artifactId === artifactId);
-    if (inTurn) {
+    if (inTurn?.data?.length) {
       files.push(inTurn);
       continue;
     }
@@ -1381,9 +1381,19 @@ export async function runAgent(
           }
           if ((slug === "CHUCK_ARTIFACT" || slug === "CHUCK_CREATE_PDF" || slug === "CHUCK_CREATE_PRESENTATION" || slug === "CHUCK_CREATE_DOCUMENT" || slug === "CHUCK_CREATE_SPREADSHEET") && execResult && typeof execResult === "object" && "__chuskyArtifactReady" in execResult) {
             const artifact = execResult as unknown as { id: string; name: string; contentType: string; type: string };
-            const delivered = await abortable(daytonaEngine.downloadArtifact(userId, artifact.id), signal);
-            generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
-            execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
+            // Telegram can upload a Node stream directly through grammY. Keep
+            // the artifact in Daytona until delivery instead of buffering it
+            // into the agent result; email/CLI/SDK paths still materialize
+            // bytes because their provider contracts require them.
+            const lazyTelegramDelivery = channelContext?.provider === "telegram";
+            if (lazyTelegramDelivery) {
+              generatedFiles.push({ data: Buffer.alloc(0), name: artifact.name, contentType: artifact.contentType, artifactId: artifact.id, type: artifact.type });
+              execResult = { artifactCreated: true, artifactId: artifact.id, name: artifact.name, type: artifact.type, note: "The artifact is ready and will be streamed to Telegram from the private Daytona workspace. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId; Chusky will attach it server-side." };
+            } else {
+              const delivered = await abortable(daytonaEngine.downloadArtifact(userId, artifact.id), signal);
+              generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
+              execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
+            }
           }
           if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };

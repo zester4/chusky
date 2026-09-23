@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
+import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
 import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
@@ -32,12 +33,12 @@ test("SDK run artifacts expose downloadable metadata without workspace paths or 
 });
 
 test("SDK artifact download returns the owner-scoped binary with download headers", async () => {
-  const originalDownloadArtifact = daytonaEngine.downloadArtifact;
+  const originalStreamArtifact = daytonaEngine.streamArtifact;
   let receivedUserId: number | undefined;
-  (daytonaEngine as any).downloadArtifact = async (userId: number, id: string) => {
+  (daytonaEngine as any).streamArtifact = async (userId: number, id: string) => {
     receivedUserId = userId;
     assert.equal(id, "artifact_pdf_1");
-    return { id, name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.from("pdf-bytes") };
+    return { id, name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.alloc(0), stream: Readable.from([Buffer.from("pdf-bytes")]) };
   };
   try {
     const response = await app().fetch(new Request("http://local/v1/artifacts/artifact_pdf_1/download", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "download-owner" } }));
@@ -47,7 +48,7 @@ test("SDK artifact download returns the owner-scoped binary with download header
     assert.equal(response.headers.get("content-disposition"), 'attachment; filename="proposal.pdf"');
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from("pdf-bytes"));
   } finally {
-    (daytonaEngine as any).downloadArtifact = originalDownloadArtifact;
+    (daytonaEngine as any).streamArtifact = originalStreamArtifact;
   }
 });
 

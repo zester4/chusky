@@ -1109,6 +1109,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
     case "CHUCK_DAYTONA_SANDBOX": return daytonaCall(runtime, () => daytonaEngine.sandbox(userId, args));
+    case "CHUCK_DAYTONA_VOLUME": return daytonaCall(runtime, () => daytonaEngine.volume(userId, args));
     case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
@@ -1135,7 +1136,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       return result;
     })();
-    case "CHUCK_DAYTONA_SESSION": return daytonaCall(runtime, () => daytonaEngine.session(userId, args));
+    case "CHUCK_DAYTONA_SESSION": return daytonaCall(runtime, () => daytonaEngine.session(userId, args, async (stream, chunk) => {
+      if (args.action === "stream_logs") await runtime.onStatus?.(`Daytona ${stream}: ${chunk.slice(0, 1400)}`);
+    }));
     case "CHUCK_DAYTONA_CODE": return daytonaCall(runtime, () => daytonaEngine.code(userId, args));
     case "CHUCK_DAYTONA_LSP": return daytonaCall(runtime, () => daytonaEngine.lsp(userId, args));
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
@@ -1223,6 +1226,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
         const result = await daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+        if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
+          const sessionId = (result as { sessionId: string }).sessionId;
+          runtime.registerCancellationCleanup(async () => { await daytonaEngine.browser(userId, { action: "session_release", sessionId }); });
+        }
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "succeeded", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} completed`, createdAt: Date.now() });
         return result;
       } catch (error) {

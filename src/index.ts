@@ -15,6 +15,7 @@ import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, Ap
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { Readable } from "node:stream";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
@@ -1322,7 +1323,7 @@ async function main(): Promise<void> {
     });
     app.get("/cli/artifacts/:id/download", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
-      try { const artifact = await daytonaEngine.downloadArtifact(device.userId, c.req.param("id")); return new Response(artifact.data, { headers: { "Content-Type": artifact.contentType, "Content-Length": String(artifact.size), "Content-Disposition": `attachment; filename="${artifact.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } }); }
+      try { const artifact = await daytonaEngine.streamArtifact(device.userId, c.req.param("id")); return new Response(Readable.toWeb(artifact.stream) as unknown as any, { headers: { "Content-Type": artifact.contentType, "Content-Length": String(artifact.size), "Content-Disposition": `attachment; filename="${artifact.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } }); }
       catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "artifact unavailable" }, 404); }
     });
     app.delete("/cli/artifacts/:id", async (c) => {
