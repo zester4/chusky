@@ -1107,6 +1107,11 @@ export interface TriggerEventRecord {
   status: "queued" | "running" | "awaiting_approval" | "completed" | "failed";
   workflowRunId?: string;
   approvalId?: string;
+  /** Structured operating-loop decision retained with the verified signal. */
+  operatingAction?: string;
+  operatingReason?: string;
+  operatingObservationId?: string;
+  operatingCommitmentId?: string;
   result?: string;
   error?: string;
   createdAt: number;

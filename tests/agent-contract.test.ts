@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
+import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "../src/autonomy/operatingLoop.js";
 
 // Agent contract tests mock provider HTTP calls; never send their fetch stubs
 // to a developer's configured Upstash Vector instance.
@@ -23,6 +24,28 @@ test("preview links are included exactly once even when the model omits them", (
   const url = "https://preview.test/app";
   assert.equal(appendPreviewLinks("The app is ready.", [url]), `The app is ready.\n\n🔗 Daytona preview: ${url}`);
   assert.equal(appendPreviewLinks(`The app is ready at ${url}.`, [url]), `The app is ready at ${url}.`);
+});
+
+test("verified triggers receive executor framing while ordinary conversations do not", () => {
+  assert.equal(triggerAutonomyInstructions(undefined), undefined);
+  const instructions = triggerAutonomyInstructions("evt_trigger_1");
+  assert.match(instructions ?? "", /AUTONOMOUS TRIGGER EXECUTION/);
+  assert.match(instructions ?? "", /not a user chat message/i);
+  assert.match(instructions ?? "", /return exactly NO_ACTION/i);
+  assert.match(instructions ?? "", /not create a durable attention record.*guess/i);
+});
+
+test("private runs receive a capability-neutral operating kernel", () => {
+  assert.match(AUTONOMY_OPERATING_KERNEL, /connected app or web tool, native tool, MCP, browser\/computer/i);
+  assert.match(AUTONOMY_OPERATING_KERNEL, /provider receipt.*artifact validation.*browser inspection/i);
+  assert.match(AUTONOMY_OPERATING_KERNEL, /exact approval and provider-verification boundary/i);
+  assert.match(AUTONOMY_OPERATING_KERNEL, /exact next action/i);
+});
+
+test("tool-bearing runs reject bare completion language until the result is closed out", () => {
+  assert.equal(needsAutonomyCloseoutNudge("Done.", 1), true);
+  assert.equal(needsAutonomyCloseoutNudge("Done — verified the provider receipt and scheduled the next check.", 1), false);
+  assert.equal(needsAutonomyCloseoutNudge("Done.", 0), false);
 });
 
 async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false) {
