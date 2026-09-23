@@ -33,7 +33,7 @@ import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession,
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, type ExternalActionClaim } from "./autonomy/actions.js";
-import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.js";
+import { isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
@@ -1227,7 +1227,7 @@ export async function runAgent(
           // Always execute the exact arguments the user reviewed instead of
           // requiring the model to reproduce the original serialization.
           executionArgs = approved.args;
-        } else if (!groupArtifactTool && (options?.toolRequireApproval?.includes(slug) || isRiskyToolSlug(slug, args) || (slug.startsWith("MCP_") && mcpClient.requiresApproval(slug, userId)))) {
+        } else if (!groupArtifactTool && (requiresToolApproval(slug, args, options?.toolRequireApproval?.includes(slug)) || (slug.startsWith("MCP_") && mcpClient.requiresApproval(slug, userId)))) {
           const approval = await createApproval({
             userId,
             ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, channelScope: channelContext.scope, triggerEventId: channelContext.triggerEventId } : {}),

@@ -47,6 +47,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_TASK_WAIT",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT",
   "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL", "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE", "CHUCK_MISSION_REPLAN",
+  "CHUCK_MISSION_PROOF", "CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",
   "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_CREATE_FOLDER", "CHUCK_DAYTONA_CREATE_SNAPSHOT", "CHUCK_DAYTONA_SANDBOX", "CHUCK_DAYTONA_VOLUME", "CHUCK_DAYTONA_SESSION", "CHUCK_DAYTONA_CODE", "CHUCK_DAYTONA_LSP",
   "CHUCK_DAYTONA_EXECUTE", "CHUCK_DAYTONA_FILE_DETAILS", "CHUCK_DAYTONA_FIND_FILES", "CHUCK_DAYTONA_REPLACE_FILES",
   "CHUCK_DAYTONA_LIST_FILES", "CHUCK_DAYTONA_PAUSE", "CHUCK_DAYTONA_PREVIEW",
@@ -64,6 +65,20 @@ const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
+]);
+
+/**
+ * Mission bookkeeping changes only the owner's bounded, durable workflow
+ * state. These controls must remain usable inside strict worker contracts;
+ * approvals belong at the external/high-impact action boundary, not around
+ * proof, evidence, checkpoints, or recovery metadata.
+ */
+const AUTONOMOUS_MISSION_CONTROL_TOOLS = new Set([
+  "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_PROOF",
+  "CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE",
+  "CHUCK_MISSION_REPLAN", "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL",
+  "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE", "CHUCK_MISSION_EVIDENCE",
+  "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",
 ]);
 
 const PRIVATE_COMPOSIO_META_TOOLS = new Set([
@@ -245,6 +260,18 @@ const STATUSES: Record<string, string> = {
 
 export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): boolean {
   return toolApprovalPolicy(slug, args) === "approval_required";
+}
+
+/**
+ * Shared approval decision for execution paths that can add a stricter
+ * per-run policy. Explicit run policies may tighten ordinary actions, but
+ * cannot turn owner-scoped mission control into an approval loop. High-impact
+ * actions always retain the central policy boundary.
+ */
+export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false): boolean {
+  if (isRiskyToolSlug(slug, args)) return true;
+  if (AUTONOMOUS_MISSION_CONTROL_TOOLS.has(slug)) return false;
+  return forceApproval;
 }
 
 export function isReadOnlyToolSlug(slug: string): boolean {

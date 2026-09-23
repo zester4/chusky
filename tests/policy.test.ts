@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, toolApprovalPolicy } from "../src/policy.js";
+import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, requiresToolApproval, toolApprovalPolicy } from "../src/policy.js";
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 
 test("recognizes materially risky tools", () => {
@@ -63,6 +63,17 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "UNKNOWN_PROVIDER_UPDATE_RECORD" }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "GMAIL_LIST_MESSAGES" }), false);
+});
+
+test("mission proof, evidence, verification, and repair stay autonomous even in strict runs", () => {
+  for (const slug of [
+    "CHUCK_MISSION_PROOF", "CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_REPAIR",
+  ]) {
+    assert.equal(toolApprovalPolicy(slug), "private", slug);
+    assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} must not become approval-gated by a run override`);
+  }
+  assert.equal(requiresToolApproval("GITHUB_DELETE_REPOSITORY", {}, false), true);
+  assert.equal(requiresToolApproval("GOOGLECALENDAR_CREATE_EVENT", {}, true), true);
 });
 
 test("provider metadata classifies dynamic Composio tools before heuristic fallback", () => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
 import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
-import { initStore, getSession, listHandoffRecords, listTasks } from "../src/store.js";
+import { initStore, getSession, listHandoffRecords, listTasks, createMission } from "../src/store.js";
 
 beforeEach(async () => {
   await initStore({ memoryOnly: true });
@@ -384,6 +384,35 @@ test("allows safe read-only tools to execute automatically even under strict app
   // Read-only tools must execute automatically without requiring approval
   assert.equal(result.status, "success");
   assert.equal(result.toolCallsCount, 1);
+});
+
+test("lets Elena use mission proof, evidence, and repair controls under strict worker approval policy", async () => {
+  const userId = 991017;
+  const cases = [
+    { name: "CHUCK_MISSION_PROOF", args: (id: string) => ({ id }) },
+    { name: "CHUCK_MISSION_EVIDENCE", args: (id: string) => ({ id, evidence: [{ kind: "assertion", summary: "Checkpoint recorded", verified: false }] }) },
+    { name: "CHUCK_MISSION_REPAIR", args: (id: string) => ({ id, reason: "Recover the failed mission", nextAction: "Resume from its checkpoint" }) },
+  ] as const;
+
+  for (const [index, scenario] of cases.entries()) {
+    const mission = await createMission(userId, {
+      id: `mis_worker_approval_${index}`,
+      title: "Worker approval regression",
+      objective: "Exercise safe mission controls",
+      definitionOfDone: "Mission control tool executes without an approval pause",
+    });
+    const result = await executeDelegation(userId, {
+      worker: "elena",
+      objective: `Use ${scenario.name} to continue mission governance`,
+      allowedTools: [scenario.name],
+      approvalPolicy: "require_chusky_approval",
+      context: { toolCall: { name: scenario.name, args: scenario.args(mission.id) } },
+    });
+
+    assert.equal(result.status, "success", scenario.name);
+    assert.equal(result.approvalId, undefined, scenario.name);
+    assert.equal((await getSession(userId)).approvals.some((approval) => approval.toolSlug === scenario.name), false, scenario.name);
+  }
 });
 
 test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", async () => {

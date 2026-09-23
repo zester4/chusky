@@ -4,7 +4,7 @@ import { cancelSubagentWorkflow, enqueueSubagentContinuation } from "./workflow.
 import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
-import { isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
+import { requiresToolApproval, isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
 import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
@@ -263,9 +263,10 @@ export async function executeDelegation(
           const approvedForTool = approved?.toolSlug === actionPayload.name;
           const executionArgs = approvedForTool ? approved.args : actionPayload.args;
           const isReadOnly = isReadOnlyToolSlug(actionPayload.name);
-          const isRisky = isRiskyToolSlug(actionPayload.name, executionArgs);
-          const requiresApproval = !approvedForTool && !isReadOnly && (
-            isRisky || contract.approvalPolicy === "require_chusky_approval"
+          const requiresApproval = !approvedForTool && requiresToolApproval(
+            actionPayload.name,
+            executionArgs,
+            !isReadOnly && contract.approvalPolicy === "require_chusky_approval",
           );
 
           if (requiresApproval) {
@@ -539,9 +540,10 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           const approvedForTool = approved?.toolSlug === slug;
           const executionArgs = approvedForTool ? approved.args : rawArgs;
           const isReadOnly = isReadOnlyToolSlug(slug);
-          const isRisky = isRiskyToolSlug(slug, executionArgs);
-          const requiresApproval = !approvedForTool && !isReadOnly && (
-            isRisky || contract.approvalPolicy === "require_chusky_approval"
+          const requiresApproval = !approvedForTool && requiresToolApproval(
+            slug,
+            executionArgs,
+            !isReadOnly && contract.approvalPolicy === "require_chusky_approval",
           );
 
           if (requiresApproval) {
@@ -611,7 +613,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             messages.push({ role: "tool", tool_call_id: call.id, content: resultStr.slice(0, 20000) });
             await checkpointTask(userId, durableTask.id, `Executed ${slug}`, "Proceed to next step");
             await checkpointRun("running", { eventType: "worker.tool_completed", tool: slug, round, checkpoint: `Executed ${slug}`, nextAction: "Proceed to next step" });
-            if (approvedForTool && isRisky) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
+            if (approvedForTool && isRiskyToolSlug(slug, executionArgs)) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
           } catch (err) {
             if (isCancellationError(err, activeSignal)) throw err;
             const errMsg = String((err as Error)?.message ?? err);
