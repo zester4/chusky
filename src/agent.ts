@@ -1671,10 +1671,48 @@ export async function listMeetingComposioCapabilities(userId: number, options?: 
 }
 
 export async function listTriggers(userId: number): Promise<unknown[]> {
+  const owned = new Set((await getSession(userId)).triggerIds ?? []);
+  if (!owned.size) return [];
+  const safeTrigger = (item: unknown): Record<string, unknown> | undefined => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const value = item as Record<string, unknown>;
+    const id = String(value.id ?? value.trigger_id ?? value.triggerId ?? "");
+    if (!id || !owned.has(id)) return undefined;
+    const slug = String(value.trigger_name ?? value.triggerName ?? value.trigger_slug ?? value.slug ?? "");
+    const disabledAt = value.disabled_at ?? value.disabledAt;
+    const configValue = value.trigger_config ?? value.triggerConfig ?? value.config;
+    const config = configValue && typeof configValue === "object" && !Array.isArray(configValue) ? configValue : {};
+    return {
+      id,
+      ...(slug ? { trigger_slug: slug, triggerName: slug } : {}),
+      status: String(value.status ?? (value.enabled === false || disabledAt ? "disabled" : "active")),
+      enabled: value.enabled !== false && !disabledAt,
+      ...(disabledAt ? { disabledAt } : {}),
+      config,
+      triggerConfig: config,
+    };
+  };
+
+  // Composio 0.18.x validates trigger `state` as an object even though the
+  // API legitimately returns null for triggers without state. Use the raw
+  // client for this read-only, owner-filtered projection so a provider shape
+  // mismatch cannot flood Railway logs or break the trigger summary. Keep the
+  // public SDK path as a compatibility fallback for future client versions.
+  const rawClient = (composio as unknown as {
+    client?: { triggerInstances?: { listActive: (query: Record<string, unknown>) => Promise<unknown> } };
+  }).client;
+  if (rawClient?.triggerInstances?.listActive) {
+    try {
+      const result = await rawClient.triggerInstances.listActive({ trigger_ids: [...owned], show_disabled: true });
+      const items = Array.isArray(result) ? result : ((result as { items?: unknown[] }).items ?? []);
+      return items.flatMap((item) => { const safe = safeTrigger(item); return safe ? [safe] : []; });
+    } catch (error) {
+      logger.warn({ err: error, userId }, "Raw Composio trigger lookup failed; using SDK compatibility path");
+    }
+  }
   const result = await composio.triggers.listActive({ showDisabled: true });
   const items = Array.isArray(result) ? result : ((result as any).items ?? []);
-  const owned = new Set((await getSession(userId)).triggerIds ?? []);
-  return items.filter((t: any) => owned.has(String(t.id ?? t.trigger_id ?? t.triggerId)));
+  return items.flatMap((item: unknown) => { const safe = safeTrigger(item); return safe ? [safe] : []; });
 }
 
 /** Trigger-capable apps, with the caller's connected accounts reflected in the result. */

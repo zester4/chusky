@@ -791,6 +791,41 @@ async function resolveRunInput(session: Awaited<ReturnType<typeof getSession>>, 
   }
   return { input, message: parts.length === 1 ? input : parts, attachments: verified.map(({ id, name, contentType, size }) => ({ id, name, contentType, size })) };
 }
+
+type AccountHistoryMessage = { role: "user" | "assistant"; content: string; createdAt?: number };
+
+function dashboardRequest(c: any): boolean {
+  return Boolean(c.get("webAuthUserId"));
+}
+
+function dashboardAgentHistory(c: any, session: Awaited<ReturnType<typeof getSession>>, threadHistory: AccountHistoryMessage[]): AccountHistoryMessage[] {
+  if (!dashboardRequest(c) || !session.history.length) return threadHistory;
+  // Keep the SDK thread as a UI projection while the account session remains
+  // the canonical private conversation shared with iMessage and other private
+  // channel adapters. Remove entries already projected into the thread without
+  // collapsing repeated user messages with identical text.
+  const remaining = new Map<string, number>();
+  for (const message of session.history) {
+    const key = `${message.role}\u0000${message.content}`;
+    remaining.set(key, (remaining.get(key) ?? 0) + 1);
+  }
+  const threadOnly = threadHistory.filter((message) => {
+    const key = `${message.role}\u0000${message.content}`;
+    const count = remaining.get(key) ?? 0;
+    if (!count) return true;
+    remaining.set(key, count - 1);
+    return false;
+  });
+  return [...session.history, ...threadOnly];
+}
+
+function accountHistoryView(session: Awaited<ReturnType<typeof getSession>>): AccountHistoryMessage[] {
+  return session.history.slice(-(config.maxHistory * 2)).map((message) => ({
+    role: message.role,
+    content: message.content,
+    ...(typeof message.createdAt === "number" ? { createdAt: message.createdAt } : {}),
+  }));
+}
 function page<T extends { id: string; updatedAt: number }>(items: T[], cursor: string | undefined, limit: string | undefined): { data: T[]; nextCursor?: string } { const size = Math.max(1, Math.min(100, Number(limit ?? 20) || 20)); const [at = "", id = ""] = Buffer.from(cursor ?? "", "base64url").toString("utf8").split(":"); const sorted = [...items].sort((a, b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id)); const filtered = at ? sorted.filter((item) => item.updatedAt < Number(at) || (item.updatedAt === Number(at) && item.id < id)) : sorted; const data = filtered.slice(0, size); const last = data.at(-1); return { data, ...(last && filtered.length > data.length ? { nextCursor: Buffer.from(`${last.updatedAt}:${last.id}`).toString("base64url") } : {}) }; }
 function idempotency(c: any, session: Awaited<ReturnType<typeof getSession>>, fingerprint: string): { replay?: unknown; key?: string; mismatch?: boolean } {
   const now = Date.now(); const cutoff = now - 24 * 60 * 60 * 1000;
@@ -1161,6 +1196,11 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/account/preferences", async (c) => {
     const session = await getSession(sdkUser(c)!.userId);
     return c.json({ model: session.model, voiceReplies: Boolean(session.voiceReplies), voicePreferences: session.voicePreferences ?? {} });
+  });
+
+  app.get("/v1/account/history", async (c) => {
+    const session = await getSession(sdkUser(c)!.userId);
+    return c.json({ data: accountHistoryView(session) });
   });
 
   app.get("/v1/account/voice-options", async (c) => {
@@ -1982,6 +2022,11 @@ export function registerSdkApi(app: Hono): void {
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
+    if (dashboardRequest(c)) {
+      const sharedHistory = dashboardAgentHistory(c, session, thread.history);
+      thread.history = sharedHistory;
+      session.history = sharedHistory;
+    }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     try {
@@ -2008,6 +2053,11 @@ export function registerSdkApi(app: Hono): void {
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
     let resolved: Awaited<ReturnType<typeof resolveRunInput>>; try { resolved = await resolveRunInput(session, body); } catch (error) { return apiError(c, 400, error instanceof Error && error.message === "invalid_attachment" ? "invalid_attachment" : "invalid_input", error instanceof Error && error.message === "invalid_attachment" ? "Each attachment must be a verified upload owned by this account." : "Provide 1–30000 characters or up to five verified attachments."); }
+    if (dashboardRequest(c)) {
+      const sharedHistory = dashboardAgentHistory(c, session, thread.history);
+      thread.history = sharedHistory;
+      session.history = sharedHistory;
+    }
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
