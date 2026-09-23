@@ -43,6 +43,7 @@ import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.
 import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { scheduleMissionSteps } from "./missionScheduler.js";
+import { getAutonomySnapshot } from "./autonomy/queue.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -287,7 +288,7 @@ async function reviewSubagentAction(userId: number, args: Record<string, unknown
 }
 
 function attentionKind(value: unknown): AttentionEntityKind {
-  const allowed: AttentionEntityKind[] = ["observation", "open_loop", "attention_candidate", "standing_order", "delivery_preference", "relationship", "project_state"];
+  const allowed: AttentionEntityKind[] = ["observation", "open_loop", "attention_candidate", "standing_order", "delivery_preference", "relationship", "project_state", "autonomy_watch", "autonomy_profile"];
   const kind = String(value ?? "");
   if (!allowed.includes(kind as AttentionEntityKind)) throw new Error("Unsupported attention entity");
   return kind as AttentionEntityKind;
@@ -310,9 +311,11 @@ async function attentionTool(userId: number, args: Record<string, unknown>): Pro
     return updated;
   }
   const input = attentionInput(args);
+  if (kind === "autonomy_watch" && typeof args.query === "string" && args.query.trim()) input.query = text(args.query);
   const requiredByKind: Partial<Record<AttentionEntityKind, string[]>> = {
     observation: ["source", "eventType", "summary"], open_loop: ["title", "nextAction"], attention_candidate: ["candidateType", "reason"],
     standing_order: ["name", "instruction", "authority"], delivery_preference: ["provider"], relationship: ["personKey"], project_state: ["projectKey", "name", "summary"],
+    autonomy_watch: ["name", "domain", "objective"], autonomy_profile: ["mode"],
   };
   for (const field of requiredByKind[kind] ?? []) if (!(field in input) || input[field] === undefined || input[field] === null || input[field] === "") throw new Error(`${field} is required for ${kind}`);
   return createAttentionRecord(userId, kind, input);
@@ -740,6 +743,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_FORGET_IMAGE_ASSET": return { forgotten: await forgetImageAsset(userId, text(args.id)) };
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };
     case "CHUCK_ATTENTION_STATE": return attentionTool(userId, args);
+    case "CHUCK_AUTONOMY_STATUS": return getAutonomySnapshot(userId);
     case "CHUCK_START_PHONE_CALL": {
       const profile = args.profile && typeof args.profile === "object" && !Array.isArray(args.profile) ? args.profile as Record<string, unknown> : undefined;
       const callProfile: "business" | "personal" = args.callProfile === "business" ? "business" : "personal";

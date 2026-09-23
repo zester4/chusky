@@ -70,3 +70,18 @@ test("native open loops require a concrete next action", async () => {
   const loop = await nativeTool(910007, "CHUCK_ATTENTION_STATE", { action: "create", kind: "open_loop", title: "Follow up", nextAction: "Send the approved summary" }) as any;
   assert.equal(loop.nextAction, "Send the approved summary");
 });
+
+test("personal and business autonomy profiles and watches stay explicit and owner-scoped", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910008;
+  const personal = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_profile", mode: "personal", enabled: true, maxChecksPerDay: 12 });
+  const business = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_profile", mode: "business", enabled: true, defaultAuthority: "prepare", allowedDomains: ["gmail", "stripe"] }) as any;
+  const watch = await nativeTool(userId, "CHUCK_ATTENTION_STATE", { action: "create", kind: "autonomy_watch", name: "Unreplied client mail", domain: "gmail", objective: "Find messages awaiting a reply", cadenceSeconds: 900, authority: "prepare" }) as any;
+  assert.equal((personal as any).mode, "personal");
+  assert.equal(business.mode, "business");
+  assert.equal(watch.cadenceSeconds, 900);
+  const status = await nativeTool(userId, "CHUCK_AUTONOMY_STATUS", {}) as any;
+  assert.equal(status.mode, "personal");
+  assert.equal(status.watches[0].id, watch.id);
+  assert.equal((await nativeTool(userId + 1, "CHUCK_AUTONOMY_STATUS", {} ) as any).watches.length, 0);
+});

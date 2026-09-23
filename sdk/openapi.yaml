@@ -35,6 +35,10 @@ paths:
   /account/projects/{projectId}/policy:
     get: { summary: Read an organization project policy as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
     put: { summary: Replace project tool grants and per-run budgets as an owner or admin, responses: { '200': { description: Updated }, '400': { description: Invalid policy }, '404': { description: Not found } } }
+  /account/autonomy/queue:
+    get: { summary: Read the authenticated owner's unified personal or business autonomy queue, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: mode, in: query, required: false, schema: { type: string, enum: [personal, business] } }], responses: { '200': { description: Owner-scoped autonomy snapshot including profile, watches, blockers, and next checks }, '403': { description: Owner link required } } }
+  /account/projects/{projectId}/autonomy/queue:
+    get: { summary: Read the unified business autonomy queue under a company project policy, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: projectId, in: path, required: true, schema: { type: string } }], responses: { '200': { description: Company autonomy snapshot }, '404': { description: Not found } } }
   /account/projects/{projectId}/agents:
     get: { summary: List organization project agent profiles as a verified member, responses: { '200': { description: OK }, '404': { description: Not found } } }
     post: { summary: Create a template-based company agent profile as an owner or admin, responses: { '201': { description: Created }, '404': { description: Not found } } }

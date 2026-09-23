@@ -53,6 +53,7 @@ import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.
 import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { scheduleMissionSteps } from "./missionScheduler.js";
+import { getAutonomySnapshot } from "./autonomy/queue.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -337,6 +338,7 @@ function accountProjectScopes(value: unknown): string[] | undefined {
 }
 
 const COMPANY_PROJECT_DEFAULT_SCOPES = [
+  "account:read",
   "threads:read", "threads:write", "agents:read", "agents:write", "workflows:read", "workflows:write",
   "tasks:read", "tasks:write", "approvals:read",
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
@@ -1603,6 +1605,34 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) {
       return apiError(c, 404, "meeting_context_unavailable", error instanceof Error ? error.message : "Meeting context is unavailable.");
     }
+  });
+
+  // One read-only, owner-scoped projection for personal and company clients.
+  // The projection never claims work; it lets a dashboard decide what to show
+  // and lets an API consumer resume the exact next action from durable state.
+  app.get("/v1/account/autonomy/queue", async (c) => {
+    const owner = await callOwner(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading autonomy state.");
+    const mode = c.req.query("mode") === "business" ? "business" : "personal";
+    return c.json(await getAutonomySnapshot(owner.userId, mode));
+  });
+
+  app.get("/v1/account/projects/:projectId/autonomy/queue", async (c) => {
+    const control = await getSession(0);
+    const project = control.sdkProjects!.find((item) => item.id === c.req.param("projectId") && item.organizationId && !item.revokedAt);
+    if (!project || !(await accountCanAccessProject(c, project, false))) return apiError(c, 404, "not_found", "Company project not found.");
+    const owner = (await linkedWebCallOwner(c)) ?? sdkUser(c);
+    if (!owner) return apiError(c, 403, "owner_link_required", "Link this company project to an owner before reading autonomy state.");
+    const policy = project.companyPolicy?.autonomy;
+    return c.json(await getAutonomySnapshot(owner.userId, "business", policy ? {
+      ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
+      ...(policy.defaultAuthority ? { defaultAuthority: policy.defaultAuthority } : {}),
+      ...(policy.allowedDomains ? { allowedDomains: [...policy.allowedDomains] } : {}),
+      ...(policy.deniedDomains ? { deniedDomains: [...policy.deniedDomains] } : {}),
+      ...(policy.maxChecksPerDay !== undefined ? { maxChecksPerDay: policy.maxChecksPerDay } : {}),
+      ...(policy.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: policy.maxAutonomousActionsPerDay } : {}),
+      ...(policy.notifyOn ? { notifyOn: policy.notifyOn } : {}),
+    } : {}));
   });
 
   app.get("/v1/account/projects", async (c) => {

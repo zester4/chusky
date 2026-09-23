@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -36,6 +36,7 @@ export class Chusky {
   readonly context: ContextResource;
   readonly departments: DepartmentsResource;
   readonly outcomes: OutcomesResource;
+  readonly autonomy: AutonomyResource;
   readonly a2a: A2AResource;
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -86,6 +87,7 @@ export class Chusky {
     this.context = new ContextResource(this);
     this.departments = new DepartmentsResource(this);
     this.outcomes = new OutcomesResource(this);
+    this.autonomy = new AutonomyResource(this);
     this.a2a = new A2AResource(this);
   }
 
@@ -534,6 +536,12 @@ export class OutcomesResource {
   list(options?: RequestOptions): Promise<Page<OutcomePackage>> { return this.client.request("/outcomes", {}, options); }
   get(slug: string, options?: RequestOptions): Promise<{ data: OutcomePackage }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}`, {}, options); }
   plan(slug: string, input: Record<string, unknown>, options?: RequestOptions): Promise<{ data: OutcomePlan }> { return this.client.request(`/outcomes/${encodeURIComponent(slug)}/plan`, { method: "POST", body: JSON.stringify(input) }, options); }
+}
+
+export class AutonomyResource {
+  constructor(private readonly client: Chusky) {}
+  queue(mode: "personal" | "business" = "personal", options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/autonomy/queue?mode=${mode}`, {}, options); }
+  businessQueue(projectId: string, options?: RequestOptions): Promise<AutonomySnapshot> { return this.client.request(`/account/projects/${encodeURIComponent(projectId)}/autonomy/queue`, {}, options); }
 }
 
 export class A2AResource {

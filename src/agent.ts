@@ -37,7 +37,7 @@ import { isRiskyToolSlug, humanProgressStatus, humanToolStatus } from "./policy.
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
@@ -1905,9 +1905,12 @@ export async function queueVideoWorkflow(userId: number, prompt: string, destina
 
 export interface TriggerEvent {
   eventId: string;
+  eventType: "composio.trigger.message" | "composio.connected_account.expired" | "composio.trigger.disabled";
   triggerSlug: string;
   userId: string;
   triggerId?: string;
+  connectionId?: string;
+  toolkit?: string;
   payload: Record<string, unknown>;
   rawPayload: unknown;
 }
@@ -1917,35 +1920,76 @@ export class TriggerWebhookVerificationError extends Error {
   constructor(message = "Invalid Composio trigger webhook signature") { super(message); this.name = "TriggerWebhookVerificationError"; }
 }
 
+function parseSignedLifecycleFallback(body: Buffer, headers: Record<string, string>, secret: string): Record<string, unknown> | undefined {
+  const webhookId = headers["webhook-id"] ?? headers["Webhook-Id"] ?? headers["webhook_id"];
+  const timestamp = headers["webhook-timestamp"] ?? headers["Webhook-Timestamp"] ?? headers["webhook_timestamp"];
+  const signature = headers["webhook-signature"] ?? headers["Webhook-Signature"] ?? headers["webhook_signature"];
+  if (!webhookId || !timestamp || !signature || !/^\d+$/.test(timestamp)) throw new TriggerWebhookVerificationError();
+  const age = Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp));
+  if (!Number.isFinite(age) || age > 300) throw new TriggerWebhookVerificationError("Composio webhook timestamp is outside the replay window");
+  const expected = createHmac("sha256", secret).update(`${webhookId}.${timestamp}.${body.toString()}`).digest("base64");
+  const candidates = signature.split(/\s+/).flatMap((part) => part.split(",").slice(1)).filter(Boolean);
+  const valid = candidates.some((candidate) => {
+    const actual = Buffer.from(candidate, "base64");
+    const wanted = Buffer.from(expected, "base64");
+    return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+  });
+  if (!valid) throw new TriggerWebhookVerificationError();
+  try {
+    const parsed = JSON.parse(body.toString()) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    throw new Error("Composio lifecycle webhook body is not valid JSON");
+  }
+}
+
 export async function parseTriggerWebhook(
   body: Buffer,
   headers: Record<string, string>,
   secret?: string
 ): Promise<TriggerEvent | null> {
-    const result = await composio.triggers.parse(
-      { body, headers } as Parameters<typeof composio.triggers.parse>[0],
-      secret ? { verifySecret: secret } : undefined
-    );
+    let result: unknown;
+    try {
+      result = await composio.triggers.parse(
+        { body, headers } as Parameters<typeof composio.triggers.parse>[0],
+        secret ? { verifySecret: secret } : undefined
+      );
+    } catch (error) {
+      // The SDK currently validates only trigger-message schemas. Composio
+      // lifecycle envelopes use the same signed transport but are intentionally
+      // smaller, so fall back to the exact signature check for those events.
+      if (!secret) throw error;
+      const raw = parseSignedLifecycleFallback(body, headers, secret);
+      if (!raw || (raw.type !== "composio.connected_account.expired" && raw.type !== "composio.trigger.disabled")) throw error;
+      result = { rawPayload: raw, payload: raw.data ?? {}, metadata: raw.metadata ?? {}, data: raw.data ?? {} };
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const r = result as any;
     if (!r?.rawPayload) {
       if (secret) throw new TriggerWebhookVerificationError();
       return null;
     }
-    if (r.rawPayload.type !== "composio.trigger.message") return null;
+    const eventType = String(r.rawPayload.type ?? "");
+    if (eventType !== "composio.trigger.message" && eventType !== "composio.connected_account.expired" && eventType !== "composio.trigger.disabled") return null;
     // Composio V3 keeps routing metadata in the webhook envelope while older
     // payloads exposed these fields directly on the parsed payload. Accept
     // both shapes so valid events reach ownership validation and QStash.
     const metadata = r.rawPayload?.metadata ?? r.metadata ?? {};
     const data = r.rawPayload?.data ?? r.data ?? {};
-    const eventId = String(r.rawPayload?.id ?? r.rawPayload?.eventId ?? r.payload?.eventId ?? r.payload?.event_id ?? "");
+    const eventId = String(r.rawPayload?.id ?? r.rawPayload?.eventId ?? r.payload?.eventId ?? r.payload?.event_id ?? data?.event_id ?? data?.eventId ?? "");
     if (!eventId) throw new Error("Composio trigger event has no event ID");
+    const connectionId = r.payload?.connectionId ?? r.payload?.connection_id ?? metadata.connection_id ?? metadata.connectionId ?? metadata.connected_account_id ?? metadata.connectedAccountId ?? data?.connection_id ?? data?.connectionId ?? data?.connected_account_id ?? data?.connectedAccountId;
+    const toolkit = r.payload?.toolkit ?? r.payload?.app ?? metadata.toolkit ?? metadata.app_name ?? metadata.appName ?? data?.toolkit ?? data?.app;
+    const payload = r.payload?.payload ?? data ?? {};
     return {
       eventId,
-      triggerSlug: String(r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? metadata.trigger_slug ?? metadata.triggerSlug ?? ""),
-      userId: String(r.payload?.userId ?? r.payload?.user_id ?? metadata.user_id ?? metadata.userId ?? ""),
+      eventType: eventType as TriggerEvent["eventType"],
+      triggerSlug: String(r.payload?.triggerSlug ?? r.payload?.trigger_slug ?? metadata.trigger_slug ?? metadata.triggerSlug ?? data?.trigger_slug ?? (eventType === "composio.connected_account.expired" ? "CONNECTED_ACCOUNT_EXPIRED" : eventType === "composio.trigger.disabled" ? "TRIGGER_DISABLED" : "")),
+      userId: String(r.payload?.userId ?? r.payload?.user_id ?? metadata.user_id ?? metadata.userId ?? data?.user_id ?? data?.userId ?? ""),
       triggerId: (r.payload?.triggerId ?? r.payload?.trigger_id ?? metadata.trigger_id ?? metadata.triggerId ?? r.rawPayload?.triggerId) ? String(r.payload?.triggerId ?? r.payload?.trigger_id ?? metadata.trigger_id ?? metadata.triggerId ?? r.rawPayload?.triggerId) : undefined,
-      payload: r.payload?.payload ?? data ?? {},
+      ...(connectionId ? { connectionId: String(connectionId) } : {}),
+      ...(toolkit ? { toolkit: String(toolkit).slice(0, 120) } : {}),
+      payload: payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {},
       rawPayload: r.rawPayload,
     };
 }

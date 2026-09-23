@@ -1016,6 +1016,8 @@ export type AttentionEntityKind =
   | "open_loop"
   | "attention_candidate"
   | "standing_order"
+  | "autonomy_watch"
+  | "autonomy_profile"
   | "delivery_preference"
   | "relationship"
   | "project_state";
@@ -1024,6 +1026,8 @@ export type AttentionCollection =
   | "open-loops"
   | "attention-candidates"
   | "standing-orders"
+  | "autonomy-watches"
+  | "autonomy-profiles"
   | "delivery-preferences"
   | "relationships"
   | "project-states";
@@ -1056,6 +1060,24 @@ export interface StandingOrderRecord {
   status: "active" | "paused" | "revoked"; expiresAt?: number; lastUsedAt?: number;
   createdAt: number; updatedAt: number;
 }
+export interface AutonomyWatchRecord {
+  id: string; userId: number; name: string; domain: string; toolkit?: string;
+  objective: string; query?: string; cadenceSeconds: number;
+  authority: "observe" | "prepare" | "execute_reversible";
+  status: "active" | "paused" | "revoked";
+  nextCheckAt?: number; lastCheckedAt?: number; lastChangedAt?: number;
+  lastResult?: string; lastError?: string; maxItems: number;
+  createdAt: number; updatedAt: number;
+}
+export interface AutonomyProfileRecord {
+  id: string; userId: number; mode: "personal" | "business";
+  enabled: boolean; defaultAuthority: "observe" | "prepare" | "execute_reversible";
+  quietHoursUtc?: { startMinute: number; endMinute: number };
+  maxChecksPerDay: number; maxAutonomousActionsPerDay: number;
+  notifyOn: "important" | "changes" | "all" | "silent";
+  allowedDomains: string[]; deniedDomains: string[];
+  createdAt: number; updatedAt: number;
+}
 export interface DeliveryPreferenceRecord {
   id: string; userId: number; provider: ChannelProvider; conversationId?: string;
   enabled: boolean; mode: "immediate" | "digest" | "silent";
@@ -1072,7 +1094,7 @@ export interface ProjectStateRecord {
   summary: string; currentPhase?: string; nextAction?: string; blockers?: string[];
   lastActivityAt?: number; confidence: number; createdAt: number; updatedAt: number;
 }
-export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord;
+export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | AutonomyWatchRecord | AutonomyProfileRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord;
 export interface AttentionListOptions { query?: string; status?: string; limit?: number; }
 
 export interface ApprovalRecord {
@@ -1101,7 +1123,9 @@ export interface ApprovalRecord {
 export interface TriggerEventRecord {
   eventId: string;
   userId: number;
+  eventType?: "composio.trigger.message" | "composio.connected_account.expired" | "composio.trigger.disabled";
   triggerId?: string;
+  connectionId?: string;
   triggerSlug: string;
   summary: string;
   status: "queued" | "running" | "awaiting_approval" | "completed" | "failed";
@@ -5915,12 +5939,12 @@ export async function forgetImageAsset(uid: number, idOrName: string): Promise<b
 
 const attentionCollections: Record<AttentionEntityKind, AttentionCollection> = {
   observation: "observations", open_loop: "open-loops", attention_candidate: "attention-candidates",
-  standing_order: "standing-orders", delivery_preference: "delivery-preferences",
+  standing_order: "standing-orders", autonomy_watch: "autonomy-watches", autonomy_profile: "autonomy-profiles", delivery_preference: "delivery-preferences",
   relationship: "relationships", project_state: "project-states",
 };
 const attentionPrefixes: Record<AttentionEntityKind, string> = {
   observation: "obs", open_loop: "loop", attention_candidate: "cand", standing_order: "order",
-  delivery_preference: "pref", relationship: "rel", project_state: "proj",
+  autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj",
 };
 const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "xchat", "voice", "cli", "webhook"];
 
@@ -6009,6 +6033,16 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       ...base, name: attentionText(raw.name, "name", 200, true)!, instruction: attentionText(raw.instruction, "instruction", 4000, true)!, scope: attentionArray(raw.scope, "scope") ?? [],
       authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as StandingOrderRecord["authority"], constraints: attentionMetadata(raw.constraints),
       status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as StandingOrderRecord["status"], expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"), lastUsedAt: attentionTimestamp(raw.lastUsedAt, "lastUsedAt"),
+    };
+    case "autonomy-watches": return {
+      ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
+      cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
+      nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),
+    };
+    case "autonomy-profiles": return {
+      ...base, mode: raw.mode === "business" ? "business" : "personal", enabled: attentionBoolean(raw.enabled, "enabled", true), defaultAuthority: attentionStatus(raw.defaultAuthority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyProfileRecord["defaultAuthority"],
+      quietHoursUtc: raw.quietHoursUtc && typeof raw.quietHoursUtc === "object" && !Array.isArray(raw.quietHoursUtc) ? { startMinute: Math.round(attentionNumber((raw.quietHoursUtc as any).startMinute, "quietHoursUtc.startMinute", 0, 0, 1439)), endMinute: Math.round(attentionNumber((raw.quietHoursUtc as any).endMinute, "quietHoursUtc.endMinute", 0, 0, 1439)) } : undefined,
+      maxChecksPerDay: Math.round(attentionNumber(raw.maxChecksPerDay, "maxChecksPerDay", 24, 0, 1000)), maxAutonomousActionsPerDay: Math.round(attentionNumber(raw.maxAutonomousActionsPerDay, "maxAutonomousActionsPerDay", 20, 0, 1000)), notifyOn: attentionStatus(raw.notifyOn, ["important", "changes", "all", "silent"], "important") as AutonomyProfileRecord["notifyOn"], allowedDomains: attentionArray(raw.allowedDomains, "allowedDomains", 100) ?? [], deniedDomains: attentionArray(raw.deniedDomains, "deniedDomains", 100) ?? [],
     };
     case "delivery-preferences": return {
       ...base, provider: attentionProvider(raw.provider, "provider", "telegram")!, conversationId: attentionText(raw.conversationId, "conversationId", 300), enabled: attentionBoolean(raw.enabled, "enabled", true),

@@ -30,9 +30,21 @@ export type CompanyBudget = {
   maxCost?: number;
 };
 
+export type CompanyAutonomyPolicy = {
+  enabled?: boolean;
+  defaultAuthority?: "observe" | "prepare" | "execute_reversible";
+  allowedDomains?: string[];
+  deniedDomains?: string[];
+  maxChecksPerDay?: number;
+  maxAutonomousActionsPerDay?: number;
+  notifyOn?: "important" | "changes" | "all" | "silent";
+  slaMinutes?: number;
+};
+
 export type CompanyPolicy = {
   tools?: CompanyToolPolicy;
   budget?: CompanyBudget;
+  autonomy?: CompanyAutonomyPolicy;
 };
 
 export type CompanyAgentProfile = {
@@ -133,6 +145,30 @@ function budget(value: unknown): CompanyBudget | undefined {
   };
 }
 
+function autonomy(value: unknown): CompanyAutonomyPolicy | undefined {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const authority = input.defaultAuthority;
+  const notifyOn = input.notifyOn;
+  const list = (candidate: unknown): string[] | undefined => candidate === undefined ? undefined : toolList(candidate);
+  const allowedDomains = list(input.allowedDomains);
+  const deniedDomains = list(input.deniedDomains);
+  if ((authority !== undefined && !["observe", "prepare", "execute_reversible"].includes(String(authority))) || (notifyOn !== undefined && !["important", "changes", "all", "silent"].includes(String(notifyOn)))) return undefined;
+  if ((input.enabled !== undefined && typeof input.enabled !== "boolean") || (input.maxChecksPerDay !== undefined && (!Number.isInteger(input.maxChecksPerDay) || Number(input.maxChecksPerDay) < 0 || Number(input.maxChecksPerDay) > 10000)) || (input.maxAutonomousActionsPerDay !== undefined && (!Number.isInteger(input.maxAutonomousActionsPerDay) || Number(input.maxAutonomousActionsPerDay) < 0 || Number(input.maxAutonomousActionsPerDay) > 10000)) || (input.slaMinutes !== undefined && (!Number.isInteger(input.slaMinutes) || Number(input.slaMinutes) < 1 || Number(input.slaMinutes) > 30 * 24 * 60))) return undefined;
+  if ((input.allowedDomains !== undefined && !allowedDomains) || (input.deniedDomains !== undefined && !deniedDomains)) return undefined;
+  return {
+    ...(typeof input.enabled === "boolean" ? { enabled: input.enabled } : {}),
+    ...(authority ? { defaultAuthority: authority as CompanyAutonomyPolicy["defaultAuthority"] } : {}),
+    ...(allowedDomains ? { allowedDomains } : {}),
+    ...(deniedDomains ? { deniedDomains } : {}),
+    ...(input.maxChecksPerDay !== undefined ? { maxChecksPerDay: Number(input.maxChecksPerDay) } : {}),
+    ...(input.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: Number(input.maxAutonomousActionsPerDay) } : {}),
+    ...(notifyOn ? { notifyOn: notifyOn as CompanyAutonomyPolicy["notifyOn"] } : {}),
+    ...(input.slaMinutes !== undefined ? { slaMinutes: Number(input.slaMinutes) } : {}),
+  };
+}
+
 export function validateCompanyPolicy(value: unknown): CompanyPolicy | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const input = value as Record<string, unknown>;
@@ -145,6 +181,8 @@ export function validateCompanyPolicy(value: unknown): CompanyPolicy | undefined
   if ((toolInput.allow !== undefined && !allow) || (toolInput.deny !== undefined && !deny) || (toolInput.requireApproval !== undefined && !requireApproval)) return undefined;
   const limits = budget(input.budget);
   if (!limits) return undefined;
+  const autonomyPolicy = autonomy(input.autonomy);
+  if (!autonomyPolicy) return undefined;
   return {
     tools: {
       ...(allow ? { allow } : {}),
@@ -152,6 +190,7 @@ export function validateCompanyPolicy(value: unknown): CompanyPolicy | undefined
       ...(requireApproval ? { requireApproval } : {}),
     },
     budget: limits,
+    autonomy: autonomyPolicy,
   };
 }
 
@@ -202,7 +241,7 @@ export function effectiveCompanyRunPolicy(
   projectPolicy: CompanyPolicy | undefined,
   agent: CompanyAgentProfile | undefined,
   requested: { tools?: CompanyToolPolicy; budget?: { duration?: string; maxToolCalls?: number; maxCost?: number } },
-): { tools?: CompanyToolPolicy; budget?: CompanyBudget; instructions?: string } {
+): { tools?: CompanyToolPolicy; budget?: CompanyBudget; autonomy?: CompanyAutonomyPolicy; instructions?: string } {
   const projectTools = projectPolicy?.tools;
   const agentTools = agent?.tools;
   const allow = intersect(intersect(projectTools?.allow, agentTools?.allow), requested.tools?.allow);
@@ -226,9 +265,21 @@ export function effectiveCompanyRunPolicy(
     ...(maxToolCalls !== undefined ? { maxToolCalls } : {}),
     ...(maxCost !== undefined ? { maxCost } : {}),
   };
+  const projectAutonomy = projectPolicy?.autonomy;
+  const autonomyPolicy: CompanyAutonomyPolicy | undefined = projectAutonomy ? {
+    ...(projectAutonomy.enabled !== undefined ? { enabled: projectAutonomy.enabled } : {}),
+    ...(projectAutonomy.defaultAuthority ? { defaultAuthority: projectAutonomy.defaultAuthority } : {}),
+    ...(projectAutonomy.allowedDomains ? { allowedDomains: [...projectAutonomy.allowedDomains] } : {}),
+    ...(projectAutonomy.deniedDomains ? { deniedDomains: [...projectAutonomy.deniedDomains] } : {}),
+    ...(projectAutonomy.maxChecksPerDay !== undefined ? { maxChecksPerDay: projectAutonomy.maxChecksPerDay } : {}),
+    ...(projectAutonomy.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: projectAutonomy.maxAutonomousActionsPerDay } : {}),
+    ...(projectAutonomy.notifyOn ? { notifyOn: projectAutonomy.notifyOn } : {}),
+    ...(projectAutonomy.slaMinutes !== undefined ? { slaMinutes: projectAutonomy.slaMinutes } : {}),
+  } : undefined;
   return {
     tools: { ...(allow !== undefined ? { allow } : {}), ...(deny.length ? { deny } : {}), ...(requireApproval.length ? { requireApproval } : {}) },
     budget,
+    ...(autonomyPolicy ? { autonomy: autonomyPolicy } : {}),
     ...(agent?.instructions ? { instructions: agent.instructions } : {}),
   };
 }
