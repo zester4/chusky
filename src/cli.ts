@@ -40,6 +40,12 @@ function taskLine(task: CliTask, color: boolean): string {
   return `${paint(task.id, "dim", color)}  ${paint(`[${task.status}]`, statusColors[task.status], color)}  ${task.title}`;
 }
 
+function autonomyLine(item: any, color: boolean): string {
+  const state = item.blockedReason ? "blocked" : item.status;
+  const tone = state === "blocked" ? "yellow" : state === "completed" ? "green" : "cyan";
+  return `${paint(String(item.id), "dim", color)}  ${paint(`[${state}]`, tone as "yellow" | "green" | "cyan", color)}  ${item.title}${item.nextAction ? ` — ${item.nextAction}` : ""}`;
+}
+
 function missionLine(mission: any, color: boolean): string {
   const statusColor = mission.status === "completed" ? "green" : ["failed", "cancelled"].includes(mission.status) ? "red" : ["paused", "blocked", "waiting"].includes(mission.status) ? "yellow" : "cyan";
   const active = Array.isArray(mission.activeStepIds) && mission.activeStepIds.length ? ` · ${mission.activeStepIds.length} active step${mission.activeStepIds.length === 1 ? "" : "s"}` : "";
@@ -166,6 +172,26 @@ async function chat(): Promise<void> {
         const [command, id] = line.split(/\s+/, 2);
         const result = await client.approve(id, command === "/approve" ? "approve" : "deny");
         console.log(result.ok ? (result.text ? renderMarkdown(result.text, color) : formatSuccess("Done.", color)) : formatError(result.error || "Request failed.", color));
+        continue;
+      }
+      if (line === "/autonomy" || line.startsWith("/autonomy ")) {
+        const parts = line.trim().split(/\s+/);
+        const action = parts[1] === "reconcile" || parts[1] === "refresh" ? parts[1] : "status";
+        const mode = (parts[action === "status" ? 1 : 2] === "business" ? "business" : "personal") as "personal" | "business";
+        if (action === "reconcile" || action === "refresh") {
+          const maxWatches = Math.max(1, Math.min(20, Number(parts[3] ?? 8) || 8));
+          const result = await client.autonomyReconcile(mode, maxWatches);
+          if (!result.ok) console.log(formatError(result.error || "Autonomy reconciliation failed.", color));
+          else console.log(formatSuccess(`Reconciled ${result.checked ?? 0} ${mode} watch${result.checked === 1 ? "" : "es"}.`, color) + (result.results?.length ? `\n${result.results.map((item: any) => `${item.watchId} [${item.status}] ${item.summary}${item.error ? ` — ${item.error}` : ""}`).join("\n")}` : ""));
+        } else {
+          const result = await client.autonomy(mode);
+          if (!result.ok || !result.snapshot) console.log(formatError(result.error || "Could not load autonomy state.", color));
+          else {
+            const snapshot = result.snapshot;
+            const counts = Object.entries(snapshot.counts ?? {}).filter(([key]) => !["blocked", "overdue"].includes(key)).map(([key, value]) => `${key}:${value}`).join("  ");
+            console.log(`${formatStatus("Autonomy", `${snapshot.mode} · ${snapshot.profile.enabled ? "enabled" : "disabled"} · authority ${snapshot.profile.defaultAuthority}`, color)}\n${formatStatus("Queue", `${counts || "empty"} · blocked:${snapshot.counts.blocked ?? 0} · overdue:${snapshot.counts.overdue ?? 0}`, color)}\n${snapshot.queue.length ? snapshot.queue.slice(0, 20).map((item: any) => autonomyLine(item, color)).join("\n") : "No unfinished work or due checks."}`);
+          }
+        }
         continue;
       }
       if (line === "/approvals") {

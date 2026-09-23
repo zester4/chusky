@@ -37,6 +37,8 @@ export interface CliDevice { name: string; createdAt: number; lastSeenAt: number
 export interface CliEventsResponse extends CliResponse { now: number; tasks: CliTask[]; runs?: CliRun[]; approvals: CliSession["approvals"]; reminders: { id: string; text: string; runAt: number; status: string }[]; jobs: { id: string; text: string; cron: string; status: string }[]; }
 export interface CliCollectionResponse extends CliResponse { kind: string; page: number; pageSize: number; total: number; totalPages: number; items: unknown[]; }
 export interface CliResponse { ok: boolean; text?: string; error?: string; approval?: { id: string; toolSlug: string; args: Record<string, unknown> }; [key: string]: unknown; }
+export interface CliAutonomySnapshot { userId: number; mode: "personal" | "business"; profile: Record<string, unknown>; watches: unknown[]; queue: unknown[]; counts: Record<string, number>; generatedAt: number; }
+export interface CliAutonomyResponse extends CliResponse { snapshot?: CliAutonomySnapshot; mode?: "personal" | "business"; checked?: number; results?: unknown[]; }
 export interface CliModel { id: string; name: string; }
 export interface CliModelsResponse extends CliResponse { page: number; pageSize: number; totalPages: number; total: number; models: CliModel[]; }
 export interface CliAppsResponse extends CliResponse { apps: { slug: string; name: string; connected: boolean; logo?: string }[]; }
@@ -111,6 +113,8 @@ export class ChuskyClient {
   }
   pair(code: string, deviceName: string) { return this.request("/cli/pair", { method: "POST", body: JSON.stringify({ code, deviceName }) }); }
   session() { return this.request("/cli/session") as Promise<CliResponse & CliSession>; }
+  autonomy(mode: "personal" | "business" = "personal") { return this.request(`/cli/autonomy?mode=${mode}`) as Promise<CliAutonomyResponse>; }
+  autonomyReconcile(mode: "personal" | "business" = "personal", maxWatches = 8) { return this.request("/cli/autonomy/reconcile", { method: "POST", body: JSON.stringify({ mode, maxWatches }) }) as Promise<CliAutonomyResponse>; }
   chat(message: string, approvalId?: string, signal?: AbortSignal) { return this.request("/cli/chat", { method: "POST", body: JSON.stringify({ message, ...(approvalId ? { approvalId } : {}) }), signal }); }
   async *stream(message: string, signal?: AbortSignal): AsyncGenerator<CliStreamEvent> {
     if (!this.config.serverUrl) throw new Error("Set CHUSKY_SERVER_URL or run: chusky auth link --server https://your-chusky-host");

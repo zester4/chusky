@@ -611,6 +611,12 @@ export interface DaytonaWorkspaceRecord {
   updatedAt: number;
   lastKnownState?: string;
   ptySessions?: Array<{ id: string; createdAt: number }>;
+  /** Owned Daytona process sessions that may be resumed after a worker restart. */
+  processSessions?: Array<{ id: string; createdAt: number; updatedAt: number }>;
+  /** Owned Python interpreter contexts. The provider remains the source of truth. */
+  interpreterContexts?: Array<{ id: string; createdAt: number; updatedAt: number }>;
+  /** Copy-on-write child sandboxes created from this owner's primary workspace. */
+  forks?: Array<{ id: string; name: string; createdAt: number; updatedAt: number; lastKnownState?: string }>;
   /** Bounded control-plane records for web apps running in the owned workspace. */
   apps?: DaytonaAppRecord[];
   browser?: { lastUrl?: string; updatedAt: number };
@@ -1061,7 +1067,7 @@ export interface StandingOrderRecord {
   createdAt: number; updatedAt: number;
 }
 export interface AutonomyWatchRecord {
-  id: string; userId: number; name: string; domain: string; toolkit?: string;
+  id: string; userId: number; name: string; domain: string; toolkit?: string; connectedAccountId?: string; accountAlias?: string;
   objective: string; query?: string; /** Exact owner-selected read-only Composio/native slugs. */
   toolSlugs?: string[]; cursor?: string; lastDigestKey?: string; consecutiveFailures?: number;
   cadenceSeconds: number;
@@ -1333,6 +1339,9 @@ interface Backend {
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   renewLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
   releaseLock(userId: number, token: string): Promise<void>;
+  acquireKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean>;
+  renewKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean>;
+  releaseKeyLock(key: string, token: string): Promise<void>;
   claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean>;
   hasAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
   claimAgentUpgrade(userId: number, upgradeId: string): Promise<boolean>;
@@ -1966,6 +1975,16 @@ class RedisBackend implements Backend {
   }
   async releaseLock(userId: number, token: string): Promise<void> {
     await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:lock:${userId}`, token);
+  }
+  async acquireKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean> {
+    return (await this.r.set(`chuck:key-lock:${key}`, token, "EX", leaseSeconds, "NX")) === "OK";
+  }
+  async renewKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean> {
+    const result = await this.r.eval("if redis.call('get',KEYS[1]) == ARGV[1] then return redis.call('expire',KEYS[1],ARGV[2]) else return 0 end", 1, `chuck:key-lock:${key}`, token, leaseSeconds);
+    return Number(result) === 1;
+  }
+  async releaseKeyLock(key: string, token: string): Promise<void> {
+    await this.r.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", 1, `chuck:key-lock:${key}`, token);
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     return (await this.r.set(this.telegramUpdateKey(updateId), "1", "EX", ttlSeconds, "NX")) === "OK";
@@ -2715,6 +2734,7 @@ class MemoryBackend implements Backend {
   private handoffs = new Map<string, HandoffRecord & { userId: number }>();
   private rates = new Map<number, { n: number; exp: number }>();
   private locks = new Map<number, { token: string; exp: number }>();
+  private keyLocks = new Map<string, { token: string; exp: number }>();
   private pairings = new Map<string, CliPairingRecord>();
   private devices = new Map<string, CliDeviceRecord>();
   private telegramUpdates = new Map<number, number>();
@@ -2950,6 +2970,21 @@ class MemoryBackend implements Backend {
   }
   async releaseLock(userId: number, token: string): Promise<void> {
     if (this.locks.get(userId)?.token === token) this.locks.delete(userId);
+  }
+  async acquireKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean> {
+    const lock = this.keyLocks.get(key);
+    if (lock && lock.exp > Date.now()) return false;
+    this.keyLocks.set(key, { token, exp: Date.now() + leaseSeconds * 1000 });
+    return true;
+  }
+  async renewKeyLock(key: string, token: string, leaseSeconds: number): Promise<boolean> {
+    const lock = this.keyLocks.get(key);
+    if (!lock || lock.token !== token || lock.exp <= Date.now()) return false;
+    lock.exp = Date.now() + leaseSeconds * 1000;
+    return true;
+  }
+  async releaseKeyLock(key: string, token: string): Promise<void> {
+    if (this.keyLocks.get(key)?.token === token) this.keyLocks.delete(key);
   }
   async claimTelegramUpdate(updateId: number, ttlSeconds: number): Promise<boolean> {
     const expiresAt = this.telegramUpdates.get(updateId);
@@ -5341,6 +5376,19 @@ export async function releaseUserLock(uid: number, token: string): Promise<void>
   return backend.releaseLock(uid, token);
 }
 
+/** Distributed lease for work that must not serialize the owner's entire chat account. */
+export async function acquireAutonomyWatchLock(userId: number, watchId: string, token: string, leaseSeconds = 300): Promise<boolean> {
+  return backend.acquireKeyLock(`autonomy-watch:${userId}:${watchId}`, token, leaseSeconds);
+}
+
+export async function renewAutonomyWatchLock(userId: number, watchId: string, token: string, leaseSeconds = 300): Promise<boolean> {
+  return backend.renewKeyLock(`autonomy-watch:${userId}:${watchId}`, token, leaseSeconds);
+}
+
+export async function releaseAutonomyWatchLock(userId: number, watchId: string, token: string): Promise<void> {
+  return backend.releaseKeyLock(`autonomy-watch:${userId}:${watchId}`, token);
+}
+
 export async function claimTelegramUpdate(updateId: number, ttlSeconds = 24 * 60 * 60): Promise<boolean> {
   if (!Number.isSafeInteger(updateId) || updateId < 0) return true;
   return backend.claimTelegramUpdate(updateId, ttlSeconds);
@@ -6038,7 +6086,7 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as StandingOrderRecord["status"], expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"), lastUsedAt: attentionTimestamp(raw.lastUsedAt, "lastUsedAt"),
     };
     case "autonomy-watches": return {
-      ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
+      ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), connectedAccountId: attentionText(raw.connectedAccountId, "connectedAccountId", 200), accountAlias: attentionText(raw.accountAlias, "accountAlias", 120), objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
       toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)),
       cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
       nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),

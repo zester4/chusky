@@ -37,7 +37,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   try {
     sessions = await vaultStatus(userId);
   } catch (error) {
-    if (process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === "test") return;
+    if (process.env.NODE_TEST_CONTEXT) return;
     throw error;
   }
   const workspaceSessions = sessions.filter((session) => session.workspaceId === workspaceId);
@@ -112,7 +112,7 @@ export async function guardVaultWorkspaceAccess(userId: number, workspaceId: str
     // The test suite must be deterministic when the sandbox blocks outbound
     // Cloudflare calls. Production never takes this branch: NODE_TEST_CONTEXT
     // is supplied by node:test and is not a user-configurable bypass.
-    if (process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === "test") return;
+    if (process.env.NODE_TEST_CONTEXT) return;
     throw error;
   }
   const active = sessions.some((session) => session.workspaceId === workspaceId && session.status === "authenticated" && (!session.expiresAt || session.expiresAt > Date.now()));

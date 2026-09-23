@@ -10,7 +10,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemory, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { listJobOccurrences } from "./store.js";
 import { logger } from "./logger.js";
@@ -818,6 +818,21 @@ async function sdkMutation(c: any, fingerprint: string, execute: (userId: number
   return c.json(response, status) as Response;
 }
 
+async function sdkAutonomyMutation(c: any, userId: number, fingerprint: string, execute: () => Promise<unknown>): Promise<Response> {
+  const session = await getSession(userId);
+  const prior = idempotency(c, session, fingerprint);
+  if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.") as Response;
+  if (prior.replay !== undefined) return c.json(prior.replay) as Response;
+  const lockToken = randomUUID();
+  if (!(await acquireUserLock(userId, lockToken, 300))) return apiError(c, 409, "autonomy_busy", "Another autonomy operation is already running for this owner.") as Response;
+  const renewal = setInterval(() => { void renewUserLock(userId, lockToken, 300).catch(() => undefined); }, 60_000);
+  try {
+    const response = await execute();
+    if (prior.key) { const fresh = await getSession(userId); fresh.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(userId, fresh); }
+    return c.json(response) as Response;
+  } finally { clearInterval(renewal); await releaseUserLock(userId, lockToken); }
+}
+
 /** Public v1 API for a self-hosted instance. Keep CLI and Telegram routes private. */
 export function registerSdkApi(app: Hono): void {
   setMissionUpdateNotifier(enqueueA2AMissionUpdate);
@@ -1623,8 +1638,9 @@ export function registerSdkApi(app: Hono): void {
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before running autonomy reconciliation.");
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const mode = body.mode === "business" ? "business" : "personal";
-    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(body.maxWatches))));
-    return c.json({ data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) });
+    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Number.isFinite(Number(body.maxWatches)) ? Math.floor(Number(body.maxWatches)) : 8));
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify({ mode, maxWatches })}`).digest("hex");
+    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => ({ data: await runDueAutonomyWatches(owner.userId, { mode, maxWatches }) }));
   });
 
   app.get("/v1/account/projects/:projectId/autonomy/queue", async (c) => {
@@ -1654,14 +1670,15 @@ export function registerSdkApi(app: Hono): void {
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const policy = project.companyPolicy?.autonomy;
     if (policy?.enabled === false) return apiError(c, 409, "autonomy_disabled", "Autonomy is disabled for this company project.");
-    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(body.maxWatches))));
-    return c.json({ data: await runDueAutonomyWatches(owner.userId, { mode: "business", maxWatches, profileOverrides: policy ? {
+    const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Number.isFinite(Number(body.maxWatches)) ? Math.floor(Number(body.maxWatches)) : 8));
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify({ maxWatches, projectId: project.id })}`).digest("hex");
+    return sdkAutonomyMutation(c, owner.userId, fingerprint, async () => ({ data: await runDueAutonomyWatches(owner.userId, { mode: "business", maxWatches, profileOverrides: policy ? {
       ...(policy.enabled !== undefined ? { enabled: policy.enabled } : {}),
       ...(policy.allowedDomains ? { allowedDomains: [...policy.allowedDomains] } : {}),
       ...(policy.deniedDomains ? { deniedDomains: [...policy.deniedDomains] } : {}),
       ...(policy.maxChecksPerDay !== undefined ? { maxChecksPerDay: policy.maxChecksPerDay } : {}),
       ...(policy.maxAutonomousActionsPerDay !== undefined ? { maxAutonomousActionsPerDay: policy.maxAutonomousActionsPerDay } : {}),
-    } : undefined }) });
+    } : undefined }) }));
   });
 
   app.get("/v1/account/projects", async (c) => {

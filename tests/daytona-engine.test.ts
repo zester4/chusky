@@ -11,11 +11,23 @@ let movedFiles: Array<{ source: string; destination: string }>;
 
 function fakeSandbox(id: string, state = "started") {
   const ptyOutputs = new Map<string, (data: Uint8Array) => void>();
+  const processSessions = new Map<string, any>();
+  const contexts = new Map<string, any>();
   const sandbox: any = {
     id, name: `chusky-${id}`, state, recoverable: false, networkBlockAll: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     refreshData: async () => undefined,
     updateNetworkSettings: async (settings: { networkBlockAll?: boolean }) => { sandbox.networkBlockAll = settings.networkBlockAll; },
     getUserHomeDir: async () => "/home/user",
+    getWorkDir: async () => "/home/user",
+    getMetricsLatest: async () => ({ cpuUsedPct: 12, memUsed: 100, memTotal: 1000, timestamp: new Date() }),
+    waitForResizeComplete: async () => undefined,
+    resize: async () => undefined,
+    setAutostopInterval: async () => undefined,
+    setAutoPauseInterval: async () => undefined,
+    setTtl: async () => undefined,
+    setAutoArchiveInterval: async () => undefined,
+    setAutoDeleteInterval: async () => undefined,
+    setLabels: async (labels: Record<string, string>) => { sandbox.labels = { ...(sandbox.labels ?? {}), ...labels }; return sandbox.labels; },
     refreshActivity: async () => undefined,
     start: async () => { sandbox.state = "started"; },
     recover: async () => { sandbox.state = "started"; sandbox.recoverable = false; },
@@ -30,6 +42,13 @@ function fakeSandbox(id: string, state = "started") {
       listPtySessions: async () => [...ptyOutputs.keys()].map((ptyId) => ({ id: ptyId, active: true })),
       resizePtySession: async () => undefined,
       killPtySession: async (ptyId: string) => { ptyOutputs.delete(ptyId); },
+      createSession: async (sessionId: string) => { processSessions.set(sessionId, { sessionId, commands: [] }); },
+      listSessions: async () => [...processSessions.values()],
+      getSession: async (sessionId: string) => processSessions.get(sessionId),
+      executeSessionCommand: async (sessionId: string, request: any) => { const commandId = `cmd-${Date.now()}`; const session = processSessions.get(sessionId); session.commands.push({ id: commandId, command: request.command, exitCode: 0 }); return { cmdId: commandId, output: `ran:${request.command}`, stdout: `ran:${request.command}`, stderr: "", exitCode: 0 }; },
+      getSessionCommandLogs: async (_sessionId: string, commandId: string) => ({ output: `logs:${commandId}`, stdout: `logs:${commandId}`, stderr: "" }),
+      sendSessionCommandInput: async () => undefined,
+      deleteSession: async (sessionId: string) => { processSessions.delete(sessionId); },
     },
     git: {
       clone: async () => undefined, status: async () => ({ currentBranch: "main", ahead: 0, behind: 0 }), branches: async () => ({ branches: ["main"] }),
@@ -46,20 +65,30 @@ function fakeSandbox(id: string, state = "started") {
       createFolder: async () => undefined,
       moveFiles: async (source: string, destination: string) => { movedFiles.push({ source, destination }); },
       deleteFile: async () => undefined,
+      replaceInFiles: async (files: string[]) => files.map((file) => ({ file, success: true })),
+      setFilePermissions: async () => undefined,
     },
     getPreviewLink: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/${port}` }),
     getSignedPreviewUrl: async (port: number) => ({ url: sandbox.previewUrl ?? `https://preview.test/signed/${port}` }),
     createSnapshot: async () => undefined,
+    fork: async () => undefined,
+    codeInterpreter: {
+      createContext: async () => { const context = { id: `ctx-${contexts.size + 1}`, language: "python", cwd: "/home/user" }; contexts.set(context.id, context); return context; },
+      listContexts: async () => [...contexts.values()],
+      runCode: async (code: string) => ({ stdout: `ran:${code}`, stderr: "" }),
+      deleteContext: async (context: any) => { contexts.delete(context.id); },
+    },
     computerUse: {
       start: async () => undefined,
       getStatus: async () => ({ status: "running" }),
       getProcessStatus: async (name: string) => ({ name, status: "running" }),
       display: { getInfo: async () => ({ displays: [{ width: 800, height: 600 }] }), getWindows: async () => ({ windows: [] }) },
-      screenshot: { takeCompressed: async () => ({ screenshot: Buffer.from("image").toString("base64"), sizeBytes: 5 }) },
+      screenshot: { takeCompressed: async () => ({ screenshot: Buffer.from("image").toString("base64"), sizeBytes: 5 }), takeFullScreen: async () => ({ screenshot: Buffer.from("png").toString("base64"), sizeBytes: 3 }), takeRegion: async () => ({ screenshot: Buffer.from("png").toString("base64"), sizeBytes: 3 }) },
       mouse: { move: async (x: number, y: number) => ({ x, y }), click: async () => ({ x: 1, y: 2 }), drag: async () => ({ x: 3, y: 4 }), scroll: async () => true },
       keyboard: { type: async () => undefined, press: async () => undefined, hotkey: async () => undefined },
       accessibility: { getTree: async () => ({ root: {} }), findNodes: async () => ({ matches: [] }), focusNode: async () => undefined, invokeNode: async () => undefined, setNodeValue: async () => undefined },
     },
+    createLspServer: async () => ({ start: async () => undefined, stop: async () => undefined, documentSymbols: async () => [{ name: "main", kind: 12 }], sandboxSymbols: async () => [{ name: "main", kind: 12 }], completions: async () => ({ isIncomplete: false, items: [{ label: "main" }] }) }),
   };
   sandboxes.set(id, sandbox);
   return sandbox;
@@ -81,6 +110,7 @@ function engine() {
       return sandbox;
     },
     create: async (params: Record<string, unknown>) => { creates++; lastCreateParams = params; return fakeSandbox(`sandbox-${creates}`); },
+    fork: async (source: any, params: { name?: string }) => { const child = fakeSandbox(`fork-${creates + 1}`); child.name = params.name ?? child.name; child.labels = { agent: "chusky", user_id: "820060", parent_sandbox: source.id }; return child; },
   } as any));
 }
 
@@ -168,6 +198,41 @@ test("recovers a retained named sandbox after the local workspace record is lost
 test("reports an absent workspace without turning a normal status check into a tool failure", async () => {
   const result = await engine().workspace(820000, "status");
   assert.deepEqual(result, { exists: false, message: "No Daytona workspace exists yet. Use action=create, or use a file/computer tool and Chusky will create it automatically." });
+});
+
+test("persists and resumes owned Daytona process sessions", async () => {
+  const e = engine();
+  const created = await e.session(820060, { action: "create", id: "build-session" });
+  assert.equal(created.sessionId, "build-session");
+  assert.equal((await getDaytonaWorkspace(820060))?.processSessions?.[0]?.id, "build-session");
+  const executed = await e.session(820060, { action: "execute", id: "build-session", command: "pwd" });
+  assert.equal(executed.commandId?.startsWith("cmd-"), true);
+  const logs = await e.session(820060, { action: "logs", id: "build-session", commandId: executed.commandId });
+  assert.match(logs.output ?? "", /logs:cmd-/);
+  await e.session(820060, { action: "delete", id: "build-session" });
+  assert.equal((await getDaytonaWorkspace(820060))?.processSessions?.length ?? 0, 0);
+});
+
+test("supports interpreter contexts, sandbox metrics, and LSP inspection", async () => {
+  const e = engine();
+  const context = await e.code(820061, { action: "create_context" });
+  assert.equal(context.created, true);
+  const result = await e.code(820061, { action: "run", contextId: context.contextId, code: "print(1)" });
+  assert.match(result.stdout ?? "", /print\(1\)/);
+  const metrics = await e.sandbox(820061, { action: "metrics" }) as any;
+  assert.equal(metrics.sandboxId, "sandbox-1");
+  assert.equal(metrics.cpuUsedPct, 12);
+  const symbols = await e.lsp(820061, { action: "document_symbols", path: "workspace/src/index.ts" }) as any;
+  assert.equal(symbols.symbols[0].name, "main");
+  await e.code(820061, { action: "delete_context", contextId: context.contextId });
+});
+
+test("creates an account-owned fork and refuses arbitrary sandbox IDs", async () => {
+  const e = engine();
+  const fork = await e.sandbox(820062, { action: "fork", name: "analysis-fork" }) as any;
+  assert.equal(fork.forked, true);
+  assert.equal((await getDaytonaWorkspace(820062))?.forks?.[0]?.id, fork.sandboxId);
+  await assert.rejects(() => e.sandbox(820062, { action: "status", sandboxId: "foreign-sandbox" }), /not an owned/);
 });
 
 test("writes generated binary media into the user's workspace", async () => {

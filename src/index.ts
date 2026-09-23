@@ -71,6 +71,8 @@ import { recordOperatingSignal } from "./autonomy/operatingLoop.js";
 import { selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
+import { getAutonomySnapshot } from "./autonomy/queue.js";
+import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -449,6 +451,26 @@ async function main(): Promise<void> {
       ...(item.meetingId ? { meetingId: item.meetingId } : {}),
       createdAt: new Date(item.createdAt).toISOString(),
       updatedAt: new Date(item.updatedAt).toISOString(),
+    });
+
+    app.get("/cli/autonomy", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const mode = c.req.query("mode") === "business" ? "business" : "personal";
+      return c.json({ ok: true, snapshot: await getAutonomySnapshot(device.userId, mode) });
+    });
+    app.post("/cli/autonomy/reconcile", async (c) => {
+      const device = await cliAuth(c);
+      if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const mode = body.mode === "business" ? "business" : "personal";
+      const maxWatches = body.maxWatches === undefined ? 8 : Math.max(1, Math.min(20, Math.floor(Number(body.maxWatches))));
+      try {
+        const results = await withCliLock(device.userId, c.req.raw.signal, () => runDueAutonomyWatches(device.userId, { mode, maxWatches }));
+        return c.json({ ok: true, mode, checked: results.length, results });
+      } catch (error) {
+        return c.json({ ok: false, error: error instanceof Error ? error.message : "autonomy reconciliation failed" }, 409);
+      }
     });
 
     const twilioCallbackUrl = (path: string, callId: string, userId: number) => `${config.twilioWebhookBaseUrl.replace(/\/+$/, "")}${path}?callId=${encodeURIComponent(callId)}&userId=${encodeURIComponent(String(userId))}`;

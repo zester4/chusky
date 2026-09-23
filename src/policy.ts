@@ -47,8 +47,8 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_TASK_WAIT",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT",
   "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL", "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE", "CHUCK_MISSION_WAIT_EVENT", "CHUCK_MISSION_STEP_COMPLETE", "CHUCK_MISSION_REPLAN",
-  "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_CREATE_FOLDER", "CHUCK_DAYTONA_CREATE_SNAPSHOT",
-  "CHUCK_DAYTONA_EXECUTE", "CHUCK_DAYTONA_FILE_DETAILS", "CHUCK_DAYTONA_FIND_FILES",
+  "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_CREATE_FOLDER", "CHUCK_DAYTONA_CREATE_SNAPSHOT", "CHUCK_DAYTONA_SANDBOX", "CHUCK_DAYTONA_SESSION", "CHUCK_DAYTONA_CODE", "CHUCK_DAYTONA_LSP",
+  "CHUCK_DAYTONA_EXECUTE", "CHUCK_DAYTONA_FILE_DETAILS", "CHUCK_DAYTONA_FIND_FILES", "CHUCK_DAYTONA_REPLACE_FILES",
   "CHUCK_DAYTONA_LIST_FILES", "CHUCK_DAYTONA_PAUSE", "CHUCK_DAYTONA_PREVIEW",
   "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_READ_FILE", "CHUCK_DAYTONA_SEARCH_FILES",
   "CHUCK_DAYTONA_WORKSPACE", "CHUCK_DAYTONA_WRITE_FILE", "CHUCK_DAYTONA_COMPUTER",
@@ -61,7 +61,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
 // remains approval-gated. Ordinary task, reminder, memory, browser, and
 // communication work is autonomous.
 const APPROVAL_NATIVE_TOOLS = new Set([
-  "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR",
+  "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
 ]);
@@ -107,6 +107,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     return String(args.action ?? "") === "push" ? "approval_required" : "private";
   }
   if (["CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE"].includes(slug)) return "approval_required";
+  if (slug === "CHUCK_DAYTONA_SET_FILE_PERMISSIONS") return "approval_required";
   if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
@@ -156,10 +157,13 @@ const STATUSES: Record<string, string> = {
   CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
   CHUCK_CREATE_TRIGGER: "🔔 I’m setting up that automation…",
   CHUCK_DAYTONA_WORKSPACE: "🖥️ I’m opening my private computer workspace…",
+  CHUCK_DAYTONA_SANDBOX: "🧭 I’m checking the private Daytona sandbox…",
   CHUCK_DAYTONA_EXECUTE: "🖥️ I’m working in my private computer workspace…",
   CHUCK_DAYTONA_LIST_FILES: "📁 I’m checking my workspace files…",
   CHUCK_DAYTONA_READ_FILE: "📄 I’m opening that workspace file…",
   CHUCK_DAYTONA_WRITE_FILE: "📝 I’m saving that in my workspace…",
+  CHUCK_DAYTONA_REPLACE_FILES: "📝 I’m updating your workspace files…",
+  CHUCK_DAYTONA_SET_FILE_PERMISSIONS: "🔐 I’m changing workspace file permissions…",
   CHUCK_DAYTONA_FIND_FILES: "🔍 I’m finding that file in my workspace…",
   CHUCK_DAYTONA_SEARCH_FILES: "🔍 I’m searching my workspace files…",
   CHUCK_DAYTONA_FILE_DETAILS: "📄 I’m checking that file…",
@@ -173,6 +177,9 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_COMPUTER: "🖥️ I’m using my private computer…",
   CHUCK_DAYTONA_PAUSE: "⏸️ I’m putting my computer workspace on standby…",
   CHUCK_DAYTONA_PTY: "⌨️ I’m working in your persistent terminal…",
+  CHUCK_DAYTONA_SESSION: "⌨️ I’m using your durable Daytona process session…",
+  CHUCK_DAYTONA_CODE: "🐍 I’m running code in your isolated Daytona interpreter…",
+  CHUCK_DAYTONA_LSP: "🧩 I’m inspecting the workspace with Daytona code intelligence…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
   CHUCK_DAYTONA_BROWSER: "🌐 I’m browsing with my private computer workspace…",
   CHUCK_VAULT_SAVE: "🔐 I’m opening a private encrypted website-login form…",

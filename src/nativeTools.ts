@@ -1108,10 +1108,13 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
+    case "CHUCK_DAYTONA_SANDBOX": return daytonaCall(runtime, () => daytonaEngine.sandbox(userId, args));
     case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
     case "CHUCK_DAYTONA_WRITE_FILE": return daytonaCall(runtime, () => daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content)));
+    case "CHUCK_DAYTONA_REPLACE_FILES": return daytonaCall(runtime, () => daytonaEngine.replaceFiles(userId, args.files, args.pattern, args.newValue));
+    case "CHUCK_DAYTONA_SET_FILE_PERMISSIONS": return daytonaCall(runtime, () => daytonaEngine.setFilePermissions(userId, args.path, args.permissions));
     case "CHUCK_DAYTONA_FIND_FILES": return daytonaCall(runtime, () => daytonaEngine.findFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern)));
     case "CHUCK_DAYTONA_SEARCH_FILES": return daytonaCall(runtime, () => daytonaEngine.searchFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern)));
     case "CHUCK_DAYTONA_FILE_DETAILS": return daytonaCall(runtime, () => daytonaEngine.fileDetails(userId, text(args.path)));
@@ -1132,6 +1135,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       return result;
     })();
+    case "CHUCK_DAYTONA_SESSION": return daytonaCall(runtime, () => daytonaEngine.session(userId, args));
+    case "CHUCK_DAYTONA_CODE": return daytonaCall(runtime, () => daytonaEngine.code(userId, args));
+    case "CHUCK_DAYTONA_LSP": return daytonaCall(runtime, () => daytonaEngine.lsp(userId, args));
     case "CHUCK_DAYTONA_GIT": return daytonaCall(runtime, () => daytonaEngine.git(userId, args));
     case "CHUCK_BROWSER_PLAN": {
       const origin = args.origin ? normalizeBrowserOrigin(text(args.origin)) : undefined;

@@ -1,5 +1,7 @@
 export type DaytonaWorkspaceAction = "get" | "create" | "status" | "pause" | "archive" | "delete";
 
+export type DaytonaSandboxAction = "status" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle";
+
 export interface DaytonaWorkspaceInfo {
   id: string;
   name: string;
@@ -10,9 +12,22 @@ export interface DaytonaWorkspaceInfo {
   disk?: number;
   createdAt?: string;
   updatedAt?: string;
+  lastActivityAt?: string;
+  warmPoolId?: string;
+  daemonVersion?: string;
   autoPauseInterval?: number;
   networkBlockAll?: boolean;
   domainAllowList?: string;
+}
+
+export interface DaytonaSandboxMetrics {
+  sandboxId: string;
+  timestamp?: string;
+  cpuUsedPct?: number;
+  memoryUsedBytes?: number;
+  memoryTotalBytes?: number;
+  diskUsedBytes?: number;
+  diskTotalBytes?: number;
 }
 
 export interface DaytonaCommandResult {
@@ -83,6 +98,32 @@ export interface DaytonaPtyResult {
   exitCode?: number;
   created?: boolean;
   killed?: boolean;
+}
+
+export interface DaytonaSessionResult {
+  sandboxId: string;
+  sessionId?: string;
+  commandId?: string;
+  created?: boolean;
+  deleted?: boolean;
+  output?: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  timedOut?: boolean;
+  sessions?: unknown[];
+  session?: unknown;
+}
+
+export interface DaytonaCodeResult {
+  sandboxId: string;
+  contextId?: string;
+  created?: boolean;
+  deleted?: boolean;
+  stdout?: string;
+  stderr?: string;
+  error?: unknown;
+  contexts?: unknown[];
 }
 
 export interface DaytonaGitResult {

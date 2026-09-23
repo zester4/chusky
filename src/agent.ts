@@ -697,6 +697,8 @@ export interface AgentRunOptions {
   toolAllow?: string[];
   /** Meeting-only, owner-configured Composio account routing; participant selectors are ignored. */
   meetingComposioAccountAliases?: Record<string, string>;
+  /** Owner-selected connected account routing for autonomous read-only checks. */
+  composioAccount?: string;
   /** Authenticated meeting identity for scoped native meeting tools. */
   meetingId?: string;
   toolDeny?: string[];
@@ -1215,6 +1217,7 @@ export async function runAgent(
         let executionArgs = options?.meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
           ? applyMeetingComposioAccountAlias(slug, args, options.meetingComposioAccountAliases)
           : args;
+        if (options?.composioAccount && !slug.startsWith("CHUCK_")) executionArgs = { ...executionArgs, account: options.composioAccount };
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
         const approved = approvedApprovalId ? await getSession(userId).then((s) => s.approvals.find((a) => a.id === approvedApprovalId && a.status === "approved" && a.expiresAt > Date.now())) : undefined;
         const approvedForTool = approved?.toolSlug === slug;

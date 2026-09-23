@@ -10,10 +10,13 @@ test("Daytona tools are present and uniquely named", () => {
   assert.equal(new Set(names).size, names.length);
   for (const name of [
     "CHUCK_DAYTONA_WORKSPACE",
+    "CHUCK_DAYTONA_SANDBOX",
     "CHUCK_DAYTONA_EXECUTE",
     "CHUCK_DAYTONA_LIST_FILES",
     "CHUCK_DAYTONA_READ_FILE",
     "CHUCK_DAYTONA_WRITE_FILE",
+    "CHUCK_DAYTONA_REPLACE_FILES",
+    "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
     "CHUCK_DAYTONA_FIND_FILES",
     "CHUCK_DAYTONA_SEARCH_FILES",
     "CHUCK_DAYTONA_FILE_DETAILS",
@@ -26,6 +29,9 @@ test("Daytona tools are present and uniquely named", () => {
     "CHUCK_DAYTONA_COMPUTER",
     "CHUCK_DAYTONA_PAUSE",
     "CHUCK_DAYTONA_PTY",
+    "CHUCK_DAYTONA_SESSION",
+    "CHUCK_DAYTONA_CODE",
+    "CHUCK_DAYTONA_LSP",
     "CHUCK_DAYTONA_GIT",
     "CHUCK_DAYTONA_BROWSER",
     "CHUCK_CREATE_PDF",
@@ -51,6 +57,9 @@ test("ordinary Daytona work is autonomous while destructive actions require appr
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_COMPUTER", { action: "accessibility_tree" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_LIST_FILES"), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_PTY"), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_SESSION", { action: "execute" }), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_CODE", { action: "run" }), false);
+  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_SET_FILE_PERMISSIONS"), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_BROWSER", { action: "click" }), false);

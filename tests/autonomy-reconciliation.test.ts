@@ -41,3 +41,18 @@ test("reconciliation respects denied domains and records a bounded failure witho
   const result = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), execute: async () => { throw new Error("must not execute"); } });
   assert.equal(result[0].status, "skipped");
 });
+
+test("reconciliation uses a distributed watch lease across concurrent workers", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990003;
+  await createAttentionRecord(userId, "autonomy_watch", { name: "Calendar", domain: "calendar", objective: "Find changed events", toolSlugs: ["GOOGLECALENDAR_LIST_EVENTS"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 10, nextCheckAt: 1 });
+  let executions = 0;
+  const execute = async () => { executions++; await new Promise((resolve) => setTimeout(resolve, 30)); return { text: "AUTONOMY_RESULT: {\"changed\":false,\"summary\":\"No changes\"}" }; };
+  const [left, right] = await Promise.all([
+    runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), execute: execute as any }),
+    runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), execute: execute as any }),
+  ]);
+  assert.equal(executions, 1);
+  assert.equal([...left, ...right].filter((item) => item.status === "completed").length, 1);
+  assert.equal([...left, ...right].filter((item) => item.status === "skipped").length, 1);
+});

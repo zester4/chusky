@@ -12,7 +12,7 @@ import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
 import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
-import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
+import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const configuredAutoPauseMinutes = Number.parseInt(config.daytonaAutoPauseInterval, 10);
@@ -107,6 +107,9 @@ function workspaceInfo(sandbox: Sandbox): DaytonaWorkspaceInfo {
     disk: sandbox.disk,
     createdAt: sandbox.createdAt,
     updatedAt: sandbox.updatedAt,
+    lastActivityAt: sandbox.lastActivityAt,
+    warmPoolId: sandbox.warmPoolId,
+    daemonVersion: sandbox.daemonVersion,
     autoPauseInterval: sandbox.autoPauseInterval,
     networkBlockAll: sandbox.networkBlockAll,
     domainAllowList: sandbox.domainAllowList,
@@ -139,6 +142,54 @@ function boundedText(value: unknown, label: string, max: number): string {
   const text = String(value ?? "");
   if (!text || text.length > max) throw new DaytonaInputError(`${label} must be 1-${max} characters`);
   return text;
+}
+
+function boundedIdentifier(value: unknown, label: string, max = 120): string {
+  const identifier = boundedText(value, label, max);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(identifier)) {
+    throw new DaytonaInputError(`${label} contains unsupported characters`);
+  }
+  return identifier;
+}
+
+function boundedEnvironment(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new DaytonaInputError("envs must be an object");
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 32) throw new DaytonaInputError("envs may contain at most 32 variables");
+  const result: Record<string, string> = {};
+  for (const [key, raw] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,80}$/.test(key) || /(secret|token|password|cookie|credential|api[_-]?key)/i.test(key)) {
+      throw new DaytonaInputError(`Environment variable '${key}' is not allowed`);
+    }
+    const valueText = String(raw ?? "");
+    if (valueText.length > 2000) throw new DaytonaInputError(`Environment variable '${key}' is too long`);
+    result[key] = valueText;
+  }
+  return result;
+}
+
+function safeSessionSummary(value: unknown, max = 40): unknown {
+  if (Array.isArray(value)) return value.slice(0, max).map((item) => safeSessionSummary(item, max));
+  if (!value || typeof value !== "object") return typeof value === "string" ? value.slice(0, 1000) : value;
+  const record = value as Record<string, unknown>;
+  const allowed = ["sessionId", "id", "commandId", "commands", "active", "cwd", "cols", "rows", "processId", "createdAt", "updatedAt", "status", "exitCode", "command"];
+  return Object.fromEntries(allowed.filter((key) => key in record).map((key) => [key, safeSessionSummary(record[key], max)]));
+}
+
+function safeMetrics(sandboxId: string, value: unknown): DaytonaSandboxMetrics {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const numeric = (key: string): number | undefined => typeof record[key] === "number" && Number.isFinite(record[key]) ? Number(record[key]) : undefined;
+  const date = record.timestamp instanceof Date ? record.timestamp.toISOString() : typeof record.timestamp === "string" ? record.timestamp : undefined;
+  return {
+    sandboxId,
+    ...(date ? { timestamp: date } : {}),
+    ...(numeric("cpuUsedPct") !== undefined ? { cpuUsedPct: numeric("cpuUsedPct") } : {}),
+    ...(numeric("memUsed") !== undefined ? { memoryUsedBytes: numeric("memUsed") } : numeric("memoryUsedBytes") !== undefined ? { memoryUsedBytes: numeric("memoryUsedBytes") } : {}),
+    ...(numeric("memTotal") !== undefined ? { memoryTotalBytes: numeric("memTotal") } : numeric("memoryTotalBytes") !== undefined ? { memoryTotalBytes: numeric("memoryTotalBytes") } : {}),
+    ...(numeric("diskUsed") !== undefined ? { diskUsedBytes: numeric("diskUsed") } : numeric("diskUsedBytes") !== undefined ? { diskUsedBytes: numeric("diskUsedBytes") } : {}),
+    ...(numeric("diskTotal") !== undefined ? { diskTotalBytes: numeric("diskTotal") } : numeric("diskTotalBytes") !== undefined ? { diskTotalBytes: numeric("diskTotalBytes") } : {}),
+  };
 }
 
 function commandOutput(result: unknown, max = 4000): string {
@@ -1397,6 +1448,219 @@ export class DaytonaEngine {
     }
   }
 
+  /**
+   * Resolve either the owner's primary sandbox or a copy-on-write fork that
+   * Chusky created for the same account. A caller can never select an
+   * arbitrary Daytona ID: fork IDs are persisted in the owner's workspace
+   * record and the provider label is checked again before use.
+   */
+  private async getOwnedSandbox(userId: number, requestedId?: unknown): Promise<Sandbox> {
+    const id = requestedId === undefined || requestedId === null || String(requestedId).trim() === ""
+      ? undefined
+      : boundedText(requestedId, "sandboxId", 160);
+    const stored = await getDaytonaWorkspace(userId);
+    if (!id || id === stored?.sandboxId) return this.getOrCreateWorkspace(userId);
+    if (!stored?.forks?.some((fork) => fork.id === id)) throw new DaytonaInputError("sandboxId is not an owned primary workspace or fork");
+    const sandbox = await this.clientFactory().get(id);
+    await sandbox.refreshData();
+    const labels = sandbox.labels ?? {};
+    if (labels.user_id && labels.user_id !== String(userId)) throw new DaytonaInputError("Daytona returned a sandbox owned by another user");
+    if (sandbox.recoverable && sandbox.state !== "started") await sandbox.recover(60);
+    else if (sandbox.state !== "started") await sandbox.start(60);
+    await this.reconcileNetworkPolicy(sandbox);
+    await sandbox.refreshActivity();
+    const current = await getDaytonaWorkspace(userId);
+    if (current) {
+      await saveDaytonaWorkspace(userId, {
+        ...current,
+        forks: current.forks?.map((fork) => fork.id === sandbox.id ? { ...fork, name: sandbox.name, updatedAt: Date.now(), lastKnownState: sandbox.state } : fork),
+        updatedAt: Date.now(),
+      });
+    }
+    return sandbox;
+  }
+
+  async sandbox(userId: number, args: Record<string, unknown>): Promise<unknown> {
+    const action = boundedText(args.action, "action", 30) as "status" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle";
+    const sandbox = await this.getOwnedSandbox(userId, args.sandboxId);
+    const stored = await getDaytonaWorkspace(userId);
+    if (action === "status") {
+      await sandbox.refreshData();
+      return { ...workspaceInfo(sandbox), primary: sandbox.id === stored?.sandboxId, forks: stored?.forks ?? [] };
+    }
+    if (action === "metrics") return safeMetrics(sandbox.id, await sandbox.getMetricsLatest());
+    if (action === "paths") return { sandboxId: sandbox.id, home: await sandbox.getUserHomeDir(), workDir: await sandbox.getWorkDir() };
+    if (action === "fork") {
+      const name = args.name ? boundedIdentifier(args.name, "name", 80) : `chusky-${userId}-fork-${Date.now()}`;
+      const child = await this.clientFactory().fork(sandbox, { name }, 120);
+      await child.setLabels({ agent: "chusky", user_id: String(userId), parent_sandbox: sandbox.id });
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, {
+        ...current,
+        forks: [...(current.forks ?? []).filter((fork) => fork.id !== child.id), { id: child.id, name: child.name, createdAt: Date.now(), updatedAt: Date.now(), lastKnownState: child.state }],
+        updatedAt: Date.now(),
+      });
+      return { sandboxId: child.id, name: child.name, parentSandboxId: sandbox.id, state: child.state, forked: true };
+    }
+    if (action === "start") { await sandbox.start(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
+    if (action === "stop") { await sandbox.stop(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
+    if (action === "pause") { await sandbox.pause(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
+    if (action === "resize") {
+      const resources: { cpu?: number; memory?: number; disk?: number } = {};
+      for (const key of ["cpu", "memory", "disk"] as const) {
+        if (args[key] !== undefined) {
+          const value = Number(args[key]);
+          if (!Number.isFinite(value) || value <= 0 || value > 1024) throw new DaytonaInputError(`${key} must be a positive resource value`);
+          resources[key] = value;
+        }
+      }
+      if (!Object.keys(resources).length) throw new DaytonaInputError("resize requires cpu, memory, or disk");
+      await sandbox.resize(resources, 120);
+      await sandbox.waitForResizeComplete(120);
+      await sandbox.refreshData();
+      return workspaceInfo(sandbox);
+    }
+    if (action === "lifecycle") {
+      const interval = (key: string, fallback = -1): number => {
+        const value = Number(args[key] ?? fallback);
+        if (!Number.isInteger(value) || value < -1 || value > 525600) throw new DaytonaInputError(`${key} must be an integer from -1 to 525600 minutes`);
+        return value;
+      };
+      if (args.autoStopMinutes !== undefined) await sandbox.setAutostopInterval(interval("autoStopMinutes", 0));
+      if (args.autoPauseMinutes !== undefined) await sandbox.setAutoPauseInterval(interval("autoPauseMinutes", 0));
+      if (args.ttlMinutes !== undefined) await sandbox.setTtl(interval("ttlMinutes", 0));
+      if (args.autoArchiveMinutes !== undefined) await sandbox.setAutoArchiveInterval(interval("autoArchiveMinutes", 0));
+      if (args.autoDeleteMinutes !== undefined) await sandbox.setAutoDeleteInterval(interval("autoDeleteMinutes", -1));
+      await sandbox.refreshData();
+      return workspaceInfo(sandbox);
+    }
+    throw new DaytonaInputError(`Unsupported sandbox action: ${action}`);
+  }
+
+  async session(userId: number, args: Record<string, unknown>): Promise<DaytonaSessionResult> {
+    const action = boundedText(args.action, "action", 20);
+    const sandbox = await this.getOwnedSandbox(userId, args.sandboxId);
+    const workspace = await getDaytonaWorkspace(userId);
+    const known = new Set((workspace?.processSessions ?? []).map((item) => item.id));
+    const id = args.id ? boundedIdentifier(args.id, "id") : undefined;
+    const save = async (items: Array<{ id: string; createdAt: number; updatedAt: number }>) => {
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, { ...current, processSessions: items, updatedAt: Date.now() });
+    };
+    if (action === "create") {
+      const sessionId = id ?? `chusky-session-${randomUUID()}`;
+      if (known.has(sessionId)) throw new DaytonaInputError("A process session with that id already exists");
+      await sandbox.process.createSession(sessionId);
+      await save([...(workspace?.processSessions ?? []), { id: sessionId, createdAt: Date.now(), updatedAt: Date.now() }]);
+      return { sandboxId: sandbox.id, sessionId, created: true };
+    }
+    if (action === "list") {
+      const sessions = await sandbox.process.listSessions();
+      return { sandboxId: sandbox.id, sessions: sessions.filter((item) => known.has(String((item as { sessionId?: unknown }).sessionId ?? ""))).map((item) => safeSessionSummary(item)) };
+    }
+    if (!id || !known.has(id)) throw new DaytonaInputError("Process session not found or not owned by you");
+    if (action === "get") return { sandboxId: sandbox.id, sessionId: id, session: safeSessionSummary(await sandbox.process.getSession(id)) };
+    if (action === "execute") {
+      const command = boundedText(args.command, "command", DAYTONA_MAX_COMMAND_LENGTH);
+      await guardVaultWorkspaceAccess(userId, sandbox.id, command, "session command");
+      const result = await sandbox.process.executeSessionCommand(id, { command, runAsync: args.runAsync === true, suppressInputEcho: args.suppressInputEcho === true }, boundedInt(args.timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS));
+      const output = String(result.output ?? result.stdout ?? "");
+      return { sandboxId: sandbox.id, sessionId: id, commandId: result.cmdId, output: output.slice(0, DAYTONA_MAX_OUTPUT_CHARS), stdout: String(result.stdout ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), stderr: String(result.stderr ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), exitCode: result.exitCode };
+    }
+    if (action === "logs") {
+      const commandId = boundedIdentifier(args.commandId, "commandId");
+      const logs = await sandbox.process.getSessionCommandLogs(id, commandId);
+      return { sandboxId: sandbox.id, sessionId: id, commandId, output: String(logs.output ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS), stdout: String(logs.stdout ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS), stderr: String(logs.stderr ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS) };
+    }
+    if (action === "input") {
+      const commandId = boundedIdentifier(args.commandId, "commandId");
+      const input = boundedText(args.input, "input", 8000);
+      await guardVaultWorkspaceAccess(userId, sandbox.id, input, "session input");
+      await sandbox.process.sendSessionCommandInput(id, commandId, input);
+      return { sandboxId: sandbox.id, sessionId: id, commandId };
+    }
+    if (action === "delete") {
+      await sandbox.process.deleteSession(id);
+      await save((workspace?.processSessions ?? []).filter((item) => item.id !== id));
+      return { sandboxId: sandbox.id, sessionId: id, deleted: true };
+    }
+    throw new DaytonaInputError(`Unsupported process session action: ${action}`);
+  }
+
+  async code(userId: number, args: Record<string, unknown>): Promise<DaytonaCodeResult> {
+    const action = boundedText(args.action, "action", 24);
+    const sandbox = await this.getOwnedSandbox(userId, args.sandboxId);
+    const workspace = await getDaytonaWorkspace(userId);
+    const known = new Set((workspace?.interpreterContexts ?? []).map((item) => item.id));
+    const contextId = args.contextId ? boundedIdentifier(args.contextId, "contextId") : undefined;
+    const save = async (items: Array<{ id: string; createdAt: number; updatedAt: number }>) => {
+      const current = await getDaytonaWorkspace(userId);
+      if (current) await saveDaytonaWorkspace(userId, { ...current, interpreterContexts: items, updatedAt: Date.now() });
+    };
+    if (action === "create_context") {
+      const context = await sandbox.codeInterpreter.createContext(args.cwd ? safeDaytonaPath(args.cwd, "cwd") : undefined);
+      const id = String(context.id ?? "");
+      if (!id) throw new DaytonaInputError("Daytona did not return an interpreter context ID");
+      await save([...(workspace?.interpreterContexts ?? []), { id, createdAt: Date.now(), updatedAt: Date.now() }]);
+      return { sandboxId: sandbox.id, contextId: id, created: true };
+    }
+    if (action === "list_contexts") {
+      const contexts = await sandbox.codeInterpreter.listContexts();
+      return { sandboxId: sandbox.id, contexts: contexts.filter((context) => known.has(String(context.id ?? ""))).map((context) => safeSessionSummary(context)) };
+    }
+    if (!contextId || !known.has(contextId)) throw new DaytonaInputError("Interpreter context not found or not owned by you");
+    const context = (await sandbox.codeInterpreter.listContexts()).find((item) => String(item.id ?? "") === contextId);
+    if (!context) throw new DaytonaInputError("Interpreter context is no longer available");
+    if (action === "run") {
+      const code = boundedText(args.code, "code", DAYTONA_MAX_COMMAND_LENGTH);
+      await guardVaultWorkspaceAccess(userId, sandbox.id, code, "interpreter code");
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const result = await sandbox.codeInterpreter.runCode(code, {
+        context,
+        timeout: boundedInt(args.timeoutSeconds, 600, DAYTONA_MAX_EXECUTION_SECONDS),
+        envs: boundedEnvironment(args.envs),
+        onStdout: (message: { output: string }) => { stdout.push(String(message.output ?? "")); },
+        onStderr: (message: { output: string }) => { stderr.push(String(message.output ?? "")); },
+      });
+      const safeStdout = `${stdout.join("")}${result.stdout ?? ""}`.slice(0, DAYTONA_MAX_OUTPUT_CHARS);
+      const safeStderr = `${stderr.join("")}${result.stderr ?? ""}`.slice(0, DAYTONA_MAX_OUTPUT_CHARS);
+      return { sandboxId: sandbox.id, contextId, stdout: safeStdout, stderr: safeStderr, ...(result.error ? { error: safeSessionSummary(result.error) } : {}) };
+    }
+    if (action === "delete_context") {
+      await sandbox.codeInterpreter.deleteContext(context);
+      await save((workspace?.interpreterContexts ?? []).filter((item) => item.id !== contextId));
+      return { sandboxId: sandbox.id, contextId, deleted: true };
+    }
+    throw new DaytonaInputError(`Unsupported code action: ${action}`);
+  }
+
+  async lsp(userId: number, args: Record<string, unknown>): Promise<unknown> {
+    const action = boundedText(args.action, "action", 24);
+    const language = boundedIdentifier(args.language ?? "typescript", "language", 40).toLowerCase();
+    if (!["typescript", "javascript", "python"].includes(language)) throw new DaytonaInputError("language must be typescript, javascript, or python");
+    const projectPath = safeDaytonaPath(args.projectPath ?? "workspace", "projectPath");
+    const sandbox = await this.getOwnedSandbox(userId, args.sandboxId);
+    const server = await sandbox.createLspServer(language, projectPath);
+    await server.start();
+    try {
+      if (action === "document_symbols") {
+        const filePath = safeDaytonaPath(args.path, "path");
+        return { sandboxId: sandbox.id, symbols: (await server.documentSymbols(filePath)).slice(0, 200) };
+      }
+      if (action === "sandbox_symbols") return { sandboxId: sandbox.id, symbols: (await server.sandboxSymbols(boundedText(args.query, "query", 200))).slice(0, 200) };
+      if (action === "completions") {
+        const filePath = safeDaytonaPath(args.path, "path");
+        const line = Number(args.line); const character = Number(args.character);
+        if (!Number.isInteger(line) || line < 0 || line > 100000 || !Number.isInteger(character) || character < 0 || character > 100000) throw new DaytonaInputError("line and character must be non-negative integer positions");
+        return { sandboxId: sandbox.id, completions: await server.completions(filePath, { line, character }) };
+      }
+      throw new DaytonaInputError(`Unsupported LSP action: ${action}`);
+    } finally {
+      await server.stop().catch(() => undefined);
+    }
+  }
+
   async workspace(userId: number, action: "get" | "create" | "status" | "pause" | "archive" | "delete"): Promise<DaytonaWorkspaceInfo | { exists: false; message: string } | { paused: boolean; sandboxId: string } | { deleted: boolean; sandboxId: string }> {
     if (action === "delete") return this.deleteWorkspace(userId);
     if (action === "pause") return this.pause(userId);
@@ -1491,6 +1755,33 @@ export class DaytonaEngine {
     await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
     await sandbox.fs.uploadFile(content, normalizedPath);
     return { path: normalizedPath, bytes: content.length };
+  }
+
+  async replaceFiles(userId: number, files: unknown, pattern: unknown, newValue: unknown): Promise<unknown> {
+    if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new DaytonaInputError("files must contain 1-100 paths");
+    const paths = files.map((file) => safeDaytonaPath(file, "file"));
+    const search = boundedText(pattern, "pattern", 8000);
+    const replacement = String(newValue ?? "");
+    if (replacement.length > 8000) throw new DaytonaInputError("newValue must be at most 8000 characters");
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, `${paths.join("\n")}\n${search}`, "replace files");
+    const result = await sandbox.fs.replaceInFiles(paths, search, replacement);
+    return { sandboxId: sandbox.id, files: result.slice(0, 100) };
+  }
+
+  async setFilePermissions(userId: number, path: unknown, permissions: unknown): Promise<{ sandboxId: string; path: string; updated: boolean }> {
+    const normalizedPath = safeDaytonaPath(path);
+    if (!permissions || typeof permissions !== "object" || Array.isArray(permissions)) throw new DaytonaInputError("permissions must be an object");
+    const input = permissions as Record<string, unknown>;
+    const mode = input.mode === undefined ? undefined : boundedText(input.mode, "mode", 4);
+    if (mode && !/^[0-7]{3,4}$/.test(mode)) throw new DaytonaInputError("mode must be an octal permission such as 644 or 755");
+    const owner = input.owner === undefined ? undefined : boundedIdentifier(input.owner, "owner", 80);
+    const group = input.group === undefined ? undefined : boundedIdentifier(input.group, "group", 80);
+    if (!mode && !owner && !group) throw new DaytonaInputError("permissions must include mode, owner, or group");
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file permissions");
+    await sandbox.fs.setFilePermissions(normalizedPath, { ...(mode ? { mode } : {}), ...(owner ? { owner } : {}), ...(group ? { group } : {}) });
+    return { sandboxId: sandbox.id, path: normalizedPath, updated: true };
   }
 
   async findFiles(userId: number, path: string | undefined, pattern: string): Promise<unknown> {
@@ -1824,8 +2115,20 @@ export class DaytonaEngine {
         await computer.recording.download(recordingId, path);
         return { recordingId, path, downloaded: true };
       }
+      case "screenshot_full": {
+        const result = await computer.screenshot.takeFullScreen(args.showCursor === true);
+        if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
+        return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/png", base64: result.screenshot, sizeBytes: result.sizeBytes } satisfies DaytonaScreenshotResult & { __daytonaScreenshot: true };
+      }
+      case "screenshot_region_full": {
+        const width = boundedInt(args.width, 1, 7680);
+        const height = boundedInt(args.height, 1, 4320);
+        const result = await computer.screenshot.takeRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, args.showCursor === true);
+        if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
+        return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/png", base64: result.screenshot, sizeBytes: result.sizeBytes, region: { x: args.x, y: args.y, width, height } };
+      }
       case "screenshot": {
-        const result = await computer.screenshot.takeCompressed({ format: "jpeg", quality: 70, scale: 0.75, showCursor: args.showCursor === true });
+        const result = await computer.screenshot.takeCompressed({ format: "jpeg", quality: Math.min(Math.max(Number(args.quality ?? 70), 20), 95), scale: Math.min(Math.max(Number(args.scale ?? 0.75), 0.25), 1), showCursor: args.showCursor === true });
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes } satisfies DaytonaScreenshotResult & { __daytonaScreenshot: true };
       }
@@ -1847,7 +2150,14 @@ export class DaytonaEngine {
       case "accessibility_find": {
         const nameMatch = args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined;
         if (nameMatch && !["exact", "substring", "regex"].includes(nameMatch)) throw new DaytonaInputError("nameMatch must be exact, substring, or regex");
-        const result = await computer.accessibility.findNodes({ scope: "all", role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) });
+        const requestedScope = args.scope ? boundedText(args.scope, "scope", 20) : "all";
+        if (!["focused", "pid", "all"].includes(requestedScope)) throw new DaytonaInputError("scope must be focused, pid, or all");
+        const pid = args.pid === undefined ? undefined : Number(args.pid);
+        if (requestedScope === "pid" && (pid === undefined || !Number.isInteger(pid) || (pid as number) < 1)) throw new DaytonaInputError("pid is required when scope is pid");
+        const states = Array.isArray(args.states) ? args.states.map((state) => boundedText(state, "state", 60)).slice(0, 20) : undefined;
+        const findOptions: Record<string, unknown> = { scope: requestedScope, role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, ...(states?.length ? { states } : {}), limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) };
+        if (pid !== undefined) findOptions.pid = pid;
+        const result = await computer.accessibility.findNodes(findOptions as Parameters<typeof computer.accessibility.findNodes>[0]);
         await rememberVaultBrowserNodes(userId, sandbox.id, result, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
         return redactBrowserData(result);
       }
@@ -1949,7 +2259,10 @@ export class DaytonaEngine {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const stored = await getDaytonaWorkspace(userId);
     if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl });
-    if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region"].includes(action)) return this.computer(userId, args, { trustedVaultFlow: true });
+    if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region", "screenshot_full", "screenshot_region_full", "move", "drag"].includes(action)) {
+      const mapped = action === "move" ? { ...args, action: "mouse_move" } : action === "drag" ? { ...args, action: "mouse_drag" } : args;
+      return this.computer(userId, mapped, { trustedVaultFlow: true });
+    }
     if (action === "status") {
       const stored = await getDaytonaWorkspace(userId);
       return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, computer: await this.computer(userId, { action: "status" }, { trustedVaultFlow: true }), windows: await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true }) };
@@ -1963,15 +2276,16 @@ export class DaytonaEngine {
       await this.computer(userId, { action: "keyboard_hotkey", keys: "CTRL+L" }, { trustedVaultFlow: true });
       await this.computer(userId, { action: "keyboard_type", text: url }, { trustedVaultFlow: true });
       await this.computer(userId, { action: "keyboard_press", key: "ENTER" }, { trustedVaultFlow: true });
+      await sleep(350);
       const current = await getDaytonaWorkspace(userId);
       if (current) await saveDaytonaWorkspace(userId, { ...current, browser: { lastUrl: parsed.toString(), updatedAt: Date.now() }, updatedAt: Date.now() });
-      return { sandboxId: sandbox.id, opened: url };
+      return { sandboxId: sandbox.id, opened: url, verificationRequired: true, inspection: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
     }
     if (action === "snapshot") {
       return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }, { trustedVaultFlow: true }) };
     }
     if (action === "find") {
-      const matches = await this.computer(userId, { action: "accessibility_find", role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) }, { trustedVaultFlow: true });
+      const matches = await this.computer(userId, { action: "accessibility_find", scope: args.scope, pid: args.pid, states: args.states, role: args.role, name: args.name, nameMatch: args.nameMatch, limit: boundedNumber(args.limit, 20, 50) }, { trustedVaultFlow: true });
       await rememberVaultBrowserNodes(userId, sandbox.id, matches, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
       return { sandboxId: sandbox.id, matches };
     }
@@ -1981,12 +2295,16 @@ export class DaytonaEngine {
     if (action === "windows") return this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
     if (action === "screenshot") return this.computer(userId, { action: "screenshot", showCursor: false }, { trustedVaultFlow: true });
     if (action === "click") return this.computer(userId, { action: "mouse_click", x: args.x, y: args.y, button: "left" }, { trustedVaultFlow: true });
+    if (action === "move") return this.computer(userId, { action: "mouse_move", x: args.x, y: args.y }, { trustedVaultFlow: true });
+    if (action === "drag") return this.computer(userId, { action: "mouse_drag", startX: args.startX, startY: args.startY, endX: args.endX, endY: args.endY, button: args.button ?? "left" }, { trustedVaultFlow: true });
     if (action === "type") return this.computer(userId, { action: "keyboard_type", text: args.text, delayMs: 0 }, { trustedVaultFlow: true });
     if (action === "press") return this.computer(userId, { action: "keyboard_press", key: args.key, modifiers: Array.isArray(args.modifiers) ? args.modifiers : [] }, { trustedVaultFlow: true });
     if (action === "scroll") return this.computer(userId, { action: "mouse_scroll", x: args.x ?? 500, y: args.y ?? 400, direction: args.direction, amount: args.amount ?? 3 }, { trustedVaultFlow: true });
     if (action === "back" || action === "forward" || action === "refresh") {
       const key = action === "back" ? "ALT+LEFT" : action === "forward" ? "ALT+RIGHT" : "CTRL+R";
-      return this.computer(userId, { action: "keyboard_hotkey", keys: key }, { trustedVaultFlow: true });
+      await this.computer(userId, { action: "keyboard_hotkey", keys: key }, { trustedVaultFlow: true });
+      await sleep(350);
+      return { sandboxId: sandbox.id, action, verificationRequired: true, inspection: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
     }
     throw new DaytonaInputError(`Unsupported browser action: ${action}`);
   }
