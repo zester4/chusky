@@ -105,6 +105,7 @@ export class Chusky {
       const headers = new Headers(init.headers);
       headers.set("Authorization", `Bearer ${this.apiKey}`);
       headers.set("X-Chusky-User-Id", this.userId);
+      headers.set("A2A-Version", "1.0");
       headers.set("Accept", "application/json");
       headers.set("User-Agent", this.userAgent);
       if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -130,6 +131,7 @@ export class Chusky {
       const headers = new Headers(init.headers);
       headers.set("Authorization", `Bearer ${this.apiKey}`);
       headers.set("X-Chusky-User-Id", this.userId);
+      headers.set("A2A-Version", "1.0");
       headers.set("Accept", "application/a2a+json, application/json");
       headers.set("User-Agent", this.userAgent);
       if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/a2a+json");
@@ -581,8 +583,9 @@ export class A2AResource {
   }
   async get(taskId: string, options?: RequestOptions): Promise<A2ATask> {
     const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "GetTask", params: { id: taskId } }) }, options);
-    if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
-    return response.result.task;
+    const result = response.result as ({ task?: A2ATask } & A2ATask) | undefined;
+    if (!result || (!result.task && !result.id)) throw new Error(response.error?.message ?? "A2A task was not returned");
+    return result.task ?? result;
   }
   async list(pageToken?: string, pageSize = 20, options?: RequestOptions): Promise<A2ATaskPage> {
     const response = await this.client.requestA2A<{ result?: A2ATaskPage; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "ListTasks", params: { ...(pageToken ? { pageToken } : {}), pageSize } }) }, options);
@@ -591,8 +594,9 @@ export class A2AResource {
   }
   async cancel(taskId: string, options?: RequestOptions): Promise<A2ATask> {
     const response = await this.client.requestA2A<{ result?: { task?: A2ATask }; error?: { message?: string } }>("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "CancelTask", params: { id: taskId } }) }, options);
-    if (!response.result?.task) throw new Error(response.error?.message ?? "A2A task was not returned");
-    return response.result.task;
+    const result = response.result as ({ task?: A2ATask } & A2ATask) | undefined;
+    if (!result || (!result.task && !result.id)) throw new Error(response.error?.message ?? "A2A task was not returned");
+    return result.task ?? result;
   }
   async *subscribe(taskId: string, options?: RequestOptions): AsyncGenerator<A2AStreamEvent> {
     const response = await this.client.requestA2AStream("/a2a/rpc", { method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: `sdk-${Date.now()}`, method: "SubscribeToTask", params: { id: taskId } }) }, options);

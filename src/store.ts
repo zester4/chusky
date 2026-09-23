@@ -776,6 +776,8 @@ export interface MissionRecord {
   evidence?: MissionEvidenceRecord[];
   verification?: MissionVerification;
   lease?: MissionLease;
+  /** A2A context supplied by the delegating agent; optional for legacy missions. */
+  a2aContextId?: string;
   a2aPushNotifications?: MissionA2APushNotificationConfig[];
   /** Monotonic revision used to prevent concurrent workers from overwriting state. */
   version: number;
@@ -4839,6 +4841,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.verification.confidence === "number" ? { confidence: Math.max(0, Math.min(1, mission.verification.confidence)) } : {}),
     } : undefined,
     ...(mission.lease && typeof mission.lease === "object" ? { lease: mission.lease } : {}),
+    ...(typeof mission.a2aContextId === "string" && mission.a2aContextId.trim() ? { a2aContextId: mission.a2aContextId.trim().slice(0, 200) } : {}),
     a2aPushNotifications: Array.isArray(mission.a2aPushNotifications) ? mission.a2aPushNotifications.slice(-10).filter((item): item is MissionA2APushNotificationConfig => Boolean(item) && typeof item === "object" && typeof item.id === "string" && typeof item.url === "string" && typeof item.signingSecretCiphertext === "string").map((item) => ({
       id: item.id.slice(0, 160),
       url: item.url.slice(0, 2000),
@@ -4857,6 +4860,7 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   budget?: Partial<MissionBudget>;
   requiredEvidence?: string[];
   verificationMode?: "legacy" | "strict";
+  a2aContextId?: string;
   steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string }>;
 };
 
@@ -4913,6 +4917,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     events: [missionEvent("created", "Mission created", now)],
     evidence: [],
     verification: { mode: input.verificationMode ?? ((input.requiredEvidence?.length ?? 0) > 0 ? "strict" : "legacy"), requiredEvidence: (input.requiredEvidence ?? []).slice(0, 50), verified: false, unresolved: (input.requiredEvidence ?? []).slice(0, 50) },
+    ...(typeof input.a2aContextId === "string" && input.a2aContextId.trim() ? { a2aContextId: input.a2aContextId.trim().slice(0, 200) } : {}),
     version: 0,
   });
   return backend.createMissionIfAbsent(userId, mission);

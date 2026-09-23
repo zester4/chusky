@@ -1,8 +1,8 @@
 # Chusky A2A integration
 
-Chusky exposes a standards-shaped A2A 1.0 boundary over the same project-key,
-end-user, mission, budget, approval, and evidence runtime used by the SDK and
-dashboard. It does not create a second tenant or identity system.
+Chusky exposes a standards-shaped A2A 1.0 boundary over the same API-key-scoped
+workspace, end-user, mission, budget, approval, and evidence runtime used by
+the SDK and dashboard. It does not create a second tenant or identity system.
 
 ## Discovery
 
@@ -18,20 +18,21 @@ streaming, and durable A2A push notifications.
 
 ## Authentication and identity
 
-Use a project-scoped `chsk_` key as a bearer token. Every request must also
+Use the Chusky API key issued for the integration as a bearer token. Every request must also
 include a stable, non-PII caller identity:
 
 ```http
 Authorization: Bearer chsk_...
 X-Chusky-User-Id: crm-agent-prod
+A2A-Version: 1.0
 Content-Type: application/a2a+json
 ```
 
-The identity is combined with the project ID to isolate missions, context,
+The identity is combined with the API key's isolated workspace to scope missions, context,
 artifacts, approvals, and results. Do not send a phone number, email address,
-root operator key, or provider credential as the identity.
+root operator key, private server bootstrap secret (`CHUSKY_PROJECT_KEY`), or provider credential as the identity.
 
-The project key needs `missions:read` for `GetTask`, `ListTasks`,
+The API key needs `missions:read` for `GetTask`, `ListTasks`,
 `SubscribeToTask`, `GetTaskPushNotificationConfig`, and
 `ListTaskPushNotificationConfigs`. It needs `missions:write` for
 `SendMessage`, `SendStreamingMessage`, `CancelTask`, creating push
@@ -47,6 +48,7 @@ The endpoint accepts JSON-RPC 2.0 at either `/a2a/rpc` or `/a2a/v1`.
 curl -X POST https://api.chusky.ai/a2a/rpc \
   -H "Authorization: Bearer $CHUSKY_API_KEY" \
   -H "X-Chusky-User-Id: crm-agent-prod" \
+  -H "A2A-Version: 1.0" \
   -H "Content-Type: application/a2a+json" \
   -H "Idempotency-Key: launch-brief-2026-09-22" \
   -d '{

@@ -18,6 +18,7 @@ export interface A2AAgentCard {
   description: string;
   version: string;
   protocolVersion?: string;
+  documentationUrl?: string;
   url?: string;
   supportedInterfaces?: Array<{ url: string; protocolBinding: string; protocolVersion: string }>;
   capabilities?: { streaming?: boolean; pushNotifications?: boolean; stateTransitionHistory?: boolean };

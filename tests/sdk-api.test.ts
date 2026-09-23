@@ -152,21 +152,25 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "a2a-rpc-owner", "Content-Type": "application/a2a+json", "Idempotency-Key": "a2a-rpc-create" };
   const card = await api.fetch(new Request("http://local/a2a/.well-known/agent-card.json"));
   assert.equal(card.status, 200);
+  const rootCard = await api.fetch(new Request("http://local/.well-known/agent-card.json"));
+  assert.equal(rootCard.status, 200);
+  assert.equal(rootCard.headers.get("a2a-version"), "1.0");
   const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }> };
   assert.equal(cardBody.protocolVersion, "1.0");
   assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
   assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
   assert.equal((cardBody as { capabilities?: { pushNotifications?: boolean } }).capabilities?.pushNotifications, true);
 
-  const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "SendMessage", params: { message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
+  const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "1.0" }, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "message/send", params: { contextId: "crm-release-context", message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
   assert.equal(send.status, 200);
   const created = await send.json() as { result: { task: { id: string; status: { state: string } } } };
   assert.match(created.result.task.id, /^mis_/);
   assert.equal(created.result.task.status.state, "TASK_STATE_WORKING");
+  assert.equal(created.result.task.contextId, "crm-release-context");
 
   const get = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-get" }, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "GetTask", params: { id: created.result.task.id } }) }));
   assert.equal(get.status, 200);
-  assert.equal(((await get.json()) as { result: { task: { id: string } } }).result.task.id, created.result.task.id);
+  assert.equal(((await get.json()) as { result: { id: string } }).result.id, created.result.task.id);
 
   const list = await api.fetch(new Request("http://local/a2a/v1", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-list" }, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "ListTasks", params: { pageSize: 10 } }) }));
   assert.equal(list.status, 200);
@@ -176,11 +180,15 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
 
   const cancelled = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-cancel" }, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "CancelTask", params: { id: created.result.task.id } }) }));
   assert.equal(cancelled.status, 200);
-  assert.equal(((await cancelled.json()) as { result: { task: { status: { state: string } } } }).result.task.status.state, "TASK_STATE_CANCELED");
+  assert.equal(((await cancelled.json()) as { result: { status: { state: string } } }).result.status.state, "TASK_STATE_CANCELED");
 
   const malformed = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": "a2a-rpc-invalid" }, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "NotA2AMethod", params: {} }) }));
   assert.equal(malformed.status, 400);
   assert.equal(((await malformed.json()) as { error: { code: number } }).error.code, -32601);
+
+  const unsupportedVersion = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "9.9" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tasks/get", params: { id: created.result.task.id } }) }));
+  assert.equal(unsupportedVersion.status, 400);
+  assert.equal(((await unsupportedVersion.json()) as { error: { code: string } }).error.code, "a2a_version_not_supported");
 });
 
 test("A2A push notification configurations are encrypted, owner-scoped, and manageable", async () => {
