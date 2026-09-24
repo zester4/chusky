@@ -187,9 +187,9 @@ paths:
     patch: { summary: Enable or disable a webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
     delete: { summary: Disable a webhook subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Disabled } } }
   /webhooks/{webhookId}/deliveries:
-    get: { summary: List bounded delivery attempts for a subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List bounded delivery attempts, including ambiguous outcomes that require receiver verification, for a subscription, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /webhooks/{webhookId}/deliveries/{deliveryId}/retry:
-    post: { summary: Requeue a failed webhook delivery, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Requeued } } }
+    post: { summary: Requeue a definitively failed webhook delivery; ambiguous outcomes are never retried automatically, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Requeued }, '409': { description: Delivery is not in a definitively failed state } } }
   /approvals:
     get: { summary: List pending approvals for the SDK user, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /tools:
@@ -314,7 +314,9 @@ paths:
   /memory/{id}:
     delete: { summary: Forget an owned memory fact, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /deliveries:
-    get: { summary: List outbound channel delivery receipts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List owner-scoped channel delivery receipts and durations, including ambiguous outcomes, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /deliveries/{deliveryId}/confirm-delivered:
+    post: { summary: Confirm an ambiguous channel delivery after verifying the destination; does not resend, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Confirmed }, '404': { description: Not found for this owner }, '409': { description: Delivery is not ambiguous } } }
   /activity:
     get: { summary: Get a bounded activity feed for polling dashboards, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
 components:

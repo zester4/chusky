@@ -26,3 +26,19 @@ test("webhook delivery sends signed bounded JSON", async () => {
   const result = await deliverWebhook({ id: "wh_1", url: "https://example.test/hook", secretCiphertext: sealWebhookSecret("whsec_test") }, { type: "run.completed" }, (async (input: string | URL | Request, init?: RequestInit) => { request = new Request(input, init); return new Response(null, { status: 204 }); }) as typeof fetch);
   assert.equal(result.delivered, true); assert.equal(request?.headers.get("x-chusky-webhook-id"), "wh_1"); assert.match(request?.headers.get("x-chusky-webhook-signature") ?? "", /^v1=/);
 });
+
+test("webhook retries can carry a stable event id for receiver-side deduplication", async () => {
+  (config as { apiKey: string }).apiKey = "test-server-key";
+  let request: Request | undefined;
+  const result = await deliverWebhook({ id: "wh_2", url: "https://example.test/hook", secretCiphertext: sealWebhookSecret("whsec_test") }, { type: "run.completed" }, (async (input: string | URL | Request, init?: RequestInit) => { request = new Request(input, init); return new Response(null, { status: 204 }); }) as typeof fetch, "out_delivery-123");
+  assert.equal(result.delivered, true);
+  assert.equal(request?.headers.get("x-chusky-event-id"), "out_delivery-123");
+  assert.equal((await request?.json() as { id: string }).id, "out_delivery-123");
+});
+
+test("webhook transport errors are marked uncertain, not definitive failures", async () => {
+  (config as { apiKey: string }).apiKey = "test-server-key";
+  const result = await deliverWebhook({ id: "wh_3", url: "https://example.test/hook", secretCiphertext: sealWebhookSecret("whsec_test") }, { type: "run.completed" }, (async () => { throw new Error("socket closed"); }) as typeof fetch);
+  assert.equal(result.delivered, false);
+  assert.equal(result.uncertain, true);
+});

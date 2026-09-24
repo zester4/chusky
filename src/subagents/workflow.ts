@@ -58,12 +58,26 @@ export async function enqueueSubagentToolContinuation(userId: number, handoffId:
   const toolRequestEventId = workflowEventId("subagent-tools", handoffId, decisionNumber);
   await saveHandoffRecord(userId, { ...record, workflowRunId, toolRequestEventId });
 
-  const queued = await client().trigger({
-    url: subagentWorkflowUrl(),
-    body: { userId, handoffId },
-    workflowRunId,
-    retries: 3,
-  });
+  let queued: { workflowRunId: string };
+  try {
+    queued = await client().trigger({
+      url: subagentWorkflowUrl(),
+      body: { userId, handoffId },
+      workflowRunId,
+      retries: 3,
+    });
+  } catch (error) {
+    // Do not leave a persisted waiter identity that looks runnable after the
+    // trigger failed. A supervisor retry can safely publish the same run ID.
+    const current = await getHandoffRecord(userId, handoffId);
+    if (current?.workflowRunId === workflowRunId && current.toolRequestEventId === toolRequestEventId) {
+      const withoutWaiter = { ...current };
+      delete withoutWaiter.workflowRunId;
+      delete withoutWaiter.toolRequestEventId;
+      await saveHandoffRecord(userId, withoutWaiter);
+    }
+    throw error;
+  }
   const persistedWorkflowRunId = String(queued.workflowRunId ?? workflowRunId);
   if (persistedWorkflowRunId !== workflowRunId) {
     await saveHandoffRecord(userId, { ...record, workflowRunId: persistedWorkflowRunId, toolRequestEventId });
@@ -74,8 +88,13 @@ export async function enqueueSubagentToolContinuation(userId: number, handoffId:
 /** Notify exactly the waiting run. workflowRunId enables Upstash lookback and closes the notify-before-wait race. */
 export async function resolveSubagentToolRequest(userId: number, handoffId: string, requestedTools: string[]): Promise<{ eventId: string; workflowRunId: string; allowedComposioTools: string[] }> {
   let record = await getHandoffRecord(userId, handoffId);
-  if (!record || record.status !== "requires_tool_request" || !record.workflowRunId || !record.toolRequestEventId) {
+  if (!record || record.status !== "requires_tool_request" || !record.taskId) {
     throw new Error("This worker run is not waiting for a durable tool decision.");
+  }
+  if (!record.workflowRunId || !record.toolRequestEventId) {
+    await enqueueSubagentToolContinuation(userId, handoffId);
+    record = await getHandoffRecord(userId, handoffId);
+    if (!record?.workflowRunId || !record.toolRequestEventId) throw new Error("The worker decision waiter could not be queued. Retry after the workflow service recovers.");
   }
   // Repair records created by older builds that used ':' in the event ID.
   // Upstash rejects those IDs before the waiter can resume, so queue a fresh

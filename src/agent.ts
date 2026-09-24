@@ -52,7 +52,7 @@ import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 import { applyMeetingComposioAccountAlias, isMeetingRepresentativeComposioTool } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
-import { missingComposioConnectionMessage, resolveComposioRoute } from "./composioRouting.js";
+import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
@@ -124,6 +124,14 @@ export class ApprovalRequiredError extends Error {
   constructor(public readonly approvalId: string, public readonly toolSlug: string, public readonly args: Record<string, unknown>) {
     super(`Approval required before executing ${toolSlug}. Approval ID: ${approvalId}`);
     this.name = "ApprovalRequiredError";
+  }
+}
+
+/** Exact Composio actions requested by a worker but absent from the owner's session. */
+export class UnavailableComposioToolsError extends Error {
+  constructor(readonly missingSlugs: string[], readonly connectionRequiredToolkits: string[] = []) {
+    super("One or more explicitly delegated Composio actions are unavailable in the owner's connected session.");
+    this.name = "UnavailableComposioToolsError";
   }
 }
 
@@ -617,25 +625,11 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
     if (options?.objective) {
       const accounts = await listConnectedAccounts(userId).catch(() => []);
       const route = resolveComposioRoute(options.objective, accounts.map((account) => account.toolkit));
-      if (route?.needsConnection) throw new Error(missingComposioConnectionMessage(route));
+      if (route?.needsConnection) throw new UnavailableComposioToolsError(requiredMissing, route.preferredToolkits);
     }
-    // A typo or stale slug must never silently broaden worker access. This is
-    // a read-only discovery hint; Chusky must still deliberately search and
-    // delegate an exact replacement in a later worker contract.
-    let suggestions: string[] = [];
-    try {
-      const matches = await sessionObj.search({ query: requiredMissing.join(" ") });
-      const items = Array.isArray(matches) ? matches : (matches?.items ?? []);
-      suggestions = items
-        .map((tool: any) => String(tool?.slug ?? tool?.tool_slug ?? tool?.name ?? "").trim())
-        .filter(Boolean)
-        .slice(0, 5);
-    } catch {
-      // Provider discovery is advisory. The connection/availability error is
-      // still actionable when the search endpoint is temporarily unavailable.
-    }
-    const hint = suggestions.length ? ` Candidate slugs: ${suggestions.join(", ")}.` : "";
-    throw new Error(`Delegated Composio tool(s) are unavailable in this user's connected session: ${requiredMissing.join(", ")}.${hint} Ask Chusky to use COMPOSIO_SEARCH_TOOL with the intended action, verify the user's connection, then delegate the exact resulting slug.`);
+    // A stale slug becomes a durable supervisor request instead of a terminal
+    // worker failure. Chusky must independently discover and verify a replacement.
+    throw new UnavailableComposioToolsError(requiredMissing);
   }
   return {
     tools: unique.filter((slug) => byName.has(slug)).map((slug) => byName.get(slug)!),
@@ -1256,6 +1250,7 @@ export async function runAgent(
               : undefined;
         if (autonomySource && isExternalWriteTool(slug)) {
           externalClaim = await beginExternalAction({ userId, provider: slug.startsWith("MCP_") ? "mcp" : slug.startsWith("CHUCK_") ? "native" : "composio", tool: slug, args: executionArgs, runId: options?.runId ?? durableRunId, source: autonomySource });
+          if (externalClaim.state === "ambiguous") throw new Error("This autonomous external write may already have reached its provider, but Chusky did not receive a durable confirmation. Verify the provider state before manually retrying; Chusky will not repeat it automatically.");
           if (externalClaim.state === "in_flight") throw new Error(`Autonomous action ${slug} is already in flight for this occurrence. Verify provider state before retrying.`);
         }
         // session.execute() routes the call through Composio:
@@ -1362,6 +1357,15 @@ export async function runAgent(
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
           execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+          if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
+            const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
+            if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
+              const payload = delegation.proposal.payload && typeof delegation.proposal.payload === "object" && !Array.isArray(delegation.proposal.payload)
+                ? delegation.proposal.payload as Record<string, unknown>
+                : {};
+              throw new ApprovalRequiredError(delegation.approvalId, delegation.proposal.actionName, payload);
+            }
+          }
           if ((slug === "CHUCK_DAYTONA_PREVIEW" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object") {
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);

@@ -29,6 +29,7 @@ import { createSendblueGroupLinkCode, redeemWebTelegramLinkCode } from "./store.
 import { notifyTriggerApproval, enqueueAutonomyApprovalResume } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { findMissionApprovalTarget, resumeMissionTaskAfterApproval } from "./missionApproval.js";
+import { resumeApprovedDelegation } from "./subagents/executor.js";
 import { nativeTool } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { posthog } from "./posthog.js";
@@ -2618,6 +2619,19 @@ export function registerHandlers(bot: Bot): void {
       return;
     }
     await editApprovalOutcome(ctx, "✅ Approved. Chusky is executing the action…");
+    if (approval.handoffId) {
+      try {
+        const resumed = await resumeApprovedDelegation(ctx.from.id, approval.id);
+        const outcome = resumed.status === "success"
+          ? `✅ Approved worker action completed.\n\n${resumed.output}`
+          : `⚠️ The approved worker action did not complete (${resumed.status}).\n\n${resumed.output}`;
+        await editApprovalOutcome(ctx, outcome.slice(0, 3900));
+      } catch (error) {
+        logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, handoffId: approval.handoffId }, "Approved worker action resume failed");
+        await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the worker action could not resume. Inspect the task status before trying again.");
+      }
+      return;
+    }
     if (approval.triggerEventId) {
       try {
         await notifyTriggerApproval(approval.id, true, approval.triggerEventId);

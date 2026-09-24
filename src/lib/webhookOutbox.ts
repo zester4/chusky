@@ -39,21 +39,24 @@ export async function enqueueA2APushNotification(userId: number, missionId: stri
   });
 }
 
-export async function deliverSdkWebhook(record: OutboxRecord): Promise<OutboxRecord> {
+export async function deliverSdkWebhook(record: OutboxRecord, fetchImpl: typeof fetch = fetch): Promise<OutboxRecord> {
   if (record.provider !== "webhook" || !record.webhook) throw new Error("Not an SDK webhook delivery");
   if (record.status === "delivered") return record;
   if (record.attempts >= MAX_ATTEMPTS) return (await updateOutbox(record.id, { status: "failed", lastError: "retry_exhausted" })) ?? record;
   const claimed = await claimOutbox(record.id, LEASE_MS);
   if (!claimed) return record;
-  const result = await deliverWebhook({ ...claimed.webhook!, id: claimed.webhook!.webhookId }, claimed.webhook!.payload);
+  const result = await deliverWebhook({ ...claimed.webhook!, id: claimed.webhook!.webhookId }, claimed.webhook!.payload, fetchImpl, record.id);
   return (await updateOutbox(record.id, result.delivered
     ? { status: "delivered", deliveredAt: Date.now(), providerStatus: String(result.status ?? 200), leaseToken: undefined, leaseExpiresAt: undefined, lastError: undefined }
-    : { status: "failed", providerStatus: result.status ? String(result.status) : undefined, lastError: result.error ?? "delivery_failed", leaseToken: undefined, leaseExpiresAt: undefined })) ?? claimed;
+    : { status: result.uncertain ? "ambiguous" : "failed", providerStatus: result.status ? String(result.status) : undefined, lastError: result.uncertain ? `Webhook outcome is uncertain; verify the receiver before retrying. Event ID: ${record.id}.` : result.error ?? "delivery_failed", leaseToken: undefined, leaseExpiresAt: undefined })) ?? claimed;
 }
 
 export async function recoverSdkWebhooks(limit = 100): Promise<number> {
   const records = (await listOutbox(["queued", "failed", "delivering"], limit)).filter((record) => record.provider === "webhook" && record.webhook);
   let delivered = 0;
-  for (const record of records) if ((await deliverSdkWebhook(record)).status === "delivered") delivered++;
+  for (const record of records) {
+    try { if ((await deliverSdkWebhook(record)).status === "delivered") delivered++; }
+    catch { /* the durable receipt records uncertainty; never let one delivery stop the recovery batch */ }
+  }
   return delivered;
 }

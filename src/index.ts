@@ -53,6 +53,7 @@ import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
+import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import { workflowEventId } from "./workflowIds.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
@@ -1236,7 +1237,7 @@ async function main(): Promise<void> {
     app.post("/cli/missions/:id/verify", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: body.verifiedBy === "human" || body.verifiedBy === "agent" ? body.verifiedBy : "agent" });
+      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: "agent" });
       return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
     });
     app.post("/cli/missions/:id/steps/:stepId/complete", async (c) => {
@@ -2388,17 +2389,14 @@ async function main(): Promise<void> {
           return;
         }
         await workflow.run("deliver-worker-slice-result", async () => {
-          if (!resumed.output.trim()) return;
           const record = await getHandoffRecord(userId, handoffId);
           const target = record?.context?.deliveryTarget as ReminderDeliveryTarget | undefined;
           const title = resumed.status === "success" ? "✅ Worker task completed" : "⚠️ Worker task update";
-          if (target) {
-            await channelGateway.send({ accountId: `account_${userId}`, userId, target, text: `${title}\n\n${resumed.output}`, idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:${target.provider}`, correlationId: handoffId, kind: "notification" });
-            return;
-          }
-          const chatId = await getTelegramChatId(userId);
-          if (!chatId) return;
-          await channelGateway.send({ accountId: `account_${userId}`, userId, target: { provider: "telegram", conversationId: String(chatId) }, text: `${title}\n\n${resumed.output}`, idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:telegram`, correlationId: handoffId, kind: "notification" });
+          await deliverSubagentResult({
+            userId, handoffId, workflowRunId: workflow.workflowRunId, title, output: resumed.output,
+            target, telegramChatId: target ? undefined : await getTelegramChatId(userId),
+            send: (message) => channelGateway.send(message),
+          });
         });
         return;
       }
@@ -2454,13 +2452,16 @@ async function main(): Promise<void> {
           approvalPolicy: record.delegation.approvalPolicy,
           timeoutSeconds: record.delegation.timeoutSeconds,
           maxToolCalls: record.delegation.maxToolCalls,
+          duration: record.delegation.duration,
+          budgetSeconds: record.delegation.budgetSeconds,
         }, {
           resume: {
             handoffId: record.id,
             taskId: record.taskId,
             workflowRunId: workflow.workflowRunId,
-            resumeCount: (record.resumeCount ?? 0) + 1,
+          resumeCount: (record.resumeCount ?? 0) + 1,
           },
+          deliveryTarget: record.context?.deliveryTarget as ReminderDeliveryTarget | undefined,
         });
       });
 
@@ -2471,20 +2472,14 @@ async function main(): Promise<void> {
       }
 
       await workflow.run("deliver-resumed-worker-result", async () => {
-        const chatId = await getTelegramChatId(userId);
-        if (!chatId || !resumed.output.trim()) return;
+        const resumedRecord = await getHandoffRecord(userId, handoffId);
+        const target = resumedRecord?.context?.deliveryTarget as ReminderDeliveryTarget | undefined;
         const title = resumed.status === "success" ? "✅ Worker task completed" : "⚠️ Worker task update";
-        for (const [index, chunk] of splitHtml(mdToTelegramHtml(`${title}\n\n${resumed.output}`), 3900).entries()) {
-          await channelGateway.send({
-            accountId: `account_${userId}`,
-            userId,
-            target: { provider: "telegram", conversationId: String(chatId) },
-            text: chunk,
-            idempotencyKey: `subagent:${handoffId}:${workflow.workflowRunId ?? "resume"}:telegram:${chatId}:${index}`,
-            correlationId: handoffId,
-            kind: "notification",
-          });
-        }
+        await deliverSubagentResult({
+          userId, handoffId, workflowRunId: workflow.workflowRunId, title, output: resumed.output,
+          target, telegramChatId: target ? undefined : await getTelegramChatId(userId),
+          send: (message) => channelGateway.send(message),
+        });
       });
     }, { url: subagentWorkflowUrl() }));
 

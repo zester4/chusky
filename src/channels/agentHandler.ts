@@ -21,6 +21,7 @@ import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 import { sharedGroupInstructions } from "./groupInstructions.js";
 import { formatInboundMessageForAgent } from "./conversations.js";
+import { resumeApprovedDelegation } from "../subagents/executor.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -174,6 +175,17 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
   if (approval.triggerEventId) {
     await notifyTriggerApproval(approval.id, true, approval.triggerEventId);
     return reply(conversation, "✅ Approved. Chusky is resuming the triggered workflow.", message.providerEventId, { kind: "approval", correlationId: approvalId });
+  }
+  if (approval.handoffId) {
+    try {
+      const resumed = await resumeApprovedDelegation(conversation.userId, approval.id);
+      const outcome = resumed.status === "success"
+        ? `✅ Approved worker action completed.\n\n${resumed.output}`
+        : `⚠️ The approved worker action did not complete (${resumed.status}).\n\n${resumed.output}`;
+      return reply(conversation, outcome.slice(0, 4000), message.providerEventId, { kind: "approval", correlationId: approvalId });
+    } catch {
+      return reply(conversation, `⚠️ Approval was recorded, but the worker action could not resume. Inspect the task status before trying again.`, message.providerEventId, { kind: "approval", correlationId: approvalId });
+    }
   }
   try {
     // Resume with the scope and identity captured when the approval was

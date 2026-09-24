@@ -9,7 +9,7 @@ export const SELF_SERVICE_PROJECT_SCOPES = [
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
   "tools:read", "skills:read", "artifacts:read", "artifacts:write",
   "videos:read", "videos:write", "workers:read", "workers:write",
-  "channels:read", "channels:write", "devices:read", "devices:write", "activity:read", "deliveries:read", "account:read",
+  "channels:read", "channels:write", "devices:read", "devices:write", "activity:read", "deliveries:read", "deliveries:write", "account:read",
   "account:write", "apps:read", "apps:write", "triggers:read",
   "triggers:write", "reminders:read", "reminders:write", "jobs:read",
   "jobs:write", "memory:read", "memory:write", "scratchpad:read",

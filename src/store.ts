@@ -928,7 +928,7 @@ export interface ExternalActionReceipt {
   /** Whether the server successfully attached trusted mission proof. */
   missionEvidenceStatus?: "persisted" | "failed";
   missionEvidenceError?: string;
-  status: "started" | "succeeded" | "failed";
+  status: "started" | "succeeded" | "failed" | "ambiguous";
   resultSummary?: string;
   providerId?: string;
   error?: string;
@@ -961,6 +961,7 @@ export interface ScheduledWorkerBinding {
   maxToolCalls: number;
   duration?: WorkerDuration;
   budgetSeconds?: number;
+  maxTotalToolCalls?: number;
 }
 
 export interface JobRecord {
@@ -1270,7 +1271,7 @@ export interface OutboxRecord {
   attachments?: InboundMessage["attachments"];
   correlationId?: string;
   kind: "message" | "approval" | "notification" | "receipt";
-  status: "queued" | "delivering" | "delivered" | "failed";
+  status: "queued" | "delivering" | "delivered" | "failed" | "ambiguous";
   attempts: number;
   leaseToken?: string;
   leaseExpiresAt?: number;
@@ -1341,6 +1342,7 @@ interface Backend {
   listAgentRuns(userId: number, limit?: number): Promise<AgentRunRecord[]>;
   getHandoffRecord(userId: number, id: string): Promise<HandoffRecord | undefined>;
   saveHandoffRecord(record: HandoffRecord & { userId: number }): Promise<HandoffRecord>;
+  claimHandoffBudget(userId: number, id: string, kind: "tool" | "peer"): Promise<boolean>;
   listHandoffRecords(userId: number, limit?: number): Promise<HandoffRecord[]>;
   incrRate(userId: number): Promise<number>;
   acquireLock(userId: number, token: string, leaseSeconds: number): Promise<boolean>;
@@ -1879,12 +1881,46 @@ class RedisBackend implements Backend {
   }
   async saveHandoffRecord(input: HandoffRecord & { userId: number }): Promise<HandoffRecord> {
     const record = { ...input, context: input.context ?? {} };
+    await this.r.eval(`
+      local previous = redis.call('GET', KEYS[1])
+      local next = cjson.decode(ARGV[1])
+      if previous then
+        local current = cjson.decode(previous)
+        if current.userId ~= nil and current.userId ~= next.userId then return redis.error_reply('handoff owner mismatch') end
+        if current.rootHandoffId and not next.rootHandoffId then next.rootHandoffId = current.rootHandoffId end
+        if current.delegation and next.delegation then
+          for _, field in ipairs({'sharedToolCallsUsed', 'peerHandoffsUsed'}) do
+            local oldValue = tonumber(current.delegation[field] or 0)
+            local newValue = tonumber(next.delegation[field] or 0)
+            if oldValue > newValue then next.delegation[field] = oldValue end
+          end
+        end
+      end
+      redis.call('SET', KEYS[1], cjson.encode(next), 'EX', ARGV[2])
+      return 1
+    `, 1, this.handoffKey(record.id), JSON.stringify(record), WORKER_RUN_TTL_SECONDS);
     await this.r.multi()
-      .set(this.handoffKey(record.id), JSON.stringify(record), "EX", WORKER_RUN_TTL_SECONDS)
       .zadd(this.handoffIndexKey(record.userId), record.timestamp, record.id)
       .expire(this.handoffIndexKey(record.userId), WORKER_RUN_TTL_SECONDS)
       .exec();
     return record;
+  }
+  async claimHandoffBudget(userId: number, id: string, kind: "tool" | "peer"): Promise<boolean> {
+    const field = kind === "tool" ? "sharedToolCallsUsed" : "peerHandoffsUsed";
+    const limitField = kind === "tool" ? "maxTotalToolCalls" : "maxPeerHandoffs";
+    const result = await this.r.eval(`
+      local raw = redis.call('GET', KEYS[1])
+      if not raw then return 0 end
+      local record = cjson.decode(raw)
+      if tonumber(record.userId or -1) ~= tonumber(ARGV[1]) or not record.delegation then return 0 end
+      local used = tonumber(record.delegation['${field}'] or 0)
+      local limit = tonumber(record.delegation['${limitField}'] or 0)
+      if used >= limit then return 0 end
+      record.delegation['${field}'] = used + 1
+      redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ARGV[2])
+      return 1
+    `, 1, this.handoffKey(id), userId, WORKER_RUN_TTL_SECONDS);
+    return Number(result) === 1;
   }
   async listHandoffRecords(userId: number, limit = 100): Promise<HandoffRecord[]> {
     const ids = await this.r.zrevrange(this.handoffIndexKey(userId), 0, Math.max(0, limit - 1));
@@ -2577,6 +2613,12 @@ class RedisBackend implements Backend {
       const record = JSON.parse(raw) as OutboxRecord;
       const now = Date.now();
       if (record.status === "delivered" || (record.status === "delivering" && (record.leaseExpiresAt ?? 0) > now)) { await this.r.unwatch(); return undefined; }
+      if (record.status === "delivering") {
+        const uncertain = { ...record, status: "ambiguous" as const, lastError: "The provider outcome is uncertain after a worker interruption. Check the destination before manually retrying.", leaseToken: undefined, leaseExpiresAt: undefined, updatedAt: now };
+        const result = await this.r.multi().set(key, JSON.stringify(uncertain), "EX", 30 * 24 * 60 * 60).zrem(this.outboxPendingIndexKey("delivering"), id).exec();
+        if (result) return undefined;
+        continue;
+      }
       const next = { ...record, status: "delivering" as const, attempts: record.attempts + 1, leaseToken: randomUUID(), leaseExpiresAt: now + leaseMs, updatedAt: now };
       const result = await this.r.multi()
         .set(key, JSON.stringify(next), "EX", 30 * 24 * 60 * 60)
@@ -2880,8 +2922,26 @@ class MemoryBackend implements Backend {
     const prior = this.handoffs.get(record.id);
     const latest = [...this.handoffs.values()].filter((item) => item.userId === record.userId && item.id !== record.id).reduce((max, item) => Math.max(max, item.timestamp), 0);
     const next = { ...record, context: record.context ?? {}, timestamp: prior ? record.timestamp : Math.max(record.timestamp, latest + 1) };
+    if (prior) {
+      next.rootHandoffId ??= prior.rootHandoffId;
+      if (next.delegation && prior.delegation) {
+        next.delegation.sharedToolCallsUsed = Math.max(next.delegation.sharedToolCallsUsed ?? 0, prior.delegation.sharedToolCallsUsed ?? 0);
+        next.delegation.peerHandoffsUsed = Math.max(next.delegation.peerHandoffsUsed ?? 0, prior.delegation.peerHandoffsUsed ?? 0);
+      }
+    }
     this.handoffs.set(record.id, next);
     return next;
+  }
+  async claimHandoffBudget(userId: number, id: string, kind: "tool" | "peer") {
+    const record = this.handoffs.get(id);
+    if (record?.userId !== userId || !record.delegation) return false;
+    const usedField = kind === "tool" ? "sharedToolCallsUsed" : "peerHandoffsUsed";
+    const limitField = kind === "tool" ? "maxTotalToolCalls" : "maxPeerHandoffs";
+    const used = record.delegation[usedField] ?? 0;
+    const limit = record.delegation[limitField] ?? 0;
+    if (used >= limit) return false;
+    record.delegation[usedField] = used + 1;
+    return true;
   }
   async listHandoffRecords(userId: number, limit = 100) {
     return [...this.handoffs.values()].filter((record) => record.userId === userId).sort((a, b) => b.timestamp - a.timestamp).slice(0, limit);
@@ -3363,6 +3423,10 @@ class MemoryBackend implements Backend {
     const record = this.outbox.get(id);
     const now = Date.now();
     if (!record || record.status === "delivered" || (record.status === "delivering" && (record.leaseExpiresAt ?? 0) > now)) return undefined;
+    if (record.status === "delivering") {
+      this.outbox.set(id, { ...record, status: "ambiguous", lastError: "The provider outcome is uncertain after a worker interruption. Check the destination before manually retrying.", leaseToken: undefined, leaseExpiresAt: undefined, updatedAt: now });
+      return undefined;
+    }
     const next = { ...record, status: "delivering" as const, attempts: record.attempts + 1, leaseToken: randomUUID(), leaseExpiresAt: now + leaseMs, updatedAt: now };
     this.outbox.set(id, next);
     return next;
@@ -3683,7 +3747,7 @@ function normalizeExternalAction(value: unknown, uid: number): ExternalActionRec
   const input = value as Record<string, unknown>;
   if (input.userId !== uid || typeof input.id !== "string" || typeof input.tool !== "string" || typeof input.argumentsHash !== "string" || typeof input.logicalActionId !== "string") return undefined;
   if (input.provider !== "composio" && input.provider !== "mcp" && input.provider !== "native") return undefined;
-  if (input.status !== "started" && input.status !== "succeeded" && input.status !== "failed") return undefined;
+  if (input.status !== "started" && input.status !== "succeeded" && input.status !== "failed" && input.status !== "ambiguous") return undefined;
   return {
     id: input.id.slice(0, 160), userId: uid, provider: input.provider, tool: input.tool.slice(0, 180),
     ...(typeof input.account === "string" ? { account: input.account.slice(0, 160) } : {}), argumentsHash: input.argumentsHash.slice(0, 128), logicalActionId: input.logicalActionId.slice(0, 240),
@@ -3929,6 +3993,11 @@ export async function listPhoneCalls(uid: number): Promise<PhoneCallRecord[]> {
 export async function saveHandoffRecord(uid: number, record: HandoffRecord): Promise<HandoffRecord> {
   await backend.saveHandoffRecord({ ...record, userId: uid });
   return record;
+}
+
+/** Atomically consume one owner-scoped budget unit from the durable root handoff. */
+export async function claimHandoffBudget(uid: number, rootHandoffId: string, kind: "tool" | "peer"): Promise<boolean> {
+  return backend.claimHandoffBudget(uid, rootHandoffId, kind);
 }
 
 export async function listHandoffRecords(uid: number): Promise<HandoffRecord[]> {
@@ -5876,6 +5945,79 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
     }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
   }
   return value;
+}
+
+/**
+ * Save the authoritative structured memory and its searchable context node in
+ * one owner-session write. The vector index remains a best-effort projection;
+ * it can be rebuilt from the persisted memory if indexing is unavailable.
+ */
+export async function upsertMemoryAndContext(
+  uid: number,
+  memory: Omit<MemoryFact, "id" | "updatedAt" | "createdAt" | "source" | "sensitivity"> & Partial<Pick<MemoryFact, "id" | "createdAt" | "source" | "sensitivity">>,
+  contextInput: Partial<ContextNodeRecord> & Pick<ContextNodeRecord, "scope" | "kind" | "key" | "value">,
+): Promise<{ memory: MemoryFact; context: ContextNodeRecord }> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) throw new Error("Memory owner is invalid");
+  const scopes: ContextScope[] = ["user", "organization", "department", "project", "mission", "meeting", "conversation", "channel"];
+  const kinds: ContextNodeRecord["kind"][] = ["memory", "decision", "preference", "objective", "open_loop", "tool_receipt", "artifact", "meeting", "message", "fact", "relationship"];
+  if (!scopes.includes(contextInput.scope) || !kinds.includes(contextInput.kind)) throw new Error("Context scope or kind is invalid");
+
+  const session = await getSession(uid);
+  const now = Date.now();
+  const existingMemory = session.memories.find((item) => (memory.id && item.id === memory.id) || (!memory.id && item.category === memory.category && item.key === memory.key));
+  const savedMemory: MemoryFact = {
+    id: existingMemory?.id ?? memory.id ?? `mem_${now}_${Math.random().toString(36).slice(2, 8)}`,
+    category: memory.category,
+    key: memory.key,
+    value: memory.value,
+    confidence: Math.max(0, Math.min(1, memory.confidence)),
+    source: memory.source || "user",
+    sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
+    reviewAt: Number.isFinite(memory.reviewAt) ? memory.reviewAt : undefined,
+    expiresAt: Number.isFinite(memory.expiresAt) ? memory.expiresAt : undefined,
+    createdAt: existingMemory?.createdAt ?? memory.createdAt ?? now,
+    updatedAt: now,
+  };
+  const savedContext: ContextNodeRecord = {
+    id: contextInput.id && /^ctx_[A-Za-z0-9_-]{1,96}$/.test(contextInput.id) ? contextInput.id : `ctx_${randomUUID()}`,
+    userId: uid,
+    scope: contextInput.scope,
+    ...(contextInput.scopeId ? { scopeId: contextInput.scopeId.slice(0, 180) } : {}),
+    kind: contextInput.kind,
+    key: contextInput.key.trim().slice(0, 240),
+    value: contextInput.value.trim().slice(0, 20_000),
+    ...(contextInput.source ? { source: contextInput.source.slice(0, 500) } : {}),
+    ...(contextInput.sourceRef ? { sourceRef: contextInput.sourceRef.slice(0, 500) } : {}),
+    confidence: Math.max(0, Math.min(1, Number.isFinite(contextInput.confidence) ? Number(contextInput.confidence) : 1)),
+    sensitivity: contextInput.sensitivity === "sensitive" ? "sensitive" : "normal",
+    tags: [...new Set((contextInput.tags ?? []).filter((tag): tag is string => typeof tag === "string").map((tag) => tag.trim().slice(0, 80)).filter(Boolean))].slice(0, 20),
+    createdAt: contextInput.createdAt ?? now,
+    updatedAt: now,
+    ...(contextInput.reviewAt ? { reviewAt: contextInput.reviewAt } : {}),
+    ...(contextInput.expiresAt ? { expiresAt: contextInput.expiresAt } : {}),
+  };
+  const contextIdentity = `${savedContext.scope}:${savedContext.scopeId ?? ""}:${savedContext.kind}:${savedContext.key}`;
+  const previousContext = session.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
+  if (previousContext) {
+    savedContext.id = previousContext.id;
+    savedContext.createdAt = previousContext.createdAt;
+  }
+  savedContext.sourceRef = savedMemory.id;
+  session.memories = [...session.memories.filter((item) => item.id !== savedMemory.id && !(item.category === savedMemory.category && item.key === savedMemory.key)), savedMemory].slice(-200);
+  session.contextNodes = previousContext
+    ? (session.contextNodes ?? []).map((item) => item.id === previousContext.id ? savedContext : item)
+    : [savedContext, ...(session.contextNodes ?? [])].slice(0, 1000);
+  await saveSession(uid, session);
+
+  if (vectorConfigured()) {
+    const vector = new UpstashKnowledgeStore();
+    void vector.upsertMemory({ userId: String(uid), id: savedMemory.id, category: savedMemory.category, key: savedMemory.key, value: savedMemory.value, projectId: savedMemory.projectId, personKey: savedMemory.personKey }).then(async () => {
+      if (existingMemory?.projectId && existingMemory.projectId !== savedMemory.projectId) await vector.deleteMemory(String(uid), existingMemory.id, existingMemory.projectId);
+    }).catch((error) => { recordVectorFailure(error, { phase: "memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: uid }, "Memory vector indexing unavailable; structured memory retained"); });
+  }
+  return { memory: savedMemory, context: savedContext };
 }
 
 export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {

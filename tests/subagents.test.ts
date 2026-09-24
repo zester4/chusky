@@ -1,9 +1,11 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { delegationStartedStatus, executeDelegation } from "../src/subagents/executor.js";
+import { delegationStartedStatus, executeDelegation, resumeApprovedDelegation, setSubagentExecutorDependenciesForTests } from "../src/subagents/executor.js";
 import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
-import { initStore, getSession, listHandoffRecords, listTasks, createMission } from "../src/store.js";
+import { initStore, getSession, listHandoffRecords, listTasks, createMission, claimApproval, claimHandoffBudget } from "../src/store.js";
+import { config } from "../src/config.js";
+import { UnavailableComposioToolsError } from "../src/agent.js";
 
 beforeEach(async () => {
   await initStore({ memoryOnly: true });
@@ -26,6 +28,21 @@ test("validates capability registry manifests for all worker capabilities", () =
     assert.ok(cap.systemPrompt.length > 20);
     assert.ok(cap.reflectionChecklist.length > 0);
   }
+});
+
+test("worker scopes reject generic Composio execution and remote-shell meta-tools", () => {
+  for (const worker of Object.keys(WORKER_CAPABILITIES).filter((name) => name !== "chusky") as Array<keyof typeof WORKER_CAPABILITIES>) {
+    for (const slug of ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_BASH_TOOL", "COMPOSIO_REMOTE_WORKBENCH"]) {
+      assert.equal(isComposioToolAllowedForWorker(worker, slug), false, `${worker} must not receive ${slug}`);
+      assert.equal(WORKER_CAPABILITIES[worker].starterComposioTools.includes(slug), false);
+    }
+  }
+});
+
+test("the supervisor cannot self-approve a worker action", async () => {
+  await assert.rejects(
+    nativeTool(991013, "CHUCK_REVIEW_SUBAGENT_ACTION", { approvalId: "approval-test", decision: "approve" }),
+  );
 });
 
 test("declares the intended worker-to-skill map", () => {
@@ -68,16 +85,19 @@ test("gives Nora only scoped Composio research-provider families", () => {
   for (const tool of ["TAVILY_SEARCH", "EXA_SEARCH", "FIRECRAWL_SCRAPE"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be allowed for Nora when Chusky verifies it`);
   }
-  for (const tool of ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"]) {
+  for (const tool of ["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), true, `${tool} should be scoped to Nora`);
+  }
+  for (const tool of ["COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"]) {
+    assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} can escape Nora's exact action scope`);
   }
   assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOLS"), false, "Nora must request tool discovery from Chusky");
   assert.equal(isComposioToolAllowedForWorker("nora", "COMPOSIO_SEARCH_TOOL"), false, "Nora must not use the legacy search alias");
   for (const tool of ["GITHUB_CREATE_PULL_REQUEST"]) {
     assert.equal(isComposioToolAllowedForWorker("nora", tool), false, `${tool} must not be available to Nora`);
   }
-  assert.match(nora.systemPrompt, /Tavily or Exa/);
-  assert.match(nora.systemPrompt, /Firecrawl/);
+  assert.match(nora.systemPrompt, /exact Composio actions explicitly delegated/);
+  assert.match(nora.systemPrompt, /Never guess a tool slug/);
 });
 
 test("normalizes generic web search aliases into the canonical Composio scope", () => {
@@ -219,8 +239,27 @@ test("lets a worker request, but never self-grant, a missing capability", async 
   assert.equal(result.toolCallsLog[0]?.result && (result.toolCallsLog[0].result as { requested?: boolean }).requested, true);
 });
 
-test("resumes the same durable worker task and handoff after a scoped tool decision", async () => {
+test("resumes the same durable worker task and runs the model with the newly scoped action", async () => {
   const userId = 991011;
+  const previousApiKey = config.openRouterApiKey;
+  let modelRounds = 0;
+  let resumedMessages: unknown[] = [];
+  let resumedTools: unknown[] = [];
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    getScopedComposioTools: async () => ({
+      tools: [{ type: "function", function: { name: "GITHUB_CREATE_PULL_REQUEST", parameters: { type: "object", properties: {} } } }],
+      missing: [],
+      execute: async () => ({ ok: true }),
+    }),
+    chat: async (_model, messages, tools) => {
+      modelRounds += 1;
+      resumedMessages = messages;
+      resumedTools = tools;
+      return { choices: [{ message: { role: "assistant", content: "The scoped action is available and the worker continued." }, finish_reason: "stop" }] } as any;
+    },
+  });
+  try {
   const paused = await executeDelegation(userId, {
     worker: "lucas",
     objective: "Prepare a verified pull-request plan",
@@ -244,9 +283,71 @@ test("resumes the same durable worker task and handoff after a scoped tool decis
     resume: { handoffId: paused.handoffRecord!.id, taskId: paused.taskId!, workflowRunId: "subagent-tools-test-1", resumeCount: 1 },
   });
   assert.equal(resumed.status, "success");
+  assert.equal(modelRounds, 1);
+  assert.ok(resumedTools.some((tool: any) => tool.function.name === "GITHUB_CREATE_PULL_REQUEST"));
+  assert.match(String((resumedMessages[0] as { content: unknown }).content), /GITHUB_CREATE_PULL_REQUEST/);
   assert.equal(resumed.taskId, paused.taskId);
   assert.equal(resumed.handoffRecord?.id, paused.handoffRecord?.id);
   assert.equal(resumed.handoffRecord?.resumeCount, 1);
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
+});
+
+test("an unavailable explicitly granted Composio action pauses for supervisor recovery", async () => {
+  const previousApiKey = config.openRouterApiKey;
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    getScopedComposioTools: async () => { throw new UnavailableComposioToolsError(["GITHUB_CREATE_PULL_REQUEST"]); },
+  });
+  try {
+    const result = await executeDelegation(991012, {
+      worker: "lucas",
+      objective: "Prepare a pull request",
+      allowedComposioTools: ["GITHUB_CREATE_PULL_REQUEST"],
+    });
+    assert.equal(result.status, "requires_tool_request");
+    assert.match(result.toolRequest?.intent ?? "", /GITHUB_CREATE_PULL_REQUEST/);
+    assert.ok(result.taskId);
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
+});
+
+test("owner approval resumes the exact stored worker action once", async () => {
+  const userId = 991014;
+  const previousApiKey = config.openRouterApiKey;
+  const executions: Array<Record<string, unknown>> = [];
+  config.openRouterApiKey = "test-openrouter-key";
+  setSubagentExecutorDependenciesForTests({
+    getScopedComposioTools: async () => ({
+      tools: [{ type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", properties: {} } } }],
+      missing: [],
+      execute: async (_slug, args) => { executions.push(args); return { deleted: true }; },
+    }),
+  });
+  try {
+    const proposal = await executeDelegation(userId, {
+      worker: "lucas",
+      objective: "Remove the GitHub repository for the approved cleanup action",
+      allowedComposioTools: ["GITHUB_DELETE_REPOSITORY"],
+      context: { toolCall: { name: "GITHUB_DELETE_REPOSITORY", args: { owner: "sample", repo: "test-repo" } } },
+    });
+    assert.equal(proposal.status, "requires_approval");
+    assert.ok(proposal.approvalId);
+    assert.equal(executions.length, 0);
+    assert.ok(await claimApproval(userId, proposal.approvalId!));
+
+    const resumed = await resumeApprovedDelegation(userId, proposal.approvalId!);
+    assert.equal(resumed.status, "success");
+    assert.deepEqual(executions, [{ owner: "sample", repo: "test-repo" }]);
+    assert.equal((await getSession(userId)).approvals.find((approval) => approval.id === proposal.approvalId)?.status, "consumed");
+  } finally {
+    config.openRouterApiKey = previousApiKey;
+    setSubagentExecutorDependenciesForTests();
+  }
 });
 
 test("executes typed delegation contract for Lucas with tool execution in boundary", async () => {
@@ -358,6 +459,22 @@ test("supports five-minute worker budgets for simple tasks", async () => {
   assert.equal(result.handoffRecord?.delegation?.budgetSeconds, 5 * 60);
 });
 
+test("does not report a completed worker delegation as cancelled", async () => {
+  const userId = 991051;
+  const finished = await executeDelegation(userId, {
+    worker: "lucas",
+    objective: "Read one bounded scratchpad item",
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "nothing" } } },
+  });
+  assert.equal(finished.status, "success");
+  const handoff = (await listHandoffRecords(userId))[0];
+  assert.ok(handoff);
+  const result = await nativeTool(userId, "CHUCK_CANCEL_SUBAGENT", { id: handoff!.id }) as { cancellationRequested: boolean; cancelled: boolean; status: string };
+  assert.equal(result.cancellationRequested, false);
+  assert.equal(result.cancelled, false);
+  assert.equal(result.status, "success");
+});
+
 test("lets a delegated worker start a validated outbound call without an approval pause", async () => {
   const userId = 991004;
   // Sofia attempts risky tool CHUCK_START_PHONE_CALL
@@ -432,6 +549,7 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
   const result = await executeDelegation(userId, {
     worker: "lucas",
     objective: "Hand off visual branding task to Leo",
+    maxTotalToolCalls: 1,
     context: {
       toolCall: {
         name: "CHUCK_HANDOFF_SUBAGENT",
@@ -439,6 +557,7 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
           targetWorker: "leo",
           objective: "Generate product marketing graphic",
           expectedOutput: "Marketing banner image asset",
+          context: { toolCall: { name: "CHUCK_SCRATCHPAD_WRITE", args: { key: "peer-budget-test", content: "must not run" } } },
         },
       },
     },
@@ -447,7 +566,26 @@ test("executes peer handoff between domain workers via CHUCK_HANDOFF_SUBAGENT", 
   assert.equal(result.status, "success");
   const handoffs = await listHandoffRecords(userId);
   assert.ok(handoffs.length >= 2);
-  assert.ok(handoffs.some((handoff) => handoff.to === "leo"));
+  const peerHandoff = handoffs.find((handoff) => handoff.to === "leo");
+  assert.ok(peerHandoff);
+  assert.equal(peerHandoff.from, "lucas");
+  assert.equal(peerHandoff.delegationDepth, 1);
+  assert.equal(peerHandoff.status, "max_tool_calls_exceeded");
+  assert.equal(peerHandoff.delegation?.allowedTools.includes("CHUCK_HANDOFF_SUBAGENT"), false);
+  assert.deepEqual(peerHandoff.delegation?.allowedTools.slice().sort(), [
+    "CHUCK_LIST_SKILL_FILES",
+    "CHUCK_READ_SKILL_FILE",
+    "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+    "CHUCK_SCRATCHPAD_READ",
+    "CHUCK_SCRATCHPAD_WRITE",
+    "CHUCK_SEARCH_SKILLS",
+  ]);
+  const rootHandoff = handoffs.find((handoff) => handoff.id === peerHandoff.rootHandoffId);
+  assert.ok(rootHandoff);
+  assert.equal(rootHandoff.delegation?.sharedToolCallsUsed, 1);
+  assert.equal(rootHandoff.delegation?.peerHandoffsUsed, 1);
+  assert.equal(await claimHandoffBudget(userId, rootHandoff.id, "tool"), false);
+  assert.equal(await claimHandoffBudget(userId, rootHandoff.id, "peer"), false);
 });
 
 test("emits real-time status update callbacks to Telegram during execution", async () => {

@@ -1,3 +1,4 @@
+//src/nativeTools.ts
 import { Client as QStashClient } from "@upstash/qstash";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
@@ -7,12 +8,12 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import {
-  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders,
+  addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, writeScratchpad,
-  forgetMemory, searchMemories, updateMemory, upsertMemory,
-  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, claimApproval, setApprovalStatus, updateTask, getHandoffRecord,
+  forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
@@ -48,6 +49,7 @@ import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
+import { validateNativeToolArguments } from "./agentTools.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -86,6 +88,10 @@ export interface NativeToolRuntime {
   /** Present only when a specialist is executing its own native tool call. */
   worker?: Exclude<import("./memory/types.js").CapabilityWorkerName, "chusky">;
   workerBinding?: Omit<ScheduledWorkerBinding, "worker" | "objective">;
+  /** Server-only peer delegation lineage propagated by the worker executor. */
+  handoffId?: string;
+  rootHandoffId?: string;
+  delegationDepth?: number;
   /** Present only for an authenticated Recall meeting run. */
   meetingId?: string;
   /** Private relationship preparation must never run from a shared channel. */
@@ -209,11 +215,46 @@ async function runDelegationWithDurableContinuation(
   contract: Parameters<typeof executeDelegation>[1],
   runtime: NativeToolRuntime,
 ): Promise<unknown> {
+  if (runtime.worker) {
+    if ((runtime.delegationDepth ?? 0) >= 1) {
+      throw new Error("Peer handoff depth is limited to one specialist-to-specialist hop. Return the blocker to Chusky for further coordination.");
+    }
+    const rootHandoffId = runtime.rootHandoffId ?? runtime.handoffId;
+    if (!rootHandoffId || !(await claimHandoffBudget(userId, rootHandoffId, "peer"))) {
+      throw new Error("The shared specialist peer-handoff budget is exhausted or unavailable. Return the blocker to Chusky for further coordination.");
+    }
+    const target = WORKER_CAPABILITIES[contract.worker];
+    const parentNativeTools = runtime.workerBinding?.allowedTools ?? [];
+    const parentComposioTools = runtime.workerBinding?.allowedComposioTools ?? [];
+    const requestedNativeTools = contract.allowedTools ?? parentNativeTools;
+    const requestedComposioTools = contract.allowedComposioTools ?? parentComposioTools;
+    contract = {
+      ...contract,
+      // A peer receives only the intersection of the parent's current grant
+      // and the target worker's manifest, even when the model supplies a
+      // broader CHUCK_DELEGATE_SUBAGENT contract.
+      allowedTools: requestedNativeTools.filter((tool) => parentNativeTools.includes(tool)
+        && target?.allowedTools.includes(tool) && tool !== "CHUCK_HANDOFF_SUBAGENT"),
+      allowedComposioTools: requestedComposioTools.filter((slug) => parentComposioTools.includes(slug)
+        && isComposioToolAllowedForWorker(contract.worker, slug)),
+      timeoutSeconds: Math.min(60, runtime.workerBinding?.timeoutSeconds ?? 60, contract.timeoutSeconds ?? 60),
+      maxToolCalls: Math.min(20, runtime.workerBinding?.maxToolCalls ?? 20, contract.maxToolCalls ?? 20),
+      duration: runtime.workerBinding?.duration ?? "30m",
+      budgetSeconds: Math.min(300, runtime.workerBinding?.budgetSeconds ?? 300, contract.budgetSeconds ?? 300),
+      maxTotalToolCalls: runtime.workerBinding?.maxTotalToolCalls ?? 200,
+    };
+  }
   const durableTarget = durableReminderTarget(runtime.deliveryTarget);
   const durableContext = durableTarget && !contract.context?.deliveryTarget
     ? { ...(contract.context ?? {}), deliveryTarget: durableTarget }
     : contract.context;
-  const result = await executeDelegation(userId, { ...contract, context: durableContext }, runtime);
+  const result = await executeDelegation(userId, { ...contract, context: durableContext }, {
+    ...runtime,
+    parentHandoffId: runtime.worker ? runtime.handoffId : undefined,
+    rootHandoffId: runtime.worker ? runtime.rootHandoffId ?? runtime.handoffId : undefined,
+    parentWorker: runtime.worker,
+    delegationDepth: runtime.worker ? (runtime.delegationDepth ?? 0) + 1 : 0,
+  });
   if (result.status !== "requires_tool_request" || !result.handoffRecord) return result;
   const continuation = await enqueueSubagentToolContinuation(userId, result.handoffRecord.id);
   return { ...result, durableContinuation: { queued: true, ...continuation } };
@@ -296,36 +337,18 @@ async function runPlannedDelegation(
   };
 }
 
-async function reviewSubagentAction(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
+async function reviewSubagentAction(userId: number, args: Record<string, unknown>): Promise<unknown> {
   const approvalId = text(args.approvalId);
   const decision = String(args.decision ?? "").toLowerCase();
-  if (decision !== "approve" && decision !== "deny") throw new Error("decision must be approve or deny");
+  if (decision !== "deny") throw new Error("Only the account owner can approve a specialist action using its explicit approval controls.");
   const approval = await getApproval(userId, approvalId);
   if (!approval?.handoffId || approval.status !== "pending" || approval.expiresAt <= Date.now()) throw new Error("Subagent proposal is missing, expired, or already reviewed");
   const handoff = await getHandoffRecord(userId, approval.handoffId);
   if (!handoff?.taskId || !handoff.delegation) throw new Error("Subagent proposal is no longer attached to a durable handoff");
-  if (decision === "deny") {
-    await setApprovalStatus(userId, approvalId, "denied");
-    await updateTask(userId, handoff.taskId, { status: "blocked", error: "Chusky supervisor denied the proposed action.", nextAction: "Revise the plan or request a different action." });
-    await saveHandoffRecord(userId, { ...handoff, status: "failed" });
-    return { reviewed: true, decision, approvalId, taskId: handoff.taskId };
-  }
-  if (!(await claimApproval(userId, approvalId))) throw new Error("Subagent proposal could not be claimed for review");
-  const result = await executeDelegation(userId, {
-    worker: handoff.to as any,
-    objective: handoff.objective,
-    context: { ...handoff.context, supervisorReview: true },
-    expectedOutput: handoff.expectedOutput,
-    model: handoff.delegation.model,
-    allowedTools: handoff.delegation.allowedTools,
-    allowedComposioTools: handoff.delegation.allowedComposioTools,
-    approvalPolicy: handoff.delegation.approvalPolicy,
-    timeoutSeconds: handoff.delegation.timeoutSeconds,
-    maxToolCalls: handoff.delegation.maxToolCalls,
-    duration: handoff.delegation.duration,
-    budgetSeconds: handoff.delegation.budgetSeconds,
-  }, { approvedApprovalId: approvalId, resume: { handoffId: handoff.id, taskId: handoff.taskId, resumeCount: (handoff.resumeCount ?? 0) + 1 }, model: runtime.model });
-  return { reviewed: true, decision, approvalId, result };
+  if (!(await setApprovalStatus(userId, approvalId, "denied"))) throw new Error("Subagent proposal could not be denied safely");
+  await updateTask(userId, handoff.taskId, { status: "blocked", error: "The account owner denied the proposed action.", nextAction: "Revise the plan or request a different action." });
+  await saveHandoffRecord(userId, { ...handoff, status: "failed" });
+  return { reviewed: true, decision, approvalId, taskId: handoff.taskId };
 }
 
 function attentionKind(value: unknown): AttentionEntityKind {
@@ -752,6 +775,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
   if (slug === "CHUCK_REVIEW_SUBAGENT_ACTION" && runtime.worker) {
     throw new Error("Only Chusky can review specialist actions.");
   }
+  validateNativeToolArguments(slug, args);
   switch (slug) {
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
@@ -775,10 +799,31 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SAVE_MEMORY": {
       if (args.sensitivity !== "normal" && args.sensitivity !== "sensitive") throw new Error("sensitivity is required when saving memory");
       const category = (args.category as string) ?? "fact";
-      const memory = await upsertMemory(userId, { category: category as any, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : undefined, confidence: Number(args.confidence ?? 1), sensitivity: args.sensitivity, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt), expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt) });
       const contextKind = ["preference", "relationship", "fact", "decision", "objective", "open_loop"].includes(category) ? category : "memory";
-      const context = await upsertContextNode(userId, { scope: args.projectId ? "project" : "user", ...(args.projectId ? { scopeId: text(args.projectId) } : {}), kind: contextKind as never, key: text(args.key), value: text(args.value), source: args.source ? text(args.source) : "CHUCK_SAVE_MEMORY", sourceRef: memory.id, sensitivity: args.sensitivity, confidence: Number(args.confidence ?? 1), ...(args.reviewAt !== undefined ? { reviewAt: Number(args.reviewAt) } : {}), ...(args.expiresAt !== undefined ? { expiresAt: Number(args.expiresAt) } : {}) });
-      return { ...memory, contextNodeId: context.id };
+      const saved = await upsertMemoryAndContext(userId, {
+        category: category as any,
+        key: text(args.key),
+        value: text(args.value),
+        source: args.source ? text(args.source) : undefined,
+        confidence: Number(args.confidence ?? 1),
+        sensitivity: args.sensitivity,
+        projectId: args.projectId ? text(args.projectId) : undefined,
+        personKey: args.personKey ? text(args.personKey) : undefined,
+        reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt),
+        expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt),
+      }, {
+        scope: args.projectId ? "project" : "user",
+        ...(args.projectId ? { scopeId: text(args.projectId) } : {}),
+        kind: contextKind as never,
+        key: text(args.key),
+        value: text(args.value),
+        source: args.source ? text(args.source) : "CHUCK_SAVE_MEMORY",
+        sensitivity: args.sensitivity,
+        confidence: Number(args.confidence ?? 1),
+        ...(args.reviewAt !== undefined ? { reviewAt: Number(args.reviewAt) } : {}),
+        ...(args.expiresAt !== undefined ? { expiresAt: Number(args.expiresAt) } : {}),
+      });
+      return { ...saved.memory, contextNodeId: saved.context.id, contextIndexed: true };
     }
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
     case "CHUCK_UPDATE_MEMORY": {
@@ -1117,7 +1162,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_VERIFY": {
-      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: args.verifiedBy === "human" || args.verifiedBy === "agent" ? args.verifiedBy : "agent" });
+      // Model-authored tool calls cannot attest that a human verified the work.
+      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");
       return mission;
     }
@@ -1378,6 +1424,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         objective: text(args.objective),
         context: (args.context as any) ?? {},
         expectedOutput: args.expectedOutput ? String(args.expectedOutput) : undefined,
+        allowedTools: runtime.workerBinding?.allowedTools.filter((tool) =>
+          WORKER_CAPABILITIES[args.targetWorker as keyof typeof WORKER_CAPABILITIES]?.allowedTools.includes(tool) && tool !== "CHUCK_HANDOFF_SUBAGENT"
+        ) ?? [],
+        allowedComposioTools: runtime.workerBinding?.allowedComposioTools.filter((slug) => isComposioToolAllowedForWorker(args.targetWorker as any, slug)),
+        timeoutSeconds: runtime.workerBinding ? Math.min(60, runtime.workerBinding.timeoutSeconds) : undefined,
+        maxToolCalls: runtime.workerBinding ? Math.min(20, runtime.workerBinding.maxToolCalls) : 20,
+        duration: runtime.workerBinding?.duration ?? "30m",
+        budgetSeconds: runtime.workerBinding?.budgetSeconds === undefined ? 300 : Math.min(300, runtime.workerBinding.budgetSeconds),
+        maxTotalToolCalls: runtime.workerBinding?.maxTotalToolCalls,
       }, runtime);
     case "CHUCK_PLAN_DELEGATION":
       if (runtime.worker) throw new Error("CHUCK_PLAN_DELEGATION is reserved for Chusky, the supervisor.");
@@ -1393,7 +1448,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST":
       return resolveSubagentToolRequest(userId, text(args.handoffId), stringList(args.allowedComposioTools, "allowedComposioTools"));
     case "CHUCK_REVIEW_SUBAGENT_ACTION":
-      return reviewSubagentAction(userId, args, runtime);
+      return reviewSubagentAction(userId, args);
     case "CHUCK_LIST_SUBAGENTS": {
       const limit = args.limit === undefined ? 20 : Math.max(1, Math.min(50, Math.floor(Number(args.limit))));
       const records = await listHandoffRecords(userId);
@@ -1417,7 +1472,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const record = records.find((r) => r.id === id);
       if (!record) throw new Error("Handoff record not found or not owned by you");
       const updated = await requestDelegationCancellation(userId, id, reason);
-      return { cancelled: true, id, worker: record.to, reason, taskId: updated?.taskId };
+      if (!updated) return { cancellationRequested: false, cancelled: false, status: record.status, id, worker: record.to, reason: "This delegation has already finished and was not cancelled.", taskId: record.taskId };
+      return { cancellationRequested: true, cancelled: false, status: updated.status, id, worker: record.to, reason, taskId: updated.taskId, note: "Cancellation was requested; the worker may need a short time to stop and settle its durable task." };
     }
     default: throw new Error(`Unknown native tool: ${slug}`);
   }

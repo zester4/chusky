@@ -117,6 +117,7 @@ export type BrowserVerificationResult = {
   passed: boolean;
   matched: string[];
   missing: string[];
+  detectors: Array<{ index: number; required: boolean; passed: boolean; matched: string[]; missing: string[] }>;
 };
 
 export function browserSessionIsRevoked(input: { status: string; expiresAt?: number }, now = Date.now()): boolean {
@@ -203,21 +204,36 @@ export function verifyBrowserResult(input: { currentUrl?: string; title?: string
   const text = input.text?.trim().toLowerCase() ?? "";
   const matched: string[] = [];
   const missing: string[] = [];
-  for (const detector of (input.detectors ?? []).slice(0, 12)) {
+  const detectors = input.detectors ?? [];
+  if (!Array.isArray(detectors)) throw new Error("detectors must be an array");
+  const detectorResults: BrowserVerificationResult["detectors"] = [];
+  for (const [index, rawDetector] of detectors.slice(0, 12).entries()) {
+    if (!rawDetector || typeof rawDetector !== "object" || Array.isArray(rawDetector)) throw new Error(`detectors[${index}] must be an object`);
+    const detector = rawDetector as BrowserDetector;
+    for (const [key, value] of Object.entries(detector)) {
+      if (!["urlIncludes", "titleIncludes", "textIncludes", "required"].includes(key)) throw new Error(`detectors[${index}].${key} is not supported`);
+      if (key === "required" ? typeof value !== "boolean" : typeof value !== "string") throw new Error(`detectors[${index}].${key} has an invalid type`);
+    }
+    const detectorMatched: string[] = [];
+    const detectorMissing: string[] = [];
     const checks = [
       detector.urlIncludes ? { label: `url contains '${detector.urlIncludes}'`, value: currentUrl, expected: detector.urlIncludes.toLowerCase() } : undefined,
       detector.titleIncludes ? { label: `title contains '${detector.titleIncludes}'`, value: title, expected: detector.titleIncludes.toLowerCase() } : undefined,
       detector.textIncludes ? { label: `page text contains '${detector.textIncludes}'`, value: text, expected: detector.textIncludes.toLowerCase() } : undefined,
     ].filter((check): check is { label: string; value: string; expected: string } => Boolean(check));
-    if (!checks.length) continue;
-    const hit = checks.some((check) => check.value.includes(check.expected));
-    (hit ? matched : missing).push(...checks.map((check) => check.label));
+    if (checks.length) {
+      // A detector is an OR across its URL/title/text alternatives. Each
+      // detector is then ANDed with the other required detectors.
+      const matchedChecks = checks.filter((check) => check.value.includes(check.expected));
+      const failedChecks = checks.filter((check) => !check.value.includes(check.expected));
+      detectorMatched.push(...matchedChecks.map((check) => check.label));
+      detectorMissing.push(...failedChecks.map((check) => check.label));
+      if (matchedChecks.length) matched.push(...detectorMatched);
+      else missing.push(...detectorMissing);
+    }
+    detectorResults.push({ index, required: detector.required !== false, passed: checks.length === 0 || detectorMatched.length > 0, matched: detectorMatched, missing: detectorMissing });
   }
-  const requiredCount = (input.detectors ?? []).filter((detector) => detector.required !== false && (detector.urlIncludes || detector.titleIncludes || detector.textIncludes)).length;
-  const requiredMissing = (input.detectors ?? []).filter((detector) => detector.required !== false && (detector.urlIncludes || detector.titleIncludes || detector.textIncludes)).some((detector) => {
-    return ![detector.urlIncludes && currentUrl.includes(detector.urlIncludes.toLowerCase()), detector.titleIncludes && title.includes(detector.titleIncludes.toLowerCase()), detector.textIncludes && text.includes(detector.textIncludes.toLowerCase())].some(Boolean);
-  });
-  return { passed: requiredCount === 0 || !requiredMissing, matched, missing };
+  return { passed: detectorResults.every((detector) => !detector.required || detector.passed), matched, missing, detectors: detectorResults };
 }
 
 export function sessionHealth(input: { service: string; accountAlias?: string; origin: string; workspaceId: string; status: string; lastUsedAt?: number; expiresAt?: number }): BrowserSessionHealth {

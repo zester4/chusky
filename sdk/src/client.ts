@@ -394,6 +394,7 @@ export class ActivityResource {
   constructor(private readonly client: Chusky) {}
   get(since?: number, options?: RequestOptions): Promise<Activity> { return this.client.request(`/activity${since ? `?since=${since}` : ""}`, {}, options); }
   deliveries(options?: RequestOptions): Promise<Page<Delivery>> { return this.client.request("/deliveries", {}, options); }
+  confirmDeliveryDelivered(deliveryId: string, options?: RequestOptions): Promise<Delivery> { return this.client.request(`/deliveries/${encodeURIComponent(deliveryId)}/confirm-delivered`, { method: "POST" }, options); }
 }
 
 export class AccountResource {

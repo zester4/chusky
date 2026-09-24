@@ -1,3 +1,4 @@
+//src/policy.ts
 import { composioMetadataPolicy } from "./composioRisk.js";
 
 // Routine communications and content publishing are autonomous. Keep the

@@ -31,6 +31,17 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("SDK can owner-confirm an ambiguous delivery without triggering a resend", async () => {
+  let request: { url: string; method: string; userId: string } | undefined;
+  const sdk = new Chusky({ apiKey: "chsk_test", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    request = { url, method: init?.method ?? "GET", userId: new Headers(init?.headers).get("x-chusky-user-id") ?? "" };
+    return new Response(JSON.stringify({ id: "out_123", provider: "slack", status: "delivered", kind: "message", attempts: 1, providerStatus: "owner_confirmed_delivered", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:02.000Z", deliveredAt: "2026-01-01T00:00:02.000Z", durationMs: 2000 }), { status: 200 });
+  }) });
+  const receipt = await sdk.activity.confirmDeliveryDelivered("out_123");
+  assert.equal(receipt.providerStatus, "owner_confirmed_delivered");
+  assert.deepEqual(request, { url: "https://example.test/v1/deliveries/out_123/confirm-delivered", method: "POST", userId: "customer_1" });
+});
+
 test("company SDK provisions agents and creates a durable profile-governed run", async () => {
   const calls: Array<{ url: string; headers: Headers; method: string; body: string }> = [];
   const sdk = new Chusky({ apiKey: "chsk_company_key", userId: "account-42", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

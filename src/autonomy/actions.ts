@@ -27,7 +27,7 @@ export function isExternalWriteTool(tool: string): boolean {
 }
 
 export interface ExternalActionClaim {
-  state: "new" | "succeeded" | "in_flight";
+  state: "new" | "succeeded" | "in_flight" | "ambiguous";
   receipt?: ExternalActionReceipt;
   logicalActionId: string;
 }
@@ -44,7 +44,20 @@ export async function beginExternalAction(input: {
   const logicalActionId = [input.source?.kind ?? "run", input.source?.id ?? input.runId, input.source?.occurrenceId ?? "single", input.tool, argumentsHash].join(":").slice(0, 240);
   const existing = await getExternalAction(input.userId, logicalActionId);
   if (existing?.status === "succeeded") return { state: "succeeded", receipt: existing, logicalActionId };
-  const claimed = await claimDelivery(`autonomy:external-action:${input.userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`, 30 * 60 * 1000);
+  const deliveryKey = `autonomy:external-action:${input.userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`;
+  if (existing?.status === "ambiguous" || existing?.status === "failed") return { state: "ambiguous", receipt: existing, logicalActionId };
+  // A process may die after the provider accepts a write but before the
+  // success receipt is persisted. Once the execution lease expires, never
+  // replay that started action automatically; quarantine it for reconciliation.
+  if (existing?.status === "started" && Date.now() - existing.updatedAt >= 30 * 60 * 1000) {
+    const ambiguous = await updateExternalAction(input.userId, logicalActionId, {
+      status: "ambiguous",
+      error: "The provider outcome is uncertain. Verify the provider state before manually retrying this action.",
+    });
+    await completeDelivery(deliveryKey, 365 * 24 * 60 * 60);
+    return { state: "ambiguous", receipt: ambiguous ?? existing, logicalActionId };
+  }
+  const claimed = await claimDelivery(deliveryKey, 30 * 60 * 1000);
   if (!claimed) return { state: "in_flight", receipt: existing, logicalActionId };
   const receipt = await saveExternalAction({
     id: existing?.id ?? `act_${createHash("sha256").update(`${input.userId}:${logicalActionId}`).digest("hex").slice(0, 48)}`,
@@ -89,5 +102,9 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
 }
 
 export async function failExternalAction(userId: number, logicalActionId: string, error: string): Promise<void> {
-  await updateExternalAction(userId, logicalActionId, { status: "failed", error: error.slice(0, 1_000) });
+  await updateExternalAction(userId, logicalActionId, {
+    status: "ambiguous",
+    error: `The provider outcome is uncertain; verify the provider state before manually retrying. ${error}`.slice(0, 1_000),
+  });
+  await completeDelivery(`autonomy:external-action:${userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
 }

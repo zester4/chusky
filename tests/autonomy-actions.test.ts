@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { beginExternalAction, finishExternalAction, isExternalWriteTool } from "../src/autonomy/actions.js";
+import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool } from "../src/autonomy/actions.js";
 import { completeMissionStep, createMission, getMission, initStore, startMission } from "../src/store.js";
 
 test("autonomous external action receipts make successful provider writes idempotent", async () => {
@@ -11,6 +11,18 @@ test("autonomous external action receipts make successful provider writes idempo
   const replay = await beginExternalAction({ userId: 950001, provider: "composio", tool: "GMAIL_SEND_EMAIL", args: { subject: "Hello", to: "a@example.com" }, runId: "run-retry", source: { kind: "job", id: "job_1", occurrenceId: "occ_1" } });
   assert.equal(replay.state, "succeeded");
   assert.match(replay.receipt?.resultSummary ?? "", /providerId/);
+});
+
+test("an uncertain external-write failure is quarantined instead of replayed", async () => {
+  await initStore({ memoryOnly: true });
+  const input = { userId: 950003, provider: "composio" as const, tool: "GMAIL_SEND_EMAIL", args: { to: "a@example.com", subject: "May already have sent" }, runId: "run-ambiguous", source: { kind: "mission", id: "mis_ambiguous", missionStepId: "send" } };
+  const first = await beginExternalAction(input);
+  assert.equal(first.state, "new");
+  await failExternalAction(input.userId, first.logicalActionId, "Provider response was lost after request submission");
+
+  const retry = await beginExternalAction({ ...input, runId: "run-retry" });
+  assert.equal(retry.state, "ambiguous");
+  assert.match(retry.receipt?.error ?? "", /verify.*provider|provider.*verify/i);
 });
 test("external write classification leaves reads and checkpoints replay-safe", () => {
   assert.equal(isExternalWriteTool("GMAIL_SEND_EMAIL"), true);

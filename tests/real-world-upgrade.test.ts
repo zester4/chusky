@@ -5,6 +5,7 @@ import { contextPrompt, selectContext, upsertContextNode } from "../src/contextG
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
 import { scheduleMissionSteps } from "../src/missionScheduler.js";
+import { nativeTool } from "../src/nativeTools.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
@@ -90,6 +91,13 @@ test("strict missions cannot be completed before independent verification", asyn
   await verifyMission(userId, mission.id);
   const completed = await completeMission(userId, mission.id, "Outcome verified");
   assert.equal(completed?.status, "completed");
+});
+
+test("native mission verification cannot claim a human verifier", async () => {
+  const userId = 972050;
+  const mission = await createMission(userId, { title: "Attribution", objective: "Verify metadata", definitionOfDone: "Verification is recorded" });
+  const result = await nativeTool(userId, "CHUCK_MISSION_VERIFY", { id: mission.id }) as { verification?: { verifiedBy?: string } };
+  assert.equal(result.verification?.verifiedBy, "agent");
 });
 
 test("terminal task failure reconciles the linked mission step and mission status", async () => {

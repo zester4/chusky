@@ -30,3 +30,8 @@ test("Telegram owners cannot rotate or revoke another user's key", async () => {
   assert.equal(await revokeTelegramProject(810002, created.id), true);
   assert.deepEqual(await listTelegramProjects(810002), []);
 });
+
+test("developer keys can request a dedicated delivery confirmation scope", async () => {
+  const created = await createTelegramProject(810004, "Delivery monitor", ["deliveries:read", "deliveries:write"]);
+  assert.deepEqual(created.scopes, ["deliveries:read", "deliveries:write"]);
+});

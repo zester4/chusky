@@ -155,6 +155,13 @@ test("browser verification requires every required detector and returns no page 
   assert.equal(failed.passed, false);
   assert.match(failed.missing.join(" "), /order confirmed/i);
   assert.equal(Object.hasOwn(failed, "text"), false);
+  assert.throws(() => verifyBrowserResult({ detectors: [null as never] }), /detectors\[0\] must be an object/);
+  const alternatives = verifyBrowserResult({ title: "Payment complete", detectors: [{ titleIncludes: "payment", textIncludes: "confirmation", required: true }] });
+  assert.equal(alternatives.passed, true);
+  assert.equal(alternatives.detectors[0]?.passed, true);
+  assert.match(alternatives.detectors[0]?.matched.join(" ") ?? "", /title contains 'payment'/i);
+  assert.match(alternatives.detectors[0]?.missing.join(" ") ?? "", /page text contains 'confirmation'/i);
+  assert.deepEqual(alternatives.missing, []);
 });
 
 test("browser handoffs are durable, owner-scoped, expiring, and require verification", async () => {

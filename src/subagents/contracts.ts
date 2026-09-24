@@ -30,6 +30,8 @@ export interface DelegationContract {
   maxToolCalls: number;
   duration?: WorkerDuration;
   budgetSeconds?: number;
+  /** Shared across every continuation and peer in this handoff tree. */
+  maxTotalToolCalls?: number;
 }
 
 export type DelegationStatus =
@@ -54,6 +56,11 @@ export interface HandoffRecord {
   expectedOutput: string;
   timestamp: number;
   status: DelegationStatus;
+  /** Server-recorded lineage for bounded peer delegation and audit. */
+  parentHandoffId?: string;
+  /** Root handoff whose shared tool and peer-spawn budgets govern this tree. */
+  rootHandoffId?: string;
+  delegationDepth?: number;
   taskId?: string;
   toolRequest?: { intent: string; reason: string; preferredToolkit?: string };
   workflowRunId?: string;
@@ -70,6 +77,10 @@ export interface HandoffRecord {
     maxToolCalls: number;
     duration?: WorkerDuration;
     budgetSeconds?: number;
+    maxTotalToolCalls?: number;
+    maxPeerHandoffs?: number;
+    sharedToolCallsUsed?: number;
+    peerHandoffsUsed?: number;
     startedAt?: number;
     continuationCount?: number;
   };

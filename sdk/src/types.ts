@@ -57,7 +57,7 @@ export interface CompanyAuditEvent { id: string; action: string; requestId: stri
 export interface CompanyUsagePeriod { month: string; completedRuns: number; costUsd: number; }
 export interface CompanyUsage { currentMonth: CompanyUsagePeriod; periods: CompanyUsagePeriod[]; runs: { indexed: number; active: number }; }
 export interface Webhook { id: string; url: string; createdAt: string; secret?: string; }
-export interface WebhookDelivery { id: string; status: "queued" | "delivering" | "delivered" | "failed"; attempts: number; lastError?: string; createdAt: string; deliveredAt?: string; }
+export interface WebhookDelivery { id: string; status: "queued" | "delivering" | "delivered" | "failed" | "ambiguous"; attempts: number; lastError?: string; createdAt: string; deliveredAt?: string; }
 export interface DeveloperProject { id: string; name: string; keyPrefix: string; scopes: string[]; createdAt: string; revokedAt?: string; key?: string; }
 export interface Usage { messages: number; cost: number; files: { count: number; declaredBytes: number; available: number }; runs: { count: number; active: number }; tasks: { count: number }; }
 export type AutonomyMode = "notify" | "check_in" | "act" | "wait_until";
@@ -372,7 +372,7 @@ export interface Worker { id: string; worker: string; from: string; objective: s
 export interface ChannelConnection { provider: string; externalUserId: string; workspaceId?: string; displayName?: string; verifiedAt: string; proactiveOptIn: boolean; }
 export type LinkableChannelProvider = "slack" | "whatsapp" | "sendblue";
 export interface Activity { now: number; approvals: Approval[]; tasks: Task[]; reminders: JsonObject[]; jobs: JsonObject[]; }
-export interface Delivery { id: string; provider: string; status: string; kind: string; attempts: number; providerStatus?: string; lastError?: string; createdAt: string; updatedAt: string; deliveredAt?: string; }
+export interface Delivery { id: string; provider: string; status: "queued" | "delivering" | "delivered" | "failed" | "ambiguous"; kind: string; attempts: number; providerStatus?: string; lastError?: string; durationMs?: number; createdAt: string; updatedAt: string; deliveredAt?: string; }
 
 export type RunStreamEvent =
   | { type: "run.queued"; run: Run }

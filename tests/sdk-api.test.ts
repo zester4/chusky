@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
+import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
@@ -7,7 +8,7 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationA
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -24,6 +25,39 @@ afterEach(() => setPhoneCallLauncherForTests());
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
+
+test("owner can confirm an ambiguous channel delivery only after checking the destination", async () => {
+  const externalId = "delivery-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const record = await enqueueOutbox({ idempotencyKey: "delivery-ambiguous-1", accountId: `sdk:${userId}`, userId, provider: "slack", conversationId: "D1", text: "possibly delivered", kind: "message" });
+  await updateOutbox(record.id, { status: "ambiguous", lastError: "Check provider." });
+  const api = app();
+  const ownerHeaders = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId };
+  const confirmed = await api.fetch(new Request(`http://local/v1/deliveries/${record.id}/confirm-delivered`, { method: "POST", headers: ownerHeaders }));
+  assert.equal(confirmed.status, 200);
+  const confirmation = await confirmed.json() as { status: string; providerStatus: string; durationMs?: number };
+  assert.equal(confirmation.status, "delivered");
+  assert.equal(confirmation.providerStatus, "owner_confirmed_delivered");
+  assert.ok(typeof confirmation.durationMs === "number");
+  assert.equal((await getOutbox(record.id))?.providerStatus, "owner_confirmed_delivered");
+
+  const replay = await api.fetch(new Request(`http://local/v1/deliveries/${record.id}/confirm-delivered`, { method: "POST", headers: ownerHeaders }));
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json() as { id: string }).id, record.id);
+
+  const other = await api.fetch(new Request(`http://local/v1/deliveries/${record.id}/confirm-delivered`, { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "someone-else" } }));
+  assert.equal(other.status, 404);
+});
+
+test("delivery confirmation cannot hide a record that is not ambiguous", async () => {
+  const externalId = "delivery-still-running-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const record = await enqueueOutbox({ idempotencyKey: "delivery-queued-1", accountId: `sdk:${userId}`, userId, provider: "slack", conversationId: "D1", text: "not sent yet", kind: "message" });
+  const api = app();
+  const response = await api.fetch(new Request(`http://local/v1/deliveries/${record.id}/confirm-delivered`, { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId } }));
+  assert.equal(response.status, 409);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "delivery_not_ambiguous");
+});
 
 test("SDK run artifacts expose downloadable metadata without workspace paths or bytes", () => {
   const artifacts = sdkRunArtifacts([{ artifactId: "artifact_pdf_1", name: "proposal.pdf", contentType: "application/pdf", type: "pdf", data: Buffer.from("pdf-bytes") }]);

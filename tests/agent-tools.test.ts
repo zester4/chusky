@@ -132,3 +132,17 @@ test("normalizes recoverable PDF section argument shapes before validation", () 
   validateNativeToolArguments("CHUCK_CREATE_PDF", encoded);
   assert.deepEqual(encoded.sections, [{ heading: "Summary", body: "Ready." }]);
 });
+
+test("native tool validation enforces nested JSON-schema constraints", () => {
+  assert.throws(() => validateNativeToolArguments("CHUCK_MEETING_CONTEXT_PREPARE", { clientName: "x".repeat(121) }), /clientName.*maxLength/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_REPLACE_FILES", { files: [], pattern: "x", newValue: "y" }), /files.*minItems/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_EVIDENCE", { id: "m1", evidence: [null] }), /evidence\[0\].*object/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_EVIDENCE", { id: "m1", evidence: [{ kind: "not-a-kind", summary: "x", verified: false }] }), /evidence\[0\]\.kind.*unsupported/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_CREATE_SPREADSHEET", { title: "x", sheets: [{ name: "Sheet", rows: [], formulas: [{ cell: "A1", formula: "SUM(A2:A3)", expectedValue: {} }] }] }), /expectedValue.*string or number or boolean/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_GENERATE_IMAGE", { prompt: "x", count: 1.5 }), /count.*integer/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_GENERATE_IMAGE", { prompt: "x", count: 11 }), /count.*maximum|count.*at most/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_ATTENTION_STATE", { action: "list", kind: "autonomy_watch", toolSlugs: ["not a slug"] }), /toolSlugs\[0\].*pattern/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_TASK_LIST", null as never), /arguments must be an object/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_VERIFY", { id: "m1", verifiedBy: "human" }), /verifiedBy.*not allowed/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { detectors: [{ password: "no" }] }), /password.*not allowed/i);
+});

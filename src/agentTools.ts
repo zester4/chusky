@@ -73,7 +73,7 @@ const baseChuckTools = [
   { type: "function", function: { name: "CHUCK_ATTENTION_STATE", description: "Read or explicitly update Chusky's durable attention state: observations, open loops, attention candidates, standing orders, delivery preferences, relationships, project states, personal/business autonomy watches, and autonomy profiles. Do not invent monitoring or permissions; only persist a watch or profile when the owner explicitly asks for it.", parameters: { type: "object", properties: {
     action: { type: "string", enum: ["create", "list", "update"] }, kind: { type: "string", enum: ["observation", "open_loop", "attention_candidate", "standing_order", "delivery_preference", "relationship", "project_state", "autonomy_watch", "autonomy_profile"] }, id: { type: "string" }, query: { type: "string" }, status: { type: "string" }, limit: { type: "number" },
     source: { type: "string" }, eventType: { type: "string" }, summary: { type: "string" }, title: { type: "string" }, objective: { type: "string" }, dueAt: { type: "number" }, priority: { type: "number" }, confidence: { type: "number" }, importance: { type: "number" }, novelty: { type: "number" }, reason: { type: "string" }, proposedAction: { type: "string" }, candidateType: { type: "string", enum: ["nudge", "digest", "prepare", "ask", "act"] },
-    name: { type: "string" }, instruction: { type: "string" }, authority: { type: "string", enum: ["observe", "prepare", "execute_reversible"] }, scope: { type: "array", items: { type: "string" } }, provider: { type: "string" }, conversationId: { type: "string" }, enabled: { type: "boolean" }, mode: { type: "string", enum: ["immediate", "digest", "silent"] },
+    name: { type: "string" }, instruction: { type: "string" }, authority: { type: "string", enum: ["observe", "prepare", "execute_reversible"] }, scope: { type: "array", items: { type: "string" } }, provider: { type: "string" }, conversationId: { type: "string" }, enabled: { type: "boolean" }, mode: { type: "string", enum: ["immediate", "digest", "silent", "personal", "business"] },
     personKey: { type: "string" }, projectKey: { type: "string" }, role: { type: "string" }, notes: { type: "string" }, currentPhase: { type: "string" }, nextAction: { type: "string" }, blockers: { type: "array", items: { type: "string" } }, lastInteractionAt: { type: "number" }, lastActivityAt: { type: "number" },
     domain: { type: "string" }, toolkit: { type: "string" }, connectedAccountId: { type: "string", maxLength: 200 }, accountAlias: { type: "string", maxLength: 120 }, queryText: { type: "string" }, toolSlugs: { type: "array", items: { type: "string", pattern: "^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$" }, maxItems: 20 }, cursor: { type: "string" }, cadenceSeconds: { type: "number", minimum: 300, maximum: 2592000 }, maxItems: { type: "number", minimum: 1, maximum: 100 }, maxChecksPerDay: { type: "number", minimum: 0, maximum: 1000 }, maxAutonomousActionsPerDay: { type: "number", minimum: 0, maximum: 1000 }, notifyOn: { type: "string", enum: ["important", "changes", "all", "silent"] }, allowedDomains: { type: "array", items: { type: "string" } }, deniedDomains: { type: "array", items: { type: "string" } }, quietHoursUtc: { type: "object" },
   }, required: ["action", "kind"] } } },
@@ -108,7 +108,7 @@ const baseChuckTools = [
   { type: "function", function: { name: "CHUCK_MISSION_BLOCK", description: "Block an autonomous mission when a dependency, permission, or human decision prevents safe progress. Preserve the verified checkpoint and exact next action.", parameters: { type: "object", properties: { id: { type: "string" }, reason: { type: "string", maxLength: 2000 }, nextAction: { type: "string", maxLength: 2000 } }, required: ["id", "reason"] } } },
   { type: "function", function: { name: "CHUCK_MISSION_COMPLETE", description: "Complete an autonomous mission only after its definition of done has been verified and the result is available.", parameters: { type: "object", properties: { id: { type: "string" }, result: { type: "string", maxLength: 12000 } }, required: ["id", "result"] } } },
   { type: "function", function: { name: "CHUCK_MISSION_EVIDENCE", description: "Attach bounded, source-backed evidence to an owned mission or step. Evidence can be a source, tool receipt, artifact, assertion, before/after record, or human confirmation. Server-observed system evidence is recorded automatically from trusted execution receipts.", parameters: { type: "object", properties: { id: { type: "string" }, stepId: { type: "string" }, evidence: { type: "array", maxItems: 20, items: { type: "object", properties: { kind: { type: "string", enum: ["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"] }, summary: { type: "string", maxLength: 2000 }, source: { type: "string", maxLength: 500 }, ref: { type: "string", maxLength: 500 }, hash: { type: "string", maxLength: 128 }, verified: { type: "boolean" }, verifiedBy: { type: "string", enum: ["agent", "human"] } }, required: ["kind", "summary", "verified"] } } }, required: ["id", "evidence"] } } },
-  { type: "function", function: { name: "CHUCK_MISSION_VERIFY", description: "Verify an owned mission's definition of done against completed steps and attached evidence. Use before claiming a high-value mission is complete. System verification is reserved for server-observed evidence and cannot be requested by the model.", parameters: { type: "object", properties: { id: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" }, maxItems: 50 }, confidence: { type: "number", minimum: 0, maximum: 1 }, verifiedBy: { type: "string", enum: ["agent", "human"] } }, required: ["id"] } } },
+  { type: "function", function: { name: "CHUCK_MISSION_VERIFY", description: "Verify an owned mission's definition of done against completed steps and attached evidence. Use before claiming a high-value mission is complete. This records agent verification; only an authenticated human confirmation or trusted server-observed evidence can attest to human/system verification.", parameters: { type: "object", properties: { id: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" }, maxItems: 50 }, confidence: { type: "number", minimum: 0, maximum: 1 } }, required: ["id"], additionalProperties: false } } },
   { type: "function", function: { name: "CHUCK_MISSION_REPAIR", description: "Put an owned mission into an honest repair state after a failed assertion, provider error, or inconsistent result, preserving completed work and a concrete recovery action.", parameters: { type: "object", properties: { id: { type: "string" }, reason: { type: "string", maxLength: 2000 }, nextAction: { type: "string", maxLength: 2000 } }, required: ["id", "reason"] } } },
   { type: "function", function: { name: "CHUCK_CONTEXT_SEARCH", description: "Select owner-scoped context for a purpose instead of dumping all memory. Supports organization, department, project, mission, meeting, channel, and conversation scopes.", parameters: { type: "object", properties: { query: { type: "string", maxLength: 500 }, scope: { type: "string", enum: ["user", "organization", "department", "project", "mission", "meeting", "conversation", "channel"] }, scopeId: { type: "string", maxLength: 180 }, purpose: { type: "string", enum: ["planning", "execution", "meeting", "support", "sales", "reporting", "handoff"] }, limit: { type: "number", minimum: 1, maximum: 100 } } } } },
   { type: "function", function: { name: "CHUCK_CONTEXT_SAVE", description: "Save a durable, owner-scoped context node such as a decision, objective, preference, open loop, tool receipt, artifact, or department fact. Never save secrets unless explicitly requested.", parameters: { type: "object", properties: { scope: { type: "string", enum: ["user", "organization", "department", "project", "mission", "meeting", "conversation", "channel"] }, scopeId: { type: "string" }, kind: { type: "string", enum: ["memory", "decision", "preference", "objective", "open_loop", "tool_receipt", "artifact", "meeting", "message", "fact", "relationship"] }, key: { type: "string", maxLength: 240 }, value: { type: "string", maxLength: 20000 }, source: { type: "string" }, sourceRef: { type: "string" }, sensitivity: { type: "string", enum: ["normal", "sensitive"] }, confidence: { type: "number", minimum: 0, maximum: 1 }, tags: { type: "array", items: { type: "string" }, maxItems: 20 }, reviewAt: { type: "number" }, expiresAt: { type: "number" } }, required: ["scope", "kind", "key", "value", "sensitivity"] } } },
@@ -159,7 +159,7 @@ const baseChuckTools = [
   { type: "function", function: { name: "CHUCK_PLAN_DELEGATION", description: "Classify an objective across all matching capabilities and return a deterministic dependency plan before any worker is created. Use this for mixed requests such as build an app, create its marketing assets, and publish them; execute each returned step with its assigned worker and pass only the prior step's handoff.", parameters: { type: "object", properties: { objective: { type: "string", description: "Full objective to decompose" }, allowedTools: { type: "array", items: { type: "string" }, description: "Optional native tools that further clarify the capability" } }, required: ["objective"] } } },
   { type: "function", function: { name: "CHUCK_REQUEST_ADDITIONAL_TOOLS", description: "Worker-only escalation: request a missing capability from Chusky. Do not guess a Composio slug or search the catalogue yourself. State the user-facing intent, why the current allowed tools are insufficient, and an optional provider/toolkit. Chusky will decide whether to use COMPOSIO_SEARCH_TOOL, verify the user's connection, and resume this same paused worker with one narrowly scoped action. This tool never grants or executes a capability itself.", parameters: { type: "object", properties: { intent: { type: "string", description: "What action is needed, expressed as an intent rather than a guessed tool slug" }, reason: { type: "string", description: "Why the worker's current tools cannot complete the task" }, preferredToolkit: { type: "string", description: "Optional likely toolkit, such as github or slack; omit when uncertain" } }, required: ["intent", "reason"] } } },
   { type: "function", function: { name: "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST", description: "Supervisor-only durable continuation. After COMPOSIO_SEARCH_TOOL has identified and Chusky has verified exact connected action slugs, notify the specific worker workflow waiting for a tool decision. This resumes the same durable worker task; it never grants a broad toolkit or runs the external action itself.", parameters: { type: "object", properties: { handoffId: { type: "string" }, allowedComposioTools: { type: "array", minItems: 1, items: { type: "string" }, description: "Exact verified Composio action slugs, scoped to the waiting worker's role" } }, required: ["handoffId", "allowedComposioTools"] } } },
-  { type: "function", function: { name: "CHUCK_REVIEW_SUBAGENT_ACTION", description: "Supervisor-only review of a specialist risky-action proposal. Chusky must inspect the proposal returned by CHUCK_DELEGATE_SUBAGENT, then approve or deny it itself; this never asks the user for approval. Approving resumes the same durable handoff with the exact reviewed arguments.", parameters: { type: "object", properties: { approvalId: { type: "string" }, decision: { type: "string", enum: ["approve", "deny"] } }, required: ["approvalId", "decision"] } } },
+  { type: "function", function: { name: "CHUCK_REVIEW_SUBAGENT_ACTION", description: "Supervisor-only denial of a specialist risky-action proposal. The supervisor cannot approve its own proposal; the account owner must use the explicit approval controls. Denial stops the exact pending action.", parameters: { type: "object", properties: { approvalId: { type: "string" }, decision: { type: "string", enum: ["deny"] } }, required: ["approvalId", "decision"] } } },
   { type: "function", function: { name: "CHUCK_LIST_SUBAGENTS", description: "List recent subagent delegation handoff records. Use to answer 'What is Lucas doing?', 'Which agent failed?', or 'Show all active workers.'", parameters: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 50, description: "Max records to return; defaults to 20" } } } } },
   { type: "function", function: { name: "CHUCK_GET_SUBAGENT_STATUS", description: "Get full status, tool call log, and linked task details for a specific subagent delegation by handoff record ID.", parameters: { type: "object", properties: { id: { type: "string", description: "The handoff record ID" } }, required: ["id"] } } },
   { type: "function", function: { name: "CHUCK_CANCEL_SUBAGENT", description: "Cancel a worker delegation and its linked durable task by handoff record ID. Use when the user says 'cancel Dexter's task' or 'stop the browser agent'. Cannot interrupt mid-flight execution.", parameters: { type: "object", properties: { id: { type: "string", description: "The handoff record ID to cancel" }, reason: { type: "string", description: "Reason for cancellation" } }, required: ["id"] } } },
@@ -173,7 +173,7 @@ const shoppingAndBrowserTools = [
   { type: "function", function: { name: "CHUCK_BROWSER_PLAYBOOK_SAVE", description: "Save an owner-approved, origin-scoped browser login or task recipe. Recipes contain only accessible labels, safe detectors, and action names—never credentials, cookies, raw page content, or screenshots. Use after a verified successful flow.", parameters: { type: "object", properties: { service: { type: "string" }, origin: { type: "string" }, accountAlias: { type: "string" }, login: { type: "object" }, tasks: { type: "array", items: { type: "object" } } }, required: ["service", "origin", "login"] } } },
   { type: "function", function: { name: "CHUCK_BROWSER_PLAYBOOK_LIST", description: "List the caller's saved origin-scoped browser playbooks and safe verification metadata. It never returns credentials, cookies, screenshots, or raw page data.", parameters: { type: "object", properties: { origin: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 50 } } } } },
   { type: "function", function: { name: "CHUCK_BROWSER_PLAYBOOK_REMOVE", description: "Remove one of the caller's saved browser playbooks. This does not delete the website login or external account.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
-  { type: "function", function: { name: "CHUCK_BROWSER_VERIFY", description: "Verify a browser operation against bounded URL, title, or page-text detectors. After a private CAPTCHA/2FA handoff, pass its handoffId and at least one required detector; a passing verification is what re-authorizes the retained browser session. Pass only minimum page metadata—never credentials, cookies, or a full private page dump.", parameters: { type: "object", properties: { handoffId: { type: "string", description: "The private browser handoff ID returned by CHUCK_DAYTONA_BROWSER_HANDOFF or CHUCK_VAULT_LOGIN" }, currentUrl: { type: "string", maxLength: 500 }, title: { type: "string", maxLength: 300 }, text: { type: "string", maxLength: 5000 }, detectors: { type: "array", maxItems: 12, items: { type: "object", properties: { urlIncludes: { type: "string", maxLength: 300 }, titleIncludes: { type: "string", maxLength: 300 }, textIncludes: { type: "string", maxLength: 300 }, required: { type: "boolean" } } } } }, required: ["detectors"] } } },
+  { type: "function", function: { name: "CHUCK_BROWSER_VERIFY", description: "Verify a browser operation against bounded URL, title, or page-text detectors. Each detector passes when any supplied URL/title/text condition matches; all required detectors must pass. Results include per-detector evidence without returning full page content. After a private CAPTCHA/2FA handoff, pass its handoffId and at least one required detector; a passing verification is what re-authorizes the retained browser session. Pass only minimum page metadata—never credentials, cookies, or a full private page dump.", parameters: { type: "object", properties: { handoffId: { type: "string", description: "The private browser handoff ID returned by CHUCK_DAYTONA_BROWSER_HANDOFF or CHUCK_VAULT_LOGIN" }, currentUrl: { type: "string", maxLength: 500 }, title: { type: "string", maxLength: 300 }, text: { type: "string", maxLength: 5000 }, detectors: { type: "array", maxItems: 12, items: { type: "object", properties: { urlIncludes: { type: "string", maxLength: 300 }, titleIncludes: { type: "string", maxLength: 300 }, textIncludes: { type: "string", maxLength: 300 }, required: { type: "boolean" } }, additionalProperties: false } } }, required: ["detectors"] } } },
   { type: "function", function: { name: "CHUCK_BROWSER_AUDIT_LIST", description: "Show the caller's bounded, private browser activity log: site, safe action class, outcome, verification, and handoff states. It never includes credentials, cookies, raw page content, or full provider payloads.", parameters: { type: "object", properties: { limit: { type: "number", minimum: 1, maximum: 100 } } } } },
   { type: "function", function: { name: "CHUCK_BROWSER_HANDOFF_STATUS", description: "Inspect the caller's private browser handoff state without exposing the signed URL, cookies, challenge contents, or credentials. Use an id for one handoff or omit it for recent handoffs.", parameters: { type: "object", properties: { id: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 20 } } } } },
   { type: "function", function: { name: "CHUCK_BROWSER_HANDOFF_COMPLETE", description: "Acknowledge that the owner has finished the private CAPTCHA/2FA/browser step. This only moves the handoff to awaiting verification; inspect the retained same-origin page and call CHUCK_BROWSER_VERIFY with the handoffId before invoking or filling anything.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
@@ -207,7 +207,8 @@ pdfToolSchema.function.description += " Before registration, Chusky independentl
 export function validateNativeToolArguments(name: string, args: Record<string, unknown>): void {
   const tool = chuckTools.find((item) => item.function.name === name);
   if (!tool) throw new Error(`Unknown native tool: ${name}`);
-  const schema = tool.function.parameters as { required?: readonly string[]; properties?: Record<string, { type?: string; enum?: readonly (string | number)[]; items?: { type?: string } }> };
+  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} arguments must be an object`);
+  const schema = tool.function.parameters as JsonSchema;
   // A Python payload plus an existing interpreter context unambiguously means
   // "run". Keep create/list/delete explicit because they have different effects.
   if (name === "CHUCK_DAYTONA_CODE" && args.action === undefined && typeof args.code === "string" && args.code.trim() && typeof args.contextId === "string" && args.contextId.trim()) {
@@ -231,19 +232,87 @@ export function validateNativeToolArguments(name: string, args: Record<string, u
       args[key] = [value];
     }
   }
-  for (const key of schema.required ?? []) {
-    if (!(key in args) || args[key] === undefined || args[key] === null || (typeof args[key] === "string" && !args[key].trim())) throw new Error(`${name} requires argument: ${key}`);
+  const errors: string[] = [];
+  validateJsonSchema(args, schema, "", name, errors);
+  if (errors.length) throw new Error(errors[0]);
+}
+
+type JsonSchema = {
+  type?: string | readonly string[];
+  enum?: readonly unknown[];
+  required?: readonly string[];
+  properties?: Record<string, JsonSchema>;
+  items?: JsonSchema;
+  additionalProperties?: boolean | JsonSchema;
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  minProperties?: number;
+  maxProperties?: number;
+  pattern?: string;
+};
+
+function jsonSchemaTypeMatches(value: unknown, type: string): boolean {
+  switch (type) {
+    case "null": return value === null;
+    case "object": return typeof value === "object" && value !== null && !Array.isArray(value);
+    case "array": return Array.isArray(value);
+    case "integer": return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value);
+    case "number": return typeof value === "number" && Number.isFinite(value);
+    case "string": return typeof value === "string";
+    case "boolean": return typeof value === "boolean";
+    default: return false;
   }
-  for (const [key, rule] of Object.entries(schema.properties ?? {})) {
-    const value = args[key];
-    if (value === undefined || value === null || !rule.type) continue;
-    const valid = rule.type === "number" ? typeof value === "number" && Number.isFinite(value)
-      : rule.type === "string" ? typeof value === "string"
-      : rule.type === "boolean" ? typeof value === "boolean"
-      : rule.type === "array" ? Array.isArray(value) && (!rule.items?.type || value.every((item) => typeof item === rule.items?.type))
-      : rule.type === "object" ? typeof value === "object" && !Array.isArray(value) : true;
-    if (!valid) throw new Error(`${name}.${key} must be ${rule.type === "array" ? "an" : "a"} ${rule.type}`);
-    if (rule.enum && !rule.enum.includes(value as string | number)) throw new Error(`${name}.${key} has an unsupported value`);
+}
+
+function validateJsonSchema(value: unknown, schema: JsonSchema, path: string, toolName: string, errors: string[]): void {
+  const displayPath = path ? `${toolName}${path.startsWith("[") ? "" : "."}${path}` : toolName;
+  const types = schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type];
+  if (types.length && !types.some((type) => jsonSchemaTypeMatches(value, type))) {
+    errors.push(`${displayPath} must be ${types.join(" or ")}`);
+    return;
+  }
+  if (schema.enum && !schema.enum.some((allowed) => Object.is(allowed, value))) {
+    errors.push(`${displayPath} has an unsupported value`);
+    return;
+  }
+  if (typeof value === "number") {
+    if (schema.minimum !== undefined && value < schema.minimum) errors.push(`${displayPath} must be at least ${schema.minimum}`);
+    if (schema.maximum !== undefined && value > schema.maximum) errors.push(`${displayPath} must be at most ${schema.maximum}`);
+  }
+  if (typeof value === "string") {
+    if (schema.minLength !== undefined && value.length < schema.minLength) errors.push(`${displayPath} must have at least ${schema.minLength} characters`);
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) errors.push(`${displayPath} exceeds maxLength ${schema.maxLength}`);
+    if (schema.pattern !== undefined) {
+      let matches = false;
+      try { matches = new RegExp(schema.pattern).test(value); } catch { errors.push(`${toolName} has an invalid schema pattern at ${path}`); return; }
+      if (!matches) errors.push(`${displayPath} does not match the required pattern`);
+    }
+  }
+  if (Array.isArray(value)) {
+    if (schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${displayPath} must contain at least ${schema.minItems} items (minItems)`);
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${displayPath} exceeds maxItems ${schema.maxItems}`);
+    if (schema.items) value.forEach((item, index) => validateJsonSchema(item, schema.items!, `${path}[${index}]`, toolName, errors));
+  }
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Record<string, unknown>;
+    if (schema.minProperties !== undefined && Object.keys(object).length < schema.minProperties) errors.push(`${displayPath} must contain at least ${schema.minProperties} properties`);
+    if (schema.maxProperties !== undefined && Object.keys(object).length > schema.maxProperties) errors.push(`${displayPath} exceeds maxProperties ${schema.maxProperties}`);
+    for (const required of schema.required ?? []) {
+      if (!(required in object) || object[required] === undefined || object[required] === null || (typeof object[required] === "string" && !object[required].trim())) {
+        errors.push(`${displayPath} requires argument: ${required}`);
+      }
+    }
+    for (const [key, child] of Object.entries(object)) {
+      const childSchema = schema.properties?.[key];
+      const childPath = path ? `${path}.${key}` : key;
+      if (childSchema) validateJsonSchema(child, childSchema, childPath, toolName, errors);
+      else if (schema.additionalProperties === false) errors.push(`${toolName}.${childPath} is not allowed`);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") validateJsonSchema(child, schema.additionalProperties, childPath, toolName, errors);
+    }
   }
 }
 

@@ -17,7 +17,7 @@ import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channe
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, appendChannelConversationMessages, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, releaseUserLock, renewUserLock, setChannelConversationModel } from "../src/store.js";
+import { acquireUserLock, appendChannelConversationMessages, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
 
 test("channel approval resumes preserve shared privacy boundaries", () => {
@@ -483,6 +483,62 @@ test("outbox idempotency prevents duplicate provider sends and records receipts"
   // Delivered audit records must never be picked up by crash recovery.
   assert.equal(await outbox.recover(new Map([["slack", adapter]])), 0);
   assert.equal(adapter.sent.length, 1);
+});
+
+test("an uncertain channel send is not retried or replayed by recovery", async () => {
+  const adapter = new FakeAdapter();
+  let providerCalls = 0;
+  adapter.send = async (message: OutboundMessage) => {
+    providerCalls++;
+    adapter.sent.push(message);
+    // Simulates the provider accepting a message while the response is lost.
+    throw new Error("connection closed before delivery receipt");
+  };
+  const outbox = new ChannelOutbox();
+  const message: OutboundMessage = { accountId: "account_42", userId: 42, target: { provider: "slack", conversationId: "D1" }, text: "possibly delivered", idempotencyKey: "ambiguous-send-1" };
+  await assert.rejects(() => outbox.send(message, adapter), /verify.*provider|outcome is uncertain/i);
+  const record = (await listOutbox(undefined, 20, 42)).find((item) => item.idempotencyKey === message.idempotencyKey);
+  assert.equal(providerCalls, 1);
+  assert.equal(record?.status, "ambiguous");
+  await assert.rejects(() => outbox.send(message, adapter), /uncertain|check the destination/i);
+  assert.equal(providerCalls, 1);
+  assert.equal(await outbox.recover(new Map([["slack", adapter]])), 0);
+  assert.equal(providerCalls, 1);
+});
+
+test("a duplicate send does not report success while the first delivery is still in flight", async () => {
+  const adapter = new FakeAdapter();
+  let release!: (receipt: DeliveryReceipt) => void;
+  let calls = 0;
+  adapter.send = async () => {
+    calls++;
+    return new Promise<DeliveryReceipt>((resolve) => { release = resolve; });
+  };
+  const outbox = new ChannelOutbox();
+  const message: OutboundMessage = { accountId: "account_42", userId: 42, target: { provider: "slack", conversationId: "D1" }, text: "in flight", idempotencyKey: "in-flight-1" };
+  const first = outbox.send(message, adapter);
+  while (!release) await new Promise((resolve) => setTimeout(resolve, 0));
+  await assert.rejects(() => outbox.send(message, adapter), /already in progress|still delivering/i);
+  assert.equal(calls, 1);
+  release({ providerMessageId: "in-flight-receipt", deliveredAt: Date.now() });
+  assert.equal((await first).status, "delivered");
+});
+
+test("outbox recovery is concurrent but bounded to protect provider and process latency", async () => {
+  const adapter = new FakeAdapter();
+  let active = 0;
+  let peak = 0;
+  adapter.send = async () => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active--;
+    return { providerMessageId: `bounded-${peak}`, deliveredAt: Date.now() };
+  };
+  const outbox = new ChannelOutbox();
+  for (let index = 0; index < 9; index++) await outbox.enqueue({ accountId: "account_42", userId: 42, target: { provider: "slack", conversationId: "D1" }, text: `queued ${index}`, idempotencyKey: `bounded-${index}` });
+  assert.equal(await outbox.recover(new Map([["slack", adapter]])), 9);
+  assert.equal(peak, 4);
 });
 
 test("Sendblue group metadata survives durable outbox recovery", async () => {

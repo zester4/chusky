@@ -58,7 +58,7 @@ test("task schemas expose the full durable lifecycle and reject malformed filter
   const { chuckTools } = await import("../src/agentTools.js");
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TASK_CREATE", "CHUCK_TASK_LIST", "CHUCK_TASK_GET", "CHUCK_TASK_CHECKPOINT", "CHUCK_TASK_BLOCK", "CHUCK_TASK_COMPLETE", "CHUCK_TASK_CANCEL", "CHUCK_TASK_RETRY"]) assert.equal(names.has(name), true);
-  await assert.rejects(() => nativeTool(830004, "CHUCK_TASK_LIST", { statuses: ["not-a-status"] }), /Invalid task status filter/);
+  await assert.rejects(() => nativeTool(830004, "CHUCK_TASK_LIST", { statuses: ["not-a-status"] }), /statuses\[0\].*unsupported value/);
 });
 
 test("concurrent task mutations preserve both updates through versioned CAS retries", async () => {

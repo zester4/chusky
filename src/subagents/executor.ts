@@ -5,9 +5,9 @@ import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { requiresToolApproval, isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, type AgentRunRecord } from "../store.js";
+import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
-import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText } from "../agent.js";
+import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText, UnavailableComposioToolsError } from "../agent.js";
 import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
 import type { ReplyTarget } from "../channels/contracts.js";
@@ -17,6 +17,17 @@ import { CancellationError, isCancellationError, safeToolAudit, throwIfAborted }
 
 const DELEGATION_STATUS_PREVIEW_LENGTH = 160;
 const activeWorkerControllers = new Map<string, AbortController>();
+let workerChat = orChat;
+let scopedToolsForWorker = getScopedComposioTools;
+
+/** Replace external inference/provider boundaries in deterministic unit tests. */
+export function setSubagentExecutorDependenciesForTests(overrides?: {
+  chat?: typeof orChat;
+  getScopedComposioTools?: typeof getScopedComposioTools;
+}): void {
+  workerChat = overrides?.chat ?? orChat;
+  scopedToolsForWorker = overrides?.getScopedComposioTools ?? getScopedComposioTools;
+}
 
 /** Request both local interruption and durable Upstash cancellation. */
 export async function requestDelegationCancellation(userId: number, handoffId: string, reason = "Worker cancellation requested by the user."): Promise<HandoffRecord | undefined> {
@@ -55,6 +66,10 @@ export async function executeDelegation(
     signal?: AbortSignal;
     historySummary?: string;
     deliveryTarget?: ReplyTarget;
+    parentHandoffId?: string;
+    parentWorker?: CapabilityWorkerName;
+    delegationDepth?: number;
+    rootHandoffId?: string;
     resume?: { handoffId: string; taskId: string; workflowRunId?: string; resumeCount?: number };
   }
 ): Promise<DelegationResult> {
@@ -84,16 +99,25 @@ export async function executeDelegation(
   }
   const starterComposioTools = manifest.starterComposioTools ?? [];
   if (contractInput.allowedComposioTools && contractInput.allowedComposioTools.length > 0) {
-    const invalidTools = contractInput.allowedComposioTools.filter((tool) => !isComposioToolAllowedForWorker(workerName, tool));
+    const invalidTools = contractInput.allowedComposioTools.filter((tool) =>
+      !starterComposioTools.includes(tool) && !isComposioToolAllowedForWorker(workerName, tool)
+    );
     if (invalidTools.length > 0) {
       throw new Error(`Invalid delegation contract: Composio tool(s) [${invalidTools.join(", ")}] are not permitted for worker capability '${workerName}'. Select only an exact action from its approved toolkit family.`);
     }
   }
 
-  validateDelegationTarget(workerName, contractInput.objective, contractInput.allowedTools ?? []);
+  // A durable continuation reuses the already-validated handoff contract.
+  // Its persisted manifest-wide tool list is not a new routing hint; treating
+  // it as one can falsely classify a resumed worker as a mixed objective.
+  validateDelegationTarget(workerName, contractInput.objective, options?.resume ? [] : contractInput.allowedTools ?? []);
 
   const duration = (contractInput.duration && contractInput.duration in WORKER_DURATION_SECONDS ? contractInput.duration : "30m") as WorkerDuration;
   const budgetSeconds = Math.max(WORKER_DURATION_SECONDS["5m"], Math.min(WORKER_DURATION_SECONDS["1w"], contractInput.budgetSeconds ?? WORKER_DURATION_SECONDS[duration]));
+  const requestedTotalToolCalls = contractInput.maxTotalToolCalls;
+  const maxTotalToolCalls = Number.isFinite(requestedTotalToolCalls)
+    ? Math.max(1, Math.min(1000, Math.floor(requestedTotalToolCalls!)))
+    : 200;
   const existingHandoff = options?.resume ? await getHandoffRecord(userId, options.resume.handoffId) : undefined;
   if (options?.resume && !existingHandoff) throw new Error("The durable handoff record for this worker continuation no longer exists or is not owned by the user.");
   const startedAt = existingHandoff?.delegation?.startedAt ?? Date.now();
@@ -114,7 +138,7 @@ export async function executeDelegation(
     // is not connected; explicitly delegated actions remain required.
     allowedComposioTools: [...new Set([...starterComposioTools, ...(contractInput.allowedComposioTools ?? [])].map((tool) => tool.trim()).filter(Boolean))],
     allowedTools: (contractInput.allowedTools ?? manifest.allowedTools).filter((tool) =>
-      manifest.allowedTools.includes(tool)
+      manifest.allowedTools.includes(tool) && !((options?.delegationDepth ?? 0) >= 1 && tool === "CHUCK_HANDOFF_SUBAGENT")
     ),
     context: contractInput.context ?? {},
     expectedOutput: contractInput.expectedOutput ?? "Summary of executed task and outcomes.",
@@ -123,6 +147,7 @@ export async function executeDelegation(
     maxToolCalls: Math.max(0, Math.min(100, contractInput.maxToolCalls ?? 40)),
     duration,
     budgetSeconds,
+    maxTotalToolCalls,
   };
 
   // 1. Durable Task Linkage. A workflow continuation reuses the original task
@@ -138,15 +163,19 @@ export async function executeDelegation(
   // 2. Persistent Handoff Record
   const handoffRecord: HandoffRecord = existingHandoff ?? {
     id: `handoff_${randomUUID()}`,
-    from: "chusky",
+    from: options?.parentWorker ?? "chusky",
     to: workerName,
     objective: contract.objective,
     context: contract.context ?? {},
     expectedOutput: contract.expectedOutput,
     timestamp: Date.now(),
     status: "queued",
+    ...(options?.parentHandoffId ? { parentHandoffId: options.parentHandoffId } : {}),
+    ...(options?.rootHandoffId ? { rootHandoffId: options.rootHandoffId } : {}),
+    delegationDepth: options?.delegationDepth ?? 0,
     taskId: durableTask.id,
   };
+  handoffRecord.rootHandoffId ??= options?.rootHandoffId ?? handoffRecord.id;
   handoffRecord.delegation = {
     runId: existingRun?.id ?? existingHandoff?.delegation?.runId ?? `run_${randomUUID()}`,
     model,
@@ -157,6 +186,10 @@ export async function executeDelegation(
     maxToolCalls: contract.maxToolCalls,
     duration: contract.duration,
     budgetSeconds: contract.budgetSeconds,
+    maxTotalToolCalls: existingHandoff?.delegation?.maxTotalToolCalls ?? maxTotalToolCalls,
+    maxPeerHandoffs: existingHandoff?.delegation?.maxPeerHandoffs ?? 1,
+    sharedToolCallsUsed: existingHandoff?.delegation?.sharedToolCallsUsed ?? 0,
+    peerHandoffsUsed: existingHandoff?.delegation?.peerHandoffsUsed ?? 0,
     startedAt,
     continuationCount: existingHandoff?.delegation?.continuationCount ?? 0,
   };
@@ -185,6 +218,7 @@ export async function executeDelegation(
   let proposal: DelegationResult["proposal"] | undefined;
   let approvalId: string | undefined;
   let toolRequest: DelegationResult["toolRequest"] | undefined;
+  let sharedBudgetExhausted = false;
 
   // The shared status callback is used by every channel. Make the selected
   // specialist and a bounded preview visible before any worker work begins.
@@ -218,10 +252,9 @@ export async function executeDelegation(
     // Native-only contract tests and fallback summaries do not need a live
     // Composio session. Avoid contacting the provider unless the worker model
     // or an explicit Composio action actually requires it.
-    const continuationAcknowledgement = Boolean(options?.resume && !actionPayload && (contract.context?.previousToolRequest || existingHandoff?.status === "requires_tool_request"));
-    const needsComposio = (canRunModel && !continuationAcknowledgement) || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
+    const needsComposio = (canRunModel && contract.allowedComposioTools.length > 0) || Boolean(actionPayload && !actionPayload.name.startsWith("CHUCK_"));
     const scopedComposio = needsComposio
-      ? await getScopedComposioTools(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools, objective: contract.objective })
+      ? await scopedToolsForWorker(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools, objective: contract.objective })
       : { tools: [], missing: starterComposioTools, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
     if (actionPayload) {
@@ -232,25 +265,38 @@ export async function executeDelegation(
         logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "failed", error: `Tool access denied for worker capability ${workerName}` }));
       } else if (actionPayload.name === "CHUCK_REQUEST_ADDITIONAL_TOOLS") {
         toolCallsCount++;
-        toolRequest = {
-          intent: String(actionPayload.args.intent ?? "").trim(),
-          reason: String(actionPayload.args.reason ?? "").trim(),
-          preferredToolkit: actionPayload.args.preferredToolkit ? String(actionPayload.args.preferredToolkit).trim() : undefined,
-        };
-        if (!toolRequest.intent || !toolRequest.reason) {
+        if (toolCallsCount > contract.maxToolCalls) {
+          status = "max_tool_calls_exceeded";
+          outputSummary = `Worker capability ${workerName} exceeded max tool call limit (${contract.maxToolCalls}).`;
+        } else if (!(await claimHandoffBudget(userId, handoffRecord.rootHandoffId!, "tool"))) {
+          sharedBudgetExhausted = true;
+          status = "max_tool_calls_exceeded";
+          outputSummary = `The shared delegation tree exceeded its total tool-call limit (${handoffRecord.delegation.maxTotalToolCalls}).`;
+        } else {
+          toolRequest = {
+            intent: String(actionPayload.args.intent ?? "").trim(),
+            reason: String(actionPayload.args.reason ?? "").trim(),
+            preferredToolkit: actionPayload.args.preferredToolkit ? String(actionPayload.args.preferredToolkit).trim() : undefined,
+          };
+          if (!toolRequest.intent || !toolRequest.reason) {
           status = "failed";
           outputSummary = "A worker tool request requires both intent and reason.";
-        } else {
-          status = "requires_tool_request";
-          outputSummary = `${manifest.displayName} requested an additional capability: ${toolRequest.intent}. Reason: ${toolRequest.reason}`;
-          await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky tool discovery and scoped re-delegation");
-          logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "completed", requested: true }));
+          } else {
+            status = "requires_tool_request";
+            outputSummary = `${manifest.displayName} requested an additional capability: ${toolRequest.intent}. Reason: ${toolRequest.reason}`;
+            await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky tool discovery and scoped re-delegation");
+            logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "completed", requested: true }));
+          }
         }
       } else {
         toolCallsCount++;
         if (toolCallsCount > contract.maxToolCalls) {
           status = "max_tool_calls_exceeded";
           outputSummary = `Worker capability ${workerName} exceeded max tool call limit (${contract.maxToolCalls}).`;
+        } else if (!(await claimHandoffBudget(userId, handoffRecord.rootHandoffId!, "tool"))) {
+          sharedBudgetExhausted = true;
+          status = "max_tool_calls_exceeded";
+          outputSummary = `The shared delegation tree exceeded its total tool-call limit (${handoffRecord.delegation.maxTotalToolCalls}).`;
         } else {
           const approved = options?.approvedApprovalId
             ? await getSession(userId).then((s) =>
@@ -305,6 +351,8 @@ export async function executeDelegation(
                     return nativeTool(userId, actionPayload.name, executionArgs, {
                       model,
                       worker: workerName,
+                      handoffId: handoffRecord.id,
+                      delegationDepth: handoffRecord.delegationDepth ?? 0,
                       workerBinding: {
                         expectedOutput: contract.expectedOutput,
                         allowedTools: contract.allowedTools,
@@ -312,7 +360,9 @@ export async function executeDelegation(
                         approvalPolicy: contract.approvalPolicy,
                         timeoutSeconds: contract.timeoutSeconds,
                         maxToolCalls: contract.maxToolCalls,
+                        maxTotalToolCalls: handoffRecord.delegation!.maxTotalToolCalls,
                       },
+                      rootHandoffId: handoffRecord.rootHandoffId,
                       approvedApprovalId: options?.approvedApprovalId,
                       deliveryTarget: options?.deliveryTarget,
                       onStatus: options?.onStatus,
@@ -324,6 +374,9 @@ export async function executeDelegation(
               logs.push(safeToolAudit({ tool: actionPayload.name, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: "completed" }));
               outputSummary = `Successfully executed ${actionPayload.name}. Result: ${JSON.stringify(toolResult).slice(0, 1000)}`;
               await checkpointTask(userId, durableTask.id, outputSummary, "Tool execution completed");
+              if (approvedForTool && isRiskyToolSlug(actionPayload.name, executionArgs)) {
+                await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
+              }
             } catch (err) {
               if (isCancellationError(err, activeSignal)) throw err;
               const errMsg = String((err as Error)?.message ?? err);
@@ -334,13 +387,6 @@ export async function executeDelegation(
           }
         }
       }
-    } else if (options?.resume && !actionPayload && (contract.context?.previousToolRequest || existingHandoff?.status === "requires_tool_request")) {
-      // A scoped capability continuation may arrive without a new model turn:
-      // the supervisor has already reviewed the request and only asked the
-      // worker to acknowledge the newly granted boundary. Preserve the same
-      // handoff and return a deterministic checkpoint instead of inventing a
-      // second objective or repeating the original work.
-      outputSummary = `Worker capability [${manifest.displayName}] resumed with the supervisor-approved capability scope. The original request was preserved and no unreviewed external action was executed.`;
     } else if (canRunModel) {
       // ── Autonomous OpenRouter Worker Model Loop ─────────────────────────────
       let skillContext = "";
@@ -379,6 +425,11 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             { role: "system", content: systemPrompt },
             { role: "user", content: contract.objective },
           ];
+      if (options?.resume && Array.isArray(restoredMessages) && restoredMessages.length) {
+        const systemIndex = messages.findIndex((message) => message.role === "system");
+        if (systemIndex >= 0) messages[systemIndex] = { ...messages[systemIndex]!, content: systemPrompt };
+        else messages.unshift({ role: "system", content: systemPrompt });
+      }
       let runVersion = existingRun?.version ?? 0;
       const runRecord: AgentRunRecord = existingRun ?? {
         id: handoffRecord.delegation.runId!,
@@ -429,7 +480,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
         }
 
         await checkpointRun("running", { eventType: "worker.model_requested", round, model, messageCount: messages.length });
-        const response = await orChat(
+        const response = await workerChat(
           model,
           messages,
           workerTools,
@@ -501,6 +552,12 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           if (toolCallsCount > contract.maxToolCalls) {
             status = "max_tool_calls_exceeded";
             outputSummary = `Worker capability ${workerName} exceeded max tool call limit (${contract.maxToolCalls}).`;
+            break;
+          }
+          if (!(await claimHandoffBudget(userId, handoffRecord.rootHandoffId!, "tool"))) {
+            sharedBudgetExhausted = true;
+            status = "max_tool_calls_exceeded";
+            outputSummary = `The shared delegation tree exceeded its total tool-call limit (${handoffRecord.delegation.maxTotalToolCalls}).`;
             break;
           }
 
@@ -589,6 +646,8 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
                   return nativeTool(userId, slug, executionArgs, {
                     model,
                     worker: workerName,
+                    handoffId: handoffRecord.id,
+                    delegationDepth: handoffRecord.delegationDepth ?? 0,
                     workerBinding: {
                       expectedOutput: contract.expectedOutput,
                       allowedTools: contract.allowedTools,
@@ -598,7 +657,9 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
                       maxToolCalls: contract.maxToolCalls,
                       duration: contract.duration,
                       budgetSeconds: contract.budgetSeconds,
+                      maxTotalToolCalls: handoffRecord.delegation!.maxTotalToolCalls,
                     },
+                    rootHandoffId: handoffRecord.rootHandoffId,
                     approvedApprovalId: options?.approvedApprovalId,
                     deliveryTarget: options?.deliveryTarget,
                     onStatus: options?.onStatus,
@@ -633,7 +694,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
         }
       }
       if (status === "success") await checkpointRun("completed", { eventType: "worker.completed", checkpoint: outputSummary, nextAction: "" });
-      else if (status === "timed_out" || status === "max_tool_calls_exceeded") await checkpointRun("queued", { eventType: "worker.slice_exhausted", checkpoint: outputSummary, nextAction: "Continue from the latest durable checkpoint.", round: contract.maxToolCalls });
+      else if (status === "timed_out" || status === "max_tool_calls_exceeded") await checkpointRun(sharedBudgetExhausted ? "failed" : "queued", { eventType: sharedBudgetExhausted ? "worker.shared_budget_exhausted" : "worker.slice_exhausted", checkpoint: outputSummary, nextAction: sharedBudgetExhausted ? "Return the exhausted delegation tree to Chusky for replanning." : "Continue from the latest durable checkpoint.", round: contract.maxToolCalls });
       else if (status === "failed") await checkpointRun("failed", { eventType: "worker.failed", checkpoint: outputSummary, nextAction: "Inspect the failure and retry when safe." });
     } else {
       // Never turn missing inference infrastructure into a synthetic success.
@@ -648,11 +709,22 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
       if (actionPayload?.name) logs.push(safeToolAudit({ tool: actionPayload.name, args: actionPayload.args, userId, runId: handoffRecord.delegation.runId, status: "cancelled", error: "Cancellation requested while the provider call was in flight." }));
       status = "interrupted";
       outputSummary = "Worker delegation was interrupted by a cancellation request.";
+    } else if (err instanceof UnavailableComposioToolsError) {
+      status = "requires_tool_request";
+      toolRequest = {
+        intent: `Find an available replacement for ${err.missingSlugs.join(", ")}`.slice(0, 500),
+        reason: err.connectionRequiredToolkits.length
+          ? `No connected app is available for this action. The owner may need to connect one of: ${err.connectionRequiredToolkits.join(", ")}.`
+          : "The exact action granted to this worker is not available in the owner's connected Composio session. Chusky must verify an exact replacement or ask the owner to connect the required app.",
+        preferredToolkit: err.connectionRequiredToolkits[0] ?? err.missingSlugs[0]?.split("_")[0]?.toLowerCase(),
+      };
+      outputSummary = `${manifest.displayName} is waiting because a granted connected-app action is unavailable. Chusky must verify a replacement or request the required connection.`;
+      await blockTask(userId, durableTask.id, outputSummary, "Await Chusky to verify an available exact action or request the required connection");
     } else {
       status = "failed";
       outputSummary = `Unhandled exception in worker capability ${workerName}: ${String((err as Error)?.message ?? err)}`;
-    }
   }
+}
 
   const durationMs = Date.now() - startTime;
   const totalElapsedMs = Date.now() - startedAt;
@@ -671,7 +743,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
   // A slice limit is a continuation point, not a terminal failure. The
   // durable supervisor will enqueue the same handoff again while its overall
   // goal budget remains available.
-  if ((status === "timed_out" || status === "max_tool_calls_exceeded") && contract.maxToolCalls > 0 && totalElapsedMs < contract.budgetSeconds! * 1000) {
+  if (!sharedBudgetExhausted && (status === "timed_out" || status === "max_tool_calls_exceeded") && contract.maxToolCalls > 0 && totalElapsedMs < contract.budgetSeconds! * 1000) {
     status = "queued";
     outputSummary = `${manifest.displayName} completed an execution slice. Continuing the same task automatically within the ${contract.duration} budget.`;
   }
@@ -745,4 +817,37 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
     handoffRecord,
     durationMs,
   };
+}
+
+/** Resume a worker only from the exact owner-approved action stored in its approval record. */
+export async function resumeApprovedDelegation(userId: number, approvalId: string): Promise<DelegationResult> {
+  const approval = (await getSession(userId)).approvals.find((item) => item.id === approvalId);
+  if (!approval || approval.status !== "approved" || approval.expiresAt <= Date.now() || !approval.handoffId) {
+    throw new Error("The owner-approved worker action is missing, expired, or no longer available.");
+  }
+  const handoff = await getHandoffRecord(userId, approval.handoffId);
+  if (!handoff?.taskId || !handoff.delegation || handoff.status !== "requires_approval") {
+    throw new Error("The approved worker action is no longer attached to a resumable handoff.");
+  }
+  await updateTask(userId, handoff.taskId, { status: "running", error: undefined, nextAction: "Executing the exact action approved by the owner." });
+  return executeDelegation(userId, {
+    worker: handoff.to as CapabilityWorkerName,
+    objective: handoff.objective,
+    context: { ...handoff.context, toolCall: { name: approval.toolSlug, args: approval.args } },
+    expectedOutput: handoff.expectedOutput,
+    model: handoff.delegation.model,
+    allowedTools: handoff.delegation.allowedTools,
+    allowedComposioTools: handoff.delegation.allowedComposioTools,
+    approvalPolicy: handoff.delegation.approvalPolicy,
+    timeoutSeconds: handoff.delegation.timeoutSeconds,
+    maxToolCalls: handoff.delegation.maxToolCalls,
+    duration: handoff.delegation.duration,
+    budgetSeconds: handoff.delegation.budgetSeconds,
+    maxTotalToolCalls: handoff.delegation.maxTotalToolCalls,
+  }, {
+    approvedApprovalId: approvalId,
+    resume: { handoffId: handoff.id, taskId: handoff.taskId, resumeCount: (handoff.resumeCount ?? 0) + 1 },
+    rootHandoffId: handoff.rootHandoffId ?? handoff.id,
+    model: handoff.delegation.model,
+  });
 }
