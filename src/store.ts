@@ -5009,8 +5009,15 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
 
 export async function completeMissionStep(userId: number, id: string, stepId: string, result: string): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
-    if (["completed", "cancelled"].includes(mission.status)) return undefined;
     const step = mission.steps.find((candidate) => candidate.id === stepId);
+    // Durable task delivery is at-least-once.  A retry can arrive after the
+    // owning worker has already completed this exact step, including after the
+    // overall mission has subsequently completed.  Preserve the first verified
+    // result and report the current record instead of turning that harmless
+    // replay into a failing tool call.  A cancelled mission is deliberately
+    // never revived, and unknown/pending steps still fail closed below.
+    if (step?.status === "completed" && mission.status !== "cancelled") return mission;
+    if (["completed", "cancelled"].includes(mission.status)) return undefined;
     // Re-evaluate the active step and every dependency after each CAS retry.
     // This prevents a stale worker from completing a step that another worker
     // has already advanced or from bypassing the dependency graph.

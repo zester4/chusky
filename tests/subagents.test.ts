@@ -130,6 +130,18 @@ test("automatically sequences a mixed supervisor delegation instead of surfacing
   assert.equal((await listHandoffRecords(991015)).length, 2);
 });
 
+test("retains mission controls with the supervisor instead of failing a specialist delegation", async () => {
+  const result = await nativeTool(991017, "CHUCK_DELEGATE_SUBAGENT", {
+    worker: "nora",
+    objective: "Research current competitors and return cited evidence",
+    allowedTools: ["CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT", "CHUCK_SCRATCHPAD_READ"],
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "competitors" } } },
+  }) as { status: string; supervisorToolsRetained?: string[]; handoffRecord?: { delegation?: { allowedTools?: string[] } } };
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.supervisorToolsRetained, ["CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT"]);
+  assert.deepEqual(result.handoffRecord?.delegation?.allowedTools, ["CHUCK_SCRATCHPAD_READ"]);
+});
+
 test("gives Lucas a complete private engineering loop while keeping provider tools role-scoped", () => {
   const lucas = WORKER_CAPABILITIES.lucas;
   for (const tool of ["CHUCK_DAYTONA_GIT", "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_PREVIEW"]) {

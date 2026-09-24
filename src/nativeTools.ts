@@ -51,6 +51,26 @@ import type { BusinessGap } from "./autonomy/gapDetectors.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
+// Mission lifecycle changes belong to the Chusky supervisor.  They are useful
+// while coordinating a specialist, but must never become delegated authority.
+// A model can occasionally include them in a worker contract while trying to
+// preserve context; recover those known supervisor controls at the native
+// boundary without weakening the worker manifest for any other invalid tool.
+const SUPERVISOR_DELEGATION_TOOLS = new Set([
+  "CHUCK_MISSION_GET",
+  "CHUCK_MISSION_LIST",
+  "CHUCK_MISSION_PROOF",
+  "CHUCK_MISSION_CHECKPOINT",
+  "CHUCK_MISSION_STEP_COMPLETE",
+  "CHUCK_MISSION_EVIDENCE",
+  "CHUCK_MISSION_VERIFY",
+  "CHUCK_MISSION_REPLAN",
+  "CHUCK_MISSION_BLOCK",
+  "CHUCK_MISSION_PAUSE",
+  "CHUCK_MISSION_RESUME",
+  "CHUCK_MISSION_CANCEL",
+  "CHUCK_MISSION_WAIT_EVENT",
+]);
 
 export interface NativeToolRuntime {
   currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
@@ -218,8 +238,22 @@ async function runPlannedDelegation(
 ): Promise<unknown> {
   contract = { ...contract, ...normalizeDelegationToolScopes(contract) };
   if (runtime.worker) return runDelegationWithDurableContinuation(userId, contract, runtime);
+  const requestedTools = contract.allowedTools ?? [];
+  const supervisorToolsRetained = requestedTools.filter((tool) => SUPERVISOR_DELEGATION_TOOLS.has(tool));
+  if (supervisorToolsRetained.length) {
+    const workerTools = requestedTools.filter((tool) => !SUPERVISOR_DELEGATION_TOOLS.has(tool));
+    // `undefined` retains the worker's manifest defaults. An empty array would
+    // accidentally remove every permitted native tool from an otherwise valid
+    // delegation.
+    contract = { ...contract, allowedTools: workerTools.length ? workerTools : undefined };
+  }
   const plan = planDelegationObjective(contract.objective, contract.allowedTools ?? []);
-  if (plan.length < 2) return runDelegationWithDurableContinuation(userId, contract, runtime);
+  if (plan.length < 2) {
+    const result = await runDelegationWithDurableContinuation(userId, contract, runtime);
+    return supervisorToolsRetained.length
+      ? { ...(result as Record<string, unknown>), supervisorToolsRetained, note: "Mission-control tools remain with the Chusky supervisor; the specialist received only its manifest-scoped tools." }
+      : result;
+  }
 
   await runtime.onStatus?.(`🧭 Coordinating ${plan.map((step) => WORKER_CAPABILITIES[step.worker].displayName).join(" → ")}`);
   const stages: Array<{ worker: string; handoffId?: string; taskId?: string; status: string; output: string }> = [];
@@ -256,7 +290,10 @@ async function runPlannedDelegation(
       };
     }
   }
-  return { orchestration: "multi_specialist", status: "success", originalObjective: contract.objective, completedStages: stages };
+  return {
+    orchestration: "multi_specialist", status: "success", originalObjective: contract.objective, completedStages: stages,
+    ...(supervisorToolsRetained.length ? { supervisorToolsRetained, note: "Mission-control tools remain with the Chusky supervisor; specialists received only manifest-scoped tools." } : {}),
+  };
 }
 
 async function reviewSubagentAction(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): Promise<unknown> {
@@ -1061,9 +1098,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };
     }
     case "CHUCK_MISSION_STEP_COMPLETE": {
-      const mission = await completeMissionStep(userId, text(args.id), text(args.stepId, 160), text(args.result, 12000));
+      const missionId = text(args.id);
+      const stepId = text(args.stepId, 160);
+      const before = await getMission(userId, missionId);
+      const alreadyCompleted = before?.steps.some((step) => step.id === stepId && step.status === "completed") === true;
+      const mission = await completeMissionStep(userId, missionId, stepId, text(args.result, 12000));
       if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
-      return mission;
+      return alreadyCompleted
+        ? { ...mission, stepCompletion: "already_completed", note: "This exact mission step was already completed; its original result was preserved." }
+        : mission;
     }
     case "CHUCK_MISSION_EVIDENCE": {
       const rawEvidence = Array.isArray(args.evidence) ? args.evidence : [];

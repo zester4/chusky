@@ -2,6 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import {
   checkpointMission,
+  cancelMission,
   completeMissionStep,
   completeMission,
   createMission,
@@ -115,6 +116,20 @@ test("mission steps enforce dependency order and reject cycles", async () => {
     { id: "a", title: "A", objective: "A", dependsOn: ["b"] },
     { id: "b", title: "B", objective: "B", dependsOn: ["a"] },
   ] })), /dependency cycle|dependency-free/);
+});
+
+test("mission step completion is idempotent for a replay but never revives cancellation", async () => {
+  const userId = 951008;
+  const mission = await createMission(userId, input({ idempotencyKey: "step-replay", steps: [
+    { id: "research", title: "Research", objective: "Collect sources." },
+  ] }));
+  await startMission(userId, mission.id);
+  const first = await completeMissionStep(userId, mission.id, "research", "Original verified result.");
+  const replay = await completeMissionStep(userId, mission.id, "research", "A retry must not overwrite this.");
+  assert.equal(replay?.id, first?.id);
+  assert.equal(replay?.steps.find((step) => step.id === "research")?.result, "Original verified result.");
+  await cancelMission(userId, mission.id, "Owner stopped the mission.");
+  assert.equal(await completeMissionStep(userId, mission.id, "research", "Late replay."), undefined);
 });
 
 test("mission replanning preserves verified steps and selects the next dependency-ready step", async () => {

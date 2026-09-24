@@ -92,7 +92,12 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
       checkpoint: task.checkpoint,
       nextAction: "Retry the task after the transient failure is resolved.",
     });
-    logger.warn({ userId: payload.userId, taskId: task.id, attempt: task.attempt, status: settled?.status, errorClass: error instanceof Error ? error.name : "unknown" }, "Task worker failed");
+    const failureContext = { userId: payload.userId, taskId: task.id, attempt: task.attempt, status: settled?.status, errorClass: error instanceof Error ? error.name : "unknown" };
+    // A queued settlement is an intentional bounded retry, not a terminal
+    // worker failure. Keep the diagnostic classification without presenting a
+    // misleading failure event in production logs and operator timelines.
+    if (settled?.status === "queued") logger.info(failureContext, "Task worker requeued after recoverable failure");
+    else logger.warn(failureContext, "Task worker failed");
     return {
       claimed: true,
       task: settled,
