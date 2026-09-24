@@ -131,6 +131,12 @@ function text(value: unknown, max = MAX_TEXT): string {
   return result;
 }
 
+function missionText(value: unknown, field: string, max: number): string {
+  const result = String(value ?? "").trim();
+  if (!result || result.length > max) throw new Error(`${field} must be 1-${max} characters`);
+  return result;
+}
+
 function daytonaCommand(value: unknown): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > MAX_DAYTONA_COMMAND) throw new Error(`Command must be 1-${MAX_DAYTONA_COMMAND} characters`);
@@ -1114,11 +1120,25 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_START": {
       const mission = await createMission(userId, {
-        title: text(args.title), objective: text(args.objective), definitionOfDone: text(args.definitionOfDone),
+        title: missionText(args.title, "title", 240),
+        objective: missionText(args.objective, "objective", 8000),
+        definitionOfDone: missionText(args.definitionOfDone, "definitionOfDone", 4000),
         idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey) : undefined,
         requiredEvidence: Array.isArray(args.requiredEvidence) ? args.requiredEvidence.filter((value: unknown): value is string => typeof value === "string") : undefined,
         verificationMode: args.verificationMode === "strict" || (args.verificationMode === undefined && Array.isArray(args.requiredEvidence) && args.requiredEvidence.length > 0) ? "strict" : "legacy",
-        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({ id: typeof step.id === "string" ? step.id : undefined, title: text(step.title), objective: text(step.objective), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((value: unknown): value is string => typeof value === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined,
+        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
+          id: typeof step.id === "string" ? step.id : undefined,
+          title: missionText(step.title, "step title", 240),
+          objective: missionText(step.objective, "step objective", 4000),
+          dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined,
+          retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit),
+          input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined,
+          outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined,
+          evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((value: unknown): value is string => typeof value === "string") : undefined,
+          compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined,
+          retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds),
+          parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined,
+        })) : undefined,
         budget: {
           maxDurationSeconds: args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds),
           maxSteps: args.maxSteps === undefined ? undefined : Number(args.maxSteps),

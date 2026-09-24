@@ -1486,12 +1486,17 @@ export async function runAgent(
   logger.warn({ model, toolsUsed }, "Max tool rounds reached");
   if (onStatus) await onStatus(humanProgressStatus("finalizing"));
 
+  messages.push({
+    role: "user",
+    content: `The configured limit of ${config.maxToolRounds} model/tool rounds has been reached. No more tools can be called in this run. Give a concise, truthful status based only on verified results already in this conversation. Do not claim unfinished work succeeded; state what remains and the next safe action.`,
+  });
   const final = await orChat(requestModel, messages, [], signal, onDelta);
   if (final.usage?.cost) totalCost += final.usage.cost;
   const text = final.choices[0]?.message?.content ?? "";
 
   posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: config.maxToolRounds, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
-  const finalText = await addUpgradeNotice(typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks));
+  const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
+  const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${config.maxToolRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
   return { text: finalText, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
 }

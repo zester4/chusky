@@ -437,9 +437,9 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
 
   // ── Conversation ───────────────────────────────────────────────────
   maxHistory: positiveInt("MAX_HISTORY", 20),
-  // Give the supervisor enough room for multi-step plans while durable worker
-  // budgets and per-run cost controls remain the outer safety boundaries.
-  maxToolRounds: positiveInt("MAX_TOOL_ROUNDS", 20),
+  // Give the supervisor room for longer tool workflows while keeping a hard
+  // ceiling; per-run tool-call, cost, and durable-work budgets still apply.
+  maxToolRounds: boundedInt("MAX_TOOL_ROUNDS", 70, 1, 100),
   userCostCap: Number(process.env.USER_COST_CAP ?? 0),
   // Each upstream attempt has a bounded wall-clock deadline. OpenRouter may
   // still choose a healthy provider/model fallback within that deadline.
