@@ -644,6 +644,43 @@ function runView(threadId: string, run: SdkRunRecord) {
   return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
 }
 
+/** Persist a run update against the latest account snapshot so a long-running
+ * request does not overwrite unrelated account changes made after it started. */
+async function persistSdkRunSnapshot(
+  userId: number,
+  threadId: string,
+  run: SdkRunRecord,
+  historyAppend: SdkThreadRecord["history"] = [],
+  costIncrement = 0,
+): Promise<void> {
+  const session = await getSession(userId);
+  const thread = session.sdkThreads?.find((item) => item.id === threadId);
+  const stored = thread?.runs.find((item) => item.id === run.id);
+  if (!thread || !stored) return;
+
+  const mergedEvents = new Map<string, SdkRunRecord["events"][number]>();
+  for (const item of [...stored.events, ...run.events]) mergedEvents.set(item.id, item);
+  const orderedEvents = [...mergedEvents.values()].sort((left, right) => left.at - right.at);
+  const activityEvents = orderedEvents.filter((item) => item.type === "run.tool_activity").slice(-200);
+  const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity").slice(-200);
+  const events = [...activityEvents, ...otherEvents].sort((left, right) => left.at - right.at);
+  const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
+  Object.assign(stored, run, { events });
+  if (preserveCancellation) {
+    stored.status = "cancelled";
+    stored.approvalId = undefined;
+  }
+  if (!preserveCancellation && run.status === "completed" && historyAppend.length) {
+    thread.history.push(...historyAppend);
+    session.totalCost = (session.totalCost ?? 0) + costIncrement;
+  }
+  run.events = events;
+  run.status = stored.status;
+  thread.updatedAt = Math.max(thread.updatedAt, run.updatedAt);
+  await saveSession(userId, session);
+  await persistSdkCompanyRun(stored);
+}
+
 /** Project generated files into an owner-safe run payload. Never expose bytes or workspace paths. */
 export function sdkRunArtifacts(generatedFiles: NonNullable<Awaited<ReturnType<typeof runAgent>>["generatedFiles"]> | undefined): SdkRunArtifact[] | undefined {
   if (!generatedFiles?.length) return undefined;
@@ -2090,10 +2127,16 @@ export function registerSdkApi(app: Hono): void {
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event("run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run); await persistSdkCompanyRun(run);
     await saveSession(owner.userId, session);
-    const abort = new AbortController(); const abortOnDisconnect = () => abort.abort(); c.req.raw.signal.addEventListener("abort", abortOnDisconnect, { once: true }); activeRuns.set(run.id, abort);
+    const abort = new AbortController(); let clientDisconnected = false; const markClientDisconnected = () => { clientDisconnected = true; }; c.req.raw.signal.addEventListener("abort", markClientDisconnected, { once: true }); activeRuns.set(run.id, abort);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({ start: async (controller) => {
-      const send = (event: unknown) => controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      const send = (event: unknown) => {
+        if (clientDisconnected) return;
+        try { controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); }
+        catch { clientDisconnected = true; }
+      };
+      const historyStart = thread.history.length;
+      let costIncrement = 0;
       send({ type: "run.started", run: runView(thread.id, run) });
       try {
         const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, (text) => {
@@ -2106,16 +2149,39 @@ export function registerSdkApi(app: Hono): void {
           onToolActivity: (activity: AgentToolActivity) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
             run.events.push(activityEvent);
-            send({ runId: run.id, ...activityEvent });
+            run.updatedAt = activityEvent.at;
+            thread.updatedAt = activityEvent.at;
+            return persistSdkRunSnapshot(owner.userId, thread.id, run).then(() => send({ runId: run.id, ...activityEvent }));
           },
         });
-        run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+        if (abort.signal.aborted) {
+          run.status = "cancelled";
+          run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved."));
+          send({ type: "run.cancelled", run: runView(thread.id, run) });
+        } else {
+          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+        }
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
         else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled")); send({ type: "run.cancelled", run: runView(thread.id, run) }); }
         else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); send({ type: "run.failed", run: runView(thread.id, run), error: run.error }); }
-      } finally { c.req.raw.signal.removeEventListener("abort", abortOnDisconnect); activeRuns.delete(run.id); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); await releaseUserLock(owner.userId, lockToken); controller.close(); }
-    } });
+      } finally {
+        c.req.raw.signal.removeEventListener("abort", markClientDisconnected);
+        activeRuns.delete(run.id);
+        run.updatedAt = Date.now();
+        thread.updatedAt = run.updatedAt;
+        try {
+          await persistSdkRunSnapshot(owner.userId, thread.id, run, run.status === "completed" ? thread.history.slice(historyStart) : [], costIncrement);
+          const latestSession = await getSession(owner.userId);
+          await notifyWebhooks(owner.userId, latestSession.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status });
+        } catch (error) {
+          logger.error({ err: error, runId: run.id }, "Could not persist or notify the final SDK run state");
+        } finally {
+          await releaseUserLock(owner.userId, lockToken);
+          try { controller.close(); } catch { /* The browser may have left; the durable run is already settled. */ }
+        }
+      }
+    }, cancel: () => { clientDisconnected = true; } });
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
   });
   app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
@@ -2384,6 +2450,17 @@ export function registerSdkApi(app: Hono): void {
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
     if (body.decision === "deny") {
       await setApprovalStatus(owner.userId, pending.id, "denied");
+      const deniedSession = await getSession(owner.userId);
+      const deniedThread = deniedSession.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === pending.id));
+      const deniedRun = deniedThread?.runs.find((run) => run.approvalId === pending.id);
+      if (deniedThread && deniedRun) {
+        deniedRun.status = "cancelled";
+        deniedRun.approvalId = undefined;
+        deniedRun.events.push(event("run.cancelled", "Approval denied; the action was not executed."));
+        deniedRun.updatedAt = Date.now();
+        deniedThread.updatedAt = deniedRun.updatedAt;
+        await persistSdkRunSnapshot(owner.userId, deniedThread.id, deniedRun);
+      }
       await rejectComposerApproval(owner.userId, pending.id);
       const missionTarget = await findMissionApprovalTarget(owner.userId, pending.id);
       if (missionTarget) {
@@ -2433,11 +2510,40 @@ export function registerSdkApi(app: Hono): void {
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;
+      const historyStart = thread.history.length;
+      run.status = "running";
+      run.approvalId = undefined;
+      run.events.push(event("run.started", "Approval granted; continuing this run."));
+      run.updatedAt = Date.now();
+      thread.updatedAt = run.updatedAt;
+      await persistSdkRunSnapshot(owner.userId, thread.id, run);
+      const abort = new AbortController();
+      activeRuns.set(run.id, abort);
+      let costIncrement = 0;
       try {
-        const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, approval.id, undefined, await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions));
-        run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.error = undefined; thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text });
-      } catch (error) { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; }
-      run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run));
+        const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, abort.signal, undefined, approval.id, undefined, {
+          ...await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions),
+          onToolActivity: async (activity: AgentToolActivity) => {
+            const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
+            run.events.push(activityEvent);
+            run.updatedAt = activityEvent.at;
+            thread.updatedAt = activityEvent.at;
+            await persistSdkRunSnapshot(owner.userId, thread.id, run);
+          },
+        });
+        if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
+        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text }); }
+      } catch (error) {
+        if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required", "Another action needs your approval.")); }
+        else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
+        else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; run.events.push(event("run.failed", run.error.message)); }
+      }
+      run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt;
+      try {
+        await persistSdkRunSnapshot(owner.userId, thread.id, run, run.status === "completed" ? thread.history.slice(historyStart) : [], costIncrement);
+        const latestSession = await getSession(owner.userId);
+        return c.json(runView(thread.id, latestSession.sdkThreads!.find((item) => item.id === thread.id)?.runs.find((item) => item.id === run.id) ?? run));
+      } finally { activeRuns.delete(run.id); }
     } finally { await releaseUserLock(owner.userId, token); }
   });
 }

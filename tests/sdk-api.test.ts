@@ -8,7 +8,7 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationA
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, createApproval, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -132,6 +132,170 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
     const persisted = await persistedResponse.json() as { data: Array<{ events: Array<{ type: string; status?: string }> }> };
     assert.equal(persisted.data[0].events.filter((item) => item.type === "run.tool_activity").length, 2);
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("denying a run approval preserves its recorded tool steps after reload", async () => {
+  const externalId = "approval-denial-timeline-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-denial-thread" }, body: JSON.stringify({}) }));
+  const threadView = await created.json() as { id: string };
+  const approval = await createApproval({ userId, toolSlug: "CHUCK_SEARCH_SKILLS", args: { query: "sales" }, request: "Search the relevant guidance.", history: [], model: "openai/gpt-luna-latest" });
+  const session = await getSession(userId);
+  const thread = session.sdkThreads!.find((item) => item.id === threadView.id)!;
+  thread.runs.push({
+    id: "run_denied_timeline", status: "requires_approval", input: "Search the relevant guidance.", approvalId: approval.id,
+    events: [
+      { id: "event_before_approval", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Guidance searched", summary: "Found relevant material" },
+    ], createdAt: 1, updatedAt: 1,
+  });
+  await saveSession(userId, session);
+
+  const denied = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "deny" }) }));
+  assert.equal(denied.status, 200);
+  const persisted = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_denied_timeline`, { headers }));
+  const run = await persisted.json() as { status: string; events: Array<{ id: string; type: string; text?: string }> };
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.events.some((event) => event.id === "event_before_approval"), true);
+  assert.match(run.events.at(-1)?.text ?? "", /Approval denied/);
+});
+
+test("cancelling a run keeps its already-recorded tool timeline", async () => {
+  const externalId = "run-cancellation-timeline-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "cancel-timeline-thread" }, body: JSON.stringify({}) }));
+  const thread = await created.json() as { id: string };
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+    id: "run_cancelled_timeline", status: "running", input: "Prepare the report.",
+    events: [{ id: "event_before_cancel", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Research complete", summary: "Sources found" }],
+    createdAt: 1, updatedAt: 1,
+  });
+  await saveSession(userId, session);
+
+  const cancelled = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_cancelled_timeline/cancel`, { method: "POST", headers }));
+  assert.equal(cancelled.status, 200);
+  const persisted = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_cancelled_timeline`, { headers }));
+  const run = await persisted.json() as { status: string; events: Array<{ id: string }> };
+  assert.equal(run.status, "cancelled");
+  assert.equal(run.events.some((event) => event.id === "event_before_cancel"), true);
+});
+
+test("approved run stays visible while resuming and preserves its earlier steps", async () => {
+  const originalFetch = globalThis.fetch;
+  const externalId = "approval-resume-timeline-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  let markAgentCallStarted!: () => void;
+  let finishAgentCall!: () => void;
+  const agentCallStarted = new Promise<void>((resolve) => { markAgentCallStarted = resolve; });
+  const agentCallGate = new Promise<void>((resolve) => { finishAgentCall = resolve; });
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "approval-resume-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    markAgentCallStarted();
+    await agentCallGate;
+    const final = { choices: [{ message: { role: "assistant", content: "Approval resumed successfully." }, finish_reason: "stop" }] };
+    return new Response(JSON.stringify(final), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "approval-resume-thread" }, body: JSON.stringify({}) }));
+    const thread = await created.json() as { id: string };
+    const approval = await createApproval({ userId, toolSlug: "CHUCK_SEARCH_SKILLS", args: { query: "sales" }, request: "Search the relevant guidance.", history: [], model: "openai/gpt-luna-latest" });
+    const session = await getSession(userId);
+    session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+      id: "run_approved_timeline", status: "requires_approval", input: "Search the relevant guidance.", approvalId: approval.id,
+      events: [{ id: "event_original_step", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Earlier research step", summary: "Sources found" }],
+      createdAt: 1, updatedAt: 1,
+    });
+    await saveSession(userId, session);
+
+    const decisionPromise = api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+    await agentCallStarted;
+    const inProgressResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_approved_timeline`, { headers }));
+    const inProgress = await inProgressResponse.json() as { status: string; events: Array<{ id: string; type: string; status?: string }> };
+    assert.equal(inProgress.status, "running");
+    assert.equal(inProgress.events.some((event) => event.id === "event_original_step"), true);
+    assert.equal(inProgress.events.some((event) => event.type === "run.started"), true);
+
+    finishAgentCall();
+    const decision = await decisionPromise;
+    assert.equal(decision.status, 200);
+    const finalResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_approved_timeline`, { headers }));
+    const finalRun = await finalResponse.json() as { status: string; output?: string; events: Array<{ id: string }> };
+    assert.equal(finalRun.status, "completed", JSON.stringify(finalRun));
+    assert.equal(finalRun.events.some((event) => event.id === "event_original_step"), true);
+    assert.match(finalRun.output ?? "", /Approval resumed successfully\.$/);
+  } finally {
+    finishAgentCall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SDK tool activity survives a disconnected stream while the same run keeps working", async () => {
+  const originalFetch = globalThis.fetch;
+  let chatCalls = 0;
+  let markSecondCallStarted!: () => void;
+  let finishSecondCall!: () => void;
+  const secondCallStarted = new Promise<void>((resolve) => { markSecondCallStarted = resolve; });
+  const secondCallGate = new Promise<void>((resolve) => { finishSecondCall = resolve; });
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "refresh-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    chatCalls += 1;
+    if (chatCalls === 1) {
+      const chunk = { choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_refresh_search", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] } }] };
+      return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    markSecondCallStarted();
+    await secondCallGate;
+    const final = { choices: [{ delta: { role: "assistant", content: "Finished after reconnect." } }] };
+    return new Response(`data: ${JSON.stringify(final)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+
+  try {
+    const api = app();
+    const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "refresh-owner", "Content-Type": "application/json" };
+    const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "refresh-thread" }, body: JSON.stringify({}) }));
+    const thread = await created.json() as { id: string };
+    const requestAbort = new AbortController();
+    const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers, body: JSON.stringify({ input: "Search and finish the task." }), signal: requestAbort.signal }));
+    assert.equal(response.status, 200);
+    await secondCallStarted;
+
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    requestAbort.abort();
+
+    const during = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { headers }));
+    const active = (await during.json() as { data: Array<{ id: string; status: string; events: Array<{ type: string; status?: string }> }> }).data[0];
+    assert.equal(active.status, "running");
+    assert.deepEqual(active.events.filter((item) => item.type === "run.tool_activity").map((item) => item.status), ["started", "completed"]);
+
+    finishSecondCall();
+    let settled: { status: string; output?: string } | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const latest = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/${active.id}`, { headers }));
+      settled = await latest.json() as { status: string; output?: string };
+      if (settled.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(settled?.status, "completed");
+    assert.match(settled?.output ?? "", /Finished after reconnect\.$/);
+  } finally {
+    finishSecondCall();
     globalThis.fetch = originalFetch;
   }
 });
