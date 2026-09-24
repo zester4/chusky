@@ -1231,14 +1231,18 @@ test("uses full-access workspace rendering when Daytona cannot allocate a second
       return { exitCode: 0, result: "installed" };
     }
     const script = Buffer.from(command.match(/base64\.b64decode\('([^']+)'\)/)![1], "base64").toString();
-    if (script.includes("require_renderer") && !installed) return { exitCode: 3, result: "CHUSKY_RENDERER_UNAVAILABLE" };
+    if (!script.includes("require_renderer")) return { exitCode: 0, result: "structure passed" };
+    if (!installed) return { exitCode: 3, result: "CHUSKY_RENDERER_UNAVAILABLE" };
     qaRuns++;
     return { exitCode: 0, result: "visual QA passed" };
   };
   source.fs.downloadFile = async () => Buffer.from("original document");
   const e = new DaytonaEngine(() => ({
     get: async () => source,
-    create: async () => { throw new Error("Total disk limit exceeded. Maximum allowed: 30GiB."); },
+    create: async (params: any) => {
+      if (params.labels?.purpose !== "artifact-qa") return source;
+      throw new Error("Total disk limit exceeded. Maximum allowed: 30GiB.");
+    },
   } as any));
 
   const artifact = await e.artifact(820043, { action: "register", type: "docx", path: "workspace/form.docx" }) as any;
