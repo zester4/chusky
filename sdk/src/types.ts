@@ -381,12 +381,14 @@ export type RunStreamEvent =
   | { type: "run.status"; runId: string; text: string }
   | { type: "run.delta"; runId: string; text: string }
   | { type: "run.tool_started"; runId: string; toolSlug: string }
+  /** Safe tool lifecycle metadata; raw arguments and provider results are never included. */
+  | { type: "run.tool_activity"; runId: string; id: string; at: number; toolSlug: string; status: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message: string; summary?: string; durationMs?: number }
   | { type: "run.approval_required"; run: Run; approval: Approval }
   | { type: "run.completed"; run: Run }
   | { type: "run.failed"; run: Run; error: { code: string; message: string } }
   | { type: "run.cancelled"; run: Run };
 
-export interface RunEvent { id: string; type: string; at: number; text?: string; }
+export interface RunEvent { id: string; type: string; at: number; text?: string; toolSlug?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message?: string; summary?: string; durationMs?: number; }
 
 export interface ChuskyClientOptions {
   apiKey: string;

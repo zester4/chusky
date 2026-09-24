@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.5.2 - 2026-09-24
+
+- Add typed `run.tool_activity` stream and persisted-run events with safe
+  lifecycle state, human-readable purpose, elapsed time, and content-free
+  result summaries.
+- Document that activity events exclude tool arguments and raw provider output.
+
 ## 1.5.1 - 2026-09-24
 
 - Report uncertain webhook delivery outcomes as `ambiguous`, provide a stable

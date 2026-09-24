@@ -511,7 +511,7 @@ export interface SdkRunRecord {
   tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
   skills?: string[];
   error?: { code: string; message: string };
-  events: Array<{ id: string; type: string; at: number; text?: string }>;
+  events: Array<{ id: string; type: string; at: number; text?: string; toolSlug?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message?: string; summary?: string; durationMs?: number }>;
   createdAt: number;
   updatedAt: number;
 }

@@ -77,7 +77,12 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 
 The stream contains one JSON object per line and may emit:
 
-`run.started`, `run.delta`, `run.tool_started`, `run.approval_required`, `run.completed`, `run.failed`.
+`run.started`, `run.delta`, `run.tool_started`, `run.tool_activity`, `run.approval_required`, `run.completed`, `run.failed`.
+
+`run.tool_activity` reports a tool's policy-owned human-readable purpose and
+`started`, `completed`, `failed`, `approval_required`, or `cancelled` state.
+Completed events may include elapsed time and a content-free result count or
+summary. Events never include tool arguments or raw connected-app results.
 
 Events are append-only for a single run. The terminal `completed` or `failed` event includes the canonical run record. Connections can be retried by querying the run; do not assume an interrupted stream means work failed.
 

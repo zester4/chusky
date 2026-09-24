@@ -710,6 +710,8 @@ export interface AgentRunOptions {
   /** Reuse a durable run when a queued workflow resumes. */
   runId?: string;
   parentRunId?: string;
+  /** Report safe tool lifecycle metadata to an authenticated run stream. */
+  onToolActivity?: (activity: AgentToolActivity) => void | Promise<void>;
   /** Bind the internal task-wait tool to the task currently being executed. */
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
@@ -718,6 +720,30 @@ export interface AgentRunOptions {
   missionStepId?: string;
   /** Link approval recovery to the exact autonomous reminder/job occurrence. */
   autonomyResume?: { kind: "reminder" | "job"; sourceId: string; occurrenceId?: string };
+}
+
+export interface AgentToolActivity {
+  toolSlug: string;
+  status: "started" | "completed" | "failed" | "approval_required" | "cancelled";
+  message: string;
+  /** Content-free result metadata; never includes provider-returned values. */
+  summary?: string;
+  durationMs?: number;
+}
+
+function safeToolActivitySummary(result: unknown): string {
+  if (Array.isArray(result)) return `${result.length} ${result.length === 1 ? "item" : "items"} returned`;
+  if (result && typeof result === "object") {
+    const record = result as Record<string, unknown>;
+    for (const key of ["items", "results", "files", "rows", "events", "accounts", "data"]) {
+      if (Array.isArray(record[key])) {
+        const count = (record[key] as unknown[]).length;
+        return `${count} ${count === 1 ? "result" : "results"} returned`;
+      }
+    }
+    if (Number.isSafeInteger(record.count) && Number(record.count) >= 0) return `${Number(record.count)} ${Number(record.count) === 1 ? "result" : "results"} returned`;
+  }
+  return "Result returned";
 }
 
 const VOICE_HISTORY_MAX_MESSAGES = 12;
@@ -815,6 +841,16 @@ export async function runAgent(
   channelContext?: AgentChannelContext,
   options?: AgentRunOptions
 ): Promise<AgentResult> {
+
+  const reportToolActivity = async (activity: AgentToolActivity) => {
+    try {
+      await options?.onToolActivity?.(activity);
+    } catch (error) {
+      // Activity display is observational; a client stream failure must not
+      // change the outcome of a tool or interrupt the agent run.
+      logger.debug({ err: error }, "Could not publish tool activity event");
+    }
+  };
 
   if (onStatus) await onStatus(humanProgressStatus("understanding"));
 
@@ -1173,6 +1209,8 @@ export async function runAgent(
 
       if (onStatus) await onStatus(toolStatus(slug));
       const toolStartedAt = Date.now();
+      const activityMessage = toolStatus(slug).slice(0, 4000);
+      await reportToolActivity({ toolSlug: slug, status: "started", message: activityMessage });
       let auditArgs: Record<string, unknown> | undefined;
       try { auditArgs = parseToolArguments(call.function.arguments); } catch { /* malformed provider args are logged by shape only */ }
       logger.debug(safeToolAudit({ tool: slug, args: auditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "started" }), "Tool call");
@@ -1432,8 +1470,14 @@ export async function runAgent(
         if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result);
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
-        if (e instanceof ApprovalRequiredError) throw e;
-        if (signal?.aborted) throw e;
+        if (e instanceof ApprovalRequiredError) {
+          await reportToolActivity({ toolSlug: slug, status: "approval_required", message: activityMessage, durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          throw e;
+        }
+        if (signal?.aborted) {
+          await reportToolActivity({ toolSlug: slug, status: "cancelled", message: activityMessage, durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          throw e;
+        }
         if (externalClaim?.state === "new") await failExternalAction(userId, externalClaim.logicalActionId, e instanceof Error ? e.message : String(e)).catch(() => undefined);
         toolFailed = true;
         if (String(e).includes("Tool arguments are malformed or truncated JSON")) malformedToolCallPending = true;
@@ -1445,6 +1489,14 @@ export async function runAgent(
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }
       }
+
+      await reportToolActivity({
+        toolSlug: slug,
+        status: toolFailed ? "failed" : "completed",
+        message: activityMessage,
+        ...(!toolFailed ? { summary: safeToolActivitySummary(execResult) } : {}),
+        durationMs: Math.max(0, Date.now() - toolStartedAt),
+      });
 
       if (!toolFailed && !toolsSucceeded.includes(slug)) toolsSucceeded.push(slug);
 

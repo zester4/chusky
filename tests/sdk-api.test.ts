@@ -118,9 +118,19 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
     const thread = await created.json() as { id: string };
     const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/stream`, { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner", "Content-Type": "application/json" }, body: JSON.stringify({ input: "Find the relevant sales guidance." }) }));
     assert.equal(response.status, 200);
-    const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string; text?: string });
+    const events = (await response.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string; text?: string; id?: string; at?: number; toolSlug?: string; status?: string; message?: string; summary?: string; durationMs?: number; arguments?: unknown; result?: unknown });
     assert.equal(events.some((item) => item.type === "run.status" && item.text === "🧭 I’m bringing in the relevant guidance…"), true);
     assert.equal(events.some((item) => item.type === "run.completed"), true);
+    const activity = events.filter((item) => item.type === "run.tool_activity");
+    assert.deepEqual(activity.map((item) => item.status), ["started", "completed"]);
+    assert.equal(activity[0].toolSlug, "CHUCK_SEARCH_SKILLS");
+    assert.equal(activity[0].message, "🧭 I’m bringing in the relevant guidance…");
+    assert.ok((activity[1].durationMs ?? 0) >= 0);
+    assert.match(activity[1].summary ?? "", /returned/);
+    assert.equal(activity.some((item) => "arguments" in item || "result" in item), false);
+    const persistedResponse = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "status-owner" } }));
+    const persisted = await persistedResponse.json() as { data: Array<{ events: Array<{ type: string; status?: string }> }> };
+    assert.equal(persisted.data[0].events.filter((item) => item.type === "run.tool_activity").length, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }

@@ -141,7 +141,7 @@ paths:
     post:
       summary: Stream an NDJSON agent run
       parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
-      responses: { '200': { description: NDJSON stream } }
+      responses: { '200': { description: NDJSON stream with typed run events, including safe run.tool_activity lifecycle updates } }
   /threads/{threadId}/runs/{runId}:
     get: { summary: Get a run, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /threads/{threadId}/runs/{runId}/cancel:

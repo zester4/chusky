@@ -13,6 +13,7 @@ for await (const event of chusky.threads.runs(thread.id).stream(
   switch (event.type) {
     case "run.delta": console.log(event.text); break;
     case "run.tool_started": console.log(`Using ${event.toolSlug}`); break;
+    case "run.tool_activity": console.log(`${event.message} (${event.status})`); break;
     case "run.approval_required": /* show exact args to a human */ break;
     case "run.completed": /* persist event.run */ break;
     case "run.failed": console.error(event.error.message); break;
@@ -21,6 +22,10 @@ for await (const event of chusky.threads.runs(thread.id).stream(
 ```
 
 Abort stops the current HTTP stream. For durable state, use `get()` or `events()` with the run ID. Do not automatically retry a stream as a new run.
+
+`run.tool_activity` events provide safe lifecycle metadata and a human-readable
+description of the step. They intentionally omit tool arguments and raw
+provider output; use the assistant's response for the relevant findings.
 
 ```ts
 const run = await chusky.threads.runs(thread.id).get(runId);
