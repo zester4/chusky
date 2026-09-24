@@ -76,6 +76,7 @@ with tempfile.TemporaryDirectory(prefix='chusky-artifact-qa-') as tmp:
         embedded_fonts=sum(1 for line in font_rows if len(line.split()) > 2 and line.split()[2].lower() == 'yes')
         print('pdf semantic checks passed: syntax=qpdf, encrypted=no, tagged=' + str(tagged) + ', embedded_fonts=' + str(embedded_fonts))
         prefix=os.path.join(tmp, 'page')
+        blank_spreadsheet_pages=0
         for page in range(1, page_count + 1):
             rendered=subprocess.run([shutil.which('pdftoppm'), '-f', str(page), '-l', str(page), '-singlefile', '-scale-to', '1600', '-png', pdf, prefix], capture_output=True, timeout=30)
             preview=prefix + '.png'
@@ -104,10 +105,17 @@ with tempfile.TemporaryDirectory(prefix='chusky-artifact-qa-') as tmp:
             second=data.find(b'\n', first + 1)
             pixels=data[second + 1:] if second >= 0 else b''
             if not pixels or len(set(pixels)) < 2:
-                fail('PDF page ' + str(page) + ' renders blank; repair the document before registration.')
+                if kind == 'spreadsheet' and not (extracted.stdout or b'').strip():
+                    # LibreOffice may emit empty print pages for intentionally
+                    # blank worksheets or unused print regions. The workbook
+                    # itself remains valid; all pages are still converted,
+                    # parsed, rasterized, and checked before this exception.
+                    blank_spreadsheet_pages += 1
+                else:
+                    fail('PDF page ' + str(page) + ' renders blank; repair the document before registration.')
             os.remove(preview)
             os.remove(mono)
-        print('visual QA passed: rendered all ' + str(page_count) + ' page(s)')
+        print('visual QA passed: rendered all ' + str(page_count) + ' page(s)' + ('; blank spreadsheet print pages=' + str(blank_spreadsheet_pages) if blank_spreadsheet_pages else ''))
     except subprocess.TimeoutExpired:
         fail('Document rendering timed out; simplify or split the document and retry registration.')
 `;

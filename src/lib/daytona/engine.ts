@@ -1,7 +1,7 @@
 import { DaytonaProcessExecutionTimeoutError, type FileInfo, type Sandbox, type PtyHandle, type VolumeMount } from "@daytona/sdk";
 import { randomUUID } from "node:crypto";
 import { posix as pathPosix } from "node:path";
-import { AlignmentType, BorderStyle, Document, Footer, Header, HeadingLevel, ImageRun, Packer, PageNumber, Paragraph, ShadingType, Table, TableCell, TableRow, TextRun, WidthType } from "docx";
+import { AlignmentType, BorderStyle, Document, Footer, Header, HeadingLevel, ImageRun, Packer, PageNumber, Paragraph, ShadingType, Table, TableCell, TableLayoutType, TableRow, TextRun, WidthType } from "docx";
 import ExcelJS from "exceljs";
 import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
@@ -99,10 +99,14 @@ function boundedInt(value: unknown, fallback: number, max: number): number {
 }
 
 export function safeDaytonaPath(value: unknown, label = "path"): string {
-  let path = String(value ?? "").trim();
+  let path = String(value ?? "").trim().replace(/\\/g, "/");
   const daytonaHome = "/home/user/";
   if (path.toLowerCase().startsWith(daytonaHome)) path = path.slice(daytonaHome.length);
   if (path.toLowerCase().startsWith("home/user/")) path = path.slice("home/user/".length);
+  // Tool results already contain the workspace-relative root. Models and
+  // callers sometimes prepend it again when carrying a path between tools;
+  // collapse only repeated leading root segments, never inner directory names.
+  path = path.replace(/^(?:workspace\/){2,}/i, "workspace/");
   const absolute = path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(path);
   if (!path || absolute || path.includes("\0") || path.split(/[\\/]+/).includes("..")) {
     throw new DaytonaInputError(`${label} must be a non-empty workspace-relative path without '..'; /home/user/... is normalized automatically`);
@@ -1894,8 +1898,16 @@ export class DaytonaEngine {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = path ? safeDaytonaPath(path) : ".";
     await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath);
-    const files = await sandbox.fs.listFiles(normalizedPath, { depth: boundedInt(depth, 1, 5) });
-    return (files as FileInfo[]).map((file) => ({
+    let files: FileInfo[];
+    try {
+      files = await sandbox.fs.listFiles(normalizedPath, { depth: boundedInt(depth, 1, 5) }) as FileInfo[];
+    } catch (error) {
+      // Listing an optional directory (for example artifacts/ before the
+      // first file is created) is a normal discovery result, not a tool fault.
+      if (isMissingDaytonaFile(error)) return [];
+      throw error;
+    }
+    return files.map((file) => ({
       name: file.name,
       path: file.path ?? file.name,
       size: file.size,
@@ -2853,7 +2865,42 @@ export class DaytonaEngine {
       if (section.body) body.push(new Paragraph({ children: [new TextRun({ text: section.body, font: style.fontName, color: color(style.text), size: Math.round(style.fontSize * 2) })], spacing: { after: 110 } }));
       for (const bullet of section.bullets ?? []) body.push(new Paragraph({ text: bullet, bullet: { level: 0 }, spacing: { after: 60 }, children: [new TextRun({ text: bullet, font: style.fontName, color: color(style.text), size: Math.round(style.fontSize * 2) })] }));
       if (section.table) {
-        body.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: section.table.map((row, rowIndex) => new TableRow({ children: row.map((cell) => new TableCell({ shading: rowIndex === 0 ? { type: ShadingType.CLEAR, color: color(style.primary) } : rowIndex % 2 ? { type: ShadingType.CLEAR, color: "F3F7FA" } : undefined, borders: { top: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, bottom: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, left: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 }, right: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 } }, children: [new Paragraph({ children: [new TextRun({ text: cell, bold: rowIndex === 0, color: rowIndex === 0 ? "FFFFFF" : color(style.text), font: style.fontName, size: 18 })] })] })) })) }));
+        const columnCount = Math.max(...section.table.map((row) => row.length));
+        // Word requires a concrete grid: percentage width alone lets mobile
+        // viewers collapse columns (especially for ragged model-generated rows).
+        const tableWidthTwips = 9_360; // Letter page with one-inch margins.
+        const baseColumnWidth = Math.floor(tableWidthTwips / columnCount);
+        const columnWidths = Array.from({ length: columnCount }, (_, index) => index === columnCount - 1
+          ? tableWidthTwips - baseColumnWidth * (columnCount - 1)
+          : baseColumnWidth);
+        body.push(new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          columnWidths,
+          layout: TableLayoutType.FIXED,
+          alignment: AlignmentType.CENTER,
+          margins: { marginUnitType: WidthType.DXA, top: 80, bottom: 80, left: 100, right: 100 },
+          rows: section.table.map((row, rowIndex) => new TableRow({
+            cantSplit: true,
+            children: Array.from({ length: columnCount }, (_, columnIndex) => {
+              const cell = row[columnIndex] ?? "";
+              return new TableCell({
+                width: { size: columnWidths[columnIndex]!, type: WidthType.DXA },
+                verticalAlign: "center",
+                shading: rowIndex === 0 ? { type: ShadingType.CLEAR, color: color(style.primary) } : rowIndex % 2 ? { type: ShadingType.CLEAR, color: "F3F7FA" } : undefined,
+                borders: {
+                  top: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 },
+                  bottom: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 },
+                  left: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 },
+                  right: { style: BorderStyle.SINGLE, color: "CBD5E1", size: 2 },
+                },
+                children: [new Paragraph({
+                  spacing: { before: 0, after: 0, line: 240 },
+                  children: [new TextRun({ text: cell, bold: rowIndex === 0, color: rowIndex === 0 ? "FFFFFF" : color(style.text), font: style.fontName, size: 18 })],
+                })],
+              });
+            }),
+          })),
+        }));
       }
       if (section.imagePath) {
         const bytes = await imageFor(section.imagePath);
@@ -3115,10 +3162,7 @@ export class DaytonaEngine {
       await this.validateArtifactStructure(sandbox, normalizedPath, type);
       await this.validateArtifactVisual(sandbox, normalizedPath, type);
       if (normalizedDestination && normalizedDestination !== normalizedPath) {
-        // Daytona's same-workspace move is the promotion boundary. The final
-        // logical path is untouched until the fully validated attempt is
-        // ready, so failed replays cannot overwrite a known-good file.
-        await sandbox.fs.moveFiles(normalizedPath, normalizedDestination);
+        await this.promoteArtifact(sandbox, normalizedPath, normalizedDestination);
         normalizedPath = normalizedDestination;
       }
     } finally {
@@ -3130,6 +3174,33 @@ export class DaytonaEngine {
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
     const persisted = await this.saveArtifact(userId, artifact);
     return { ...persisted, __chuskyArtifactReady: true };
+  }
+
+  private async promoteArtifact(sandbox: Sandbox, stagingPath: string, destinationPath: string): Promise<void> {
+    // Daytona refuses moves onto an existing path. Keep the previously
+    // validated artifact recoverable while promoting the new validated file.
+    let backupPath: string | undefined;
+    try {
+      await sandbox.fs.getFileDetails(destinationPath);
+      const separator = destinationPath.lastIndexOf("/");
+      const directory = separator >= 0 ? destinationPath.slice(0, separator) : "artifacts";
+      const name = separator >= 0 ? destinationPath.slice(separator + 1) : destinationPath;
+      backupPath = safeDaytonaPath(`${directory}/.chusky/previous-${randomUUID()}-${name}`, "artifact backup path");
+      await sandbox.fs.moveFiles(destinationPath, backupPath);
+    } catch (error) {
+      if (!isMissingDaytonaFile(error)) throw error;
+    }
+    try {
+      await sandbox.fs.moveFiles(stagingPath, destinationPath);
+    } catch (error) {
+      if (backupPath) {
+        try { await sandbox.fs.moveFiles(backupPath, destinationPath); } catch { /* retain backup for recovery */ }
+      }
+      throw error;
+    }
+    if (backupPath) {
+      try { await sandbox.fs.deleteFile(backupPath, false); } catch { /* promoted output is valid; stale backup is recoverable */ }
+    }
   }
 
   private async findUniqueArtifactPath(sandbox: Sandbox, requestedPath: string, extension: string): Promise<{ path: string; details: { size?: number; isDir?: boolean } } | undefined> {

@@ -100,6 +100,8 @@ export const WORKER_CAPABILITIES: Record<CapabilityWorkerName, CapabilityManifes
       "CHUCK_DAYTONA_APP",
       "CHUCK_DAYTONA_PTY",
       "CHUCK_DAYTONA_GIT",
+      "CHUCK_DAYTONA_CODE",
+      "CHUCK_DAYTONA_LSP",
       "CHUCK_DAYTONA_BROWSER",
       "CHUCK_DAYTONA_COMPUTER",
       "CHUCK_CREATE_PDF",

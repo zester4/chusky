@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chuckTools } from "../src/agentTools.js";
+import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
 import { isRiskyToolSlug } from "../src/policy.js";
 import { safeDaytonaPath } from "../src/lib/daytona/index.js";
 import { normalizeImageCount, resolveImageWorkspacePath } from "../src/image.js";
+import { WORKER_CAPABILITIES } from "../src/subagents/capabilities.js";
 
 test("Daytona tools are present and uniquely named", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -48,6 +49,18 @@ test("artifact tool exposes DOCX and its validation contract", () => {
   assert.match(artifact.function.description, /structural validation/);
 });
 
+test("Lucas can use Daytona interpreter and language-server tools", () => {
+  assert.ok(WORKER_CAPABILITIES.lucas.allowedTools.includes("CHUCK_DAYTONA_CODE"));
+  assert.ok(WORKER_CAPABILITIES.lucas.allowedTools.includes("CHUCK_DAYTONA_LSP"));
+});
+
+test("Daytona code validation infers only an unambiguous run action", () => {
+  const args: Record<string, unknown> = { contextId: "ctx_owned", code: "print('ok')", cwd: "workspace", timeoutSeconds: 90 };
+  validateNativeToolArguments("CHUCK_DAYTONA_CODE", args);
+  assert.equal(args.action, "run");
+  assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_CODE", { code: "print('ok')" }), /requires argument: action/);
+});
+
 test("ordinary Daytona work is autonomous while destructive actions require approval", () => {
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_EXECUTE"), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_WRITE_FILE"), false);
@@ -69,6 +82,8 @@ test("ordinary Daytona work is autonomous while destructive actions require appr
 
 test("Daytona paths reject traversal and NUL bytes", () => {
   assert.equal(safeDaytonaPath("workspace/src/index.ts"), "workspace/src/index.ts");
+  assert.equal(safeDaytonaPath("workspace/workspace/autonomy-mis-6937001c-lucas/test_command.txt"), "workspace/autonomy-mis-6937001c-lucas/test_command.txt");
+  assert.equal(safeDaytonaPath("workspace\\workspace\\project\\file.txt"), "workspace/project/file.txt");
   assert.throws(() => safeDaytonaPath("../secrets.txt"), /without/);
   assert.throws(() => safeDaytonaPath("workspace/\0file"), /without/);
   assert.equal(safeDaytonaPath("/home/user/resume.html"), "resume.html");

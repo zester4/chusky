@@ -765,6 +765,12 @@ test("creates branded DOCX and XLSX artifacts with native Office builders", asyn
   assert.equal(xlsx.type, "spreadsheet");
   assert.ok(uploads.some((item) => item.path.endsWith(".docx") && item.bytes.subarray(0, 2).equals(Buffer.from("PK"))));
   assert.ok(uploads.some((item) => item.path.endsWith(".xlsx") && item.bytes.subarray(0, 2).equals(Buffer.from("PK"))));
+  const docxBytes = uploads.find((item) => item.path.endsWith(".docx"))!.bytes;
+  const docxZip = await JSZip.loadAsync(docxBytes);
+  const documentXml = await docxZip.file("word/document.xml")!.async("string");
+  assert.match(documentXml, /<w:tblLayout w:type="fixed"\/>/);
+  assert.match(documentXml, /<w:tblGrid><w:gridCol w:w="4680"\/><w:gridCol w:w="4680"\/><\/w:tblGrid>/);
+  assert.match(documentXml, /<w:tcW w:type="dxa" w:w="4680"\/>/);
 });
 
 test("moves PDF generation to the isolated renderer when the workspace lacks ReportLab", async () => {
@@ -998,6 +1004,45 @@ test("successful artifact registration replay reuses the logical artifact identi
   const artifacts = (await getSession(820041)).artifacts ?? [];
   assert.equal(artifacts.length, 1);
   assert.equal(artifacts[0]?.path, "workspace/logo.png");
+});
+
+test("listing a not-yet-created workspace directory returns an empty result", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820045) as any;
+  sandbox.fs.listFiles = async () => { throw new Error("DaytonaFileNotFoundError: open workspace/artifacts: no such file or directory"); };
+  assert.deepEqual(await e.listFiles(820045, "workspace/artifacts"), []);
+});
+
+test("validated artifact generation replaces an existing destination without a conflict", async () => {
+  const sandbox = fakeSandbox("artifact-replace");
+  const files = new Map<string, Buffer>();
+  sandbox.fs.uploadFile = async (bytes: Buffer, path: string) => { files.set(path, Buffer.from(bytes)); };
+  sandbox.fs.downloadFile = async (path: string) => {
+    const bytes = files.get(path);
+    if (!bytes) throw new Error(`file not found: ${path}`);
+    return Buffer.from(bytes);
+  };
+  sandbox.fs.getFileDetails = async (path: string) => {
+    const bytes = files.get(path);
+    if (!bytes) throw new Error(`file not found: ${path}`);
+    return { size: bytes.length, isDir: false };
+  };
+  sandbox.fs.moveFiles = async (source: string, destination: string) => {
+    if (files.has(destination)) throw new Error("DaytonaConflictError: conflict: destination already exists");
+    const bytes = files.get(source);
+    if (!bytes) throw new Error(`file not found: ${source}`);
+    files.set(destination, Buffer.from(bytes));
+    files.delete(source);
+  };
+  sandbox.fs.deleteFile = async (path: string) => { files.delete(path); };
+  sandbox.process.executeCommand = async (command: string) => ({ exitCode: 0, result: "validated" });
+  const e = new DaytonaEngine(() => ({ get: async () => sandbox, create: async () => sandbox } as any));
+
+  const first = await e.createPresentation(820046, { title: "Replace deck", slides: [{ title: "Version A", body: "Old" }] });
+  const second = await e.createPresentation(820046, { title: "Replace deck", slides: [{ title: "Version B", body: "New" }] });
+  assert.equal(second.path, first.path);
+  assert.ok(files.has(first.path));
+  assert.equal([...files.keys()].some((path) => path.includes("previous-")), false);
 });
 
 test("failed generated replacement preserves the last known-good artifact", async () => {

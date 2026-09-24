@@ -26,9 +26,12 @@ function runQa(scenario: string, type: "pdf" | "docx" | "presentation" | "spread
     "        if '-png' in args:",
     "            with open(args[-1] + '.png', 'wb') as f: f.write(b'\\x89PNG\\r\\n\\x1a\\n' + bytes(120))",
     "        else:",
-    "            with open(args[-1] + '.pbm', 'wb') as f: f.write(b'P4\\n8 8\\n' + bytes([0, 255]))",
+    "            page=args[args.index('-f')+1]",
+    "            pixels=bytes([0, 0]) if scenario == 'blank-page' and page == '2' else bytes([0, 255])",
+    "            with open(args[-1] + '.pbm', 'wb') as f: f.write(b'P4\\n8 8\\n' + pixels)",
     "    elif args[0] == 'pdftotext':",
-    "        return subprocess.CompletedProcess(args, 0, stdout='text')",
+    "        page=args[args.index('-f')+1]",
+    "        return subprocess.CompletedProcess(args, 0, stdout='' if scenario == 'blank-page' and page == '2' else 'text')",
     "    return subprocess.CompletedProcess(args, 0)",
     "original_cwd=os.getcwd()",
     "with tempfile.TemporaryDirectory() as root:",
@@ -56,6 +59,15 @@ test("semantic spreadsheet QA uses Poppler's supported monochrome invocation", (
   const script = artifactVisualQaScript("spreadsheet", "source.xlsx");
   assert.match(script, /'-mono', pdf, mono_prefix/);
   assert.doesNotMatch(script, /'-pbm'/);
+});
+
+test("spreadsheet QA permits a successfully rendered empty print page", () => {
+  const spreadsheet = runQa("blank-page", "spreadsheet");
+  assert.equal(spreadsheet.status, 0, spreadsheet.stderr);
+  assert.match(spreadsheet.stdout, /blank spreadsheet print pages=1/);
+  const pdf = runQa("blank-page", "pdf");
+  assert.equal(pdf.status, 2, pdf.stderr);
+  assert.match(pdf.stderr, /page 2 renders blank/);
 });
 
 for (const scenario of ["bad-pdf", "empty", "partial"]) {
