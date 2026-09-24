@@ -11,6 +11,8 @@ Treat spreadsheets as executable business artifacts, not painted grids. A workbo
 
 Use the available spreadsheet artifact/workbook API for workbook edits. Prefer block writes, formulas, tables, validation, conditional formatting, charts, and compact verification over per-cell loops.
 
+When using Chusky's `CHUCK_CREATE_SPREADSHEET`, use JSON numbers/booleans for typed source cells used by calculations and add formula cells in each sheet's optional `formulas` array (`cell`, `formula`, optional `expectedValue`). The registration gate recalculates formulas in LibreOffice Calc and checks cached outputs independently. Formula support is limited to safe arithmetic plus `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, `COUNTA`, `IF`, `ROUND`, `ABS`, `AND`, and `OR`; see `docs/artifact-verification.md` for syntax and limitations.
+
 For a normal workbook:
 1. Understand the requested sheets, inputs, calculations, outputs, and audience.
 2. Create or import the workbook.

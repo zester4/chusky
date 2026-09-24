@@ -551,14 +551,19 @@ re-authorized.
 Redis metadata. Chusky can create Markdown reports and HTML websites directly, register verified
 files generated in Daytona (DOCX, PDF, PPTX, XLSX, images, and videos), list or retrieve prior
 artifacts, delete registry entries, and package verified workspace files into ZIP archives.
-Registered artifacts are downloaded from Daytona only after metadata and deterministic structure
-validation, then delivered to Telegram as documents. DOCX, PDF, PPTX, and XLSX packages are checked
-for the expected file structure and corrupt ZIP members before they enter the registry; PDFs are
-checked for a valid header and EOF marker. This is a structural quality gate, not a visual review:
-when layout fidelity matters, the agent should render or preview the file in Daytona and correct it
-before registration. Large binary contents are never written into conversation history. Binary
-formats must be generated and checked in Daytona before registration; an artifact record is not
-created from a text claim alone.
+Registered artifacts are inspected in Daytona before promotion to the durable registry. DOCX/PDF
+builder titles are checked against independently extracted rendered text, and every rendered page
+is parsed and rasterized. XLSX workbooks are recalculated with LibreOffice Calc, then every formula
+cell's cached value and error state is inspected; the builder can also compare selected calculated
+results against declared expected values. Formula support is explicit and restricted to a bounded
+safe syntax/function allowlist. The returned verification evidence contains counts and pass/fail
+checks, not document contents. It establishes renderability and the checks listed, not human
+editorial review or correctness of the workbook's business assumptions. Arbitrary registered
+documents have no source baseline, so their extracted contents are counted but not compared to a
+builder title. Large binary contents are never written into conversation history. Binary formats
+must be generated and checked in Daytona before registration; an artifact record is not created
+from a text claim alone. See [artifact verification](docs/artifact-verification.md) for the exact
+contract and limitations.
 
 For running sites and apps, the agent starts the process inside Daytona, verifies the service is
 listening, calls `CHUCK_DAYTONA_PREVIEW`, and includes the returned temporary HTTPS URL in its

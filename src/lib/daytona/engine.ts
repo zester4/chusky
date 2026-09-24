@@ -565,7 +565,53 @@ type BrandInput = {
 };
 
 type DocumentSectionInput = PdfSectionInput;
-type SpreadsheetSheetInput = { name: string; rows: string[][]; tabColor?: string };
+type SpreadsheetFormulaInput = { cell: string; formula: string; expectedValue?: string | number | boolean };
+type SpreadsheetCell = string | number | boolean;
+type SpreadsheetSheetInput = { name: string; rows: SpreadsheetCell[][]; formulas: SpreadsheetFormulaInput[]; tabColor?: string };
+
+const SAFE_SPREADSHEET_FUNCTIONS = new Set(["SUM", "AVERAGE", "MIN", "MAX", "COUNT", "COUNTA", "IF", "ROUND", "ABS", "AND", "OR"]);
+
+function spreadsheetRows(value: unknown, label: string): SpreadsheetCell[][] | undefined {
+  const rows = pdfTable(value, label);
+  if (!rows) return undefined;
+  const inputRows = Array.isArray(value)
+    ? value
+    : value && typeof value === "object" && !Array.isArray(value)
+      ? [...((value as Record<string, unknown>).headers === undefined ? [] : [(value as Record<string, unknown>).headers]), ...(((value as Record<string, unknown>).rows as unknown[] | undefined) ?? [])]
+      : [];
+  return rows.map((row, rowIndex) => row.map((cell, columnIndex) => {
+    const original = Array.isArray(inputRows[rowIndex]) ? inputRows[rowIndex][columnIndex] : undefined;
+    return (typeof original === "number" && Number.isFinite(original)) || typeof original === "boolean" ? original : cell;
+  }));
+}
+
+function spreadsheetFormulas(value: unknown, label: string): SpreadsheetFormulaInput[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 200) throw new DaytonaInputError(`${label} must be an array with at most 200 formulas`);
+  const usedCells = new Set<string>();
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`${label}[${index}] must be an object`);
+    const item = raw as Record<string, unknown>;
+    const cell = String(item.cell ?? "").trim().toUpperCase();
+    if (!/^[A-Z]{1,3}[1-9][0-9]{0,6}$/.test(cell)) throw new DaytonaInputError(`${label}[${index}].cell must be a valid worksheet cell reference`);
+    if (usedCells.has(cell)) throw new DaytonaInputError(`${label} cannot target ${cell} more than once`);
+    usedCells.add(cell);
+    let formula = String(item.formula ?? "").trim();
+    if (formula.startsWith("=")) formula = formula.slice(1);
+    if (!formula || formula.length > 500 || /[\[\]{};\\]/.test(formula) || /\b(?:WEBSERVICE|HYPERLINK|INDIRECT|OFFSET|NOW|TODAY|RAND|RANDBETWEEN|CELL|INFO|DDE|RTD)\s*\(/i.test(formula)) {
+      throw new DaytonaInputError(`${label}[${index}].formula is not a supported safe formula`);
+    }
+    const functions = [...formula.matchAll(/([A-Z][A-Z0-9._]*)\s*\(/gi)].map((match) => match[1]!.toUpperCase());
+    if (functions.some((name) => !SAFE_SPREADSHEET_FUNCTIONS.has(name)) || !/^[A-Za-z0-9_$.,(): +*/<>=!%&'"-]+$/.test(formula)) {
+      throw new DaytonaInputError(`${label}[${index}].formula uses unsupported syntax or functions`);
+    }
+    const expectedValue = item.expectedValue;
+    if (expectedValue !== undefined && !(typeof expectedValue === "string" && expectedValue.length <= 500) && !(typeof expectedValue === "boolean") && !(typeof expectedValue === "number" && Number.isFinite(expectedValue))) {
+      throw new DaytonaInputError(`${label}[${index}].expectedValue must be a bounded string, finite number, or boolean`);
+    }
+    return { cell, formula, ...(expectedValue === undefined ? {} : { expectedValue }) };
+  });
+}
 
 function brandInput(value: unknown): BrandInput {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -2717,15 +2763,19 @@ export class DaytonaEngine {
     }
   }
 
-  private async validateArtifactVisual(sandbox: Sandbox, path: string, type: ArtifactType): Promise<void> {
-    if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return;
-    const script = artifactVisualQaScript(type, path);
+  private async validateArtifactVisual(sandbox: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}): Promise<Record<string, unknown> | undefined> {
+    if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return undefined;
+    const script = artifactVisualQaScript(type, path, expectedText, expectedFormulaValues);
     const encoded = Buffer.from(script, "utf8").toString("base64");
     let result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 900);
-    if (result.exitCode === 3) result = await this.validateInRenderer(sandbox, path, type);
+    if (result.exitCode === 3) result = await this.validateInRenderer(sandbox, path, type, expectedText, expectedFormulaValues);
     if (result.exitCode !== 0) {
       throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed for '${path}': ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
     }
+    const match = String(result.result ?? "").match(/CHUSKY_VERIFICATION_JSON=(\{[^\r\n]+\})/);
+    if (!match) return undefined;
+    try { return JSON.parse(match[1]!) as Record<string, unknown>; }
+    catch { return undefined; }
   }
 
   /**
@@ -2755,7 +2805,7 @@ export class DaytonaEngine {
    * limited to an explicit provider capacity response: normal operation keeps
    * the renderer isolated and never mutates the user's workspace dependencies.
    */
-  private async validateWithWorkspaceRenderer(source: Sandbox, path: string, type: ArtifactType) {
+  private async validateWithWorkspaceRenderer(source: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}) {
     let install = rendererDependencyInstallPromises.get(source.id);
     if (!install) {
       install = (async () => {
@@ -2777,7 +2827,7 @@ export class DaytonaEngine {
       rendererDependencyInstallPromises.delete(source.id);
       throw error;
     }
-    const encoded = Buffer.from(artifactVisualQaScript(type, path), "utf8").toString("base64");
+    const encoded = Buffer.from(artifactVisualQaScript(type, path, expectedText, expectedFormulaValues), "utf8").toString("base64");
     return source.process.executeCommand(
       'python3 -c "import base64;exec(base64.b64decode(\'' + encoded + '\'))"',
       await source.getUserHomeDir(),
@@ -2786,7 +2836,7 @@ export class DaytonaEngine {
     );
   }
 
-  private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType) {
+  private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}) {
     const bytes = Buffer.from(await source.fs.downloadFile(path));
     if (!bytes.length || bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) {
       throw new DaytonaInputError("Artifact is empty or exceeds the rendering size limit");
@@ -2808,14 +2858,14 @@ export class DaytonaEngine {
         renderer = await this.createArtifactRenderer(params);
       } catch (error) {
         if (DAYTONA_RENDERER_CAPACITY_RESTRICTION.test(String((error as { message?: unknown })?.message ?? error))) {
-          return this.validateWithWorkspaceRenderer(source, path, type);
+          return this.validateWithWorkspaceRenderer(source, path, type, expectedText, expectedFormulaValues);
         }
         throw error;
       }
       rendererPhase = "uploading the artifact to the renderer";
       const renderPath = "document." + ARTIFACT_EXTENSION[type];
       await renderer.fs.uploadFile(bytes, renderPath);
-      const encoded = Buffer.from(artifactVisualQaScript(type, renderPath), "utf8").toString("base64");
+      const encoded = Buffer.from(artifactVisualQaScript(type, renderPath, expectedText, expectedFormulaValues), "utf8").toString("base64");
       rendererPhase = "running visual QA";
       const result = await renderer.process.executeCommand(
         'python3 -c "import base64;exec(base64.b64decode(\'' + encoded + '\'))"',
@@ -2912,7 +2962,7 @@ export class DaytonaEngine {
     const doc = new Document({ creator: style.author ?? "Chusky", title, sections: [{ properties: {}, headers: headerChildren.length ? { default: new Header({ children: headerChildren }) } : undefined, footers: { default: new Footer({ children: [new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: style.footer ?? "Created by Chusky", color: color(style.muted), size: 16 }), ...(style.includePageNumbers ? [new TextRun({ text: "  •  Page " }), new TextRun({ children: [PageNumber.CURRENT] })] : [])] })] }) }, children: body }] });
     const attemptPath = artifactAttemptPath(path);
     await sandbox.fs.uploadFile(Buffer.from(await Packer.toBuffer(doc)), attemptPath);
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx, path);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.docx"), "docx", ARTIFACT_MIME.docx, path, title);
     return { ...artifact, generated: true };
   }
 
@@ -2925,9 +2975,10 @@ export class DaytonaEngine {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new DaytonaInputError(`sheets[${index}] must be an object`);
       const input = raw as Record<string, unknown>;
       const name = presentationText(input.name, `sheets[${index}].name`, 31, true)!;
-      const rows = pdfTable(input.rows ?? input.table, `sheets[${index}].rows`);
+      const rows = spreadsheetRows(input.rows ?? input.table, `sheets[${index}].rows`);
       if (!rows?.length) throw new DaytonaInputError(`sheets[${index}].rows must contain a header row and at least one row`);
-      return { name, rows, tabColor: input.tabColor === undefined ? undefined : presentationColor(input.tabColor, `sheets[${index}].tabColor`, style.accent) };
+      const formulas = spreadsheetFormulas(input.formulas, `sheets[${index}].formulas`);
+      return { name, rows, formulas, tabColor: input.tabColor === undefined ? undefined : presentationColor(input.tabColor, `sheets[${index}].tabColor`, style.accent) };
     });
     const requestedPath = args.path === undefined ? `artifacts/${artifactNameForType(`${title.slice(0, 70).replace(/\s+/g, "_") || "workbook"}`, "spreadsheet")}` : safeDaytonaPath(args.path, "path");
     const path = requestedPath.toLowerCase().endsWith(".xlsx") ? requestedPath : `${requestedPath}.xlsx`;
@@ -2955,11 +3006,20 @@ export class DaytonaEngine {
       headerRow.eachCell((cell) => { cell.font = { name: style.fontFace, bold: true, color: { argb: "FFFFFFFF" } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: `FF${style.accent}` } }; cell.alignment = { vertical: "middle", wrapText: true }; });
       for (let row = 4; row <= spec.rows.length + 2; row++) sheet.getRow(row).eachCell((cell) => { cell.font = { name: style.fontFace, color: { argb: `FF${style.text}` } }; cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: row % 2 ? "FFFFFFFF" : `FF${style.surface}` } }; cell.alignment = { vertical: "top", wrapText: true }; cell.border = { bottom: { style: "hair", color: { argb: "FFD8E1EA" } } }; });
       spec.rows[0]!.forEach((_cell, index) => { sheet.getColumn(index + 1).width = Math.min(42, Math.max(13, ...spec.rows.map((row) => String(row[index] ?? "").length + 2))); });
-      sheet.addTable({ name: `ChuskyTable${workbook.worksheets.length}`, ref: `A3:${String.fromCharCode(64 + spec.rows[0]!.length)}${spec.rows.length + 2}`, headerRow: true, style: { theme: "TableStyleMedium2", showRowStripes: true }, columns: spec.rows[0]!.map((name) => ({ name })), rows: spec.rows.slice(1) });
+      sheet.addTable({ name: `ChuskyTable${workbook.worksheets.length}`, ref: `A3:${String.fromCharCode(64 + spec.rows[0]!.length)}${spec.rows.length + 2}`, headerRow: true, style: { theme: "TableStyleMedium2", showRowStripes: true }, columns: spec.rows[0]!.map((name) => ({ name: String(name) })), rows: spec.rows.slice(1) });
+      for (const item of spec.formulas) {
+        const cell = sheet.getCell(item.cell);
+        const cellRow = Number(item.cell.match(/[0-9]+$/)?.[0]);
+        const columnLabel = item.cell.match(/^[A-Z]+/)?.[0] ?? "";
+        const cellColumn = [...columnLabel].reduce((number, letter) => number * 26 + letter.charCodeAt(0) - 64, 0);
+        if (cell.isMerged || cellRow < 4 || cellRow > spec.rows.length + 2 || cellColumn > spec.rows[0]!.length) throw new DaytonaInputError(`Formula target ${item.cell} must be an unmerged data-row cell in sheet '${spec.name}'`);
+        cell.value = { formula: item.formula, ...(item.expectedValue === undefined ? {} : { result: item.expectedValue }) };
+      }
     }
     const attemptPath = artifactAttemptPath(path);
     await sandbox.fs.uploadFile(Buffer.from(await workbook.xlsx.writeBuffer()), attemptPath);
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet, path);
+    const expectedFormulaValues = Object.fromEntries(sheets.flatMap((spec, sheetIndex) => spec.formulas.filter((formula) => formula.expectedValue !== undefined).map((formula) => [`sheet${sheetIndex + 1}.xml!${formula.cell}`, formula.expectedValue!] as const)));
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "workbook.xlsx"), "spreadsheet", ARTIFACT_MIME.spreadsheet, path, title, expectedFormulaValues);
     return { ...artifact, generated: true };
   }
 
@@ -2989,7 +3049,7 @@ export class DaytonaEngine {
     } finally {
       try { await sandbox.fs.deleteFile(scriptPath, false); } catch { /* temporary generator cleanup is best effort */ }
     }
-    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf, path);
+    const artifact = await this.registerArtifact(userId, sandbox, attemptPath, String(args.name ?? path.split("/").pop() ?? "document.pdf"), "pdf", ARTIFACT_MIME.pdf, path, title);
     return { ...artifact, generated: true };
   }
 
@@ -3115,7 +3175,7 @@ export class DaytonaEngine {
     throw new DaytonaInputError(`Unsupported artifact action: ${action}`);
   }
 
-  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string, destinationPath?: string): Promise<ArtifactRecord & { __chuskyArtifactReady: true }> {
+  private async registerArtifact(userId: number, sandbox: Sandbox, path: string, name: string, type: ArtifactType, contentType: string, destinationPath?: string, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}): Promise<ArtifactRecord & { __chuskyArtifactReady: true; verification?: Record<string, unknown> }> {
     const extension = `.${ARTIFACT_EXTENSION[type]}`;
     let normalizedPath = path.toLowerCase().endsWith(extension) ? path : `${path}${extension}`;
     const normalizedDestination = destinationPath === undefined
@@ -3125,6 +3185,7 @@ export class DaytonaEngine {
         return safeDestination.toLowerCase().endsWith(extension) ? safeDestination : `${safeDestination}${extension}`;
       })();
     const stagingPath = normalizedPath;
+    let verification: Record<string, unknown> | undefined;
     const normalizedName = artifactNameForType(name, type);
     let details: { size?: number; isDir?: boolean } | undefined;
     // Preserve the historical extension-normalization behavior for files
@@ -3160,7 +3221,7 @@ export class DaytonaEngine {
     if (!Number.isFinite(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact must be between 1 byte and ${DAYTONA_MAX_ARTIFACT_BYTES} bytes`);
     try {
       await this.validateArtifactStructure(sandbox, normalizedPath, type);
-      await this.validateArtifactVisual(sandbox, normalizedPath, type);
+      verification = await this.validateArtifactVisual(sandbox, normalizedPath, type, expectedText, expectedFormulaValues);
       if (normalizedDestination && normalizedDestination !== normalizedPath) {
         await this.promoteArtifact(sandbox, normalizedPath, normalizedDestination);
         normalizedPath = normalizedDestination;
@@ -3173,7 +3234,7 @@ export class DaytonaEngine {
     const now = Date.now();
     const artifact: ArtifactRecord = { id: `artifact_${randomUUID()}`, userId, sandboxId: sandbox.id, name: normalizedName, type, path: normalizedPath, contentType, size, status: "available", createdAt: now, updatedAt: now };
     const persisted = await this.saveArtifact(userId, artifact);
-    return { ...persisted, __chuskyArtifactReady: true };
+    return { ...persisted, ...(verification ? { verification } : {}), __chuskyArtifactReady: true };
   }
 
   private async promoteArtifact(sandbox: Sandbox, stagingPath: string, destinationPath: string): Promise<void> {

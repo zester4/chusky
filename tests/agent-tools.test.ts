@@ -77,6 +77,18 @@ test("presentation generator requires a title and structured slides", () => {
   assert.equal(properties.slides?.type, "array");
 });
 
+test("spreadsheet generator exposes bounded formulas and independent calculation evidence", () => {
+  const tool = chuckTools.find((item) => item.function.name === "CHUCK_CREATE_SPREADSHEET") as any;
+  const sheet = tool.function.parameters.properties.sheets.items;
+  assert.equal(sheet.properties.formulas.type, "array");
+  assert.deepEqual(sheet.properties.formulas.items.required, ["cell", "formula"]);
+  assert.match(tool.function.description, /LibreOffice/);
+  for (const name of ["CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PDF"]) {
+    const artifactTool = chuckTools.find((item) => item.function.name === name);
+    assert.match(artifactTool?.function.description ?? "", /independently extracts the rendered text/);
+  }
+});
+
 test("scheduled tools expose required parameters", () => {
   const reminder = chuckTools.find((tool) => tool.function.name === "CHUCK_SET_REMINDER");
   const job = chuckTools.find((tool) => tool.function.name === "CHUCK_SCHEDULE_JOB");

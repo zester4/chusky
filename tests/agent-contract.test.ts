@@ -154,11 +154,13 @@ test("emails a generated artifact through the exact connected Composio action", 
     },
   };
   setAgentDependenciesForTests({ composio: { create: async () => session } });
-  (daytonaEngine as any).createPdf = async () => ({ __chuskyArtifactReady: true, id: "art_email_1", name: "proposal.pdf", type: "pdf", contentType: "application/pdf" });
+  (daytonaEngine as any).createPdf = async () => ({ __chuskyArtifactReady: true, id: "art_email_1", name: "proposal.pdf", type: "pdf", contentType: "application/pdf", verification: { pagesRendered: 2, expectedTitleMatched: true } });
   (daytonaEngine as any).downloadArtifact = async (_owner: number, id: string) => ({ id, name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.from("pdf-bytes") });
+  const modelRequests: Array<Record<string, any>> = [];
   let responseIndex = 0;
-  globalThis.fetch = (async (input) => {
+  globalThis.fetch = (async (input, init) => {
     if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    modelRequests.push(JSON.parse(String(init?.body ?? "{}")));
     const responses = [
       toolResponse("CHUCK_CREATE_PDF", JSON.stringify({ title: "Proposal", sections: [{ heading: "Summary", body: "Approved proposal" }] }), "call-create-pdf"),
       toolResponse("CHUCK_EMAIL_ARTIFACT", JSON.stringify({ emailTool: "GMAIL_SEND_EMAIL", arguments: { recipient_email: "client@example.com", subject: "Proposal", body: "Attached." }, artifactIds: ["art_email_1"] }), "call-email-artifact"),
@@ -170,6 +172,9 @@ test("emails a generated artifact through the exact connected Composio action", 
     const result = await runAgent(userId, "Create the proposal PDF and email it to the client.", [], "test/model");
     assert.match(result.text, /emailed/);
     assert.equal(result.generatedFiles?.[0]?.artifactId, "art_email_1");
+    const toolResult = modelRequests.flatMap((request) => request.messages ?? []).find((message: any) => message.role === "tool" && String(message.content).includes("artifactCreated"));
+    assert.match(String(toolResult?.content), /"verification"/);
+    assert.match(String(toolResult?.content), /"pagesRendered":2/);
     assert.equal((sentArguments?.attachment as Array<Record<string, string>>)?.[0]?.file_name, "proposal.pdf");
     assert.equal((sentArguments?.attachment as Array<Record<string, string>>)?.[0]?.file_data, Buffer.from("pdf-bytes").toString("base64"));
   } finally {

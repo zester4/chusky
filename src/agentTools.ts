@@ -187,6 +187,22 @@ const shoppingAndBrowserTools = [
 
 export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools] as const;
 
+// Formula cells are explicit, bounded per-sheet inputs. The Daytona boundary
+// validates them again and LibreOffice independently recalculates them before
+// the artifact is registered.
+const spreadsheetToolSchema = chuckTools.find((item) => item.function.name === "CHUCK_CREATE_SPREADSHEET") as any;
+spreadsheetToolSchema.function.description += " Formula cells may be supplied per sheet as formulas [{cell,formula,expectedValue?}]. Only basic arithmetic and the documented safe functions are accepted; expectedValue is checked against a fresh LibreOffice calculation. Returned verification evidence reports extracted content and formula counts; it is not a substitute for reviewing business assumptions.";
+spreadsheetToolSchema.function.parameters.properties.sheets.items.properties = {
+  name: { type: "string" },
+  rows: { description: "Cell matrix or {headers,rows}; use numeric/boolean cells for calculations. Formula cells are applied separately after the table is written." },
+  formulas: { type: "array", items: { type: "object", properties: { cell: { type: "string", description: "Cell address such as C4" }, formula: { type: "string", description: "Safe formula such as SUM(B4:B8), optionally with a leading =" }, expectedValue: { type: ["string", "number", "boolean"], description: "Optional expected result checked independently after recalculation" } }, required: ["cell", "formula"] } },
+  tabColor: { type: "string", description: "Optional six-digit hex color" },
+};
+const documentToolSchema = chuckTools.find((item) => item.function.name === "CHUCK_CREATE_DOCUMENT") as any;
+documentToolSchema.function.description += " Before registration, Chusky independently extracts the rendered text, checks that it contains the requested title, and renders every page; returned evidence gives page and extracted-text counts, not human editorial approval.";
+const pdfToolSchema = chuckTools.find((item) => item.function.name === "CHUCK_CREATE_PDF") as any;
+pdfToolSchema.function.description += " Before registration, Chusky independently extracts the rendered text, checks that it contains the requested title, and renders every page; returned evidence gives page and extracted-text counts, not human editorial approval.";
+
 /** Validate local-tool arguments at the execution boundary, not just in the model prompt. */
 export function validateNativeToolArguments(name: string, args: Record<string, unknown>): void {
   const tool = chuckTools.find((item) => item.function.name === name);

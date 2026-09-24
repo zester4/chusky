@@ -758,7 +758,7 @@ test("creates branded DOCX and XLSX artifacts with native Office builders", asyn
   });
   const xlsx = await e.createSpreadsheet(820028, {
     title: "Performance report",
-    sheets: [{ name: "Overview", rows: { headers: ["Metric", "Value"], rows: [["Revenue", "100"], ["Margin", "25%"]] } }],
+    sheets: [{ name: "Overview", rows: { headers: ["Metric", "Value", "Total"], rows: [["Revenue", 100, ""], ["Margin", "25%", ""]] }, formulas: [{ cell: "C4", formula: "SUM(B4:B4)", expectedValue: 100 }] }],
     brand: { companyName: "ZiloShift", preset: "modern", primary: "312E81", accent: "DB2777" },
   });
   assert.equal(docx.type, "docx");
@@ -771,6 +771,18 @@ test("creates branded DOCX and XLSX artifacts with native Office builders", asyn
   assert.match(documentXml, /<w:tblLayout w:type="fixed"\/>/);
   assert.match(documentXml, /<w:tblGrid><w:gridCol w:w="4680"\/><w:gridCol w:w="4680"\/><\/w:tblGrid>/);
   assert.match(documentXml, /<w:tcW w:type="dxa" w:w="4680"\/>/);
+  const xlsxBytes = uploads.find((item) => item.path.endsWith(".xlsx"))!.bytes;
+  const xlsxZip = await JSZip.loadAsync(xlsxBytes);
+  const worksheetXml = await xlsxZip.file("xl/worksheets/sheet1.xml")!.async("string");
+  assert.match(worksheetXml, /<c r="C4"[^>]*><f>SUM\(B4:B4\)<\/f><v>100<\/v><\/c>/);
+});
+
+test("spreadsheet builder rejects external and volatile formula functions", async () => {
+  const e = engine();
+  await assert.rejects(() => e.createSpreadsheet(820031, {
+    title: "Unsafe formula",
+    sheets: [{ name: "Overview", rows: { headers: ["Input", "Output"], rows: [[1, ""]] }, formulas: [{ cell: "B4", formula: "WEBSERVICE(\"https://example.test\")" }] }],
+  }), /supported safe formula/);
 });
 
 test("moves PDF generation to the isolated renderer when the workspace lacks ReportLab", async () => {
