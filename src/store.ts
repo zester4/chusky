@@ -1394,8 +1394,11 @@ interface Backend {
   compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
+  addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void>;
+  transitionReminderStatus(userId: number, id: string, expectedStatuses: ReminderRecord["status"][], patch: Partial<ReminderRecord>): Promise<ReminderRecord | undefined>;
   getJobs(userId: number): Promise<JobRecord[]>;
   saveJobs(userId: number, jobs: JobRecord[]): Promise<void>;
+  addJob(userId: number, job: JobRecord, maxActive: number): Promise<void>;
   getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]>;
   mutateAttentionRecords(userId: number, collection: AttentionCollection, mutate: (records: AttentionRecord[]) => AttentionRecord[]): Promise<AttentionRecord[]>;
   claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined>;
@@ -2301,6 +2304,41 @@ class RedisBackend implements Backend {
     // Scheduling state must outlive the conversational session TTL.
     await this.r.set(this.reminderk(userId), JSON.stringify(reminders.slice(-100)));
   }
+  async addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void> {
+    const key = this.reminderk(userId);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let reminders: ReminderRecord[] = [];
+      try { const parsed = raw ? JSON.parse(raw) : await this.getSession(userId).then((session) => session.reminders ?? []); reminders = Array.isArray(parsed) ? parsed as ReminderRecord[] : []; } catch { reminders = []; }
+      const existing = reminders.find((item) => item.id === reminder.id);
+      const activeCount = reminders.filter((item) => item.userId === userId && ["scheduled", "waiting", "paused"].includes(item.status)).length;
+      if (!existing && ["scheduled", "waiting", "paused"].includes(reminder.status) && activeCount >= maxActive) {
+        await this.r.unwatch();
+        throw new Error(`You have reached the limit of ${maxActive} active reminders. Cancel or complete one before adding another.`);
+      }
+      const result = await this.r.multi().set(key, JSON.stringify([...reminders.filter((item) => item.id !== reminder.id), reminder].slice(-100))).exec();
+      if (result) return;
+    }
+    throw new Error("Reminder list changed concurrently; retry creating the reminder");
+  }
+  async transitionReminderStatus(userId: number, id: string, expectedStatuses: ReminderRecord["status"][], patch: Partial<ReminderRecord>): Promise<ReminderRecord | undefined> {
+    const key = this.reminderk(userId);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let reminders: ReminderRecord[] = [];
+      try { const parsed = raw ? JSON.parse(raw) : []; reminders = Array.isArray(parsed) ? parsed as ReminderRecord[] : []; } catch { reminders = []; }
+      const index = reminders.findIndex((reminder) => reminder.id === id && reminder.userId === userId);
+      const current = index < 0 ? undefined : reminders[index];
+      if (!current || !expectedStatuses.includes(current.status)) { await this.r.unwatch(); return undefined; }
+      const next = { ...current, ...patch, id: current.id, userId: current.userId };
+      reminders[index] = next;
+      const result = await this.r.multi().set(key, JSON.stringify(reminders.slice(-100))).exec();
+      if (result) return next;
+    }
+    throw new Error("Reminder state changed concurrently; retry the action");
+  }
   async getJobs(userId: number): Promise<JobRecord[]> {
     const raw = await this.r.get(this.jobk(userId));
     if (raw) {
@@ -2313,6 +2351,24 @@ class RedisBackend implements Backend {
   async saveJobs(userId: number, jobs: JobRecord[]): Promise<void> {
     // Scheduling state must outlive the conversational session TTL.
     await this.r.set(this.jobk(userId), JSON.stringify(jobs.slice(-100)));
+  }
+  async addJob(userId: number, job: JobRecord, maxActive: number): Promise<void> {
+    const key = this.jobk(userId);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await this.r.watch(key);
+      const raw = await this.r.get(key);
+      let jobs: JobRecord[] = [];
+      try { const parsed = raw ? JSON.parse(raw) : await this.getSession(userId).then((session) => session.jobs ?? []); jobs = Array.isArray(parsed) ? parsed as JobRecord[] : []; } catch { jobs = []; }
+      const existing = jobs.find((item) => item.id === job.id);
+      const activeCount = jobs.filter((item) => item.userId === userId && ["active", "paused"].includes(item.status)).length;
+      if (!existing && ["active", "paused"].includes(job.status) && activeCount >= maxActive) {
+        await this.r.unwatch();
+        throw new Error(`You have reached the limit of ${maxActive} active recurring jobs. Cancel one before adding another.`);
+      }
+      const result = await this.r.multi().set(key, JSON.stringify([...jobs.filter((item) => item.id !== job.id), job].slice(-100))).exec();
+      if (result) return;
+    }
+    throw new Error("Recurring-job list changed concurrently; retry creating the job");
   }
   async getAttentionRecords(userId: number, collection: AttentionCollection): Promise<AttentionRecord[]> {
     const raw = await this.r.get(this.attentionKey(userId, collection));
@@ -2954,6 +3010,21 @@ class MemoryBackend implements Backend {
     return legacy;
   }
   async saveReminders(userId: number, reminders: ReminderRecord[]) { this.reminders.set(userId, reminders.slice(-100)); }
+  async addReminder(userId: number, reminder: ReminderRecord, maxActive: number) {
+    const reminders = this.reminders.get(userId) ?? (this.sessions.get(userId) ?? fresh()).reminders ?? [];
+    const existing = reminders.some((item) => item.id === reminder.id && item.userId === userId);
+    const activeCount = reminders.filter((item) => item.userId === userId && ["scheduled", "waiting", "paused"].includes(item.status)).length;
+    if (!existing && ["scheduled", "waiting", "paused"].includes(reminder.status) && activeCount >= maxActive) throw new Error(`You have reached the limit of ${maxActive} active reminders. Cancel or complete one before adding another.`);
+    this.reminders.set(userId, [...reminders.filter((item) => item.id !== reminder.id), reminder].slice(-100));
+  }
+  async transitionReminderStatus(userId: number, id: string, expectedStatuses: ReminderRecord["status"][], patch: Partial<ReminderRecord>) {
+    const reminders = await this.getReminders(userId);
+    const current = reminders.find((reminder) => reminder.id === id && reminder.userId === userId);
+    if (!current || !expectedStatuses.includes(current.status)) return undefined;
+    const next = { ...current, ...patch, id: current.id, userId: current.userId };
+    this.reminders.set(userId, reminders.map((reminder) => reminder.id === id ? next : reminder).slice(-100));
+    return next;
+  }
   async getJobs(userId: number) {
     const existing = this.jobs.get(userId);
     if (existing) return existing;
@@ -2962,6 +3033,13 @@ class MemoryBackend implements Backend {
     return legacy;
   }
   async saveJobs(userId: number, jobs: JobRecord[]) { this.jobs.set(userId, jobs.slice(-100)); }
+  async addJob(userId: number, job: JobRecord, maxActive: number) {
+    const jobs = this.jobs.get(userId) ?? (this.sessions.get(userId) ?? fresh()).jobs ?? [];
+    const existing = jobs.some((item) => item.id === job.id && item.userId === userId);
+    const activeCount = jobs.filter((item) => item.userId === userId && ["active", "paused"].includes(item.status)).length;
+    if (!existing && ["active", "paused"].includes(job.status) && activeCount >= maxActive) throw new Error(`You have reached the limit of ${maxActive} active recurring jobs. Cancel one before adding another.`);
+    this.jobs.set(userId, [...jobs.filter((item) => item.id !== job.id), job].slice(-100));
+  }
   async createTriggerEvent(record: TriggerEventRecord) { return this.triggerEvents.get(record.eventId) ?? (this.triggerEvents.set(record.eventId, record), record); }
   async getTriggerEvent(eventId: string) { return this.triggerEvents.get(eventId); }
   async updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>) {
@@ -5590,8 +5668,7 @@ export async function updateTriggerEvent(eventId: string, patch: Partial<Trigger
 }
 
 export async function addReminder(uid: number, reminder: ReminderRecord): Promise<void> {
-  const reminders = await backend.getReminders(uid);
-  await backend.saveReminders(uid, [...reminders.filter((r) => r.id !== reminder.id), reminder]);
+  await backend.addReminder(uid, reminder, 80);
 }
 
 export async function listReminders(uid: number): Promise<ReminderRecord[]> {
@@ -5611,9 +5688,13 @@ export async function updateReminder(uid: number, id: string, patch: Partial<Rem
   return true;
 }
 
+/** Atomically transition a reminder only if its current status is still eligible. */
+export async function transitionReminderStatus(uid: number, id: string, expectedStatuses: ReminderRecord["status"][], patch: Partial<ReminderRecord>): Promise<ReminderRecord | undefined> {
+  return backend.transitionReminderStatus(uid, id, expectedStatuses, patch);
+}
+
 export async function addJob(uid: number, job: JobRecord): Promise<void> {
-  const jobs = await backend.getJobs(uid);
-  await backend.saveJobs(uid, [...jobs.filter((j) => j.id !== job.id), job]);
+  await backend.addJob(uid, job, 50);
 }
 
 export async function listJobs(uid: number): Promise<JobRecord[]> {
@@ -5999,7 +6080,11 @@ export async function upsertMemoryAndContext(
     ...(contextInput.expiresAt ? { expiresAt: contextInput.expiresAt } : {}),
   };
   const contextIdentity = `${savedContext.scope}:${savedContext.scopeId ?? ""}:${savedContext.kind}:${savedContext.key}`;
-  const previousContext = session.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
+  // Prefer the memory's stable source reference when updating it. Its key,
+  // category, or project scope may have changed, so matching only on the new
+  // context identity would leave the old projection searchable.
+  const previousContext = session.contextNodes?.find((item) => item.sourceRef === existingMemory?.id)
+    ?? session.contextNodes?.find((item) => `${item.scope}:${item.scopeId ?? ""}:${item.kind}:${item.key}` === contextIdentity);
   if (previousContext) {
     savedContext.id = previousContext.id;
     savedContext.createdAt = previousContext.createdAt;
@@ -6025,14 +6110,30 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
   const existing = session.memories.find((memory) => target.id ? memory.id === target.id : memory.key === target.key && (!target.category || memory.category === target.category));
   if (!existing) return undefined;
   const changed = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as Partial<MemoryFact>;
-  return upsertMemory(uid, {
+  const updated = {
     ...existing,
     ...changed,
     id: existing.id,
     createdAt: existing.createdAt,
     source: changed.source ?? existing.source,
     sensitivity: changed.sensitivity ?? existing.sensitivity,
-  });
+  };
+  const kind = (["preference", "relationship", "fact", "decision", "objective", "open_loop"] as string[]).includes(updated.category)
+    ? updated.category as ContextNodeRecord["kind"]
+    : "memory";
+  return (await upsertMemoryAndContext(uid, updated, {
+    scope: updated.projectId ? "project" : "user",
+    ...(updated.projectId ? { scopeId: updated.projectId } : {}),
+    kind,
+    key: updated.key,
+    value: updated.value,
+    source: updated.source,
+    sourceRef: updated.id,
+    sensitivity: updated.sensitivity,
+    confidence: updated.confidence,
+    ...(updated.reviewAt !== undefined ? { reviewAt: updated.reviewAt } : {}),
+    ...(updated.expiresAt !== undefined ? { expiresAt: updated.expiresAt } : {}),
+  })).memory;
 }
 
 export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; personKey?: string; sensitivity?: MemoryFact["sensitivity"]; limit?: number } = {}): Promise<MemoryFact[]> {
@@ -6084,6 +6185,8 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
   const removed = s.memories.filter((m) => m.key === key || m.id === key);
   s.memories = s.memories.filter((m) => m.key !== key && m.id !== key);
   if (s.memories.length === before) return false;
+  const removedIds = new Set(removed.map((memory) => memory.id));
+  s.contextNodes = (s.contextNodes ?? []).filter((node) => !node.sourceRef || !removedIds.has(node.sourceRef));
   await saveSession(uid, s);
   if (vectorConfigured()) {
     for (const memory of removed) {

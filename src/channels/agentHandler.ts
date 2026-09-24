@@ -22,6 +22,7 @@ import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 import { sharedGroupInstructions } from "./groupInstructions.js";
 import { formatInboundMessageForAgent } from "./conversations.js";
 import { resumeApprovedDelegation } from "../subagents/executor.js";
+import { SHARED_CHANNEL_TOOL_DENY } from "../sharedChannelPolicy.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -45,17 +46,6 @@ function agentInstructions(conversation: ChuskyConversation): string | undefined
   if (conversation.scope !== "shared") return undefined;
   return sharedGroupInstructions(conversation.provider);
 }
-
-const SHARED_CHANNEL_TOOL_DENY = [
-  "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY",
-  "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
-  "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
-  "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
-  "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE",
-  "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE",
-  "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE",
-  "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE",
-] as const;
 
 /** Build the same privacy boundary for a normal turn and an approval resume. */
 export function channelAgentRunOptions(conversation: ChuskyConversation, receivedAt?: number): AgentRunOptions {

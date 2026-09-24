@@ -1,7 +1,7 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import {
-  addHistorySummary, appendMessages, acquireUserLock, addReminder, claimTriggerEvent, clearHistory, clearSession,
+  addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, claimTriggerEvent, clearHistory, clearSession,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
   listReminders, releaseUserLock, saveDaytonaWorkspace, saveSession, setApprovalStatus, setComposioSessionId, setModel,
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
@@ -19,6 +19,7 @@ import {
   setLiveVoicePreference,
 } from "../src/store.js";
 import { nativeTool } from "../src/nativeTools.js";
+import { daytonaEngine } from "../src/lib/daytona/index.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -384,6 +385,49 @@ test("reminder ownership and active listing are enforced", async () => {
   await addReminder(userId, reminder);
   assert.equal((await listReminders(userId)).length, 1);
   assert.equal(await (await import("../src/store.js")).getReminder(810007, reminder.id).then((v) => v === undefined), true);
+});
+
+test("scheduled jobs and reminders enforce per-owner active caps", async () => {
+  const userId = 810066;
+  const now = Date.now();
+  for (let index = 0; index < 80; index++) {
+    await addReminder(userId, { id: `rem-cap-${index}`, userId, text: "bounded", runAt: now + 60_000, status: "scheduled", createdAt: now });
+  }
+  await assert.rejects(() => addReminder(userId, { id: "rem-cap-overflow", userId, text: "bounded", runAt: now + 60_000, status: "scheduled", createdAt: now }), /limit/i);
+  for (let index = 0; index < 50; index++) {
+    await addJob(userId, { id: `job-cap-${index}`, userId, text: "bounded", cron: "0 9 * * 1", scheduleId: `schedule-cap-${index}`, status: "active", createdAt: now });
+  }
+  await assert.rejects(() => addJob(userId, { id: "job-cap-overflow", userId, text: "bounded", cron: "0 9 * * 1", scheduleId: "schedule-cap-overflow", status: "active", createdAt: now }), /limit/i);
+});
+
+test("reminder cancellation does not overwrite a reminder that already sent", async () => {
+  const userId = 810067;
+  const reminder = { id: "rem-already-sent", userId, text: "done", runAt: Date.now() - 1, status: "sent" as const, createdAt: Date.now() };
+  await addReminder(userId, reminder);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_CANCEL_REMINDER", { id: reminder.id }), /cannot cancel a sent reminder/i);
+  assert.equal((await (await import("../src/store.js")).getReminder(userId, reminder.id))?.status, "sent");
+});
+
+test("reminder timestamps reject timezone-less and ambiguous inputs before enqueue", async () => {
+  const userId = 810068;
+  await assert.rejects(() => nativeTool(userId, "CHUCK_SET_REMINDER", { text: "bad local time", runAt: "2026-10-01T09:00:00" }), /explicit timezone/i);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_SET_REMINDER", { text: "ambiguous time", runAt: "2026-10-01T09:00:00Z", delaySeconds: 60 }), /exactly one/i);
+});
+
+test("browser verification uses observed page text, not model-authored metadata", async () => {
+  const originalBrowser = daytonaEngine.browser;
+  daytonaEngine.browser = async () => ({ observedUrl: "https://example.test/real", title: "Real page", accessibility: { role: "main", name: "Real content" }, observationMethod: "accessibility_tree" }) as any;
+  try {
+    const result = await nativeTool(810069, "CHUCK_BROWSER_VERIFY", {
+      text: "model-authored success",
+      currentUrl: "https://example.test/fake",
+      title: "Fake page",
+      detectors: [{ textIncludes: "model-authored success", required: true }],
+    }) as { passed: boolean };
+    assert.equal(result.passed, false);
+  } finally {
+    daytonaEngine.browser = originalBrowser;
+  }
 });
 
 test("scheduling records survive ordinary session writes", async () => {

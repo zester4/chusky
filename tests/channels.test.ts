@@ -14,6 +14,8 @@ import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
 import { formatInboundMessageForAgent, sharedSenderLabel } from "../src/channels/conversations.js";
 import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
+import { SHARED_CHANNEL_TOOL_DENY } from "../src/sharedChannelPolicy.js";
+import { nativeTool } from "../src/nativeTools.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
@@ -29,11 +31,20 @@ test("channel approval resumes preserve shared privacy boundaries", () => {
   const sharedOptions = channelAgentRunOptions(shared, 123);
   assert.match(sharedOptions.instructions ?? "", /shared sendblue group/i);
   assert.ok(sharedOptions.toolDeny?.includes("CHUCK_SEARCH_MEMORY"));
+  for (const privateOnly of SHARED_CHANNEL_TOOL_DENY) {
+    assert.ok(sharedOptions.toolDeny?.includes(privateOnly), `${privateOnly} must be denied in a shared channel`);
+  }
   assert.deepEqual(sharedOptions.temporalContext, { messageReceivedAt: 123 });
 
   const privateOptions = channelAgentRunOptions({ ...shared, scope: "private", conversationId: "+15550001", replyTarget: { provider: "sendblue", conversationId: "+15550001" } }, 123);
   assert.equal(privateOptions.instructions, undefined);
   assert.equal(privateOptions.toolDeny, undefined);
+});
+
+test("native execution enforces the full shared-channel private-tool boundary", async () => {
+  for (const slug of SHARED_CHANNEL_TOOL_DENY) {
+    await assert.rejects(nativeTool(42, slug, {}, { sharedConversation: true }), /private owner conversation/i, slug);
+  }
 });
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });

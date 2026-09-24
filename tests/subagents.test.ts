@@ -45,6 +45,13 @@ test("the supervisor cannot self-approve a worker action", async () => {
   );
 });
 
+test("a worker without a binding cannot hand off with an empty inherited grant", async () => {
+  await assert.rejects(
+    nativeTool(991013, "CHUCK_HANDOFF_SUBAGENT", { targetWorker: "lucas", objective: "Inspect this code" }, { worker: "lucas" }),
+    /without a worker capability binding cannot hand off/i,
+  );
+});
+
 test("declares the intended worker-to-skill map", () => {
   assert.deepEqual(WORKER_CAPABILITIES.nora.skills.primary, ["research-pro"]);
   assert.ok(WORKER_CAPABILITIES.lucas.skills.primary.includes("fullstack-dev"));

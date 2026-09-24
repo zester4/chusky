@@ -777,6 +777,49 @@ test("creates branded DOCX and XLSX artifacts with native Office builders", asyn
   assert.match(worksheetXml, /<c r="C4"[^>]*><f>SUM\(B4:B4\)<\/f><v>100<\/v><\/c>/);
 });
 
+test("cancellable Daytona execution kills only its owned PTY and returns command output", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820070) as any;
+  let killed = false;
+  let disconnected = false;
+  sandbox.process.createPty = async ({ onData }: any) => ({
+    sessionId: "owned-cancellable-pty",
+    waitForConnection: async () => undefined,
+    sendInput: async (input: string) => {
+      if (input.includes("__CHUSKY_EXIT_")) {
+        const marker = input.match(/(__CHUSKY_EXIT_[A-Fa-f0-9]+__:)/)?.[1];
+        assert.ok(marker);
+        onData(new TextEncoder().encode(`verified output\\n${marker}0\\n`));
+      }
+    },
+    kill: async () => { killed = true; },
+    disconnect: async () => { disconnected = true; },
+  });
+  const result = await e.execute(820070, "echo verified", "workspace", 10, new AbortController().signal);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.output, /verified output/);
+  assert.equal(killed, false);
+  assert.equal(disconnected, true);
+});
+
+test("cancelling Daytona execution during PTY input kills and disconnects that PTY", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820071) as any;
+  const controller = new AbortController();
+  let killed = false;
+  let disconnected = false;
+  sandbox.process.createPty = async () => ({
+    sessionId: "owned-cancelled-pty",
+    waitForConnection: async () => undefined,
+    sendInput: async (input: string) => { if (input.includes("__CHUSKY_EXIT_")) controller.abort(); },
+    kill: async () => { killed = true; },
+    disconnect: async () => { disconnected = true; },
+  });
+  await assert.rejects(() => e.execute(820071, "sleep 10", "workspace", 10, controller.signal), /cancel/i);
+  assert.equal(killed, true);
+  assert.equal(disconnected, true);
+});
+
 test("spreadsheet builder rejects external and volatile formula functions", async () => {
   const e = engine();
   await assert.rejects(() => e.createSpreadsheet(820031, {

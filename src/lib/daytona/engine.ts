@@ -12,6 +12,7 @@ import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
 import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
+import { CancellationError, throwIfAborted } from "../../cancellation.js";
 import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaBrowserSessionResult, DaytonaCodeResult, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
@@ -1907,7 +1908,7 @@ export class DaytonaEngine {
     return workspaceInfo(sandbox);
   }
 
-  async execute(userId: number, command: string, cwd?: string, timeoutSeconds?: number): Promise<DaytonaCommandResult> {
+  async execute(userId: number, command: string, cwd?: string, timeoutSeconds?: number, signal?: AbortSignal): Promise<DaytonaCommandResult> {
     const normalized = String(command ?? "").trim();
     if (!normalized || normalized.length > DAYTONA_MAX_COMMAND_LENGTH) {
       throw new DaytonaInputError(`command must be 1-${DAYTONA_MAX_COMMAND_LENGTH} characters`);
@@ -1916,6 +1917,7 @@ export class DaytonaEngine {
     const normalizedCwd = cwd ? safeDaytonaPath(cwd, "cwd") : undefined;
     await guardVaultWorkspaceAccess(userId, sandbox.id, `${normalized}\n${normalizedCwd ?? ""}`, "command");
     const normalizedTimeout = boundedInt(timeoutSeconds, 60, DAYTONA_MAX_EXECUTION_SECONDS);
+    if (signal) return this.executeCancellable(userId, sandbox, normalized, normalizedCwd, normalizedTimeout, signal);
     let result: { exitCode?: number; result?: string; artifacts?: { stdout?: string } };
     try {
       result = await sandbox.process.executeCommand(normalized, normalizedCwd, undefined, normalizedTimeout);
@@ -1938,6 +1940,80 @@ export class DaytonaEngine {
     const raw = String(result.result ?? result.artifacts?.stdout ?? "");
     const output = raw.slice(0, DAYTONA_MAX_OUTPUT_CHARS);
     return { sandboxId: sandbox.id, command: normalized, cwd: normalizedCwd, exitCode: result.exitCode ?? 1, output, truncated: raw.length > output.length, timeoutSeconds: normalizedTimeout };
+  }
+
+  /**
+   * Process.executeCommand in the installed Daytona SDK has no AbortSignal.
+   * A dedicated ephemeral PTY gives this one command an owned kill handle,
+   * avoiding workspace-wide pauses when the user cancels a run.
+   */
+  private async executeCancellable(userId: number, sandbox: Sandbox, command: string, cwd: string | undefined, timeoutSeconds: number, signal: AbortSignal): Promise<DaytonaCommandResult> {
+    throwIfAborted(signal);
+    const ptyId = `chusky-exec-${randomUUID()}`;
+    const marker = `__CHUSKY_EXIT_${randomUUID().replaceAll("-", "")}__:`;
+    let output = "";
+    let exitCode: number | undefined;
+    let resolveMarker!: (code: number) => void;
+    const markerResult = new Promise<number>((resolve) => { resolveMarker = resolve; });
+    const decoder = new TextDecoder();
+    const append = (chunk: string) => {
+      output = (output + chunk).slice(-120_000);
+      const match = output.match(new RegExp(`${marker}(\\d{1,3})`));
+      if (match) resolveMarker(Number(match[1]));
+    };
+    let handle: PtyHandle | undefined;
+    let cancelledWhileCreating = false;
+    const noteEarlyCancel = () => { cancelledWhileCreating = true; };
+    signal.addEventListener("abort", noteEarlyCancel, { once: true });
+    try {
+      handle = await sandbox.process.createPty({
+        id: ptyId, cwd, cols: 300, rows: 100, envs: { TERM: "dumb" },
+        onData: (data) => append(decoder.decode(data, { stream: true })),
+      });
+    } finally {
+      signal.removeEventListener("abort", noteEarlyCancel);
+    }
+    let completed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    let resolveCancelled!: () => void;
+    const cancelledSignal = new Promise<void>((resolve) => { resolveCancelled = resolve; });
+    try {
+      if (cancelledWhileCreating || signal.aborted) throw new CancellationError();
+      onAbort = () => resolveCancelled();
+      signal.addEventListener("abort", onAbort, { once: true });
+      const rejectIfCancelled = async <T>(operation: Promise<T>): Promise<T> => Promise.race([
+        operation,
+        cancelledSignal.then(() => { throw new CancellationError(); }),
+      ]);
+      await rejectIfCancelled(handle.waitForConnection());
+      // Disable terminal input echo before sending the base64 wrapper so large
+      // source commands are not reflected back into captured output.
+      await rejectIfCancelled(handle.sendInput("stty -echo 2>/dev/null\n"));
+      await sleep(30);
+      if (signal.aborted) throw new CancellationError();
+      const encoded = Buffer.from(command, "utf8").toString("base64");
+      await rejectIfCancelled(handle.sendInput(`( eval "$(printf '%s' '${encoded}' | base64 -d)" ); __chusky_code=$?; printf '\\n${marker}%s\\n' "$__chusky_code"\n`));
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DaytonaInputError(`Command exceeded the ${timeoutSeconds}-second execution limit.`)), timeoutSeconds * 1000);
+        timer.unref?.();
+      });
+      exitCode = await Promise.race([markerResult, timeout, cancelledSignal.then(() => { throw new CancellationError(); })]);
+      completed = true;
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+      if (!completed) {
+        // Preserve the operation's timeout/cancellation error. PTY disconnect
+        // below is still attempted if the remote kill endpoint itself fails.
+        try { await handle.kill(); } catch { /* The remote session may already have ended. */ }
+      }
+      try { await handle.disconnect(); } catch { /* The PTY may already be closed after kill. */ }
+    }
+    const markerIndex = output.indexOf(marker);
+    const raw = (markerIndex >= 0 ? output.slice(0, markerIndex) : output).replace(/^\s*\$\s*/, "").trim();
+    const boundedOutput = raw.slice(0, DAYTONA_MAX_OUTPUT_CHARS);
+    return { sandboxId: sandbox.id, command, cwd, exitCode: exitCode ?? 1, output: boundedOutput, truncated: raw.length > boundedOutput.length, timeoutSeconds };
   }
 
   async listFiles(userId: number, path?: string, depth?: number): Promise<DaytonaFileInfo[]> {

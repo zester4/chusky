@@ -11,7 +11,7 @@ import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
-  readScratchpad, updateJob, updateReminder, writeScratchpad,
+  readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
@@ -50,6 +50,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -73,7 +74,6 @@ const SUPERVISOR_DELEGATION_TOOLS = new Set([
   "CHUCK_MISSION_CANCEL",
   "CHUCK_MISSION_WAIT_EVENT",
 ]);
-
 export interface NativeToolRuntime {
   currentImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
   generatedImages?: Array<{ data: Uint8Array; mediaType: string; filename?: string }>;
@@ -510,10 +510,35 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
     for (const job of active) await cancelJob(userId, job.id);
     return { enabled: false, cancelled: active.map((job) => job.id) };
   }
-  const existing = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
-  if (existing) return existing;
-  const qstashToken = requireQStash();
   const cron = validateCronExpression(args.cron ? text(args.cron) : "0 * * * *");
+  const existing = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
+  if (existing) {
+    if (existing.cron === cron) return existing;
+    const client = new QStashClient({ token: requireQStash() });
+    const schedule = (scheduledCron: string) => ({
+      scheduleId: existing.scheduleId,
+      destination: workflowUrl(config.jobWorkflowUrl, "JOB_WORKFLOW_URL", "/workflows/job"),
+      body: JSON.stringify({ jobId: existing.id, userId }), headers: { "Content-Type": "application/json" },
+      cron: scheduledCron, retries: 3, retryDelay: "1000 * (1 + retried)",
+      ...(workflowFailureUrl() ? { failureCallback: workflowFailureUrl() } : {}),
+    });
+    await client.schedules.delete(existing.scheduleId);
+    try {
+      await client.schedules.create(schedule(cron));
+      if (!(await updateJob(userId, existing.id, { cron, deliveryError: undefined }))) throw new Error("The attention-pulse record disappeared while updating its schedule");
+    } catch (error) {
+      try {
+        await client.schedules.delete(existing.scheduleId).catch(() => undefined);
+        await client.schedules.create(schedule(existing.cron));
+      } catch (restoreError) {
+        await updateJob(userId, existing.id, { deliveryError: `Schedule update failed and the prior QStash schedule could not be restored: ${String(restoreError).slice(0, 300)}` });
+        throw new Error("The attention-pulse schedule update failed, and QStash could not restore the previous schedule. Inspect the job status before retrying.", { cause: error });
+      }
+      throw error;
+    }
+    return { ...existing, cron };
+  }
+  const qstashToken = requireQStash();
   await ensureAttentionPulseDeliveryPreference(userId, runtime);
   const deliveryTarget = durableReminderTarget(runtime.deliveryTarget);
   const job: JobRecord = {
@@ -542,9 +567,24 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
 
 function futureTimestamp(args: Record<string, unknown>): number {
   const now = Date.now();
-  const delay = Number(args.delaySeconds ?? 0);
-  const parsed = args.runAt ? Date.parse(String(args.runAt)) : NaN;
-  const runAt = Number.isFinite(parsed) ? parsed : now + delay * 1000;
+  const hasRunAt = args.runAt !== undefined;
+  const hasDelay = args.delaySeconds !== undefined;
+  if (hasRunAt === hasDelay) throw new Error("Provide exactly one of runAt (ISO-8601 with timezone) or delaySeconds");
+  let runAt: number;
+  if (hasRunAt) {
+    const value = String(args.runAt);
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) {
+      throw new Error("runAt must be an ISO-8601 timestamp with an explicit timezone, such as Z or +01:00");
+    }
+    runAt = Date.parse(value);
+    if (!Number.isFinite(runAt)) throw new Error("runAt is not a valid ISO-8601 timestamp");
+  } else {
+    const delay = Number(args.delaySeconds);
+    if (!Number.isSafeInteger(delay) || delay < 1 || delay > 365 * 24 * 60 * 60) {
+      throw new Error("delaySeconds must be a whole number from 1 to 31536000");
+    }
+    runAt = now + delay * 1000;
+  }
   if (!Number.isFinite(runAt) || runAt <= now) throw new Error("Reminder time must be in the future (use runAt ISO or delaySeconds)");
   if (runAt > now + 365 * 24 * 60 * 60 * 1000) throw new Error("Reminder cannot be more than one year ahead");
   return runAt;
@@ -631,7 +671,13 @@ async function enqueueReminderWorkflow(userId: number, reminder: ReminderRecord,
 export async function cancelReminder(userId: number, id: string): Promise<string> {
   const reminder = await getReminder(userId, id);
   if (!reminder) throw new Error("Reminder not found or not owned by you");
-  await updateReminder(userId, id, { status: "cancelled" });
+  const allowed = ["scheduled", "waiting", "paused"] as const;
+  if (!allowed.includes(reminder.status as typeof allowed[number])) throw new Error(`Cannot cancel a ${reminder.status} reminder`);
+  const updated = await transitionReminderStatus(userId, id, [...allowed], { status: "cancelled" });
+  if (!updated) {
+    const latest = await getReminder(userId, id);
+    throw new Error(`Reminder state changed${latest ? ` to ${latest.status}` : " or the reminder was removed"}; it was not cancelled`);
+  }
   return `Reminder ${id} cancelled.`;
 }
 
@@ -769,6 +815,9 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
 }
 
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
+  if (runtime.sharedConversation && isSharedChannelToolDenied(slug)) {
+    throw new Error(`${slug} is available only in a private owner conversation`);
+  }
   if (slug === "CHUCK_REQUEST_ADDITIONAL_TOOLS" && !runtime.worker) {
     throw new Error("CHUCK_REQUEST_ADDITIONAL_TOOLS is reserved for specialist workers; Chusky must search and verify the capability directly.");
   }
@@ -1209,7 +1258,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
     case "CHUCK_DAYTONA_SANDBOX": return daytonaCall(runtime, () => daytonaEngine.sandbox(userId, args));
     case "CHUCK_DAYTONA_VOLUME": return daytonaCall(runtime, () => daytonaEngine.volume(userId, args));
-    case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds)));
+    case "CHUCK_DAYTONA_EXECUTE": return daytonaCall(runtime, () => daytonaEngine.execute(userId, daytonaCommand(args.command), args.cwd ? text(args.cwd) : undefined, args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds), runtime.signal));
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
     case "CHUCK_DAYTONA_WRITE_FILE": return daytonaCall(runtime, () => daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content)));
@@ -1256,8 +1305,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       for (const item of expired) {
         try {
           await logoutVault(userId, item.service, item.accountAlias, item.origin);
-          await daytonaEngine.workspace(userId, "pause");
-          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service: item.service, origin: item.origin, status: "succeeded", summary: `Expired ${item.service} browser session was revoked and its workspace paused`, createdAt: Date.now() });
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service: item.service, origin: item.origin, status: "succeeded", summary: `Expired ${item.service} browser identity was revoked`, createdAt: Date.now() });
         } catch {
           await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service: item.service, origin: item.origin, status: "failed", summary: `Expired ${item.service} browser session needs manual revocation`, createdAt: Date.now() });
         }
@@ -1294,25 +1342,46 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!Array.isArray(args.detectors)) throw new Error("detectors must be an array");
       const handoffId = args.handoffId ? text(args.handoffId) : undefined;
       if (handoffId && args.detectors.length === 0) throw new Error("A browser handoff requires at least one required verification detector");
+      const handoff = handoffId ? await getBrowserHandoff(userId, handoffId) : undefined;
+      if (handoffId && !handoff) throw new Error("Browser handoff not found or not owned by you");
+      if (handoff && !["waiting", "awaiting_verification"].includes(handoff.status)) throw new Error(`Browser handoff is ${handoff.status} and cannot be verified`);
+      const detectors = args.detectors as Parameters<typeof verifyBrowserResult>[0]["detectors"];
+      if (!detectors?.length || !detectors.some((detector) => detector.urlIncludes || detector.titleIncludes || detector.textIncludes)) {
+        throw new Error("Provide at least one detector with a URL, title, or page-text condition");
+      }
+      if (handoff && !detectors.some((detector) => detector.required !== false && (detector.urlIncludes || detector.titleIncludes || detector.textIncludes))) {
+        throw new Error("A browser handoff requires at least one non-optional verification detector");
+      }
+      // Never let model-authored metadata authorize a retained website session.
+      // Read the live retained desktop and verify only its observed state.
+      const observed = await daytonaCall(runtime, () => daytonaEngine.browser(userId, { action: "state", maxDepth: 8 })) as {
+        observedUrl?: unknown; title?: unknown; accessibility?: unknown; observationMethod?: unknown;
+      };
+      const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
+      const title = typeof observed.title === "string" ? observed.title : undefined;
+      const liveText = JSON.stringify(observed.accessibility ?? "").slice(0, 5000);
+      if (handoff && (!currentUrl || observed.observationMethod !== "address_bar")) {
+        throw new Error("Daytona could not observe the live browser URL; the handoff remains unverified");
+      }
       const result = verifyBrowserResult({
-        currentUrl: args.currentUrl === undefined ? undefined : text(args.currentUrl).slice(0, 500),
-        title: args.title === undefined ? undefined : text(args.title).slice(0, 300),
-        text: args.text === undefined ? undefined : String(args.text).slice(0, 5000),
-        detectors: args.detectors as Parameters<typeof verifyBrowserResult>[0]["detectors"],
+        currentUrl,
+        title,
+        text: liveText,
+        detectors,
       });
+      if (handoff?.origin && currentUrl) {
+        let verifiedOrigin: string;
+        try { verifiedOrigin = new URL(currentUrl).origin; } catch { throw new Error("Daytona returned an invalid browser URL; the handoff remains unverified"); }
+        if (verifiedOrigin !== handoff.origin) {
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "verification_failed", origin: verifiedOrigin, status: "failed", summary: "Private browser handoff verification stopped because the live page origin did not match", createdAt: Date.now() });
+          throw new Error("The live verification page is outside the website origin bound to this handoff");
+        }
+      }
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: result.passed ? "verification_passed" : "verification_failed", status: result.passed ? "succeeded" : "failed", summary: result.passed ? "Browser result verification passed" : "Browser result verification needs review", createdAt: Date.now() });
       if (handoffId && result.passed) {
-        const handoff = await getBrowserHandoff(userId, handoffId);
-        if (!handoff) throw new Error("Browser handoff not found or not owned by you");
-        if (!["waiting", "awaiting_verification"].includes(handoff.status)) throw new Error(`Browser handoff is ${handoff.status} and cannot be completed`);
         const credentials = await listVault(userId);
-        const saved = credentials.find((credential) => credential.session?.workspaceId === handoff.workspaceId && credential.session.status === "awaiting_user_interaction" && (!handoff.origin || credential.origin === handoff.origin) && (!handoff.service || credential.service === handoff.service));
+        const saved = credentials.find((credential) => credential.session?.workspaceId === handoff!.workspaceId && credential.session.status === "awaiting_user_interaction" && (!handoff!.origin || credential.origin === handoff!.origin) && (!handoff!.service || credential.service === handoff!.service));
         if (!saved?.session) throw new Error("The retained browser session is not awaiting verification. Inspect the same browser and start a fresh vault login if necessary.");
-        if (args.currentUrl && handoff.origin) {
-          let verifiedOrigin: string;
-          try { verifiedOrigin = new URL(text(args.currentUrl)).origin; } catch { throw new Error("currentUrl must be a valid HTTPS URL for handoff verification"); }
-          if (verifiedOrigin !== handoff.origin) throw new Error("The verification page is outside the website origin bound to this handoff");
-        }
         const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
         await updateBrowserHandoff(userId, handoffId, "completed", Date.now());
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", service: saved.service, origin: saved.origin, status: "succeeded", summary: "Private browser handoff passed verification", createdAt: Date.now() });
@@ -1392,13 +1461,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         }
       }
       const result = await logoutVault(userId, service, accountAlias, origin);
-      let workspacePaused = false;
-      try {
-        await daytonaEngine.workspace(userId, "pause");
-        workspacePaused = true;
-      } catch { /* A missing workspace should not undo the broker revocation. */ }
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service, ...(saved?.origin ? { origin: saved.origin } : {}), status: "succeeded", summary: `Revoked the ${service}${accountAlias ? ` (${accountAlias})` : ""} browser session`, createdAt: Date.now() });
-      return { ...result, browserLogout, workspacePaused, note: "The saved session is revoked. Chusky will block browser reuse in this workspace until a fresh vault login succeeds." };
+      return { ...result, browserLogout, workspacePaused: false, note: "The selected saved session is revoked. Other browser identities and workspace processes remain available." };
     })();
     case "CHUCK_BROWSER_SESSION_REVOKE": return nativeTool(userId, "CHUCK_VAULT_LOGOUT", args, runtime);
     case "CHUCK_SHOPPING_START": return startShopping(userId, args);
@@ -1419,14 +1483,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DELEGATE_SUBAGENT":
       return runPlannedDelegation(userId, args as any, runtime);
     case "CHUCK_HANDOFF_SUBAGENT":
+      if (runtime.worker && !runtime.workerBinding) throw new Error("A specialist without a worker capability binding cannot hand off work");
       return runDelegationWithDurableContinuation(userId, {
         worker: args.targetWorker as any,
         objective: text(args.objective),
         context: (args.context as any) ?? {},
         expectedOutput: args.expectedOutput ? String(args.expectedOutput) : undefined,
-        allowedTools: runtime.workerBinding?.allowedTools.filter((tool) =>
+        allowedTools: runtime.workerBinding ? runtime.workerBinding.allowedTools.filter((tool) =>
           WORKER_CAPABILITIES[args.targetWorker as keyof typeof WORKER_CAPABILITIES]?.allowedTools.includes(tool) && tool !== "CHUCK_HANDOFF_SUBAGENT"
-        ) ?? [],
+        ) : undefined,
         allowedComposioTools: runtime.workerBinding?.allowedComposioTools.filter((slug) => isComposioToolAllowedForWorker(args.targetWorker as any, slug)),
         timeoutSeconds: runtime.workerBinding ? Math.min(60, runtime.workerBinding.timeoutSeconds) : undefined,
         maxToolCalls: runtime.workerBinding ? Math.min(20, runtime.workerBinding.maxToolCalls) : 20,
