@@ -4,7 +4,11 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
 ## 1.5.1 - 2026-09-24
 
+<<<<<<< HEAD
 - Report uncertain webhook delivery outcomes as `ambiguous`, provide a stable
+=======
+- Report uncertain webhook delivery outcomes as ambiguous, provide a stable
+>>>>>>> 59df28eddb3c1b4f06830a02b567bbe66e44cdc1
   event ID for receiver-side deduplication, and prevent automatic replay when
   a network failure leaves acceptance uncertain.
 - Add owner-scoped channel delivery confirmation and successful-send duration
