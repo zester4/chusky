@@ -275,6 +275,26 @@ test("supports interpreter contexts, sandbox metrics, and LSP inspection", async
   await e.code(820061, { action: "delete_context", contextId: context.contextId });
 });
 
+test("returns a recoverable result when the Daytona code WebSocket closes", async () => {
+  const e = engine();
+  const context = await e.code(820062, { action: "create_context" });
+  const sandbox = sandboxes.get("sandbox-1")!;
+  sandbox.codeInterpreter.runCode = async () => { throw new Error("WebSocket closed with code 1006"); };
+  const result = await e.code(820062, { action: "run", contextId: context.contextId, code: "print('safe')" });
+  assert.equal(result.executed, false);
+  assert.equal(result.retryable, true);
+  assert.match(result.nextAction ?? "", /Inspect the expected output/);
+});
+
+test("reports a missing file detail as a recoverable workspace observation", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820063) as any;
+  sandbox.fs.getFileDetails = async () => { throw new Error("stat workspace/missing.xlsx: no such file or directory"); };
+  const result = await e.fileDetails(820063, "workspace/missing.xlsx") as any;
+  assert.equal(result.exists, false);
+  assert.match(result.nextAction, /CHUCK_DAYTONA_LIST_FILES/);
+});
+
 test("reports sandbox health and capability evidence", async () => {
   const result = await engine().sandbox(820064, { action: "health" }) as any;
   assert.equal(result.healthy, true);

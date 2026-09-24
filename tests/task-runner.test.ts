@@ -1,6 +1,6 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
-import { createTask, getTask, initStore, settleTaskRun } from "../src/store.js";
+import { completeTask, createTask, getTask, initStore, settleTaskRun } from "../src/store.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
@@ -51,4 +51,18 @@ test("blocked executions retain their checkpoint and emit an audit event", async
   assert.equal(run.task?.checkpoint, "Read-only inspection completed");
   assert.equal(run.task?.nextAction, "Approve the proposed action");
   assert.equal(run.task?.events.at(-1)?.type, "blocked");
+});
+
+test("an in-turn task completion is not misreported as a lost lease failure", async () => {
+  const userId = 840005;
+  const task = await createTask(userId, { title: "Complete in turn", objective: "Exercise lifecycle handoff" });
+  const run = await executeDurableTask({ userId, taskId: task.id }, {
+    workerId: "worker",
+    execute: async () => {
+      await completeTask(userId, task.id, "Verified completion from the current worker.");
+      throw new DOMException("Task was settled by the current worker.", "AbortError");
+    },
+  });
+  assert.equal(run.task?.status, "completed");
+  assert.match(run.task?.result ?? "", /Verified completion/);
 });

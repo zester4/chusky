@@ -38,9 +38,19 @@ const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIM
 const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and cannot be overridden|tier[- ]based network restriction/i;
 const DAYTONA_RENDERER_CAPACITY_RESTRICTION = /total disk limit exceeded|concurrency limits|insufficient (?:disk|storage|capacity)|resource quota/i;
 const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|connection reset|transport.*closed/i;
+const DAYTONA_TRANSIENT_CODE_CONNECTION = /websocket\s+closed(?:\s+with\s+code\s+1006)?|websocket.*(?:eof|reset|closed)|connection is shut down|connection reset|transport.*closed/i;
 
 function isTransientComputerConnection(error: unknown): boolean {
   return DAYTONA_TRANSIENT_COMPUTER_CONNECTION.test(String((error as { message?: unknown })?.message ?? error));
+}
+
+function isTransientCodeConnection(error: unknown): boolean {
+  return DAYTONA_TRANSIENT_CODE_CONNECTION.test(String((error as { message?: unknown })?.message ?? error));
+}
+
+function isMissingDaytonaFile(error: unknown): boolean {
+  const message = String((error as { message?: unknown })?.message ?? error);
+  return /(?:no such file or directory|file not found|not found|\bstat\b)/i.test(message);
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -1764,13 +1774,31 @@ export class DaytonaEngine {
       await guardVaultWorkspaceAccess(userId, sandbox.id, code, "interpreter code");
       const stdout: string[] = [];
       const stderr: string[] = [];
-      const result = await sandbox.codeInterpreter.runCode(code, {
-        context,
-        timeout: boundedInt(args.timeoutSeconds, 600, DAYTONA_MAX_EXECUTION_SECONDS),
-        envs: boundedEnvironment(args.envs),
-        onStdout: (message: { output: string }) => { stdout.push(String(message.output ?? "")); },
-        onStderr: (message: { output: string }) => { stderr.push(String(message.output ?? "")); },
-      });
+      let result: Awaited<ReturnType<typeof sandbox.codeInterpreter.runCode>>;
+      try {
+        result = await sandbox.codeInterpreter.runCode(code, {
+          context,
+          timeout: boundedInt(args.timeoutSeconds, 600, DAYTONA_MAX_EXECUTION_SECONDS),
+          envs: boundedEnvironment(args.envs),
+          onStdout: (message: { output: string }) => { stdout.push(String(message.output ?? "")); },
+          onStderr: (message: { output: string }) => { stderr.push(String(message.output ?? "")); },
+        });
+      } catch (error) {
+        // A dropped interpreter WebSocket has ambiguous execution semantics:
+        // the code may have started server-side. Never replay arbitrary code
+        // automatically. Return a structured retry state so the agent can
+        // inspect the workspace/context first and retry only when safe.
+        if (isTransientCodeConnection(error)) {
+          return {
+            sandboxId: sandbox.id,
+            contextId,
+            executed: false,
+            retryable: true,
+            nextAction: "The Daytona code connection dropped before a result was received. Inspect the expected output or workspace state, then retry only if the code is safe to repeat.",
+          };
+        }
+        throw error;
+      }
       // Daytona can expose the same stream through callbacks and the final
       // result. Prefer the final result when present so a long run is not
       // accidentally duplicated in the model context.
@@ -1957,7 +1985,21 @@ export class DaytonaEngine {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = safeDaytonaPath(path);
     await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
-    return sandbox.fs.getFileDetails(normalizedPath);
+    try {
+      return { path: normalizedPath, exists: true, ...(await sandbox.fs.getFileDetails(normalizedPath)) };
+    } catch (error) {
+      // File probing is an inspection operation. A stale or model-suggested
+      // path is useful feedback, not an execution failure; this lets the
+      // agent list the workspace and recover without poisoning its task.
+      if (isMissingDaytonaFile(error)) {
+        return {
+          path: normalizedPath,
+          exists: false,
+          nextAction: "Use CHUCK_DAYTONA_LIST_FILES or CHUCK_DAYTONA_FIND_FILES to discover the actual workspace path before reading, registering, or modifying a file.",
+        };
+      }
+      throw error;
+    }
   }
 
   async createFolder(userId: number, path: string): Promise<{ path: string; created: boolean }> {

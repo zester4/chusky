@@ -157,6 +157,10 @@ export interface DaytonaCodeResult {
   contextId?: string;
   created?: boolean;
   deleted?: boolean;
+  /** A transport drop has ambiguous execution semantics; inspect before replaying code. */
+  executed?: boolean;
+  retryable?: boolean;
+  nextAction?: string;
   stdout?: string;
   stderr?: string;
   error?: unknown;

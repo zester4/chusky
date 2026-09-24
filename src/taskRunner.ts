@@ -36,10 +36,27 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
     void renewTaskLease(payload.userId, task.id, task.lease!.token, leaseMs).then((renewed) => {
       if (renewed) {
         consecutiveRenewalFailures = 0;
-      } else if (++consecutiveRenewalFailures >= 2) {
-        leaseAbort.abort(new Error("Task lease was lost while the worker was executing."));
-        logger.warn({ userId: payload.userId, taskId: task.id, workerId: deps.workerId }, "Task worker lost its lease");
+        return;
       }
+      // A task-control tool can deliberately settle the task while the model
+      // is still producing its closeout. That preserves the current worker's
+      // token, but it is no longer a renewable `running` lease. Stop the
+      // remaining turn without incorrectly reporting a stolen lease or a
+      // worker failure.
+      return getTask(payload.userId, task.id).then((current) => {
+        if (current?.lease?.token === task.lease!.token && !["running", "cancel_requested"].includes(current.status)) {
+          leaseAbort.abort(new Error("Task was settled by the current worker."));
+          logger.info({ userId: payload.userId, taskId: task.id, workerId: deps.workerId, status: current.status }, "Task worker stopped after task lifecycle transition");
+          return;
+        }
+        if (++consecutiveRenewalFailures >= 2) {
+          leaseAbort.abort(new Error("Task lease was lost while the worker was executing."));
+          logger.warn({ userId: payload.userId, taskId: task.id, workerId: deps.workerId }, "Task worker lost its lease");
+        }
+      }).catch((error) => {
+        if (++consecutiveRenewalFailures >= 2) leaseAbort.abort(new Error("Task lease renewal failed repeatedly; stopping the worker before lease expiry."));
+        logger.warn({ err: error, userId: payload.userId, taskId: task.id, consecutiveFailures: consecutiveRenewalFailures }, "Task lease state inspection failed");
+      });
     }).catch((error) => {
       if (++consecutiveRenewalFailures >= 2) leaseAbort.abort(new Error("Task lease renewal failed repeatedly; stopping the worker before lease expiry."));
       logger.warn({ err: error, userId: payload.userId, taskId: task.id, consecutiveFailures: consecutiveRenewalFailures }, "Task lease renewal failed");
@@ -54,6 +71,13 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
   } catch (error) {
     const message = error instanceof Error ? error.message : "Task worker failed";
     const current = await inspectDurableTask(payload);
+    // The task may have been completed, blocked, failed, or requeued by an
+    // in-turn native task control. Its state is already the authoritative
+    // result; do not turn that normal handoff into an AbortError failure.
+    if (current?.lease?.token === task.lease.token && !["running", "cancel_requested"].includes(current.status)) {
+      logger.info({ userId: payload.userId, taskId: task.id, attempt: task.attempt, status: current.status }, "Task worker observed an in-turn lifecycle settlement");
+      return { claimed: true, task: current };
+    }
     if (current?.status === "cancel_requested" || current?.status === "cancelled") {
       const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, {
         status: "cancelled",
