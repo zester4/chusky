@@ -4,7 +4,7 @@ import { assessReliability, makeQuotaDecision, verifyOutcome } from "../src/reli
 import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
 import { executeCompensation, listCompensations, queueCompensation } from "../src/reliability/persistence.js";
-import { initStore } from "../src/store.js";
+import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, type MissionRecord } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
 import { createComposioOutcomeReadAdapter } from "../src/reliability/composioReadAdapter.js";
@@ -30,6 +30,54 @@ test("replay evaluator catches invalid lifecycle and checks terminal invariants"
   const report = replayScenario({ id: "replay_1", ownerId: 10, missionId: "mis_1", events: [{ at: 1, type: "mission.started" }, { at: 2, type: "mission.checkpoint", data: { checkpoint: "research" } }, { at: 3, type: "step.completed", id: "step_1" }, { at: 4, type: "mission.completed" }], expected: { terminalStatus: "completed", requiredInvariants: ["has_checkpoint", "every_completed_step_has_receipt"] } });
   assert.equal(report.status, "failed");
   assert.ok(report.violations.includes("completed_step_missing_receipt"));
+});
+
+test("replayMission verifies persisted step identity and completed mission invariants", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 212;
+  const mission = await createMission(ownerId, { title: "Replay test", objective: "Finish one persisted step", definitionOfDone: "The step and result are recorded", steps: [{ id: "research", title: "Research", objective: "Check the source" }] });
+  const started = await startMission(ownerId, mission.id);
+  assert.ok(started);
+  await completeMissionStep(ownerId, mission.id, "research", "Source checked");
+  await verifyMission(ownerId, mission.id, { verifiedBy: "agent" });
+  await completeMission(ownerId, mission.id, "Source checked and verified");
+  const completed = await getMission(ownerId, mission.id);
+  assert.ok(completed);
+  assert.ok(completed.events.some((event) => event.type === "step_started" && event.stepId === "research"));
+  assert.ok(completed.events.some((event) => event.type === "step_completed" && event.stepId === "research"));
+  assert.equal(replayMission(completed).status, "passed");
+  const incomplete = { ...completed, steps: [...completed.steps, { ...completed.steps[0]!, id: "missing", status: "pending" as const }] } as MissionRecord;
+  assert.ok(replayMission(incomplete).violations.includes("completed_mission_has_incomplete_steps"));
+});
+
+test("mission replay preserves same-time order, step receipts, and replay event identity", () => {
+  const passed = replayScenario({ id: "replay_long", ownerId: 10, missionId: "mis_long", events: [
+    { at: 1, type: "mission.started", eventId: "event_start" },
+    { at: 2, type: "step.started", id: "research", eventId: "event_step_start" },
+    { at: 2, type: "receipt.succeeded", id: "receipt_1", data: { stepId: "research" }, eventId: "event_receipt" },
+    { at: 2, type: "step.completed", id: "research", eventId: "event_step_done" },
+    { at: 3, type: "mission.checkpoint", data: { checkpoint: "persisted" }, eventId: "event_checkpoint" },
+    { at: 4, type: "mission.completed", eventId: "event_done" },
+  ], expected: { terminalStatus: "completed", requiredInvariants: ["has_checkpoint", "every_completed_step_has_receipt"] } });
+  assert.equal(passed.status, "passed");
+  const duplicate = replayScenario({ id: "replay_duplicate", ownerId: 10, missionId: "mis_duplicate", events: [
+    { at: 1, type: "mission.started", eventId: "same_event" },
+    { at: 2, type: "mission.checkpoint", data: { checkpoint: "must not count" }, eventId: "same_event" },
+    { at: 3, type: "mission.completed" },
+  ], expected: { terminalStatus: "completed", requiredInvariants: ["has_checkpoint"] } });
+  assert.equal(duplicate.status, "failed");
+  assert.ok(duplicate.violations.includes("duplicate_event_replayed"));
+  assert.ok(duplicate.violations.includes("missing_checkpoint"));
+});
+
+test("replay rejects unsupported claims and bounds untrusted scenarios", () => {
+  const unsupported = replayScenario({ id: "replay_unknown", ownerId: 10, missionId: "mis_unknown", events: [{ at: 1, type: "mission.started" }, { at: 2, type: "mission.blocked" }], expected: { terminalStatus: "blocked", requiredInvariants: ["all_external_actions_verified"] } });
+  assert.equal(unsupported.status, "failed");
+  assert.ok(unsupported.violations.includes("unsupported_invariant:all_external_actions_verified"));
+  const overLimit = replayScenario({ id: "replay_large", ownerId: 10, missionId: "mis_large", events: Array.from({ length: 5001 }, (_, index) => ({ at: index + 1, type: "noop" })), expected: { terminalStatus: "blocked" } });
+  assert.equal(overLimit.status, "failed");
+  assert.ok(overLimit.violations.includes("event_limit_exceeded"));
+  assert.equal(overLimit.replayedEvents, 5000);
 });
 
 test("reliability health detects a meltdown and quota decisions fail closed", () => {
@@ -119,7 +167,7 @@ test("persisted outcome observations redact sensitive fields recursively and omi
 });
 
 test("mission replay and operator timeline are deterministic", () => {
-  const mission = { id: "mis_replay", userId: 1, title: "x", objective: "x", definitionOfDone: "x", status: "completed" as const, steps: [], budget: { maxDurationSeconds: 1, maxSteps: 1, maxToolCalls: 1, maxCost: 1 }, consumedSteps: 0, toolCalls: 0, cost: 0, createdAt: 1, updatedAt: 4, events: [{ id: "e1", type: "started" as const, message: "started", at: 1 }, { id: "e2", type: "checkpointed" as const, message: "checkpoint", at: 2 }, { id: "e3", type: "completed" as const, message: "done", at: 3 }], version: 1 };
+  const mission = { id: "mis_replay", userId: 1, title: "x", objective: "x", definitionOfDone: "x", status: "completed" as const, result: "done", steps: [], budget: { maxDurationSeconds: 1, maxSteps: 1, maxToolCalls: 1, maxCost: 1 }, consumedSteps: 0, toolCalls: 0, cost: 0, createdAt: 1, updatedAt: 4, events: [{ id: "e1", type: "started" as const, message: "started", at: 1 }, { id: "e2", type: "checkpointed" as const, message: "checkpoint", at: 2 }, { id: "e3", type: "completed" as const, message: "done", at: 3 }], version: 1 };
   assert.equal(replayMission(mission).status, "passed");
   const timeline = buildOperatorTimeline({ mission, trace: [], approvals: [] });
   assert.equal(timeline.at(-1)?.type, "mission.completed");

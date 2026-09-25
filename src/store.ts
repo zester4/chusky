@@ -5042,8 +5042,8 @@ export async function getTask(userId: number, id: string): Promise<TaskRecord | 
 
 const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
 
-function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now()): MissionEventRecord {
-  return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at };
+function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string): MissionEventRecord {
+  return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, ...(stepId ? { stepId } : {}) };
 }
 
 function normalizeMission(mission: MissionRecord): MissionRecord {
@@ -5285,7 +5285,8 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
       if (index >= 0) steps[index] = { ...steps[index], status: "running", attempts: steps[index].attempts + 1, updatedAt: now };
     }
     const next = nextActive.map((candidate) => steps.find((item) => item.id === candidate)).find(Boolean);
-    return { steps, activeStepIds: nextActive, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now)] };
+    const newlyStarted = ready.filter((candidate) => nextActive.includes(candidate.id));
+    return { steps, activeStepIds: nextActive, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
   });
 }
 
@@ -5447,7 +5448,7 @@ export async function startMission(userId: number, id: string): Promise<MissionR
     const steps = mission.steps.map((step) => ready.some((candidate) => candidate.id === step.id) ? { ...step, status: "running" as const, attempts: step.attempts + 1, updatedAt: now } : step);
     const activeStepIds = ready.map((step) => step.id);
     const current = ready[0];
-    return { status: "running", startedAt: now, error: undefined, activeStepIds, ...(current ? { currentStepId: current.id, steps } : {}), events: [...mission.events, missionEvent("started", activeStepIds.length > 1 ? `Mission started with ${activeStepIds.length} parallel steps.` : "Mission started", now)] };
+    return { status: "running", startedAt: now, error: undefined, activeStepIds, ...(current ? { currentStepId: current.id, steps } : {}), events: [...mission.events, missionEvent("started", activeStepIds.length > 1 ? `Mission started with ${activeStepIds.length} parallel steps.` : "Mission started", now), ...ready.map((step) => missionEvent("step_started", `Mission step ${step.id} started.`, now, step.id))] };
   });
 }
 

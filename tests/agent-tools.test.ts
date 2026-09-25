@@ -27,7 +27,7 @@ test("tool reliability diagnostics are explicit; artifact uploads stay gated and
   assert.match(bridge.function.description, /base64\/binary field/i);
   const media = chuckTools.find((entry) => entry.function.name === "CHUCK_MEDIA_BRIDGE")!;
   assert.deepEqual(media.function.parameters.required, ["source", "toolSlug", "arguments"]);
-  assert.match(media.function.description, /without asking for separate approval/i);
+  assert.match(media.function.description, /no separate approval step/i);
   assert.match(media.function.description, /fail closed/i);
   const qa = chuckTools.find((entry) => entry.function.name === "CHUCK_ARTIFACT_QA")!;
   assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);

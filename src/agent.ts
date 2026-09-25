@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { buildMediaBridgeArguments, hasMediaUrlField } from "./mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -568,6 +568,18 @@ async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], 
   return schema;
 }
 
+async function resolveMediaBridgeToolkitSlug(composioClient: any, toolSlug: string, signal?: AbortSignal): Promise<string> {
+  const getRawTool = composioClient?.tools?.getRawComposioToolBySlug;
+  if (typeof getRawTool !== "function") throw new Error(`Composio cannot resolve the exact toolkit for ${toolSlug}; no file upload was attempted.`);
+  const rawTool: any = await abortable(getRawTool.call(composioClient.tools, toolSlug), signal);
+  const returnedSlug = rawTool?.slug ?? rawTool?.toolSlug ?? rawTool?.tool_slug;
+  const toolkitSlug = rawTool?.toolkit?.slug ?? rawTool?.toolkitSlug ?? rawTool?.toolkit_slug;
+  if (returnedSlug !== toolSlug || typeof toolkitSlug !== "string" || !/^[a-z0-9_]+$/.test(toolkitSlug)) {
+    throw new Error(`Composio did not return exact toolkit metadata for ${toolSlug}; no file upload was attempted.`);
+  }
+  return toolkitSlug;
+}
+
 async function executeLinkedinImagePost(
   sessionObj: any,
   toolSlug: string,
@@ -621,6 +633,85 @@ async function executeLinkedinImagePost(
   validateToolArgumentsAgainstSchema(toolSlug, postArguments, postSchema, 36 * 1024 * 1024);
   const result = await composioExecute(sessionObj, toolSlug, account ? { ...postArguments, account } : postArguments, signal);
   return { result, mode: "linkedin_upload" };
+}
+
+async function publishInstagramMedia(
+  sessionObj: any,
+  availableTools: any[],
+  actionArguments: Record<string, unknown>,
+  createResult: any,
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<any> {
+  if (createResult?.successful !== true || createResult?.error) throw new Error("Instagram did not confirm media-container creation; publishing was not attempted.");
+  const data = createResult.data && typeof createResult.data === "object" ? createResult.data : {};
+  const creationId = [data.id, data.creation_id, data.creationId, data.media_id, data.mediaId]
+    .find((value) => typeof value === "string" && value.trim());
+  if (typeof creationId !== "string") throw new Error("Instagram created no usable media-container ID; publish was not attempted.");
+
+  const publishSlug = "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH";
+  const schema = await resolveMediaBridgeSchema(sessionObj, availableTools, publishSlug, signal) as any;
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object") throw new Error("Instagram publish action has no usable input schema; publish was not attempted.");
+  const idCandidates = Object.keys(properties).filter((key) => /^(creation_id|creationId|container_id|containerId|ig_media_id)$/i.test(key));
+  if (idCandidates.length !== 1) throw new Error("Instagram publish schema has no unambiguous media-container ID field; publish was not attempted.");
+  const publishArguments: Record<string, unknown> = { [idCandidates[0]!]: creationId };
+  for (const key of schema.required ?? []) {
+    if (Object.hasOwn(publishArguments, key)) continue;
+    if (Object.hasOwn(actionArguments, key)) publishArguments[key] = actionArguments[key];
+    else throw new Error(`Instagram publish requires ${key}, which the media action did not provide; publish was not attempted.`);
+  }
+  validateToolArgumentsAgainstSchema(publishSlug, publishArguments, schema, 36 * 1024 * 1024);
+  return composioExecute(sessionObj, publishSlug, account ? { ...publishArguments, account } : publishArguments, signal);
+}
+
+async function executeTwitterImagePost(
+  composioClient: any,
+  sessionObj: any,
+  availableTools: any[],
+  postSchema: any,
+  postArguments: Record<string, unknown>,
+  file: { data: Buffer; name: string; contentType: string },
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<any> {
+  const mediaKeys = ["media_media_ids", "media_ids", "mediaIds"];
+  const mediaKey = mediaKeys.find((key) => postSchema?.properties?.[key]?.type === "array" && postSchema.properties[key].items?.type === "string");
+  if (!mediaKey) throw new Error("The current X post schema has no supported media ID array; no image upload was attempted.");
+  if (Object.hasOwn(postArguments, mediaKey)) throw new Error(`Do not supply ${mediaKey}; Chusky adds the provider-confirmed image ID.`);
+  const uploadSlug = "TWITTER_UPLOAD_MEDIA";
+  const uploadSchema = await resolveMediaBridgeSchema(sessionObj, availableTools, uploadSlug, signal);
+  if (!hasComposioFileUploadField(uploadSchema)) throw new Error("The exact X media-upload action does not expose a Composio file-upload field; no upload was attempted.");
+  if (typeof composioClient?.files?.upload !== "function") throw new Error("Composio staged file upload is unavailable for X; no upload was attempted.");
+  const toolkitSlug = await resolveMediaBridgeToolkitSlug(composioClient, uploadSlug, signal);
+  const stagedFileResponse = await abortable(composioClient.files.upload({
+    file: new File([new Uint8Array(file.data)], file.name, { type: file.contentType }),
+    toolSlug: uploadSlug,
+    toolkitSlug,
+  }), signal);
+  const stagedFile = stagedFileResponse && typeof stagedFileResponse === "object" ? stagedFileResponse as Record<string, unknown> : undefined;
+  if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
+    throw new Error("Composio did not return a valid staged X media reference; no X API upload was attempted.");
+  }
+  const uploadArguments = buildComposioFileUploadArguments(uploadSchema, {}, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key });
+  const uploadProperties = (uploadSchema as any)?.properties;
+  for (const key of (uploadSchema as any)?.required ?? []) {
+    if (Object.hasOwn(uploadArguments, key)) continue;
+    if (!uploadProperties || typeof uploadProperties !== "object" || Array.isArray(uploadProperties) || !Object.hasOwn(uploadProperties, key)) {
+      throw new Error(`X media upload requires unsupported field ${key}; no X API upload was attempted.`);
+    }
+    if (/^media_?type$/i.test(key)) uploadArguments[key] = file.contentType;
+    else if (/^media_?category$/i.test(key)) uploadArguments[key] = "tweet_image";
+    else throw new Error(`X media upload requires unsupported field ${key}; no X API upload was attempted.`);
+  }
+  validateToolArgumentsAgainstSchema(uploadSlug, uploadArguments, composioFileUploadValidationSchema(uploadSchema), 36 * 1024 * 1024);
+  const uploaded = await composioExecute(sessionObj, uploadSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
+  if (uploaded?.successful !== true || uploaded?.error) throw new Error("X did not confirm media upload; post creation was not attempted.");
+  const mediaId = findProviderString(uploaded.data ?? uploaded, (key, value) => /^(media_id|media_id_string|mediaid|id)$/i.test(key) && Boolean(value.trim()));
+  if (!mediaId) throw new Error("X returned no media ID; post creation was not attempted.");
+  const finalArguments = { ...postArguments, [mediaKey]: [mediaId] };
+  validateToolArgumentsAgainstSchema("TWITTER_CREATION_OF_A_POST", finalArguments, postSchema, 36 * 1024 * 1024);
+  return composioExecute(sessionObj, "TWITTER_CREATION_OF_A_POST", account ? { ...finalArguments, account } : finalArguments, signal);
 }
 
 function findProviderString(
@@ -771,6 +862,7 @@ export async function executeMediaBridgeAction(
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   if (!sessionObj) throw new Error("Image transfers require an active connected-app session.");
+  const composioClient = composio;
   const toolSlug = typeof args.toolSlug === "string" ? args.toolSlug.trim() : "";
   if (!toolSlug || toolSlug.startsWith("CHUCK_") || toolSlug.startsWith("COMPOSIO_") || toolSlug.startsWith("MCP_")) {
     throw new Error("toolSlug must be one exact connected Composio app action, not a Chusky, Composio meta-tool, or MCP action.");
@@ -828,16 +920,43 @@ export async function executeMediaBridgeAction(
 
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
   let result: any;
-  let mode: "url" | "binary" | "linkedin_upload";
+  let mode: "url" | "binary" | "composio_file" | "linkedin_upload";
   if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
     const linkedIn = await executeLinkedinImagePost(sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
     mode = linkedIn.mode;
+  } else if (toolSlug === "TWITTER_CREATION_OF_A_POST") {
+    result = await executeTwitterImagePost(composioClient, sessionObj, availableComposioTools, schema, actionArguments as Record<string, unknown>, file, account, signal);
+    mode = "composio_file";
+  } else if (hasComposioFileUploadField(schema)) {
+    if (typeof composio?.files?.upload !== "function") {
+      throw new Error("Composio staged file upload is unavailable for this schema-declared action; no provider action was attempted.");
+    }
+    // Composio's Tool Router requires a staged FileUploadable descriptor for
+    // file_uploadable schema fields. A signed URL or base64 string is not a
+    // compatible substitute for Gmail/Instagram-style upload actions.
+    const toolkitSlug = await resolveMediaBridgeToolkitSlug(composioClient, toolSlug, signal);
+    const upload = await abortable(composioClient.files.upload({
+      file: new File([new Uint8Array(file.data)], file.name, { type: file.contentType }),
+      toolSlug,
+      toolkitSlug,
+    }), signal);
+    const stagedFile = upload && typeof upload === "object" ? upload as Record<string, unknown> : undefined;
+    if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
+      throw new Error("Composio did not return a valid staged-file reference; no provider action was attempted.");
+    }
+    const uploadArguments = buildComposioFileUploadArguments(schema, actionArguments as Record<string, unknown>, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key });
+    validateToolArgumentsAgainstSchema(toolSlug, uploadArguments, composioFileUploadValidationSchema(schema), 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
+    mode = "composio_file";
   } else {
     const built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
     validateToolArgumentsAgainstSchema(toolSlug, built.arguments, schema, 36 * 1024 * 1024);
     result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
     mode = built.mode;
+  }
+  if (toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA") {
+    result = await publishInstagramMedia(sessionObj, availableComposioTools, actionArguments as Record<string, unknown>, result, account, signal);
   }
   if (result?.successful !== true || result?.error) throw new Error("The connected app did not confirm this image action succeeded. Check the provider state before retrying to avoid a duplicate.");
   const data = result?.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};

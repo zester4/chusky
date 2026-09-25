@@ -98,6 +98,7 @@ export interface ReliabilityTraceEvent {
 export interface ReplayEvent {
   at: number;
   type: string;
+  eventId?: string;
   id?: string;
   status?: string;
   data?: Record<string, unknown>;
