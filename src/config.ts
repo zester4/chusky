@@ -107,7 +107,7 @@ export const config = {
   mcpConnectionEncryptionKey: optional("MCP_CONNECTION_ENCRYPTION_KEY", ""),
   mcpOAuthCallbackUrl: optional("MCP_OAUTH_CALLBACK_URL", ""),
   mcpToolTimeoutMs: boundedInt("MCP_TOOL_TIMEOUT_MS", 20_000, 1_000, 120_000),
-  mcpMaxServers: boundedInt("MCP_MAX_SERVERS", 20, 1, 100),
+  mcpMaxServers: boundedInt("MCP_MAX_SERVERS", 20, 1, 50),
   mcpMaxToolsPerServer: boundedInt("MCP_MAX_TOOLS_PER_SERVER", 100, 1, 500),
   mcpMaxResultChars: boundedInt("MCP_MAX_RESULT_CHARS", 20_000, 1_000, 100_000),
 

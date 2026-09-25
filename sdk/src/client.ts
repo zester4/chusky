@@ -1,6 +1,6 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
-import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OutcomePackage, OutcomePlan, Page, RecurringJob, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -27,6 +27,7 @@ export class Chusky {
   readonly calls: CallsResource;
   readonly meetings: MeetingsResource;
   readonly apps: AppsResource;
+  readonly mcp: McpResource;
   readonly reminders: RemindersResource;
   readonly jobs: JobsResource;
   readonly memory: MemoryResource;
@@ -79,6 +80,7 @@ export class Chusky {
     this.calls = new CallsResource(this);
     this.meetings = new MeetingsResource(this);
     this.apps = new AppsResource(this);
+    this.mcp = new McpResource(this);
     this.reminders = new RemindersResource(this);
     this.jobs = new JobsResource(this);
     this.memory = new MemoryResource(this);
@@ -439,6 +441,15 @@ export class AppsResource {
   connect(toolkit: string, alias?: string, options?: RequestOptions): Promise<{ toolkit: string; alias?: string; url: string }> { return this.client.request(`/apps/${encodeURIComponent(toolkit)}/connect`, { method: "POST", body: JSON.stringify(alias === undefined ? {} : { alias }) }, options); }
   connections(options?: RequestOptions): Promise<Page<AppConnection>> { return this.client.request("/apps/connections", {}, options); }
   disconnect(connectionId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/apps/connections/${encodeURIComponent(connectionId)}`, { method: "DELETE" }, options); }
+}
+
+export class McpResource {
+  constructor(private readonly client: Chusky) {}
+  catalog(options?: RequestOptions): Promise<{ data: McpCatalogEntry[]; errors?: string[] }> { return this.client.request("/mcp/catalog", {}, options); }
+  connections(options?: RequestOptions): Promise<{ data: McpConnection[] }> { return this.client.request("/mcp/connections", {}, options); }
+  addServer(params: AddCustomMcpServerParams, options?: RequestOptions): Promise<McpConnection> { return this.client.request("/mcp/custom-servers", { method: "POST", body: JSON.stringify(params) }, options); }
+  connect(serverId: string, accessToken?: string, options?: RequestOptions): Promise<McpConnection> { return this.client.request("/mcp/connections", { method: "POST", body: JSON.stringify({ serverId, ...(accessToken ? { accessToken } : {}) }) }, options); }
+  disconnect(serverId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/mcp/connections/${encodeURIComponent(serverId)}`, { method: "DELETE" }, options); }
 }
 
 export class RemindersResource {

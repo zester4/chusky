@@ -8,6 +8,15 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /mcp/catalog:
+    get: { summary: List built-in MCP servers and the authenticated user's custom servers, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Owner-scoped MCP server catalogue } } }
+  /mcp/connections:
+    get: { summary: List owner-scoped MCP connections, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Connected servers and verification metadata } } }
+    post: { summary: Connect a built-in MCP server, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Connected after MCP initialization and tool discovery }, '400': { description: Invalid credentials or verification failure } } }
+  /mcp/custom-servers:
+    post: { summary: Verify and add an account-owned MCP server using Streamable HTTP with legacy HTTP+SSE fallback, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [name, url, auth], properties: { name: { type: string, maxLength: 120 }, url: { type: string, format: uri }, auth: { type: string, enum: [none, bearer] }, accessToken: { type: string, writeOnly: true }, allowedTools: { type: array, maxItems: 500, items: { type: string } }, requireApproval: { type: boolean, default: true } } } } } }, responses: { '201': { description: Server initialized and at least one tool discovered; credentials are encrypted at rest }, '400': { description: Invalid server, authentication, or failed verification }, '403': { description: MCP write scope required } } }
+  /mcp/connections/{serverId}:
+    delete: { summary: Disconnect an owner-scoped MCP server, parameters: [{ name: serverId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '204': { description: Disconnected }, '404': { description: Not connected to this account } } }
   /admin/projects:
     get: { summary: List root-managed developer projects, responses: { '200': { description: OK } } }
     post: { summary: Create a developer project and return its key exactly once, responses: { '201': { description: Created } } }

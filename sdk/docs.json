@@ -6,7 +6,7 @@
     "tabs": [
       { "tab": "Documentation", "groups": [
         { "group": "Start here", "pages": ["docs/index", "docs/quickstart", "docs/concepts"] },
-        { "group": "Build with Chusky", "pages": ["docs/company-workspaces", "docs/missions", "docs/embedded-chat", "docs/calls", "docs/meetings", "docs/streaming", "docs/models", "docs/files", "docs/approvals", "docs/tasks", "docs/policies", "docs/structured-output", "docs/fallbacks", "docs/budgets", "docs/capabilities", "docs/architecture"] },
+        { "group": "Build with Chusky", "pages": ["docs/company-workspaces", "docs/missions", "docs/embedded-chat", "docs/calls", "docs/meetings", "docs/mcp", "docs/streaming", "docs/models", "docs/files", "docs/approvals", "docs/tasks", "docs/policies", "docs/structured-output", "docs/fallbacks", "docs/budgets", "docs/capabilities", "docs/architecture"] },
         { "group": "Production", "pages": ["docs/webhooks", "docs/security", "docs/errors", "docs/releases", "docs/production"] }
       ] },
       { "tab": "API Reference", "openapi": "openapi.yaml", "pages": ["docs/api-contract"] }

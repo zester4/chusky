@@ -44,6 +44,30 @@ test("native tool discovery returns executable JSON schemas for all reliability 
   }
 });
 
+test("custom MCP catalogue entries remain scoped to the authenticated SDK identity", async () => {
+  const externalId = "mcp-catalog-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const owner = await getSession(userId);
+  owner.mcpConnections = [{ serverId: "custom-test-server", customServer: { name: "Owner MCP", url: "https://mcp.example.test/mcp", auth: "none", requireApproval: true }, enabled: true, createdAt: Date.now(), updatedAt: Date.now() }];
+  await saveSession(userId, owner);
+  const api = app();
+  const ownerResponse = await api.fetch(new Request("http://local/v1/mcp/catalog", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId } }));
+  const otherResponse = await api.fetch(new Request("http://local/v1/mcp/catalog", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "mcp-other-user" } }));
+  assert.equal(ownerResponse.status, 200);
+  assert.equal(otherResponse.status, 200);
+  const ownerCustom = ((await ownerResponse.json()) as { data: Array<{ id: string; custom?: boolean }> }).data.filter((item) => item.custom);
+  const otherCustom = ((await otherResponse.json()) as { data: Array<{ id: string; custom?: boolean }> }).data.filter((item) => item.custom);
+  assert.deepEqual(ownerCustom.map((item) => item.id), ["custom-test-server"]);
+  assert.deepEqual(otherCustom, []);
+});
+
+test("custom MCP API rejects incomplete configuration before network access", async () => {
+  const api = app();
+  const response = await api.fetch(new Request("http://local/v1/mcp/custom-servers", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "mcp-invalid-owner", "Content-Type": "application/json" }, body: JSON.stringify({ name: "Missing URL" }) }));
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_custom_mcp_server");
+});
+
 test("owner can confirm an ambiguous channel delivery only after checking the destination", async () => {
   const externalId = "delivery-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);

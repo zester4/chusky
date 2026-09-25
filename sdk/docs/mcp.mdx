@@ -1,0 +1,43 @@
+---
+title: "Third-party MCP servers"
+description: "Connect and safely use account-owned Model Context Protocol servers."
+---
+
+Chusky can connect an account to a third-party MCP server using the MCP
+Streamable HTTP transport, with automatic fallback to legacy HTTP+SSE when the
+endpoint returns `404` or `405` for Streamable HTTP. Adding a server performs
+the protocol initialize handshake and `tools/list`; Chusky only saves the
+connection if discovery succeeds and at least one permitted tool is found.
+stdio servers are not supported through this resource.
+
+```ts
+const server = await chusky.mcp.addServer({
+  name: "Research tools",
+  url: "https://mcp.example.com/mcp",
+  auth: "bearer",
+  accessToken: process.env.RESEARCH_MCP_TOKEN!,
+  allowedTools: ["search_papers", "fetch_paper"],
+  requireApproval: true,
+}, { idempotencyKey: "research-mcp-setup-v1" });
+
+console.log(server.verifiedToolCount); // tools discovered during verification
+const tools = await chusky.mcp.catalog();
+```
+
+Use `chusky.mcp.connections()` to check saved connections and
+`chusky.mcp.disconnect(serverId)` to remove one. Custom servers and their
+credentials are private to the stable end-user identity used by this SDK
+client. Bearer credentials are encrypted at rest and never returned by the API.
+
+The API accepts HTTPS URLs and pins requests to validated DNS results to block
+private and link-local destinations. Development-only loopback HTTP is for local
+testing. Redirects are rejected. MCP connections are private to their account
+and are not exposed in shared group or meeting contexts. Tool calls require
+human approval by default; input schemas are validated and output is bounded. Treat remote tool
+descriptions and results as untrusted data. Configure `MCP_ENABLED=true` and a
+valid `MCP_CONNECTION_ENCRYPTION_KEY` on the Chusky server before adding a
+bearer-authenticated server.
+
+The endpoint is `POST /v1/mcp/custom-servers` and requires `mcp:write` for
+project API keys. The dashboard uses the authenticated account session and the
+same API contract.

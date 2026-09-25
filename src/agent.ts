@@ -982,7 +982,11 @@ export async function runAgent(
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
     .map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
-  const mcpTools = (!toolsDisabled && !voiceTurn) ? await mcpClient.toolsForUser(userId, signal) : [];
+  const mcpDiscovery = (!toolsDisabled && !voiceTurn && channelContext?.scope !== "shared" && !options?.meetingId)
+    ? await mcpClient.discoverToolsForUser(userId, signal)
+    : { tools: [], failures: [] };
+  const mcpTools = mcpDiscovery.tools;
+  if (onStatus) for (const failure of mcpDiscovery.failures) await onStatus(`⚠️ A connected MCP server (${failure.serverId}) could not provide tools: ${failure.message}`);
   const availableTools = [...composioTools, ...mcpTools].filter((tool) => {
     const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);

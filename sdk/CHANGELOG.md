@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.5.4 - 2026-09-25
+
+- Add `chusky.mcp` catalog, connection, verified custom-server, and disconnect
+  methods with typed request/response contracts.
+- Document Streamable HTTP support, verification-before-save, encrypted bearer
+  credentials, private-network protections, and per-end-user isolation.
+
 ## 1.5.3 - 2026-09-25
 
 - Publish native tool JSON schemas through the SDK tool catalog and add a typed

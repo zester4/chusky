@@ -37,7 +37,7 @@ import { requestDelegationCancellation } from "./subagents/executor.js";
 import { SELF_SERVICE_PROJECT_SCOPES } from "./developerProjects.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting, lookupRecallMeetingContext, prepareRecallMeetingMission } from "./meetings/service.js";
 import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
-import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
+import { addCustomMcpServer, connectMcpServer, disconnectMcpServer, listMcpCatalogForUser, listMcpConnections } from "./mcp/client.js";
 import { beginMcpOAuth, finishMcpOAuth } from "./mcp/oauth.js";
 import { createComposerWorkflow, listComposerWorkflows, reconcileComposerWorkflow, rejectComposerApproval, startComposerWorkflow, updateComposerWorkflow, type ComposerStageInput } from "./workflows/composer.js";
 import {
@@ -1499,7 +1499,7 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/mcp/catalog", async (c) => {
-    const catalog = listMcpCatalog();
+    const catalog = await listMcpCatalogForUser(sdkUser(c)!.userId);
     return c.json({ data: catalog.servers, ...(catalog.errors.length ? { errors: catalog.errors } : {}) });
   });
 
@@ -1531,6 +1531,16 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/mcp/connections", async (c) => {
     try { return c.json({ data: await listMcpConnections(sdkUser(c)!.userId) }); }
     catch (error) { return apiError(c, 502, "mcp_connections_unavailable", error instanceof Error ? error.message : "MCP connections are temporarily unavailable."); }
+  });
+
+  app.post("/v1/mcp/custom-servers", async (c) => {
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    if (typeof body.name !== "string" || typeof body.url !== "string" || (body.auth !== "none" && body.auth !== "bearer")) return apiError(c, 400, "invalid_custom_mcp_server", "Provide a name, HTTPS MCP endpoint, and authentication type (none or bearer).");
+    if (body.allowedTools !== undefined && (!Array.isArray(body.allowedTools) || body.allowedTools.length > config.mcpMaxToolsPerServer || !body.allowedTools.every((tool) => typeof tool === "string"))) return apiError(c, 400, "invalid_custom_mcp_tools", "allowedTools must be a bounded list of tool names.");
+    try {
+      const connection = await addCustomMcpServer(sdkUser(c)!.userId, { name: body.name, url: body.url, auth: body.auth, ...(Array.isArray(body.allowedTools) ? { allowedTools: body.allowedTools as string[] } : {}), requireApproval: body.requireApproval !== false }, typeof body.accessToken === "string" ? { accessToken: body.accessToken } : undefined);
+      return c.json(connection, 201);
+    } catch (error) { return apiError(c, 400, "mcp_custom_server_verification_failed", error instanceof Error ? error.message : "Could not verify and add the MCP server."); }
   });
 
   app.post("/v1/mcp/connections", async (c) => {

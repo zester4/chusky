@@ -79,6 +79,9 @@ export type MemoryCategory = "profile" | "personal" | "preference" | "business" 
 export interface MemoryFact { id: string; category: MemoryCategory; key: string; value: string; confidence: number; source: string; sensitivity: "normal" | "sensitive"; status?: string; projectId?: string; personKey?: string; createdAt: string; updatedAt: string; expiresAt?: string; reviewAt?: string; }
 export interface CliDevice { id: string; name: string; createdAt: string; lastSeenAt: string; }
 export interface AppConnection { id: string; toolkit?: string; accountId?: string; name?: string; status?: string; [key: string]: unknown; }
+export interface McpCatalogEntry { id: string; name: string; url: string; auth: "none" | "bearer" | "oauth"; allowedTools?: string[]; requireApproval?: boolean; custom?: boolean; enabled?: boolean; }
+export interface McpConnection { serverId: string; name: string; auth: "none" | "bearer" | "oauth"; enabled: boolean; connectedAt: string; updatedAt: string; verifiedToolCount?: number; }
+export interface AddCustomMcpServerParams { name: string; url: string; auth: "none" | "bearer"; accessToken?: string; allowedTools?: string[]; requireApproval?: boolean; }
 export interface CompanyBranding { organizationId: string; displayName?: string; logoUrl?: string; accentColor?: string; backgroundColor?: string; customDomain?: string; customDomainStatus?: string; updatedAt?: string; }
 
 export type CallProvider = "twilio" | "bland" | "legacy";

@@ -31,6 +31,20 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("SDK adds custom MCP servers through the authenticated verification endpoint", async () => {
+  let request: { url: string; body: Record<string, unknown>; key: string | null; userId: string | null } | undefined;
+  const sdk = new Chusky({ apiKey: "chsk_mcp_test", userId: "mcp-owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    request = { url, body: JSON.parse(String(init?.body)) as Record<string, unknown>, key: new Headers(init?.headers).get("idempotency-key"), userId: new Headers(init?.headers).get("x-chusky-user-id") };
+    return new Response(JSON.stringify({ serverId: "custom_1", name: "Research MCP", auth: "bearer", enabled: true, connectedAt: "2026-09-25T00:00:00.000Z", updatedAt: "2026-09-25T00:00:00.000Z", verifiedToolCount: 4 }), { status: 201 });
+  }) });
+  const connection = await sdk.mcp.addServer({ name: "Research MCP", url: "https://mcp.example.test/mcp", auth: "bearer", accessToken: "secret-token" }, { idempotencyKey: "mcp-add-1" });
+  assert.equal(connection.verifiedToolCount, 4);
+  assert.equal(request?.url, "https://example.test/v1/mcp/custom-servers");
+  assert.equal(request?.body.accessToken, "secret-token");
+  assert.equal(request?.key, "mcp-add-1");
+  assert.equal(request?.userId, "mcp-owner");
+});
+
 test("SDK reliability capability runner narrows to one native tool and preserves durable approval flow", async () => {
   const calls: Array<{ url: string; method: string; body: Record<string, unknown>; key: string | null }> = [];
   const sdk = new Chusky({ apiKey: "chsk_test", userId: "tenant-1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

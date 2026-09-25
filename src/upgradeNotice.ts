@@ -37,6 +37,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
     "Added approval-gated transfer of Daytona artifacts to Composio, and exposed all five reliability capabilities across typed SDK, single-tool MCP runs, and durable A2A task skills without bypassing policy.",
   ],
+  customMcp: [
+    "Accounts can add third-party MCP servers from the dashboard or SDK; Chusky supports Streamable HTTP with legacy HTTP+SSE fallback and verifies discovery before saving.",
+    "Bearer credentials are encrypted at rest, outbound hosts are pinned to validated public DNS results, and private/link-local targets and redirects are rejected.",
+    "The agent executes discovered tools with schema validation, default human approval, bounded results, visible failures, and account isolation from group and meeting contexts.",
+  ],
 } as const;
 
 export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;

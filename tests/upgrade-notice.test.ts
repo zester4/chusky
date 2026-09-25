@@ -58,6 +58,15 @@ test("tool reliability upgrade preset describes bounded diagnostics and approved
   assert.match(bullets[2], /typed SDK, single-tool MCP runs, and durable A2A task skills/);
 });
 
+test("custom MCP upgrade preset describes verification, private networking controls, and agent execution", () => {
+  const bullets = getAgentUpgradePreset("customMcp");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.customMcp]);
+  assert.match(bullets[0], /legacy HTTP\+SSE fallback/);
+  assert.match(bullets[1], /private\/link-local targets and redirects/);
+  assert.match(bullets[2], /group and meeting contexts/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -71,12 +80,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the tool reliability release", async () => {
+test("current upgrade manifest announces the custom MCP release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.5.0");
-  assert.equal(notice?.version, "4.5.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /tool preflight and connected-account health/);
-  assert.match(formatAgentUpgradeNotice(notice!), /read-only PDF, DOCX, PPTX, and XLSX QA/);
-  assert.match(formatAgentUpgradeNotice(notice!), /approval-gated transfer/);
-  assert.match(formatAgentUpgradeNotice(notice!), /single-tool MCP runs, and durable A2A task skills/);
+  assert.equal(notice?.id, "release-4.6.0");
+  assert.equal(notice?.version, "4.6.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /third-party MCP servers/);
+  assert.match(formatAgentUpgradeNotice(notice!), /private\/link-local targets and redirects/);
+  assert.match(formatAgentUpgradeNotice(notice!), /account isolation from group and meeting contexts/);
 });
