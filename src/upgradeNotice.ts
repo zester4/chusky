@@ -35,7 +35,7 @@ export const AGENT_UPGRADE_PRESETS = {
   toolReliability: [
     "Added tool preflight and connected-account health checks so Chusky can validate the exact exposed schema and report connection state without executing actions.",
     "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
-    "Added approval-gated transfer of owner-owned Daytona artifacts to exact schema-verified connected-app actions, with file bytes kept server-side.",
+    "Added approval-gated transfer of Daytona artifacts to Composio, and exposed all five reliability capabilities across typed SDK, single-tool MCP runs, and durable A2A task skills without bypassing policy.",
   ],
 } as const;
 

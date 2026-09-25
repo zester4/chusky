@@ -193,9 +193,9 @@ paths:
   /approvals:
     get: { summary: List pending approvals for the SDK user, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /tools:
-    get: { summary: List native and connected Composio tools, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List native and connected Composio tools; native tools include their JSON input schema and durable-run execution mode, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /tools/{slug}:
-    get: { summary: Get one tool by exact slug, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: Get one tool by exact slug; native tools include their JSON input schema and durable-run execution mode, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /skills:
     get: { summary: Search the trusted project skill catalogue, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /skills/{name}/files:

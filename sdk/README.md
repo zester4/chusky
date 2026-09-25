@@ -54,6 +54,24 @@ console.log(completed.status);
 console.log(completed.output ?? "The run did not produce text output.");
 ```
 
+For a reliability operation, `chusky.tools.list({ source: "native" })` and
+`chusky.tools.get(slug)` return the native JSON input schema. The SDK helper
+starts one durable run restricted to the selected operation; it does not call
+the native dispatcher outside the normal owner policy and approval path:
+
+```ts
+const { thread, run } = await chusky.tools.run({
+  tool: "CHUCK_ARTIFACT_QA",
+  arguments: { path: "artifacts/quarterly-report.pdf", type: "pdf" },
+}, { idempotencyKey: "qa-quarterly-report-v1" });
+const result = await chusky.runs.wait(thread.id, run.id);
+```
+
+The same helper supports `CHUCK_TOOL_PREFLIGHT`, `CHUCK_INTEGRATION_HEALTH`,
+`CHUCK_FILE_BRIDGE`, and `CHUCK_TOOL_RECOVERY`. File bridge uploads remain
+approval-gated, and approval decisions still belong to the human-facing
+approval workflow.
+
 `userId` is an application-owned identity boundary. Chusky uses it to isolate
 threads, runs, memories, approvals, files, tasks, reminders, connected
 accounts, and durable work. Use the same stable value whenever that user

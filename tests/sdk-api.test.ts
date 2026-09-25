@@ -26,6 +26,24 @@ afterEach(() => setPhoneCallLauncherForTests());
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
 
+test("native tool discovery returns executable JSON schemas for all reliability capabilities", async () => {
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-catalog-owner" };
+  const reliability = ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"];
+  for (const slug of reliability) {
+    const listed = await api.fetch(new Request(`http://local/v1/tools?source=native&query=${encodeURIComponent(slug)}`, { headers }));
+    assert.equal(listed.status, 200);
+    const data = (await listed.json() as { data: Array<{ slug: string; parameters?: { type?: string }; execution?: string }> }).data;
+    const item = data.find((candidate) => candidate.slug === slug);
+    assert.ok(item, `${slug} is discoverable`);
+    assert.equal(item.parameters?.type, "object");
+    assert.equal(item.execution, "durable_run");
+    const detail = await api.fetch(new Request(`http://local/v1/tools/${slug}`, { headers }));
+    assert.equal(detail.status, 200);
+    assert.equal(((await detail.json()) as { parameters?: { type?: string } }).parameters?.type, "object");
+  }
+});
+
 test("owner can confirm an ambiguous channel delivery only after checking the destination", async () => {
   const externalId = "delivery-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
@@ -363,11 +381,16 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const rootCard = await api.fetch(new Request("http://local/.well-known/agent-card.json"));
   assert.equal(rootCard.status, 200);
   assert.equal(rootCard.headers.get("a2a-version"), "1.0");
-  const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }> };
+  const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }>; skills: Array<{ id: string; examples?: string[] }> };
   assert.equal(cardBody.protocolVersion, "1.0");
   assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
   assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
   assert.equal((cardBody as { capabilities?: { pushNotifications?: boolean } }).capabilities?.pushNotifications, true);
+  for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"]) {
+    const skill = cardBody.skills.find((item) => item.id === slug);
+    assert.ok(skill, `${slug} is advertised as an A2A skill`);
+    assert.ok(skill.examples?.length);
+  }
 
   const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "1.0" }, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "message/send", params: { contextId: "crm-release-context", message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
   assert.equal(send.status, 200);

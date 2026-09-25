@@ -31,6 +31,28 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("SDK reliability capability runner narrows to one native tool and preserves durable approval flow", async () => {
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown>; key: string | null }> = [];
+  const sdk = new Chusky({ apiKey: "chsk_test", userId: "tenant-1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    calls.push({ url, method: init?.method ?? "GET", body, key: new Headers(init?.headers).get("idempotency-key") });
+    if (url.endsWith("/v1/threads")) return new Response(JSON.stringify({ id: "thr_reliability", metadata: {}, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }), { status: 201 });
+    return new Response(JSON.stringify({ id: "run_reliability", status: "queued", threadId: "thr_reliability", createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }), { status: 202 });
+  }) });
+  const args = { artifactId: "artifact_1", toolSlug: "GMAIL_SEND_EMAIL", arguments: { recipient: "owner@example.test" } };
+  const created = await sdk.tools.run({ tool: "CHUCK_FILE_BRIDGE", arguments: args }, { idempotencyKey: "bridge-operation-001" });
+  assert.equal(created.thread.id, "thr_reliability");
+  assert.equal(created.run.id, "run_reliability");
+  assert.equal(calls.length, 2);
+  const body = calls[1]!.body;
+  assert.deepEqual((body.tools as { allow: string[] }).allow, ["CHUCK_FILE_BRIDGE"]);
+  assert.equal((body.budget as { maxToolCalls: number }).maxToolCalls, 1);
+  assert.match(String(body.input), /never bypass it/);
+  assert.match(String(body.input), new RegExp(args.artifactId));
+  assert.equal(calls[0]!.key, "bridge-operation-001:thread");
+  assert.equal(calls[1]!.key, "bridge-operation-001:run");
+});
+
 test("SDK can owner-confirm an ambiguous delivery without triggering a resend", async () => {
   let request: { url: string; method: string; userId: string } | undefined;
   const sdk = new Chusky({ apiKey: "chsk_test", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

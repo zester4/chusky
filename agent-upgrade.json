@@ -1,11 +1,11 @@
 {
-  "id": "release-4.4.0",
-  "version": "4.4.0",
+  "id": "release-4.5.0",
+  "version": "4.5.0",
   "title": "Chusky has been upgraded",
   "bullets": [
     "Added tool preflight and connected-account health checks so Chusky can validate the exact exposed schema and report connection state without executing actions.",
     "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
-    "Added approval-gated transfer of owner-owned Daytona artifacts to exact schema-verified connected-app actions, with file bytes kept server-side."
+    "Added approval-gated transfer of Daytona artifacts to Composio, and exposed all five reliability capabilities across typed SDK, single-tool MCP runs, and durable A2A task skills without bypassing policy."
   ],
-  "createdAt": "2026-09-24T23:43:31.946Z"
+  "createdAt": "2026-09-25T02:36:28.291Z"
 }

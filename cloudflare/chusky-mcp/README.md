@@ -2,7 +2,7 @@
 
 This Cloudflare Worker exposes a remote, stateless MCP endpoint over Chusky's public `/v1` API. It does not contain an agent runtime, Composio credentials, or a second workflow engine. Chusky remains the orchestrator; Composio continues to own connected accounts and tool execution.
 
-Version `0.3.0` supports two authentication modes:
+Version `0.4.0` supports two authentication modes:
 
 - Private/server-to-server mode: `Authorization: Bearer chsk_...` plus `X-Chusky-User-Id`.
 - Interactive MCP mode: OAuth 2.1 authorization-code flow with S256 PKCE, dynamic client registration, encrypted provider grants, and standard protected-resource/authorization-server discovery. OAuth requires a Cloudflare KV binding named `OAUTH_KV`.
@@ -18,6 +18,7 @@ Version `0.3.0` supports two authentication modes:
 - Search and save purpose-scoped context, including decisions, open loops, tool receipts, artifacts, meetings, and department handoffs.
 - Read per-identity usage and company-project run, audit, and monthly usage summaries.
 - Discover Chusky tools and trusted skills, revisit threads, inspect approvals, and retrieve artifact/file metadata.
+- Run one exact native reliability capability (`CHUCK_TOOL_PREFLIGHT`, `CHUCK_INTEGRATION_HEALTH`, `CHUCK_ARTIFACT_QA`, `CHUCK_FILE_BRIDGE`, or `CHUCK_TOOL_RECOVERY`) as a durable run restricted to that tool. File bridge retains its normal human approval requirement.
 - Manage agent profiles, triggers, and webhook targets when the caller has the `mcp:manage` scope.
 
 No MCP tool approves an external action. Approval is a human decision made through the authenticated Chusky dashboard or an explicitly authorized host application. Chusky's API checks the project key's scopes, stable end-user identity, agent/project grants, budgets, and approval policy on every request. The server does not expose arbitrary upstream URLs or API paths.
@@ -129,7 +130,7 @@ public names and their minimum MCP scope:
 | Discovery | `chusky_agent_templates`, `chusky_agents_list`, `chusky_tools_list`, `chusky_skills_search`, `chusky_skill_read` |
 | Agent profiles | `chusky_agent_create`, `chusky_agent_get`, `chusky_agent_update`, `chusky_agent_delete` |
 | Composio | `chusky_composio_apps_list`, `chusky_composio_connect_app`, `chusky_triggers_list` |
-| Runs | `chusky_run_start`, `chusky_run_get`, `chusky_runs_list`, `chusky_run_events`, `chusky_run_cancel`, `chusky_run_resume` |
+| Runs | `chusky_run_start`, `chusky_tool_run`, `chusky_run_get`, `chusky_runs_list`, `chusky_run_events`, `chusky_run_cancel`, `chusky_run_resume` |
 | Tasks | `chusky_tasks_list`, `chusky_task_get`, `chusky_task_cancel`, `chusky_task_retry` |
 | Autonomous missions | `chusky_missions_list`, `chusky_mission_get`, `chusky_mission_start`, `chusky_mission_step_complete`, `chusky_mission_replan`, `chusky_mission_event`, `chusky_mission_pause`, `chusky_mission_resume`, `chusky_mission_cancel` |
 | Mission proof and outcomes | `chusky_mission_events`, `chusky_mission_proof`, `chusky_mission_evidence`, `chusky_mission_verify`, `chusky_mission_repair`, `chusky_outcomes_list`, `chusky_outcome_plan` |

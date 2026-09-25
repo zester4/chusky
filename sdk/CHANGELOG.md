@@ -2,6 +2,14 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.5.3 - 2026-09-25
+
+- Publish native tool JSON schemas through the SDK tool catalog and add a typed
+  one-capability durable-run helper for tool reliability operations.
+- Keep exact tool allowlisting, idempotent run creation, owner policy, and
+  existing human approval behavior on the regular run path.
+- Align the A2A Agent Card with the same five tool-reliability skills.
+
 ## 1.5.2 - 2026-09-24
 
 - Add typed `run.tool_activity` stream and persisted-run events with safe

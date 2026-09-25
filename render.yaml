@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: tg-agent
+    name: chusky
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free

@@ -940,7 +940,21 @@ export function registerSdkApi(app: Hono): void {
       capabilities: { streaming: true, pushNotifications: true, stateTransitionHistory: true },
       securitySchemes: { bearerAuth: { type: "http", scheme: "bearer", bearerFormat: "Chusky API key" } },
       security: [{ bearerAuth: [] }],
-      skills: listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"] })),
+      skills: [
+        ...listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"] })),
+        ...(["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"] as const).flatMap((slug) => {
+          const tool = chuckTools.find((candidate) => candidate.function.name === slug);
+          if (!tool) return [];
+          const name: Record<typeof slug, string> = {
+            CHUCK_TOOL_PREFLIGHT: "Native tool preflight",
+            CHUCK_INTEGRATION_HEALTH: "Connected integration health",
+            CHUCK_ARTIFACT_QA: "Document artifact quality assurance",
+            CHUCK_FILE_BRIDGE: "Approval-gated artifact transfer",
+            CHUCK_TOOL_RECOVERY: "Tool failure recovery inspection",
+          };
+          return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [`Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];
+        }),
+      ],
       defaultInputModes: ["text/plain"],
       defaultOutputModes: ["text/plain", "application/json"],
     });
@@ -2205,13 +2219,13 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
-    const native = chuckTools.map((item) => ({ slug: item.function.name, description: item.function.description, source: "native" as const })).filter((item) => (!query || `${item.slug} ${item.description}`.toLowerCase().includes(query.toLowerCase())) && source !== "composio");
+    const native = chuckTools.map((item) => ({ slug: item.function.name, description: item.function.description, source: "native" as const, parameters: item.function.parameters as Record<string, unknown>, execution: "durable_run" as const })).filter((item) => (!query || `${item.slug} ${item.description}`.toLowerCase().includes(query.toLowerCase())) && source !== "composio");
     let composio: any[] = [];
     if (source !== "native" && query) { try { composio = (await searchTools(sdkUser(c)!.userId, query)).slice(0, 50).map((item: any) => ({ slug: String(item.slug ?? item.name ?? ""), description: String(item.description ?? item.name ?? ""), source: "composio", toolkit: item.toolkit ?? item.appName, connected: Boolean(item.connection?.isActive ?? item.connected) })).filter((item: any) => item.slug); } catch { composio = []; } }
     const data = [...native, ...composio].filter((item: any) => !toolkit || String(item.toolkit ?? "").toLowerCase() === toolkit).slice(0, Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50) || 50)));
     return c.json({ data });
   });
-  app.get("/v1/tools/:slug", async (c) => { const slug = c.req.param("slug"); const native = chuckTools.find((item) => item.function.name === slug); if (native) return c.json({ slug, description: native.function.description, source: "native" }); try { const matches = await searchTools(sdkUser(c)!.userId, slug); const item: any = matches.find((candidate: any) => String(candidate.slug ?? candidate.name) === slug); return item ? c.json({ slug, description: String(item.description ?? item.name ?? ""), source: "composio", toolkit: item.toolkit ?? item.appName, connected: Boolean(item.connection?.isActive ?? item.connected) }) : apiError(c, 404, "not_found", "Tool not found."); } catch { return apiError(c, 502, "tools_unavailable", "Tool catalogue is temporarily unavailable."); } });
+  app.get("/v1/tools/:slug", async (c) => { const slug = c.req.param("slug"); const native = chuckTools.find((item) => item.function.name === slug); if (native) return c.json({ slug, description: native.function.description, source: "native", parameters: native.function.parameters, execution: "durable_run" }); try { const matches = await searchTools(sdkUser(c)!.userId, slug); const item: any = matches.find((candidate: any) => String(candidate.slug ?? candidate.name) === slug); return item ? c.json({ slug, description: String(item.description ?? item.name ?? ""), source: "composio", toolkit: item.toolkit ?? item.appName, connected: Boolean(item.connection?.isActive ?? item.connected) }) : apiError(c, 404, "not_found", "Tool not found."); } catch { return apiError(c, 502, "tools_unavailable", "Tool catalogue is temporarily unavailable."); } });
   app.get("/v1/skills", async (c) => { try { const data = await searchSkills(c.req.query("query") ?? "", Number(c.req.query("limit") ?? 20)); return c.json({ data }); } catch (error) { return apiError(c, 500, "skills_unavailable", error instanceof Error ? error.message : "Skill catalogue unavailable."); } });
   app.get("/v1/skills/:name/files", async (c) => { try { const data = await listSkillFiles(c.req.param("name"), Number(c.req.query("maxFiles") ?? 100)); return c.json({ data }); } catch (error) { return apiError(c, 404, "skill_not_found", error instanceof Error ? error.message : "Skill not found."); } });
   app.get("/v1/skills/:name/files/read", async (c) => { try { return c.json(await readSkillFile(c.req.param("name"), c.req.query("path") ?? "SKILL.md", Number(c.req.query("maxChars") ?? 12000))); } catch (error) { return apiError(c, 404, "skill_file_not_found", error instanceof Error ? error.message : "Skill file not found."); } });

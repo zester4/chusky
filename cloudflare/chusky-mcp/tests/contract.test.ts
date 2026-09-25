@@ -13,4 +13,10 @@ test("MCP keeps the approval boundary and response limits explicit", async () =>
   assert.match(source, /oauthCompletionResponse/);
   assert.match(source, /http-equiv="refresh"/);
   assert.doesNotMatch(source, /approvals\/[^"`]*\/(approve|deny)/);
+  assert.match(source, /server\.registerTool\("chusky_tool_run"/);
+  assert.match(source, /CHUCK_TOOL_PREFLIGHT.*CHUCK_INTEGRATION_HEALTH.*CHUCK_ARTIFACT_QA.*CHUCK_FILE_BRIDGE.*CHUCK_TOOL_RECOVERY/s);
+  assert.match(source, /"chusky_run_start"[^\]]*"chusky_tool_run"/s);
+  assert.match(source, /tools:\s*\{\s*allow:\s*\[tool\]/);
+  assert.match(source, /budget:\s*\{\s*maxToolCalls:\s*1\s*\}/);
+  assert.match(source, /If the tool requires human approval, pause/);
 });

@@ -55,6 +55,7 @@ test("tool reliability upgrade preset describes bounded diagnostics and approved
   assert.match(bullets[0], /exact exposed schema/);
   assert.match(bullets[1], /never blindly replays/);
   assert.match(bullets[2], /approval-gated transfer/);
+  assert.match(bullets[2], /typed SDK, single-tool MCP runs, and durable A2A task skills/);
 });
 
 test("loads and writes the release manifest", async () => {
@@ -72,9 +73,10 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces the tool reliability release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.4.0");
-  assert.equal(notice?.version, "4.4.0");
+  assert.equal(notice?.id, "release-4.5.0");
+  assert.equal(notice?.version, "4.5.0");
   assert.match(formatAgentUpgradeNotice(notice!), /tool preflight and connected-account health/);
   assert.match(formatAgentUpgradeNotice(notice!), /read-only PDF, DOCX, PPTX, and XLSX QA/);
   assert.match(formatAgentUpgradeNotice(notice!), /approval-gated transfer/);
+  assert.match(formatAgentUpgradeNotice(notice!), /single-tool MCP runs, and durable A2A task skills/);
 });

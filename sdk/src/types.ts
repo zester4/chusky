@@ -22,7 +22,7 @@ export interface A2AAgentCard {
   url?: string;
   supportedInterfaces?: Array<{ url: string; protocolBinding: string; protocolVersion: string }>;
   capabilities?: { streaming?: boolean; pushNotifications?: boolean; stateTransitionHistory?: boolean };
-  skills?: Array<{ id: string; name: string; description: string; tags?: string[]; inputModes?: string[]; outputModes?: string[] }>;
+  skills?: Array<{ id: string; name: string; description: string; tags?: string[]; inputModes?: string[]; outputModes?: string[]; examples?: string[] }>;
   defaultInputModes?: string[];
   defaultOutputModes?: string[];
   [key: string]: unknown;
@@ -365,7 +365,8 @@ export interface ApprovalDecision { id: string; status: "denied" | "consumed"; t
 
 export interface Skill { name: string; description: string; path: string; bytes?: number; updatedAt?: string; files?: number; }
 export interface SkillFile { name?: string; path: string; bytes: number; binary: boolean; content?: string; truncated?: boolean; }
-export interface Tool { slug: string; description: string; source: "native" | "composio"; approval?: "auto" | "approval_required"; toolkit?: string; connected?: boolean; }
+export type ToolReliabilitySlug = "CHUCK_TOOL_PREFLIGHT" | "CHUCK_INTEGRATION_HEALTH" | "CHUCK_ARTIFACT_QA" | "CHUCK_FILE_BRIDGE" | "CHUCK_TOOL_RECOVERY";
+export interface Tool { slug: string; description: string; source: "native" | "composio"; parameters?: JsonObject; execution?: "durable_run"; approval?: "auto" | "approval_required"; toolkit?: string; connected?: boolean; }
 export interface Artifact { id: string; name: string; type: "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project"; path: string; contentType: string; size: number; status: "available"; sandboxId: string; createdAt: string; updatedAt: string; downloadUrl?: string; }
 export interface VideoJob { id: string; prompt: string; destination: "telegram" | "daytona" | "both"; workspacePath?: string; workflowRunId?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; pollCount: number; error?: string; resultPath?: string; createdAt: string; updatedAt: string; completedAt?: string; }
 export interface Worker { id: string; worker: string; from: string; objective: string; expectedOutput: string; status: string; taskId?: string; workflowRunId?: string; timestamp: string; delegation?: JsonObject; context?: JsonObject; }

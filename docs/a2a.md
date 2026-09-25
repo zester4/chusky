@@ -13,8 +13,19 @@ GET https://api.chusky.ai/a2a/.well-known/agent-card.json
 ```
 
 The card advertises the JSON-RPC interface at `/a2a/rpc`, protocol version
-`1.0`, supported outcome skills, bearer authentication, text input, task
-streaming, and durable A2A push notifications.
+`1.0`, supported outcome skills plus the five tool-reliability capabilities,
+bearer authentication, text input, task streaming, and durable A2A push
+notifications. Reliability capabilities are declared as skills and requested
+through ordinary durable A2A tasks; A2A does not expose a Chusky native-tool RPC.
+The worker runs under the same project grants and approval rules as other
+mission work. In particular, file bridge always pauses for human approval.
+
+Advertised reliability skills are `CHUCK_TOOL_PREFLIGHT`,
+`CHUCK_INTEGRATION_HEALTH`, `CHUCK_ARTIFACT_QA`, `CHUCK_FILE_BRIDGE`, and
+`CHUCK_TOOL_RECOVERY`. Ask for one in the task objective and include its
+arguments in the task description. Use the SDK or MCP tool-run helper when an
+exact schema-constrained single-tool invocation is required; A2A remains the
+task-oriented interoperability boundary.
 
 ## Authentication and identity
 

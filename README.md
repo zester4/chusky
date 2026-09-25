@@ -79,7 +79,9 @@ cloudflare/chusky-mcp is a stateless Streamable HTTP MCP server for clients
 that need Chusky tools. It proxies a small, explicit set of operations (list
 templates/profiles, start and inspect runs, check approval status,
 inspect/cancel/retry tasks, start and control autonomous missions, and read
-usage) to the authenticated Chusky /v1 API. It does not store project keys or
+usage) to the authenticated Chusky /v1 API. `chusky_tool_run` starts an
+idempotent durable run restricted to one of the five native tool-reliability
+capabilities; it does not directly execute or approve actions. It does not store project keys or
 provider credentials, and it cannot approve external actions.
 Configure the Cloudflare Worker with CHUSKY_API_ORIGIN; MCP clients send a
 Chusky project key as Authorization: Bearer … and a trusted stable identity as
