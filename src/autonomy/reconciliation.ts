@@ -4,6 +4,7 @@ import { acquireAutonomyWatchLock, createAttentionRecord, listAttentionRecords, 
 import { isReadOnlyToolSlug } from "../policy.js";
 import { config } from "../config.js";
 import { detectBusinessGaps, type NormalizedBusinessSignal } from "./gapDetectors.js";
+import { detectBusinessOpportunities } from "./opportunityDetectors.js";
 
 export interface ReconciliationRun {
   watchId: string;
@@ -124,10 +125,10 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       const changed = Boolean(parsed?.changed) || (!!executed.text.trim() && !/^NO_ACTION$/i.test(executed.text.trim()));
       const summary = compact(parsed?.summary || executed.text, 4000) || "No changes found.";
       const signals = normalizeSignals(parsed?.signals, watch.domain);
-      const gaps = detectBusinessGaps(signals, { now });
+      const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
       await recordGaps(userId, gaps);
       const digestKey = createHash("sha256").update(JSON.stringify({ watch: watch.id, summary, cursor: parsed?.cursor, gaps: gaps.map((gap) => gap.key) })).digest("hex").slice(0, 32);
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed?.cursor ? compact(parsed.cursor, 500) : watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed?.cursor ? compact(parsed.cursor, 500) : watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {
       const message = compact(error instanceof Error ? error.message : error, 1000);

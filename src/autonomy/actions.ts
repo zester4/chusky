@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { claimDelivery, completeDelivery, getExternalAction, recordTrustedMissionEvidence, saveExternalAction, updateExternalAction, type ExternalActionReceipt } from "../store.js";
+import { claimDelivery, completeDelivery, getExternalAction, getMission, recordTrustedMissionEvidence, saveExternalAction, updateExternalAction, type ExternalActionReceipt } from "../store.js";
 import { logger } from "../logger.js";
+import { queueCompensation, appendTraceEvent, appendReliabilitySample } from "../reliability/persistence.js";
 
 function stableValue(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -69,11 +70,14 @@ export async function beginExternalAction(input: {
     ...(typeof input.args.account_alias === "string" ? { account: input.args.account_alias.slice(0, 160) } : {}),
     ...(input.source?.occurrenceId ? { occurrenceId: input.source.occurrenceId } : {}), status: "started", createdAt: existing?.createdAt ?? Date.now(), updatedAt: Date.now(),
   });
+  await appendTraceEvent({ ownerId: input.userId, kind: "receipt", type: "external_action.started", at: Date.now(), correlationId: logicalActionId, summary: `${input.tool} started through ${input.provider}.`, metadata: { provider: input.provider } }).catch(() => undefined);
   return { state: "new", receipt, logicalActionId };
 }
 
 export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string): Promise<void> {
   const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), error: undefined });
+  await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "success", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
+  await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.succeeded", at: Date.now(), correlationId: logicalActionId, summary: `${receipt?.tool ?? "External action"} was confirmed by the provider.`, metadata: { providerId: providerId ?? null } }).catch(() => undefined);
   // This is the production trusted-evidence boundary: the provider/tool
   // execution returned successfully and Chusky has a durable receipt. The
   // model can request evidence, but it cannot manufacture this system proof.
@@ -103,9 +107,18 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
 }
 
 export async function failExternalAction(userId: number, logicalActionId: string, error: string): Promise<void> {
-  await updateExternalAction(userId, logicalActionId, {
+  const receipt = await updateExternalAction(userId, logicalActionId, {
     status: "ambiguous",
     error: `The provider outcome is uncertain; verify the provider state before manually retrying. ${error}`.slice(0, 1_000),
   });
+  await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "uncertain", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
+  await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.ambiguous", at: Date.now(), correlationId: logicalActionId, status: "uncertain", summary: "External provider outcome is uncertain and has been quarantined.", metadata: { tool: receipt?.tool ?? "unknown" } }).catch(() => undefined);
+  if (receipt?.sourceKind === "mission" && receipt.sourceId && receipt.missionStepId) {
+    const mission = await getMission(userId, receipt.sourceId);
+    const step = mission?.steps.find((candidate) => candidate.id === receipt.missionStepId);
+    if (step?.compensationObjective) {
+      await queueCompensation({ ownerId: userId, missionId: receipt.sourceId, missionStepId: receipt.missionStepId, originalActionId: receipt.id, provider: receipt.provider, objective: step.compensationObjective }).catch((compensationError) => logger.warn({ userId, missionId: receipt.sourceId, errorName: compensationError instanceof Error ? compensationError.name : "UnknownError" }, "Could not queue mission compensation"));
+    }
+  }
   await completeDelivery(`autonomy:external-action:${userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
 }

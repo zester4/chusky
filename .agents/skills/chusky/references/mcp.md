@@ -276,10 +276,15 @@ identifiers; preserve them when changing implementation.
 
 - `chusky_run_start` — create a thread and start a background durable run. Inputs:
   `input`, optional `agentId`, optional bounded `metadata`, optional `budget`,
-  optional `tools`, and optional `idempotencyKey`. The Worker creates the thread
+  optional `tools`, up to five owner-scoped `attachments` file IDs, and optional
+  `idempotencyKey`. Upload and verify files through `/v1/files` first. The Worker creates the thread
   and run with separate derived idempotency keys and returns `threadId` plus the run
   record.
 - `chusky_run_get` — read a run by `threadId` and `runId`.
+- `chusky_tool_run` — run exactly one allowlisted native reliability capability,
+  including `CHUCK_MEDIA_BRIDGE`; pass uploaded image file IDs in `attachments`.
+  Chusky verifies file ownership and availability, and image transfer remains
+  subject to its normal approval policy.
 - `chusky_runs_list` — list runs in one thread with optional `limit` and `cursor`.
 - `chusky_run_events` — read progress events for one run, optionally after a
   millisecond timestamp.

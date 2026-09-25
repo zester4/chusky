@@ -138,7 +138,7 @@ test("SDK exposes authenticated A2A discovery and task lifecycle", async () => {
   }) });
 
   const card = await sdk.a2a.card();
-  const created = await sdk.a2a.send("Research the account.", { idempotencyKey: "a2a-create-1" });
+  const created = await sdk.a2a.send({ text: "Transfer this image to the connected account.", attachments: ["file_verified_image"] }, { idempotencyKey: "a2a-create-1" });
   const current = await sdk.a2a.get(created.id);
   const page = await sdk.a2a.list();
   const cancelled = await sdk.a2a.cancel(current.id);
@@ -153,6 +153,7 @@ test("SDK exposes authenticated A2A discovery and task lifecycle", async () => {
   assert.equal(calls[1]?.headers.get("x-chusky-user-id"), "a2a-user");
   assert.equal(calls[1]?.headers.get("content-type"), "application/a2a+json");
   assert.equal(calls[1]?.headers.get("idempotency-key"), "a2a-create-1");
+  assert.deepEqual(JSON.parse(calls[1]?.body ?? "{}").params.message.parts, [{ text: "Transfer this image to the connected account." }, { data: { chuskyFileIds: ["file_verified_image"] } }]);
 });
 
 test("SDK parses NDJSON run events in order", async () => {
@@ -254,6 +255,24 @@ test("SDK upload helper completes a presigned upload with a distinct idempotency
   assert.equal(calls[0]?.method, "POST");
   assert.equal(calls[1]?.url, "https://upload.example.test/file_1");
   assert.equal(calls[2]?.url, "https://example.test/v1/files/file_1/complete");
+});
+
+test("SDK media-bridge helper accepts verified image attachments and carries them into the durable run", async () => {
+  const calls: Array<{ url: string; body: string }> = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    calls.push({ url, body: String(init?.body ?? "") });
+    if (url.endsWith("/threads")) return new Response(JSON.stringify({ id: "thread_image", history: [], runs: [], createdAt: "2026-09-25T00:00:00.000Z", updatedAt: "2026-09-25T00:00:00.000Z" }), { status: 201 });
+    if (url.endsWith("/runs")) return new Response(JSON.stringify({ id: "run_image", threadId: "thread_image", status: "queued", input: "Transfer this image", createdAt: "2026-09-25T00:00:00.000Z", updatedAt: "2026-09-25T00:00:00.000Z" }), { status: 201 });
+    return new Response(JSON.stringify({ data: [] }), { status: 200 });
+  }) });
+
+  await sdk.tools.run({ tool: "CHUCK_MEDIA_BRIDGE", arguments: { source: "current", toolSlug: "SOCIAL_POST", arguments: { caption: "Launch" } }, attachments: ["file_verified_image"] }, { idempotencyKey: "media-run-123" });
+  const runRequest = calls.find((call) => call.url.endsWith("/runs"));
+  assert.ok(runRequest);
+  const body = JSON.parse(runRequest.body) as { attachments?: string[]; tools?: { allow?: string[] }; budget?: { maxToolCalls?: number } };
+  assert.deepEqual(body.attachments, ["file_verified_image"]);
+  assert.deepEqual(body.tools?.allow, ["CHUCK_MEDIA_BRIDGE"]);
+  assert.equal(body.budget?.maxToolCalls, 1);
 });
 
 test("SDK exposes native schedules, memory, scratchpad, app connections, channels, and devices", async () => {

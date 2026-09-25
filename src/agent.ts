@@ -860,6 +860,25 @@ export async function getScopedComposioTools(userId: number, allowedSlugs: strin
   };
 }
 
+/**
+ * Execute one exact owner-selected connected-app action outside the model
+ * loop. This is used by durable operator continuations such as approval
+ * escalation. Discovery, account ownership, and the provider schema are still
+ * checked before dispatch; callers must supply the exact action and reviewed
+ * arguments rather than allowing a model to choose an arbitrary write.
+ */
+export async function executeExactComposioAction(userId: number, toolSlug: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+  const normalized = toolSlug.trim();
+  if (!/^[A-Z][A-Z0-9_]{2,127}$/.test(normalized) || normalized.startsWith("CHUCK_") || normalized.startsWith("COMPOSIO_") || normalized.startsWith("MCP_")) {
+    throw new Error("Escalation requires one exact connected-app action slug.");
+  }
+  const scoped = await getScopedComposioTools(userId, [normalized], { objective: "Create the owner-approved approval escalation in the connected app." });
+  const tool = scoped.tools[0] as { function?: { parameters?: Record<string, unknown> } } | undefined;
+  const schema = tool?.function?.parameters;
+  if (schema && typeof schema === "object") validateToolArgumentsAgainstSchema(normalized, args, schema);
+  return scoped.execute(normalized, args, signal);
+}
+
 // ── Agent result ──────────────────────────────────────────────────────────────
 
 export interface AgentResult {

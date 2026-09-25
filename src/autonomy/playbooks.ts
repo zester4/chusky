@@ -8,6 +8,8 @@ const outcomeByGap: Record<BusinessGapType, string> = {
   staffing_coverage: "staffing-coverage-recovery",
   stalled_onboarding: "stalled-onboarding-recovery",
   missed_follow_up: "post-meeting-follow-through",
+  expansion_opportunity: "qualified-fintech-leads",
+  renewal_risk: "invoice-follow-up",
 };
 
 export interface AutonomyPlaybookPlan {
@@ -29,4 +31,3 @@ export function planBusinessGapPlaybook(gap: BusinessGap, input: Record<string, 
   const planned = planOutcome(slug, { ...input, gap_key: gap.key, gap_reason: gap.reason, recommended_next_action: gap.recommendedNextAction });
   return { gap, outcome, missingInputs: planned.missingInputs, objective: planned.objective, definitionOfDone: planned.definitionOfDone, steps: planned.steps, approvalBoundary: gap.requiresApproval ? "Prepare and verify; pause before any external write, outbound message, payment, schedule change, access change, deletion, or permission change until the existing approval contract is satisfied." : "Read and prepare autonomously; escalate only if the verified next step becomes externally consequential." };
 }
-

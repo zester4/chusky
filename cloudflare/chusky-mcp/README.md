@@ -18,10 +18,17 @@ Version `0.4.0` supports two authentication modes:
 - Search and save purpose-scoped context, including decisions, open loops, tool receipts, artifacts, meetings, and department handoffs.
 - Read per-identity usage and company-project run, audit, and monthly usage summaries.
 - Discover Chusky tools and trusted skills, revisit threads, inspect approvals, and retrieve artifact/file metadata.
-- Run one exact native reliability capability (`CHUCK_TOOL_PREFLIGHT`, `CHUCK_INTEGRATION_HEALTH`, `CHUCK_ARTIFACT_QA`, `CHUCK_FILE_BRIDGE`, or `CHUCK_TOOL_RECOVERY`) as a durable run restricted to that tool. File bridge retains its normal human approval requirement.
+- Run one exact native reliability capability (`CHUCK_TOOL_PREFLIGHT`, `CHUCK_INTEGRATION_HEALTH`, `CHUCK_ARTIFACT_QA`, `CHUCK_FILE_BRIDGE`, `CHUCK_MEDIA_BRIDGE`, or `CHUCK_TOOL_RECOVERY`) as a durable run restricted to that tool. File and image bridges retain their normal human approval requirements.
 - Manage agent profiles, triggers, and webhook targets when the caller has the `mcp:manage` scope.
 
 No MCP tool approves an external action. Approval is a human decision made through the authenticated Chusky dashboard or an explicitly authorized host application. Chusky's API checks the project key's scopes, stable end-user identity, agent/project grants, budgets, and approval policy on every request. The server does not expose arbitrary upstream URLs or API paths.
+
+For image transfer, upload through the authenticated Chusky `/v1/files` API
+(or the SDK `files.upload()` helper), wait for verification, then pass the
+returned file ID in `attachments` to `chusky_run_start` or `chusky_tool_run`.
+The API resolves it for the same end-user identity and accepts only available
+JPEG, PNG, or WebP files for the media bridge. MCP does not accept inline image
+bytes or arbitrary image URLs; the bridge remains approval-gated.
 
 ## Local development
 

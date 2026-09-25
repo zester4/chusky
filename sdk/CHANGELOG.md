@@ -2,6 +2,14 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.6.0 - 2026-09-25
+
+- Add typed operator reliability resources for timelines, outcome
+  verification, compensation inspection, replay, provider proof, and health.
+- Expose fail-closed durability signals without claiming live provider proof.
+- Add typed media-bridge tool execution with verified image attachments and A2A
+  task messages referencing owner-scoped uploaded images.
+
 ## 1.5.4 - 2026-09-25
 
 - Add `chusky.mcp` catalog, connection, verified custom-server, and disconnect

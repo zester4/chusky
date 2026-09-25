@@ -11,7 +11,9 @@ export type BusinessGapType =
   | "stale_lead"
   | "staffing_coverage"
   | "stalled_onboarding"
-  | "missed_follow_up";
+  | "missed_follow_up"
+  | "expansion_opportunity"
+  | "renewal_risk";
 
 export interface GapEvidence {
   source: string;
@@ -124,4 +126,3 @@ export function detectBusinessGaps(signals: readonly NormalizedBusinessSignal[],
   const seen = new Set<string>();
   return gaps.filter((gap) => !seen.has(gap.key) && (seen.add(gap.key), true)).slice(0, 100);
 }
-

@@ -52,6 +52,10 @@ import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
+import { verifyOutcome } from "./reliability/evaluator.js";
+import { saveOutcomeVerification, appendTraceEvent, listCompensations, updateCompensation } from "./reliability/persistence.js";
+import type { OutcomeCheck, OutcomeCheckResult } from "./reliability/contracts.js";
+import { diagnoseMissionRepair } from "./reliability/repair.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -68,6 +72,7 @@ const SUPERVISOR_DELEGATION_TOOLS = new Set([
   "CHUCK_MISSION_STEP_COMPLETE",
   "CHUCK_MISSION_EVIDENCE",
   "CHUCK_MISSION_VERIFY",
+  "CHUCK_MISSION_COMPENSATE",
   "CHUCK_MISSION_REPLAN",
   "CHUCK_MISSION_BLOCK",
   "CHUCK_MISSION_PAUSE",
@@ -1265,14 +1270,40 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_VERIFY": {
       // Model-authored tool calls cannot attest that a human verified the work.
-      const mission = await verifyMission(userId, text(args.id), { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
+      const missionId = text(args.id);
+      if (Array.isArray(args.checks) && Array.isArray(args.results)) {
+        const checks = args.checks.filter((item: unknown): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50);
+        const results = args.results.filter((item: unknown): item is OutcomeCheckResult => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).checkId === "string" && ["passed", "failed", "uncertain", "skipped"].includes(String((item as Record<string, unknown>).status))).slice(0, 50);
+        const verification = verifyOutcome({ ownerId: userId, missionId, checks, results, now: Date.now() });
+        await saveOutcomeVerification(verification);
+        await appendTraceEvent({ ownerId: userId, kind: "verification", type: "mission.outcome_verified", at: Date.now(), correlationId: missionId, status: verification.status, summary: `Mission outcome verification ${verification.status}.`, metadata: { confidence: verification.confidence, unresolved: verification.unresolved.length } });
+        if (verification.status !== "verified") return { missionId, verification, mission: await getMission(userId, missionId) };
+      }
+      const mission = await verifyMission(userId, missionId, { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");
       return mission;
     }
+    case "CHUCK_MISSION_COMPENSATE": {
+      const id = text(args.compensationId);
+      const records = await listCompensations(userId);
+      const record = records.find((item) => item.id === id);
+      if (!record) throw new Error("Compensation record not found or not owned by you");
+      // The provider adapter is deliberately injected by the supervisor. This
+      // tool can inspect and approve the durable record, but cannot invent a
+      // provider-side undo operation from model text.
+      if (args.action === "inspect") return record;
+      if (args.action !== "approve") throw new Error("Compensation requires action=inspect or action=approve");
+      const approved = await updateCompensation(userId, id, { status: "pending", approvalId: `approved_${Date.now()}` });
+      return { ...approved, message: "Compensation is approved for the provider-specific supervisor; no provider action is claimed until that adapter returns a receipt." };
+    }
     case "CHUCK_MISSION_REPAIR": {
-      const mission = await repairMission(userId, text(args.id), { reason: text(args.reason, 2000), nextAction: args.nextAction ? text(args.nextAction, 2000) : undefined });
+      const missionId = text(args.id);
+      const existing = await getMission(userId, missionId);
+      if (!existing) throw new Error("Mission not found, finished, or not owned by you");
+      const diagnosis = diagnoseMissionRepair({ mission: existing, compensations: await listCompensations(userId, ["pending", "failed", "blocked"]) });
+      const mission = await repairMission(userId, missionId, { reason: `${text(args.reason, 2000)} [diagnosis: ${diagnosis.causes.join(", ")}]`, nextAction: args.nextAction ? text(args.nextAction, 2000) : diagnosis.safeNextActions.join("; ") });
       if (!mission) throw new Error("Mission not found, finished, or not owned by you");
-      return mission;
+      return { mission, diagnosis };
     }
     case "CHUCK_CONTEXT_SEARCH": {
       const selection = { query: args.query ? text(args.query) : undefined, scope: args.scope as never, scopeId: args.scopeId ? text(args.scopeId) : undefined, purpose: args.purpose as never, limit: args.limit === undefined ? undefined : Number(args.limit) };

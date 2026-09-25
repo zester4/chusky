@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
@@ -58,6 +58,17 @@ import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/
 import { scheduleMissionSteps } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
+import { appendReliabilitySample, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth, saveOutcomeVerification } from "./reliability/persistence.js";
+import { replayMission, replayScenario } from "./reliability/replay.js";
+import { verifyOutcome } from "./reliability/evaluator.js";
+import type { OutcomeCheck, OutcomeCheckResult, ReplayScenario } from "./reliability/contracts.js";
+import { compileAutonomyPolicy } from "./reliability/policy.js";
+import { detectMemoryConflicts } from "./memory/conflicts.js";
+import { chooseReliableRoute } from "./reliability/routing.js";
+import { providerMatrix } from "./reliability/providerMatrix.js";
+import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
+import { buildOperatorTimeline } from "./reliability/timeline.js";
+import { checkExecutionQuota } from "./reliability/quotas.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -160,7 +171,7 @@ function a2aTaskView(owner: A2AOwner, mission: any) {
 }
 function a2aJsonRpcResult(c: any, id: A2AJsonRpcId, result: unknown, status = 200) { c.header("Content-Type", A2A_CONTENT_TYPE); return c.json({ jsonrpc: "2.0", id, result }, status); }
 function a2aJsonRpcError(c: any, id: A2AJsonRpcId, code: number, message: string, status = 400) { c.header("Content-Type", A2A_CONTENT_TYPE); return c.json({ jsonrpc: "2.0", id, error: { code, message } }, status); }
-function a2aTextMessage(params: unknown): { text: string; taskId?: string; contextId?: string } | undefined {
+function a2aTextMessage(params: unknown): { text: string; taskId?: string; contextId?: string; attachments: string[] } | undefined {
   if (!params || typeof params !== "object" || Array.isArray(params)) return undefined;
   const value = params as Record<string, unknown>;
   const message = value.message;
@@ -171,9 +182,28 @@ function a2aTextMessage(params: unknown): { text: string; taskId?: string; conte
     .map((part) => typeof part.text === "string" ? part.text : "")
     .filter(Boolean).join("\n").trim().slice(0, 32_000);
   if (!text) return undefined;
+  const attachmentParts = parts.filter((part): part is Record<string, unknown> => Boolean(part && typeof part === "object" && !Array.isArray(part) && "data" in part));
+  const attachments: string[] = [];
+  for (const part of attachmentParts) {
+    const data = part.data;
+    if (!data || typeof data !== "object" || Array.isArray(data) || !Array.isArray((data as Record<string, unknown>).chuskyFileIds)) throw new Error("A2A image references must use data.chuskyFileIds.");
+    const ids = (data as Record<string, unknown>).chuskyFileIds as unknown[];
+    if (ids.some((item) => typeof item !== "string" || !/^file_[A-Za-z0-9_-]{1,160}$/.test(item))) throw new Error("A2A image references must contain valid Chusky file IDs.");
+    attachments.push(...ids as string[]);
+  }
+  if (attachments.length > 5 || new Set(attachments).size !== attachments.length) throw new Error("A2A messages support up to five unique image file IDs.");
   const taskId = typeof (message as Record<string, unknown>).taskId === "string" ? String((message as Record<string, unknown>).taskId) : typeof value.taskId === "string" ? value.taskId : undefined;
   const contextId = normalizeA2AContextId((message as Record<string, unknown>).contextId) ?? normalizeA2AContextId(value.contextId);
-  return { text, ...(taskId ? { taskId } : {}), ...(contextId ? { contextId } : {}) };
+  return { text, attachments, ...(taskId ? { taskId } : {}), ...(contextId ? { contextId } : {}) };
+}
+async function resolveA2AImageAttachments(owner: A2AOwner, ids: string[]): Promise<Array<{ id: string; name: string; contentType: string; size: number }>> {
+  if (!ids.length) return [];
+  if (ids.length > 5 || ids.some((id) => typeof id !== "string" || !/^file_[A-Za-z0-9_-]{1,160}$/.test(id)) || new Set(ids).size !== ids.length) throw new Error("A2A supports up to five unique, valid Chusky file IDs.");
+  const allowedTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+  const session = await getSession(owner.userId);
+  const files = ids.map((id) => session.sdkFiles?.find((file) => file.id === id && file.status === "available"));
+  if (files.some((file) => !file || !allowedTypes.has(file.contentType) || file.size > config.sdkMaxFileBytes)) throw new Error("A2A attachments must reference available, verified image files owned by this caller.");
+  return files.map((file) => ({ id: file!.id, name: file!.name, contentType: file!.contentType, size: file!.size }));
 }
 type A2APushConfigInput = { taskId?: unknown; id?: unknown; url?: unknown; token?: unknown; authentication?: { scheme?: unknown; schemes?: unknown; credentials?: unknown } };
 function a2aPushConfigView(taskId: string, config: MissionA2APushNotificationConfig) {
@@ -230,6 +260,7 @@ async function enqueueA2AMissionUpdate(mission: any): Promise<void> {
 }
 function a2aPageSize(params: unknown): number { const value = params && typeof params === "object" && !Array.isArray(params) ? Number((params as Record<string, unknown>).pageSize ?? 20) : 20; return Number.isFinite(value) ? Math.max(1, Math.min(100, Math.floor(value))) : 20; }
 async function createA2ATask(owner: A2AOwner, body: Record<string, unknown>, idempotencyKey?: string) {
+  const sdkAttachments = await resolveA2AImageAttachments(owner, Array.isArray(body.attachments) ? body.attachments as string[] : []);
   const outcomeSlug = typeof body.outcome === "string" ? body.outcome : undefined;
   const planned = outcomeSlug ? planOutcome(outcomeSlug, body.input && typeof body.input === "object" ? body.input as Record<string, unknown> : {}) : undefined;
   const objective = typeof body.objective === "string" ? body.objective.trim() : planned?.objective ?? "";
@@ -240,7 +271,7 @@ async function createA2ATask(owner: A2AOwner, body: Record<string, unknown>, ide
   const mission = await createMission(owner.userId, { title, objective, definitionOfDone, requiredEvidence: planned?.package.evidenceRequired, steps: planned?.steps, idempotencyKey, budget: planned?.package.budget, a2aContextId: contextId });
   const started = mission.status === "queued" ? await startMission(owner.userId, mission.id) : mission;
   if (!started) throw new Error("The delegated task is no longer startable.");
-  const task = await createTask(owner.userId, { title: `A2A: ${started.title}`, objective: started.objective, missionId: started.id, runAt: Date.now(), maxAttempts: 3 });
+  const task = await createTask(owner.userId, { title: `A2A: ${started.title}`, objective: started.objective, missionId: started.id, runAt: Date.now(), maxAttempts: 3, sdkAttachments });
   const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
   if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly.");
   const linked = await updateMission(owner.userId, started.id, (latest) => ({ rootTaskId: latest.rootTaskId ?? task.id, steps: latest.steps.map((step) => ({ ...step, taskId: step.id === latest.currentStepId ? task.id : step.taskId })) }));
@@ -953,7 +984,7 @@ export function registerSdkApi(app: Hono): void {
             CHUCK_MEDIA_BRIDGE: "Approval-gated image transfer",
             CHUCK_TOOL_RECOVERY: "Tool failure recovery inspection",
           };
-          return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [`Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];
+          return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: slug === "CHUCK_MEDIA_BRIDGE" ? ["text/plain", "application/json"] : ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [slug === "CHUCK_MEDIA_BRIDGE" ? "Upload an image through /v1/files, then send its file ID in data.chuskyFileIds with the image-transfer request." : `Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];
         }),
       ],
       defaultInputModes: ["text/plain"],
@@ -1033,6 +1064,12 @@ export function registerSdkApi(app: Hono): void {
           if (!mission) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
           if (message.contextId && normalizeA2AContextId(mission.a2aContextId) && message.contextId !== mission.a2aContextId) return a2aJsonRpcError(c, id, -32003, "The task belongs to a different context.", 409);
           if (["completed", "failed", "cancelled"].includes(mission.status)) return a2aJsonRpcError(c, id, -32002, "A terminal task cannot accept another message.", 409);
+          const attachments = await resolveA2AImageAttachments(owner, message.attachments);
+          if (attachments.length && mission.rootTaskId) {
+            const rootTask = await getTask(owner.userId, mission.rootTaskId);
+            if (!rootTask) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
+            await updateTask(owner.userId, rootTask.id, { sdkAttachments: [...(rootTask.sdkAttachments ?? []), ...attachments.filter((file) => !rootTask.sdkAttachments?.some((saved) => saved.id === file.id))].slice(0, 5) });
+          }
           const updated = await updateMission(owner.userId, mission.id, { checkpoint: message.text, nextAction: "Incorporate the delegating agent's message in the next bounded slice." });
           return a2aJsonRpcResult(c, id, { task: a2aTaskView(owner, updated ?? mission) });
         }
@@ -1041,6 +1078,7 @@ export function registerSdkApi(app: Hono): void {
           title: typeof record.title === "string" ? record.title : "A2A delegated task",
           definitionOfDone: typeof record.definitionOfDone === "string" ? record.definitionOfDone : "The requested task is completed and its result is verified.",
           contextId: message.contextId,
+          attachments: message.attachments,
         }, c.req.header("Idempotency-Key") ?? undefined);
         const configuration = record.configuration && typeof record.configuration === "object" && !Array.isArray(record.configuration) ? record.configuration as Record<string, unknown> : undefined;
         const pushInput = configuration?.taskPushNotificationConfig ?? configuration?.pushNotificationConfig;
@@ -1108,7 +1146,7 @@ export function registerSdkApi(app: Hono): void {
         if (!message) return a2aJsonRpcError(c, id, -32602, "message.parts must contain at least one text part.");
         const created = message.taskId
           ? await getMission(owner.userId, message.taskId).then((mission) => mission ? { mission, task: a2aTaskView(owner, mission) } : undefined)
-          : await createA2ATask(owner, { objective: message.text, title: "A2A delegated task", definitionOfDone: "The requested task is completed and its result is verified.", contextId: message.contextId }, c.req.header("Idempotency-Key") ?? undefined);
+          : await createA2ATask(owner, { objective: message.text, title: "A2A delegated task", definitionOfDone: "The requested task is completed and its result is verified.", contextId: message.contextId, attachments: message.attachments }, c.req.header("Idempotency-Key") ?? undefined);
         if (!created) return a2aJsonRpcError(c, id, -32001, "Task not found.", 404);
         return streamA2ATask(c, id, owner, created.mission.id);
       }
@@ -2112,6 +2150,8 @@ export function registerSdkApi(app: Hono): void {
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
     const companyPolicy = await applyCompanyRunPolicy(c, body);
     if (companyPolicy.error) return apiError(c, 403, "agent_policy_denied", companyPolicy.error);
+    const quota = await checkExecutionQuota(owner.userId, "sdk.run");
+    if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
@@ -2135,7 +2175,7 @@ export function registerSdkApi(app: Hono): void {
     }
     try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
   });
   app.post("/v1/threads/:threadId/runs/stream", async (c) => {
@@ -2143,6 +2183,8 @@ export function registerSdkApi(app: Hono): void {
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
     const companyPolicy = await applyCompanyRunPolicy(c, body);
     if (companyPolicy.error) return apiError(c, 403, "agent_policy_denied", companyPolicy.error);
+    const quota = await checkExecutionQuota(owner.userId, "sdk.run");
+    if (!quota.allowed) return apiError(c, 429, "execution_quota_exceeded", quota.reason ?? "Execution quota exceeded.");
     if (!(await checkRateLimit(owner.userId))) { c.header("Retry-After", "60"); return apiError(c, 429, "rate_limited", "Rate limit exceeded."); }
     if (!(await canSpend(owner.userId))) return apiError(c, 402, "spend_limit", "Usage cap reached.");
     const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found.");
@@ -2224,7 +2266,7 @@ export function registerSdkApi(app: Hono): void {
     const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
      try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
-    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
+    run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
   app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
   app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
@@ -2457,6 +2499,20 @@ export function registerSdkApi(app: Hono): void {
   });
   app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
   app.get("/v1/activity", async (c) => { const userId = sdkUser(c)!.userId; const since = Number(c.req.query("since") ?? 0) || 0; const session = await getSession(userId); return c.json({ now: Date.now(), approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()), tasks: (await listTasks(userId)).filter((item) => item.updatedAt > since).slice(0, 50), reminders: (await listReminders(userId)).filter((item) => item.createdAt > since).slice(0, 50), jobs: (await listJobs(userId)).filter((item) => item.createdAt > since).slice(0, 50) }); });
+  app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });
+  app.get("/v1/operator/timeline", async (c) => { const owner = sdkUser(c)!; const missionId = c.req.query("mission_id"); const mission = missionId ? await getMission(owner.userId, missionId) : undefined; if (missionId && !mission) return apiError(c, 404, "not_found", "Mission not found."); const session = await getSession(owner.userId); const trace = await listTraceEvents(owner.userId, missionId, 1000); return c.json({ data: buildOperatorTimeline({ mission, trace, approvals: session.approvals.filter((item) => !missionId || item.args?.missionId === missionId).map((item) => ({ id: item.id, createdAt: item.createdAt, status: item.status, request: item.request })) }) }); });
+  app.get("/v1/operator/compensations", async (c) => { const owner = sdkUser(c)!; const status = c.req.query("status"); return c.json({ data: await listCompensations(owner.userId, status ? [status as never] : undefined) }); });
+  app.get("/v1/operator/verifications", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listOutcomeVerifications(owner.userId, c.req.query("mission_id")) }); });
+  app.get("/v1/operator/reliability", async (c) => { const owner = sdkUser(c)!; const operation = String(c.req.query("operation") ?? "agent").slice(0, 160); return c.json({ data: await reliabilityHealth(owner.userId, operation, Date.now(), Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(c.req.query("window_ms") ?? 3_600_000) || 3_600_000))) }); });
+  app.get("/v1/operator/escalations", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listApprovalEscalations(owner.userId) }); });
+  app.get("/v1/operator/provider-matrix", async (c) => c.json({ data: providerMatrix(), note: "Configured is not live proof; run the provider smoke suite with real credentials before marking a surface verified." }));
+  app.post("/v1/operator/escalations/run", async (c) => { const owner = sdkUser(c)!; const result = await runDueApprovalEscalations(owner.userId, { create: async (record) => { if (!record.toolSlug) throw new Error("No exact escalation action was configured; no external issue or message was created."); const output = await executeExactComposioAction(owner.userId, record.toolSlug, record.toolArgs ?? {}); const payload = output && typeof output === "object" ? output as Record<string, unknown> : {}; const key = [payload.key, payload.issueKey, payload.issue_key, payload.id].find((value): value is string => typeof value === "string" && value.length <= 240); return { ...(key ? { externalIssueKey: key } : {}), summary: key ? `Escalation action completed (${key}).` : "Escalation action completed." }; } }); return c.json({ data: result, executed: result.some((item) => item.status === "escalated"), message: result.length ? "Due escalations were processed through the exact owner-selected connected-app action." : "No due escalations." }); });
+  app.post("/v1/operator/outcomes/verify", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const checks = Array.isArray(body.checks) ? body.checks.filter((item): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50) : []; const results = Array.isArray(body.results) ? body.results.filter((item): item is OutcomeCheckResult => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).checkId === "string" && ["passed", "failed", "uncertain", "skipped"].includes(String((item as Record<string, unknown>).status))).slice(0, 50) : []; if (!checks.length) return apiError(c, 400, "invalid_checks", "At least one outcome check is required."); const verification = verifyOutcome({ ownerId: owner.userId, missionId: typeof body.missionId === "string" ? body.missionId : undefined, runId: typeof body.runId === "string" ? body.runId : undefined, checks, results }); await saveOutcomeVerification(verification); return c.json(verification, verification.status === "verified" ? 200 : 409); });
+  app.post("/v1/operator/replay", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; if (typeof body.missionId === "string" && body.events === undefined) { const mission = await getMission(owner.userId, body.missionId); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); const report = replayMission(mission); return c.json(report, report.status === "passed" ? 200 : 409); } const scenario = body as unknown as ReplayScenario; if (!scenario || typeof scenario.id !== "string" || typeof scenario.missionId !== "string" || !Array.isArray(scenario.events) || !scenario.expected || typeof scenario.expected !== "object" || !["completed", "blocked", "failed", "cancelled"].includes(String(scenario.expected.terminalStatus))) return apiError(c, 400, "invalid_replay", "A replay scenario with id, missionId, events, and expected terminalStatus is required."); const report = replayScenario({ ...scenario, ownerId: owner.userId }); return c.json(report, report.status === "passed" ? 200 : 409); });
+  app.post("/v1/operator/reliability/sample", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const operation = String(body.operation ?? "").trim(); const status = String(body.status ?? ""); if (!operation || !["success", "failure", "uncertain", "timeout"].includes(status)) return apiError(c, 400, "invalid_sample", "operation and a valid reliability status are required."); return c.json(await appendReliabilitySample({ ownerId: owner.userId, operation, status: status as never, at: Date.now(), latencyMs: typeof body.latencyMs === "number" ? body.latencyMs : undefined, costUsd: typeof body.costUsd === "number" ? body.costUsd : undefined, provider: typeof body.provider === "string" ? body.provider : undefined }), 201); });
+  app.post("/v1/operator/policy/compile", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; return c.json(compileAutonomyPolicy({ ownerId: owner.userId, mode: body.mode === "business" ? "business" : "personal", project: body.project as CompanyPolicy | undefined, agent: body.agent as CompanyAgentProfile | undefined, requested: body.requested as CompanyPolicy | undefined })); });
+  app.get("/v1/operator/memory-conflicts", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); return c.json({ data: detectMemoryConflicts((session.memories ?? []) as never[]) }); });
+  app.post("/v1/operator/route", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const candidates = Array.isArray(body.candidates) ? body.candidates.filter((item): item is { id: string; health?: any; costMultiplier?: number; latencyMultiplier?: number } => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string").slice(0, 100) : []; const route = chooseReliableRoute(candidates, { requireHealthy: body.requireHealthy === true }); return route ? c.json({ route }) : apiError(c, 409, "no_healthy_route", "No eligible route is available."); });
   app.get("/v1/runs", async (c) => { const userId = sdkUser(c)!.userId; const status = c.req.query("status"); const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50) || 50)); const data = (await listAgentRuns(userId, limit)).filter((run) => !status || run.status === status).map((run) => ({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() })); return c.json({ data }); });
   app.get("/v1/runs/:id", async (c) => { const run = await getAgentRun(sdkUser(c)!.userId, c.req.param("id")); return run ? c.json({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }) : apiError(c, 404, "not_found", "Agent run not found."); });
   app.get("/v1/usage", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
@@ -2575,4 +2631,5 @@ export function registerSdkApi(app: Hono): void {
       } finally { activeRuns.delete(run.id); }
     } finally { await releaseUserLock(owner.userId, token); }
   });
+  app.post("/v1/approvals/:approvalId/escalate", async (c) => { const owner = sdkUser(c)!; const approval = await getApproval(owner.userId, c.req.param("approvalId")); if (!approval) return apiError(c, 404, "not_found", "Approval not found."); if (approval.status !== "pending" || approval.expiresAt <= Date.now()) return apiError(c, 409, "approval_not_escalatable", "Only a pending, unexpired approval can be escalated."); const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const destination = body.destination === "channel" ? "channel" : "jira"; const toolSlug = typeof body.toolSlug === "string" ? body.toolSlug.trim() : undefined; if (destination === "jira" && toolSlug && !/^JIRA_[A-Z0-9_]*(CREATE|ADD|COMMENT|ISSUE|TICKET)[A-Z0-9_]*$/.test(toolSlug)) return apiError(c, 400, "invalid_escalation_tool", "Jira escalation requires an exact Jira issue/comment action."); if (destination === "channel" && toolSlug && !/^(SLACK|TELEGRAM|WHATSAPP|SENDGRID|GMAIL|OUTLOOK)_[A-Z0-9_]*(SEND|MESSAGE|POST|NOTIFY)[A-Z0-9_]*$/.test(toolSlug)) return apiError(c, 400, "invalid_escalation_tool", "Channel escalation requires an exact outbound message action."); const dueAt = typeof body.dueAt === "number" && Number.isFinite(body.dueAt) ? Math.max(Date.now(), body.dueAt) : Date.now(); const toolArgs = body.toolArgs && typeof body.toolArgs === "object" && !Array.isArray(body.toolArgs) ? body.toolArgs as Record<string, unknown> : undefined; return c.json(await scheduleApprovalEscalation({ ownerId: owner.userId, approvalId: approval.id, destination, summary: typeof body.summary === "string" ? body.summary : approval.request, dueAt, ...(toolSlug ? { toolSlug } : {}), ...(toolArgs ? { toolArgs } : {}) }), 201); });
 }

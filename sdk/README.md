@@ -68,9 +68,19 @@ const result = await chusky.runs.wait(thread.id, run.id);
 ```
 
 The same helper supports `CHUCK_TOOL_PREFLIGHT`, `CHUCK_INTEGRATION_HEALTH`,
-`CHUCK_FILE_BRIDGE`, and `CHUCK_TOOL_RECOVERY`. File bridge uploads remain
-approval-gated, and approval decisions still belong to the human-facing
-approval workflow.
+`CHUCK_FILE_BRIDGE`, `CHUCK_MEDIA_BRIDGE`, and `CHUCK_TOOL_RECOVERY`. For image
+transfer, upload first and pass the returned owner-scoped file ID; only verified
+JPEG, PNG, or WebP images are accepted. Both bridges keep their normal approval
+gates, and approval decisions still belong to the human-facing workflow.
+
+```ts
+const image = await chusky.files.upload({ name: "launch.png", contentType: "image/png", data: imageBytes });
+const { thread, run } = await chusky.tools.run({
+  tool: "CHUCK_MEDIA_BRIDGE",
+  arguments: { source: "current", toolSlug: "SOCIAL_POST", arguments: { caption: "Launch" } },
+  attachments: [image.id],
+});
+```
 
 `userId` is an application-owned identity boundary. Chusky uses it to isolate
 threads, runs, memories, approvals, files, tasks, reminders, connected
@@ -145,6 +155,13 @@ const card = await chusky.a2a.card();
 const task = await chusky.a2a.send("Prepare a verified launch brief.", {
   idempotencyKey: "a2a-launch-brief-2026-09-22",
 });
+
+// For image tasks, upload with chusky.files.upload() first. A2A accepts only
+// available owner-scoped Chusky file IDs, never inline bytes or arbitrary URLs.
+const imageTask = await chusky.a2a.send({
+  text: "Transfer this image to the connected social account.",
+  attachments: [image.id],
+}, { idempotencyKey: "image-transfer-2026-09-25" });
 
 const callback = await chusky.a2a.createPushNotificationConfig(task.id, {
   url: "https://your-service.example/a2a/status",
@@ -341,7 +358,10 @@ if (current.status.state !== "TASK_STATE_COMPLETED") {
 Use `a2a.card()` for discovery, `a2a.send()` for a durable delegated task,
 `a2a.get()` or `a2a.list()` for status, and `a2a.cancel()` for cancellation.
 The SDK sends A2A JSON-RPC over the authenticated `/a2a/rpc` boundary and
-does not expose private prompts, credentials, or unscoped tenant data.
+does not expose private prompts, credentials, or unscoped tenant data. Image
+references use Chusky's `data.chuskyFileIds` message-part extension and are
+validated against the caller's available image files before the durable task
+is queued.
 
 ## Files and artifacts
 

@@ -45,7 +45,7 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Dashboard projects | `GET/POST /v1/account/projects`, `PATCH /v1/account/projects/:id`, `POST .../rotate-key`, `DELETE .../:id` | Better-Auth-cookie-only, verified-user project management. |
 | Company policy | `GET/PUT /v1/account/projects/:id/policy` | Organization members may read; only owners/admins may change bounded tool grants and per-run budgets. |
 | Company agents | `GET/POST/PATCH/DELETE /v1/account/projects/:id/agents` and `/v1/agents` | Dashboard management is role-checked; SDK routes require project `agents:read/write` scopes. Templates are listed at `GET /v1/agents/templates`. |
-| Runs | `POST /v1/threads/:threadId/runs` | Executes durable Chusky work. `wait` is bounded. |
+| Runs | `POST /v1/threads/:threadId/runs` | Executes durable Chusky work. `wait` is bounded. Optional `attachments` contains up to five available file IDs owned by the authenticated user; image bridge runs accept verified JPEG, PNG, or WebP files. |
 | Native tool catalog | `GET /v1/tools`, `GET /v1/tools/:slug` | Native tools include their JSON input schema and `execution: durable_run`; `chusky.tools.run()` starts a durable run restricted to one of the five tool-reliability capabilities. Normal project policy and approval gates still apply. |
 | Run stream | `POST /v1/threads/:threadId/runs/stream` | `application/x-ndjson`; emits typed run events. |
 | Runs | `GET /v1/threads/:threadId/runs/:runId`, `POST .../cancel` | Cancellation is request-specific; durable task results stay queryable. |

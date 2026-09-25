@@ -14,7 +14,10 @@ test("MCP keeps the approval boundary and response limits explicit", async () =>
   assert.match(source, /http-equiv="refresh"/);
   assert.doesNotMatch(source, /approvals\/[^"`]*\/(approve|deny)/);
   assert.match(source, /server\.registerTool\("chusky_tool_run"/);
-  assert.match(source, /CHUCK_TOOL_PREFLIGHT.*CHUCK_INTEGRATION_HEALTH.*CHUCK_ARTIFACT_QA.*CHUCK_FILE_BRIDGE.*CHUCK_TOOL_RECOVERY/s);
+  assert.match(source, /CHUCK_TOOL_PREFLIGHT.*CHUCK_INTEGRATION_HEALTH.*CHUCK_ARTIFACT_QA.*CHUCK_FILE_BRIDGE.*CHUCK_MEDIA_BRIDGE.*CHUCK_TOOL_RECOVERY/s);
+  assert.match(source, /attachments:\s*z\.array\(z\.string\(\)\.min\(1\)\.max\(160\)\)\.max\(5\)/);
+  assert.match(source, /body: jsonBody\(\{ input, agentId, metadata, budget, tools, attachments, wait: false \}\)/);
+  assert.match(source, /body: jsonBody\(\{ input, attachments, wait: false, budget: \{ maxToolCalls: 1 \}/);
   assert.match(source, /"chusky_run_start"[^\]]*"chusky_tool_run"/s);
   assert.match(source, /tools:\s*\{\s*allow:\s*\[tool\]/);
   assert.match(source, /budget:\s*\{\s*maxToolCalls:\s*1\s*\}/);

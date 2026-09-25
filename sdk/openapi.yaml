@@ -328,6 +328,36 @@ paths:
     post: { summary: Confirm an ambiguous channel delivery after verifying the destination; does not resend, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Confirmed }, '404': { description: Not found for this owner }, '409': { description: Delivery is not ambiguous } } }
   /activity:
     get: { summary: Get a bounded activity feed for polling dashboards, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+  /operator/trace:
+    get: { summary: List owner-scoped reliability trace events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Trace events } } }
+  /operator/timeline:
+    get: { summary: Read the unified mission, receipt, approval, and reliability timeline, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Causal operator timeline } } }
+  /operator/reliability:
+    get: { summary: Read measured reliability health for an operation, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Reliability health } } }
+  /operator/compensations:
+    get: { summary: List owner-scoped compensation records, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Compensation queue } } }
+  /operator/verifications:
+    get: { summary: List persisted outcome verifications, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Outcome verification records } } }
+  /operator/replay:
+    post: { summary: Replay a submitted scenario or durable mission history, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Replay passed }, '409': { description: Replay invariant failed } } }
+  /operator/provider-matrix:
+    get: { summary: Show channel parity and honest live-proof state, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Provider matrix } } }
+  /operator/escalations:
+    get: { summary: List owner-scoped approval escalations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Approval escalations } } }
+  /operator/escalations/run:
+    post: { summary: Process due escalations through exact owner-selected connected-app actions, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Escalation results } } }
+  /operator/reliability/sample:
+    post: { summary: Record a bounded owner-scoped reliability sample, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '201': { description: Reliability sample } } }
+  /operator/policy/compile:
+    post: { summary: Compile a bounded autonomy policy, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Compiled policy } } }
+  /operator/memory-conflicts:
+    get: { summary: Read active owner-scoped memory conflicts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Memory conflicts } } }
+  /operator/route:
+    post: { summary: Select a measured reliable route from bounded candidates, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Selected route }, '409': { description: No eligible route } } }
+  /operator/outcomes/verify:
+    post: { summary: Verify an outcome from receipts or read-only provider evidence, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Verified outcome }, '409': { description: Unresolved outcome checks } } }
+  /approvals/{approvalId}/escalate:
+    post: { summary: Schedule an owner-approved escalation with an exact connected-app action, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '201': { description: Scheduled escalation }, '409': { description: Approval is not escalatable } } }
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }

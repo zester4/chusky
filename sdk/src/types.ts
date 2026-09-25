@@ -27,6 +27,8 @@ export interface A2AAgentCard {
   defaultOutputModes?: string[];
   [key: string]: unknown;
 }
+/** A Chusky A2A message can reference previously uploaded, owner-scoped files. */
+export type A2AMessageInput = string | { text: string; attachments?: string[] };
 export interface A2APushNotificationConfig {
   taskId: string;
   id?: string;
@@ -352,6 +354,11 @@ export interface DepartmentSpace { id: string; department: string; name: string;
 export interface WorkPacket { id: string; department: string; objective: string; status: string; fromAgent?: string; toAgent?: string; inputs?: JsonObject; constraints?: string[]; outputSchema?: JsonObject; deadline?: number; approvalBoundary?: string; evidenceRequired: string[]; result?: JsonObject; evidence?: MissionEvidence[]; createdAt: number; updatedAt: number; }
 export interface OutcomePackage { slug: string; name: string; department: string; description: string; requiredInputs: string[]; allowedTools: string[]; successCriteria: string[]; evidenceRequired: string[]; escalationRules: string[]; approvalPolicy: "draft_only" | "approve_external_action" | "approve_every_write"; budget: Record<string, unknown>; slaSeconds: number; deliverable: string; }
 export interface OutcomePlan { package: OutcomePackage; missingInputs: string[]; objective: string; definitionOfDone: string; steps: Array<{ id: string; title: string; objective: string; dependsOn?: string[]; evidenceRequired: string[] }>; }
+export interface ReliabilityHealth { operation: string; windowMs: number; sampleCount: number; successRate: number; uncertaintyRate: number; p95LatencyMs?: number; state: "healthy" | "degraded" | "meltdown"; reasons: string[]; calculatedAt: number; }
+export interface OperatorTraceEvent { id: string; kind: string; type: string; at: number; correlationId?: string; parentId?: string; status?: string; summary: string; }
+export interface Compensation { id: string; originalActionId: string; provider: string; objective: string; status: "pending" | "running" | "succeeded" | "failed" | "blocked" | "cancelled"; attempts: number; maxAttempts: number; idempotencyKey: string; createdAt: number; updatedAt: number; error?: string; resultSummary?: string; }
+export interface OutcomeVerification { id: string; missionId?: string; runId?: string; status: "verified" | "failed" | "uncertain" | "blocked"; confidence: number; unresolved: string[]; checks: Array<Record<string, unknown>>; results: Array<Record<string, unknown>>; startedAt: number; completedAt?: number; }
+export interface ApprovalEscalation { id: string; approvalId: string; destination: "jira" | "channel"; summary: string; dueAt: number; status: "pending" | "escalated" | "acknowledged" | "closed" | "failed"; attempts: number; externalIssueKey?: string; error?: string; toolSlug?: string; createdAt: number; updatedAt: number; }
 
 export interface Approval {
   id: string;
@@ -368,7 +375,7 @@ export interface ApprovalDecision { id: string; status: "denied" | "consumed"; t
 
 export interface Skill { name: string; description: string; path: string; bytes?: number; updatedAt?: string; files?: number; }
 export interface SkillFile { name?: string; path: string; bytes: number; binary: boolean; content?: string; truncated?: boolean; }
-export type ToolReliabilitySlug = "CHUCK_TOOL_PREFLIGHT" | "CHUCK_INTEGRATION_HEALTH" | "CHUCK_ARTIFACT_QA" | "CHUCK_FILE_BRIDGE" | "CHUCK_TOOL_RECOVERY";
+export type ToolReliabilitySlug = "CHUCK_TOOL_PREFLIGHT" | "CHUCK_INTEGRATION_HEALTH" | "CHUCK_ARTIFACT_QA" | "CHUCK_FILE_BRIDGE" | "CHUCK_MEDIA_BRIDGE" | "CHUCK_TOOL_RECOVERY";
 export interface Tool { slug: string; description: string; source: "native" | "composio"; parameters?: JsonObject; execution?: "durable_run"; approval?: "auto" | "approval_required"; toolkit?: string; connected?: boolean; }
 export interface Artifact { id: string; name: string; type: "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project"; path: string; contentType: string; size: number; status: "available"; sandboxId: string; createdAt: string; updatedAt: string; downloadUrl?: string; }
 export interface VideoJob { id: string; prompt: string; destination: "telegram" | "daytona" | "both"; workspacePath?: string; workflowRunId?: string; status: "queued" | "running" | "completed" | "failed" | "cancelled"; pollCount: number; error?: string; resultPath?: string; createdAt: string; updatedAt: string; completedAt?: string; }

@@ -8,7 +8,7 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationA
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createApproval, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, createApproval, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -42,6 +42,21 @@ test("native tool discovery returns executable JSON schemas for all reliability 
     assert.equal(detail.status, 200);
     assert.equal(((await detail.json()) as { parameters?: { type?: string } }).parameters?.type, "object");
   }
+});
+
+test("operator reliability surfaces are owner-scoped and expose honest provider proof", async () => {
+  const api = app();
+  const ownerHeaders = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-owner" };
+  const sample = await api.fetch(new Request("http://local/v1/operator/reliability/sample", { method: "POST", headers: { ...ownerHeaders, "Content-Type": "application/json" }, body: JSON.stringify({ operation: "operator.test", status: "success", latencyMs: 12 }) }));
+  assert.equal(sample.status, 201);
+  const health = await api.fetch(new Request("http://local/v1/operator/reliability?operation=operator.test", { headers: ownerHeaders }));
+  assert.equal(health.status, 200);
+  assert.equal((await health.json() as { data: { sampleCount: number } }).data.sampleCount, 1);
+  const matrix = await api.fetch(new Request("http://local/v1/operator/provider-matrix", { headers: ownerHeaders }));
+  assert.equal(matrix.status, 200);
+  assert.match(JSON.stringify(await matrix.json()), /configured_unverified|not_configured/);
+  const other = await api.fetch(new Request("http://local/v1/operator/reliability?operation=operator.test", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-other" } }));
+  assert.equal((await other.json() as { data: { sampleCount: number } }).data.sampleCount, 0);
 });
 
 test("custom MCP catalogue entries remain scoped to the authenticated SDK identity", async () => {
@@ -405,7 +420,7 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const rootCard = await api.fetch(new Request("http://local/.well-known/agent-card.json"));
   assert.equal(rootCard.status, 200);
   assert.equal(rootCard.headers.get("a2a-version"), "1.0");
-  const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }>; skills: Array<{ id: string; examples?: string[] }> };
+  const cardBody = await card.json() as { protocolVersion: string; supportedInterfaces: Array<{ protocolBinding: string; url: string }>; skills: Array<{ id: string; examples?: string[]; inputModes?: string[] }> };
   assert.equal(cardBody.protocolVersion, "1.0");
   assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
   assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
@@ -414,6 +429,7 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
     const skill = cardBody.skills.find((item) => item.id === slug);
     assert.ok(skill, `${slug} is advertised as an A2A skill`);
     assert.ok(skill.examples?.length);
+    if (slug === "CHUCK_MEDIA_BRIDGE") assert.ok(skill.inputModes?.includes("application/json"));
   }
 
   const send = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "1.0" }, body: JSON.stringify({ jsonrpc: "2.0", id: "send-1", method: "message/send", params: { contextId: "crm-release-context", message: { role: "ROLE_USER", messageId: "msg-1", parts: [{ text: "Prepare a verified launch brief." }] } } }) }));
@@ -444,6 +460,39 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const unsupportedVersion = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "9.9" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tasks/get", params: { id: created.result.task.id } }) }));
   assert.equal(unsupportedVersion.status, 400);
   assert.equal(((await unsupportedVersion.json()) as { error: { code: string } }).error.code, "a2a_version_not_supported");
+});
+
+test("A2A tasks accept only verified owner image file IDs and persist them for durable worker input", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-image-test");
+  const externalId = "a2a-image-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const session = await getSession(userId);
+  session.sdkFiles = [
+    { id: "file_a2a_image", key: `sdk/${userId}/image.png`, name: "campaign.png", contentType: "image/png", size: 64, status: "available", createdAt: Date.now() },
+    { id: "file_a2a_text", key: `sdk/${userId}/notes.txt`, name: "notes.txt", contentType: "text/plain", size: 12, status: "available", createdAt: Date.now() },
+  ];
+  await saveSession(userId, session);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/a2a+json", "Idempotency-Key": "a2a-image-task-123" };
+  const send = async (fileId: string, idempotencyKey: string) => api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "Idempotency-Key": idempotencyKey }, body: JSON.stringify({ jsonrpc: "2.0", id: "image-send", method: "message/send", params: { message: { role: "ROLE_USER", parts: [{ text: "Transfer this image to the connected social account." }, { data: { chuskyFileIds: [fileId] } }] } } }) }));
+
+  const response = await send("file_a2a_image", "a2a-image-valid-123");
+  assert.equal(response.status, 200);
+  const task = (await response.json() as { result: { task: { id: string } } }).result.task;
+  const mission = await import("../src/store.js").then(({ getMission }) => getMission(userId, task.id));
+  assert.ok(mission?.rootTaskId);
+  const rootTask = await getTask(userId, mission.rootTaskId!);
+  assert.deepEqual(rootTask?.sdkAttachments?.map(({ id }) => id), ["file_a2a_image"]);
+
+  const invalid = await send("file_a2a_text", "a2a-image-invalid-123");
+  assert.equal(invalid.status, 400);
+  assert.match(JSON.stringify(await invalid.json()), /verified image/i);
+  const otherOwner = await getSession(userId + 1);
+  otherOwner.sdkFiles = [{ id: "file_a2a_foreign", key: `sdk/${userId + 1}/foreign.png`, name: "foreign.png", contentType: "image/png", size: 64, status: "available", createdAt: Date.now() }];
+  await saveSession(userId + 1, otherOwner);
+  const foreign = await send("file_a2a_foreign", "a2a-image-foreign-123");
+  assert.equal(foreign.status, 400);
+  assert.match(JSON.stringify(await foreign.json()), /verified image/i);
 });
 
 test("A2A push notification configurations are encrypted, owner-scoped, and manageable", async () => {
