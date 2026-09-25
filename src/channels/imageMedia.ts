@@ -5,7 +5,6 @@ import { join } from "node:path";
 import type { ChannelAttachment, ChannelMediaError, InboundMessage } from "./contracts.js";
 
 const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
-const MODEL_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 export interface DecodedDataUrl {
@@ -93,14 +92,11 @@ export async function normalizeInboundImages(message: InboundMessage, executable
     if (!isImageCandidate(attachment, decoded) && !sniffed) return attachment;
     if (!sniffed || !hasValidImageEnvelope(decoded.bytes, sniffed)) return { ...attachment, mediaError: "invalid_media" as ChannelMediaError };
     if (decoded.bytes.length > MAX_IMAGE_BYTES) return { ...attachment, mediaError: "too_large" as ChannelMediaError };
-    if (MODEL_IMAGE_TYPES.has(sniffed)) {
-      return { ...attachment, kind: "image" as const, mimeType: sniffed, sizeBytes: decoded.bytes.length, url: `data:${sniffed};base64,${decoded.bytes.toString("base64")}` };
-    }
     try {
       const jpeg = await transcodeToJpeg(decoded.bytes, executable);
       return { ...attachment, kind: "image" as const, mimeType: "image/jpeg", sizeBytes: jpeg.length, url: `data:image/jpeg;base64,${jpeg.toString("base64")}` };
     } catch {
-      return { ...attachment, mediaError: "unsupported_media_type" as ChannelMediaError };
+      return { ...attachment, mediaError: sniffed === "image/heic" ? "unsupported_media_type" as ChannelMediaError : "invalid_media" as ChannelMediaError };
     }
   }));
   return { ...message, attachments };

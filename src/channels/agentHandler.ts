@@ -26,6 +26,13 @@ import { SHARED_CHANNEL_TOOL_DENY } from "../sharedChannelPolicy.js";
 import { defaultMediaInstruction } from "../mediaInput.js";
 import { decodeMediaDataUrl, normalizeInboundImages } from "./imageMedia.js";
 
+export class ChannelMediaInputError extends Error {
+  constructor(readonly mediaError: ChannelMediaError, readonly kind: InboundMessage["attachments"][number]["kind"]) {
+    super(`Inbound ${kind} media could not be decoded`);
+    this.name = "ChannelMediaInputError";
+  }
+}
+
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
     accountId: conversation.accountId,
@@ -143,7 +150,10 @@ async function buildAgentInput(message: InboundMessage): Promise<{ input: string
   const labels: string[] = [];
   for (const attachment of attachments) {
     const decoded = attachment.url ? dataUrlBytes(attachment.url) : undefined;
-    if (!decoded) continue;
+    if (!decoded) {
+      if (attachment.kind === "image") throw new ChannelMediaInputError("invalid_media", attachment.kind);
+      continue;
+    }
     labels.push(attachment.filename ?? attachment.kind);
     if (attachment.kind === "image") parts.push({ type: "image_url", image_url: { url: decoded.dataUrl } });
     else if (attachment.kind === "video") parts.push({ type: "video_url", video_url: { url: decoded.dataUrl } });
@@ -242,6 +252,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
         const interactive = conversation.provider === "whatsapp" ? { kind: "buttons" as const, body: `Approval required before I can run ${error.toolSlug}.`, buttons: [{ id: `chusky_approval_approve:${error.approvalId}`, title: "Approve" }, { id: `chusky_approval_deny:${error.approvalId}`, title: "Deny" }] } : undefined;
         return reply(conversation, `Approval required before I can run ${error.toolSlug}. Approval ID: ${error.approvalId}`, message.providerEventId, { blocks, interactive, kind: "approval", correlationId: error.approvalId });
       }
+      if (error instanceof ChannelMediaInputError) return reply(conversation, mediaFailureText(error.mediaError, error.kind), message.providerEventId);
       if (error instanceof Error && error.message === "Unsupported audio format") {
         return reply(conversation, mediaFailureText("unsupported_media_type"), message.providerEventId);
       }

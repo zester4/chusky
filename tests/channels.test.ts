@@ -152,7 +152,7 @@ test("Sendblue hydrates bounded media for the shared agent handler", async () =>
   assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
 });
 
-test("shared image normalization verifies bytes and corrects provider MIME drift", async () => {
+test("shared image normalization decodes and re-encodes provider MIME drift", async () => {
   const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
   const message = {
     provider: "sendblue" as const, providerEventId: "sb-valid-image", providerUserId: "+15550001", providerConversationId: "+15550001", receivedAt: Date.now(), scope: "private" as const,
@@ -160,8 +160,8 @@ test("shared image normalization verifies bytes and corrects provider MIME drift
   };
   const normalized = await normalizeInboundImages(message);
   assert.equal(normalized.attachments[0].mediaError, undefined);
-  assert.equal(normalized.attachments[0].mimeType, "image/png");
-  assert.match(normalized.attachments[0].url ?? "", /^data:image\/png;base64,/);
+  assert.equal(normalized.attachments[0].mimeType, "image/jpeg");
+  assert.match(normalized.attachments[0].url ?? "", /^data:image\/jpeg;base64,/);
 });
 
 test("shared image normalization rejects malformed image bytes before model dispatch", async () => {
