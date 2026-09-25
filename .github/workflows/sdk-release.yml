@@ -46,6 +46,8 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
       - run: npm ci
+      - name: Install media test dependency
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - name: Verify the application and SDK
         run: |
           npm run typecheck

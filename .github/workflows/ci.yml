@@ -26,6 +26,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install media test dependency
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
