@@ -44,6 +44,8 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
+import { buildMediaBridgeArguments, hasMediaUrlField } from "./mediaBridge.js";
+import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
@@ -61,6 +63,8 @@ import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonom
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
+type MediaBridgeStorage = Pick<typeof import("./store.js"), "saveImageAsset" | "getImageAsset"> & Pick<typeof import("./lib/storage/r2.js"), "readR2Object" | "signR2Download">;
+let mediaBridgeStorage: MediaBridgeStorage = { saveImageAsset, getImageAsset, readR2Object, signR2Download };
 
 /** Configure the project webhook through Composio's current v3.1 API. */
 export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promise<ComposioTriggerSetupStatus> {
@@ -70,6 +74,7 @@ export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promi
 // ── OpenRouter fetch ──────────────────────────────────────────────────────────
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
+const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
 const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
@@ -605,11 +610,134 @@ async function uploadArtifactToConnectedTool(
   return receipt;
 }
 
+export async function prepareMediaBridgeApprovalSource(
+  userId: number,
+  args: Record<string, unknown>,
+  runtime: Pick<NativeToolRuntime, "currentImages" | "generatedImages">,
+): Promise<Record<string, unknown>> {
+  const source = args.source;
+  if (source === "asset") {
+    const selector = typeof args.assetId === "string" ? args.assetId.trim() : "";
+    if (!selector) throw new Error("assetId is required when source=asset.");
+    const asset = await mediaBridgeStorage.getImageAsset(userId, selector);
+    if (!asset) throw new Error("The requested owner image asset was not found.");
+    if (!(["image/jpeg", "image/png", "image/webp"] as string[]).includes(asset.contentType) || asset.size <= 0 || asset.size > MAX_IMAGE_TRANSFER_BYTES) {
+      throw new Error("The selected image asset is invalid, unsupported, or larger than 25 MB.");
+    }
+    const normalized: Record<string, unknown> = { ...args, source: "asset", assetId: asset.id };
+    delete normalized.sourceIndex;
+    return normalized;
+  }
+  if (source !== "current" && source !== "generated") throw new Error("source must be current, generated, or asset.");
+  const index = args.sourceIndex === undefined ? 0 : Number(args.sourceIndex);
+  if (!Number.isInteger(index) || index < 0 || index > 9) throw new Error("sourceIndex must be an integer from 0 to 9.");
+  const images = source === "generated" ? runtime.generatedImages : runtime.currentImages;
+  const image = images?.[index];
+  if (!image) throw new Error(`No ${source} image is available at index ${index}.`);
+  const bytes = Buffer.from(image.data);
+  const contentType = String(image.mediaType).toLowerCase().split(";", 1)[0];
+  if (bytes.length === 0 || bytes.length > MAX_IMAGE_TRANSFER_BYTES || sniffImageMime(bytes) !== contentType || !hasValidImageEnvelope(bytes, contentType) || !["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
+    throw new Error("The selected image is invalid, unsupported, or larger than 25 MB.");
+  }
+  const saved = await mediaBridgeStorage.saveImageAsset(userId, {
+    name: `media-transfer-${Date.now()}`,
+    purpose: "Owner-approved connected-app image transfer",
+    description: "Image retained as the source for this explicitly approved connected-app action.",
+    tags: ["media-transfer", source],
+    contentType: contentType as "image/jpeg" | "image/png" | "image/webp",
+  }, bytes);
+  const normalized: Record<string, unknown> = { ...args, source: "asset", assetId: saved.id };
+  delete normalized.sourceIndex;
+  return normalized;
+}
+
+export async function executeMediaBridgeAction(
+  userId: number,
+  sessionObj: any,
+  availableComposioTools: any[],
+  args: Record<string, unknown>,
+  runtime: Pick<NativeToolRuntime, "currentImages" | "generatedImages">,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (!sessionObj) throw new Error("Image transfers require an active connected-app session.");
+  const toolSlug = typeof args.toolSlug === "string" ? args.toolSlug.trim() : "";
+  if (!toolSlug || toolSlug.startsWith("CHUCK_") || toolSlug.startsWith("COMPOSIO_") || toolSlug.startsWith("MCP_")) {
+    throw new Error("toolSlug must be one exact connected Composio app action, not a Chusky, Composio meta-tool, or MCP action.");
+  }
+  const actionArguments = args.arguments;
+  if (!actionArguments || typeof actionArguments !== "object" || Array.isArray(actionArguments)) {
+    throw new Error("arguments must match the selected app action schema.");
+  }
+  const source = args.source === "asset" || args.source === "generated" ? args.source : "current";
+  const sourceIndex = Number.isInteger(Number(args.sourceIndex)) ? Math.max(0, Math.floor(Number(args.sourceIndex))) : 0;
+  const directTool = availableComposioTools.find((tool) => toolSchemaName(tool) === toolSlug);
+  if (!directTool) throw new Error(`The exact action ${toolSlug} is not available in this owner's current Composio session; no image transfer was attempted.`);
+  const schema = directTool.function?.parameters;
+  if (!schema || typeof schema !== "object") throw new Error("The selected action did not advertise an input schema; no image transfer was attempted.");
+
+  let file: { data: Buffer; name: string; contentType: "image/jpeg" | "image/png" | "image/webp" };
+  let assetId: string | undefined;
+  let mediaUrl: string | undefined;
+  if (source === "asset") {
+    const requestedAsset = typeof args.assetId === "string" ? args.assetId.trim() : "";
+    if (!requestedAsset) throw new Error("assetId is required when source=asset.");
+    const asset = await mediaBridgeStorage.getImageAsset(userId, requestedAsset);
+    if (!asset) throw new Error("The requested owner image asset was not found.");
+    if (!(["image/jpeg", "image/png", "image/webp"] as string[]).includes(asset.contentType) || asset.size <= 0 || asset.size > MAX_IMAGE_TRANSFER_BYTES) {
+      throw new Error("The selected image asset is invalid, unsupported, or larger than 25 MB.");
+    }
+    const contentType = asset.contentType;
+    file = { data: await abortable(mediaBridgeStorage.readR2Object(asset.r2Key), signal), name: asset.name, contentType };
+    assetId = asset.id;
+    mediaUrl = await mediaBridgeStorage.signR2Download(asset.r2Key, 900);
+  } else {
+    const images = source === "generated" ? runtime.generatedImages : runtime.currentImages;
+    const image = images?.[sourceIndex];
+    if (!image) throw new Error(`No ${source} image is available at index ${sourceIndex}.`);
+    const contentType = String(image.mediaType).toLowerCase().split(";", 1)[0];
+    if (contentType !== "image/jpeg" && contentType !== "image/png" && contentType !== "image/webp") {
+      throw new Error("Only JPEG, PNG, and WebP images can be transferred to connected apps.");
+    }
+    file = { data: Buffer.from(image.data), name: image.filename || `chusky-image-${sourceIndex + 1}.${contentType.slice(6)}`, contentType };
+    // URL-only providers need an HTTPS object that they can fetch. Persisting
+    // happens only because the user explicitly requested an external transfer.
+    if (hasMediaUrlField(schema)) {
+      const saved = await mediaBridgeStorage.saveImageAsset(userId, {
+        name: `media-transfer-${Date.now()}`,
+        purpose: "Owner-requested connected-app image transfer",
+        description: "Image retained as the source for an explicitly requested connected-app action.",
+        tags: ["media-transfer", source],
+        contentType,
+      }, file.data);
+      assetId = saved.id;
+      mediaUrl = await mediaBridgeStorage.signR2Download(saved.r2Key, 900);
+    }
+  }
+
+  if (file.data.byteLength === 0 || file.data.byteLength > MAX_IMAGE_TRANSFER_BYTES || sniffImageMime(file.data) !== file.contentType || !hasValidImageEnvelope(file.data, file.contentType)) {
+    throw new Error("The selected image is invalid, unsupported, or larger than 25 MB.");
+  }
+
+  const built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
+  validateToolArgumentsAgainstSchema(toolSlug, built.arguments, schema, 36 * 1024 * 1024);
+  const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
+  const result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
+  if (result?.successful !== true || result?.error) throw new Error("The connected app did not confirm this image action succeeded. Check the provider state before retrying to avoid a duplicate.");
+  const data = result?.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
+  const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode: built.mode, ...(assetId ? { assetId } : {}), size: file.data.byteLength, contentType: file.contentType };
+  for (const key of ["id", "postId", "messageId", "mediaId", "media_id", "uploadId", "status"]) {
+    const value = data[key];
+    if (typeof value === "string" || typeof value === "number") receipt[key] = typeof value === "string" ? value.slice(0, 200) : value;
+  }
+  return receipt;
+}
+
 const sessionCache = new Map<number, ComposioSession>();
 
 /** Replace provider dependencies in contract tests without contacting Composio. */
-export function setAgentDependenciesForTests(dependencies: { composio: any }): void {
+export function setAgentDependenciesForTests(dependencies: { composio: any; mediaBridgeStorage?: MediaBridgeStorage }): void {
   composio = dependencies.composio;
+  mediaBridgeStorage = dependencies.mediaBridgeStorage ?? { saveImageAsset, getImageAsset, readR2Object, signR2Download };
   sessionCache.clear();
 }
 
@@ -1409,18 +1537,24 @@ export async function runAgent(
           // requiring the model to reproduce the original serialization.
           executionArgs = approved.args;
         } else if (!groupArtifactTool && (requiresToolApproval(slug, args, options?.toolRequireApproval?.includes(slug)) || (slug.startsWith("MCP_") && mcpClient.requiresApproval(slug, userId)))) {
+          const approvalArgs = slug === "CHUCK_MEDIA_BRIDGE"
+            ? await prepareMediaBridgeApprovalSource(userId, args, {
+              currentImages: currentImageRuntime(userMessage).currentImages,
+              generatedImages: generatedReferenceImages,
+            })
+            : args;
           const approval = await createApproval({
             userId,
             ...(channelContext ? { accountId: channelContext.accountId, channelProvider: channelContext.provider as import("./channels/contracts.js").ChannelProvider, channelConversationId: channelContext.conversationId, channelScope: channelContext.scope, triggerEventId: channelContext.triggerEventId } : {}),
             toolSlug: slug,
-            args,
+            args: approvalArgs,
             request: typeof userMessage === "string" ? userMessage : "User request with attachment",
             history,
             model,
             ...(options?.autonomyResume ? { autonomyResume: options.autonomyResume } : {}),
           });
           await persistRun("waiting_approval", "run.approval_requested", undefined, { approvalId: approval.id, tool: slug, callId: call.id, round });
-          throw new ApprovalRequiredError(approval.id, slug, args);
+          throw new ApprovalRequiredError(approval.id, slug, approvalArgs);
         }
         effectiveAuditArgs = executionArgs;
         // Approval records are durable and may be resumed after a model retry.
@@ -1450,6 +1584,11 @@ export async function runAgent(
           execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
         } else if (slug === "CHUCK_FILE_BRIDGE") {
           execResult = await uploadArtifactToConnectedTool(userId, sessionObj, availableTools, executionArgs, signal);
+        } else if (slug === "CHUCK_MEDIA_BRIDGE") {
+          execResult = await executeMediaBridgeAction(userId, sessionObj, availableTools, executionArgs, {
+            currentImages: currentImageRuntime(userMessage).currentImages,
+            generatedImages: generatedReferenceImages,
+          }, signal);
         } else if (slug === "CHUCK_GENERATE_IMAGE") {
           const imageRuntime = currentImageRuntime(userMessage);
           const mode = args.mode === "edit" || args.mode === "reference_variations" ? args.mode : "generate";

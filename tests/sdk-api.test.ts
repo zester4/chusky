@@ -29,7 +29,7 @@ function request(body: unknown, key = "idem_1") { return new Request("http://loc
 test("native tool discovery returns executable JSON schemas for all reliability capabilities", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-catalog-owner" };
-  const reliability = ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"];
+  const reliability = ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"];
   for (const slug of reliability) {
     const listed = await api.fetch(new Request(`http://local/v1/tools?source=native&query=${encodeURIComponent(slug)}`, { headers }));
     assert.equal(listed.status, 200);
@@ -410,7 +410,7 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   assert.equal(cardBody.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
   assert.match(cardBody.supportedInterfaces[0]?.url ?? "", /\/a2a\/rpc$/);
   assert.equal((cardBody as { capabilities?: { pushNotifications?: boolean } }).capabilities?.pushNotifications, true);
-  for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"]) {
+  for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"]) {
     const skill = cardBody.skills.find((item) => item.id === slug);
     assert.ok(skill, `${slug} is advertised as an A2A skill`);
     assert.ok(skill.examples?.length);

@@ -94,6 +94,9 @@ test("tool diagnostics stay read-only while external artifact transfers require 
   assert.equal(toolApprovalPolicy("CHUCK_FILE_BRIDGE"), "approval_required");
   assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE"), true);
   assert.match(humanToolStatus("CHUCK_FILE_BRIDGE"), /approved file transfer/i);
+  assert.equal(toolApprovalPolicy("CHUCK_MEDIA_BRIDGE"), "approval_required");
+  assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE"), true);
+  assert.match(humanToolStatus("CHUCK_MEDIA_BRIDGE"), /approved image transfer/i);
 });
 
 test("provider metadata classifies dynamic Composio tools before heuristic fallback", () => {

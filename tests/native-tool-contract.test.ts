@@ -11,6 +11,7 @@ const agentLoopNativeTools = new Set([
   "CHUCK_GENERATE_IMAGE",
   "CHUCK_GENERATE_VIDEO",
   "CHUCK_LIST_CONNECTED_ACCOUNTS",
+  "CHUCK_MEDIA_BRIDGE",
 ]);
 
 test("every native tool has exactly one documented execution route and a policy classification", async () => {

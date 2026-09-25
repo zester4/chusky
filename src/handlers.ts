@@ -749,6 +749,7 @@ export function telegramAgentChannelContext(ctx: Context, userId: number): Agent
 const SHARED_GROUP_TOOL_DENY = [
   "CHUCK_SAVE_MEMORY", "CHUCK_UPDATE_MEMORY", "CHUCK_SEARCH_MEMORY", "CHUCK_FORGET_MEMORY",
   "CHUCK_SAVE_IMAGE_ASSET", "CHUCK_SEARCH_IMAGE_ASSETS", "CHUCK_GET_IMAGE_ASSET", "CHUCK_FORGET_IMAGE_ASSET",
+  "CHUCK_MEDIA_BRIDGE",
   // A setup link is a bearer credential and an authenticated identity belongs
   // to one account, never a shared group conversation.
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",

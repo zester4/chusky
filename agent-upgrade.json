@@ -1,11 +1,11 @@
 {
-  "id": "release-4.7.0",
-  "version": "4.7.0",
+  "id": "release-4.8.0",
+  "version": "4.8.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Meeting representatives now arrive with a private, client-matched readiness brief and can discover relevant actions from the owner's connected apps for the meeting objective.",
-    "Proactive meeting modes can contribute naturally without waiting to be addressed, yield when participants speak, verify calendar availability before booking, and continue agreed follow-through.",
-    "Meeting context stays owner-scoped: sensitive and unrelated memories are excluded, private connected-app results are not authorization to disclose, and high-impact actions retain approval boundaries."
+    "Added owner-scoped image transfer from the current conversation, generated images, or saved image assets into exact connected-app actions using their advertised URL or binary upload schema.",
+    "Image transfers are validated, privately retained before approval so they can resume safely, and routed through the selected owner's connected account without exposing bytes or signed URLs to the model.",
+    "Upload-only provider actions return bounded media identifiers for a separate publish/send step; direct posts or emails are reported complete only after the provider confirms that exact action succeeded."
   ],
-  "createdAt": "2026-09-25T11:28:28.493Z"
+  "createdAt": "2026-09-25T13:42:01.004Z"
 }

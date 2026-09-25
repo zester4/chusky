@@ -942,7 +942,7 @@ export function registerSdkApi(app: Hono): void {
       security: [{ bearerAuth: [] }],
       skills: [
         ...listOutcomePackages().map((item) => ({ id: item.slug, name: item.name, description: item.description, tags: [item.department], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"] })),
-        ...(["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"] as const).flatMap((slug) => {
+        ...(["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"] as const).flatMap((slug) => {
           const tool = chuckTools.find((candidate) => candidate.function.name === slug);
           if (!tool) return [];
           const name: Record<typeof slug, string> = {
@@ -950,6 +950,7 @@ export function registerSdkApi(app: Hono): void {
             CHUCK_INTEGRATION_HEALTH: "Connected integration health",
             CHUCK_ARTIFACT_QA: "Document artifact quality assurance",
             CHUCK_FILE_BRIDGE: "Approval-gated artifact transfer",
+            CHUCK_MEDIA_BRIDGE: "Approval-gated image transfer",
             CHUCK_TOOL_RECOVERY: "Tool failure recovery inspection",
           };
           return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [`Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];

@@ -8,7 +8,10 @@ function client(): S3Client {
 }
 export function r2Configured(): boolean { return Boolean(config.r2AccountId && config.r2AccessKeyId && config.r2SecretAccessKey && config.r2Bucket); }
 export async function signR2Upload(key: string, contentType: string): Promise<string> { return getSignedUrl(client(), new PutObjectCommand({ Bucket: config.r2Bucket, Key: key, ContentType: contentType }), { expiresIn: 300 }); }
-export async function signR2Download(key: string): Promise<string> { return getSignedUrl(client(), new GetObjectCommand({ Bucket: config.r2Bucket, Key: key }), { expiresIn: 300 }); }
+export async function signR2Download(key: string, expiresIn = 300): Promise<string> {
+  const boundedExpiry = Number.isInteger(expiresIn) ? Math.max(60, Math.min(expiresIn, 3600)) : 300;
+  return getSignedUrl(client(), new GetObjectCommand({ Bucket: config.r2Bucket, Key: key }), { expiresIn: boundedExpiry });
+}
 export async function inspectR2Object(key: string): Promise<{ size: number; contentType?: string }> { const result = await client().send(new HeadObjectCommand({ Bucket: config.r2Bucket, Key: key })); return { size: Number(result.ContentLength ?? -1), contentType: result.ContentType?.toLowerCase() }; }
 /** Read a verified object server-side before it is supplied to an agent. */
 export async function readR2Object(key: string): Promise<Buffer> {

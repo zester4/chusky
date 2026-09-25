@@ -58,6 +58,15 @@ test("tool reliability upgrade preset describes bounded diagnostics and approved
   assert.match(bullets[2], /typed SDK, single-tool MCP runs, and durable A2A task skills/);
 });
 
+test("media bridge upgrade preset describes scoped assets, approval-resume, and provider receipts", () => {
+  const bullets = getAgentUpgradePreset("mediaBridge");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaBridge]);
+  assert.match(bullets[0], /exact connected-app actions/);
+  assert.match(bullets[1], /privately retained before approval/);
+  assert.match(bullets[2], /provider confirms/);
+});
+
 test("custom MCP upgrade preset describes verification, private networking controls, and agent execution", () => {
   const bullets = getAgentUpgradePreset("customMcp");
   assert.equal(bullets.length, 3);
@@ -80,11 +89,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the meeting representative release", async () => {
+test("current upgrade manifest announces the connected-app media bridge release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.7.0");
-  assert.equal(notice?.version, "4.7.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /client-matched readiness brief/);
-  assert.match(formatAgentUpgradeNotice(notice!), /yield when participants speak/);
-  assert.match(formatAgentUpgradeNotice(notice!), /approval boundaries/);
+  assert.equal(notice?.id, "release-4.8.0");
+  assert.equal(notice?.version, "4.8.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /current conversation, generated images, or saved image assets/);
+  assert.match(formatAgentUpgradeNotice(notice!), /privately retained before approval/);
+  assert.match(formatAgentUpgradeNotice(notice!), /provider confirms that exact action succeeded/);
 });

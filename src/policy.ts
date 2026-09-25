@@ -160,6 +160,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_ARTIFACT_QA: "📄 I’m independently checking the rendered file…",
   CHUCK_TOOL_RECOVERY: "🛠️ I’m checking the saved execution outcome…",
   CHUCK_FILE_BRIDGE: "📎 I’m preparing the approved file transfer…",
+  CHUCK_MEDIA_BRIDGE: "🖼️ I’m preparing the approved image transfer…",
   CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the supporting guidance…",
   CHUCK_READ_SKILL_FILE: "📖 I’m reviewing the relevant guidance…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",

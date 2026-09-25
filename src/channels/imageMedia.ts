@@ -36,7 +36,7 @@ export function sniffImageMime(bytes: Buffer): string | undefined {
   return undefined;
 }
 
-function hasValidImageEnvelope(bytes: Buffer, mimeType: string): boolean {
+export function hasValidImageEnvelope(bytes: Buffer, mimeType: string): boolean {
   switch (mimeType) {
     case "image/jpeg": return bytes.length >= 10 && bytes[bytes.length - 2] === 0xff && bytes[bytes.length - 1] === 0xd9;
     case "image/png": return bytes.length >= 24 && bytes.subarray(bytes.length - 8, bytes.length - 4).toString("ascii") === "IEND";
