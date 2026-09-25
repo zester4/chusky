@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { getSession, saveSession, type UserSession } from "../store.js";
+import { getSession, mutateSession, type UserSession } from "../store.js";
 import { assessReliability } from "./evaluator.js";
 import type { CompensationRecord, OutcomeVerification, ReliabilityHealth, ReliabilitySample, ReliabilityTraceEvent } from "./contracts.js";
 
@@ -7,9 +7,9 @@ function bounded(value: unknown, max: number): string { return String(value ?? "
 
 export async function appendReliabilitySample(input: Omit<ReliabilitySample, "id"> & { id?: string }): Promise<ReliabilitySample> {
   const sample: ReliabilitySample = { ...input, id: input.id ? bounded(input.id, 160) : `sample_${randomUUID()}`, operation: bounded(input.operation, 160), provider: input.provider ? bounded(input.provider, 100) : undefined, at: Number.isFinite(input.at) ? input.at : Date.now() };
-  const session = await getSession(input.ownerId);
-  session.reliabilitySamples = [...(session.reliabilitySamples ?? []).filter((item) => item.id !== sample.id), sample].slice(-2000);
-  await saveSession(input.ownerId, session);
+  await mutateSession(input.ownerId, (session) => {
+    session.reliabilitySamples = [...(session.reliabilitySamples ?? []).filter((item) => item.id !== sample.id), sample].slice(-2000);
+  });
   return sample;
 }
 
@@ -23,9 +23,9 @@ export async function reliabilityHealth(ownerId: number, operation: string, now 
 }
 
 export async function saveOutcomeVerification(record: OutcomeVerification): Promise<OutcomeVerification> {
-  const session = await getSession(record.ownerId);
-  session.outcomeVerifications = [...(session.outcomeVerifications ?? []).filter((item) => item.id !== record.id && !(record.missionId && item.missionId === record.missionId && item.status === "verified")), record].slice(-200);
-  await saveSession(record.ownerId, session);
+  await mutateSession(record.ownerId, (session) => {
+    session.outcomeVerifications = [...(session.outcomeVerifications ?? []).filter((item) => item.id !== record.id && !(record.missionId && item.missionId === record.missionId && item.status === "verified")), record].slice(-200);
+  });
   return record;
 }
 
@@ -43,9 +43,6 @@ export async function queueCompensation(input: {
   maxAttempts?: number;
 }): Promise<CompensationRecord> {
   const idempotencyKey = `comp_${createHash("sha256").update(`${input.ownerId}:${input.originalActionId}:${input.objective}`).digest("hex").slice(0, 48)}`;
-  const session = await getSession(input.ownerId);
-  const existing = (session.compensations ?? []).find((item) => item.idempotencyKey === idempotencyKey);
-  if (existing) return existing;
   const now = Date.now();
   const record: CompensationRecord = {
     id: `comp_${randomUUID()}`,
@@ -62,9 +59,12 @@ export async function queueCompensation(input: {
     createdAt: now,
     updatedAt: now,
   };
-  session.compensations = [...(session.compensations ?? []), record].slice(-500);
-  await saveSession(input.ownerId, session);
-  return record;
+  return mutateSession(input.ownerId, (session) => {
+    const existing = (session.compensations ?? []).find((item) => item.idempotencyKey === idempotencyKey);
+    if (existing) return existing;
+    session.compensations = [...(session.compensations ?? []), record].slice(-500);
+    return record;
+  });
 }
 
 export async function listCompensations(ownerId: number, statuses?: CompensationRecord["status"][]): Promise<CompensationRecord[]> {
@@ -72,13 +72,13 @@ export async function listCompensations(ownerId: number, statuses?: Compensation
 }
 
 export async function updateCompensation(ownerId: number, id: string, patch: Partial<CompensationRecord>): Promise<CompensationRecord | undefined> {
-  const session = await getSession(ownerId);
-  const current = (session.compensations ?? []).find((item) => item.id === id && item.ownerId === ownerId);
-  if (!current) return undefined;
-  const next: CompensationRecord = { ...current, ...patch, id: current.id, ownerId, originalActionId: current.originalActionId, updatedAt: Date.now() };
-  session.compensations = [...(session.compensations ?? []).filter((item) => item.id !== id), next].slice(-500);
-  await saveSession(ownerId, session);
-  return next;
+  return mutateSession(ownerId, (session) => {
+    const current = (session.compensations ?? []).find((item) => item.id === id && item.ownerId === ownerId);
+    if (!current) return undefined;
+    const next: CompensationRecord = { ...current, ...patch, id: current.id, ownerId, originalActionId: current.originalActionId, updatedAt: Date.now() };
+    session.compensations = [...(session.compensations ?? []).filter((item) => item.id !== id), next].slice(-500);
+    return next;
+  });
 }
 
 /** Execute a queued compensation through an injected provider adapter. The adapter must be idempotent. */
@@ -106,9 +106,9 @@ export async function executeCompensation(input: {
 
 export async function appendTraceEvent(input: Omit<ReliabilityTraceEvent, "id"> & { id?: string }): Promise<ReliabilityTraceEvent> {
   const event: ReliabilityTraceEvent = { ...input, id: input.id ? bounded(input.id, 160) : `trace_${randomUUID()}`, summary: bounded(input.summary, 2000), type: bounded(input.type, 120), correlationId: input.correlationId ? bounded(input.correlationId, 240) : undefined, parentId: input.parentId ? bounded(input.parentId, 160) : undefined };
-  const session = await getSession(input.ownerId);
-  session.reliabilityTrace = [...(session.reliabilityTrace ?? []).filter((item) => item.id !== event.id), event].slice(-5000);
-  await saveSession(input.ownerId, session);
+  await mutateSession(input.ownerId, (session) => {
+    session.reliabilityTrace = [...(session.reliabilityTrace ?? []).filter((item) => item.id !== event.id), event].slice(-5000);
+  });
   return event;
 }
 

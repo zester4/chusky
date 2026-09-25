@@ -13,6 +13,13 @@ function sameExpected(observed: Record<string, unknown> | undefined, expected: R
   return Object.entries(expected).every(([key, value]) => stable(observed[key]) === stable(value));
 }
 
+function hasEvidence(result: OutcomeCheckResult, kind: OutcomeCheck["kind"]): boolean {
+  if (result.status !== "passed") return false;
+  if (kind === "provider_read") return result.observedAt !== undefined && Boolean(result.provider || result.evidenceRef);
+  if (kind === "human") return typeof result.evidenceRef === "string" && result.evidenceRef.startsWith("human:");
+  return typeof result.evidenceRef === "string" && result.evidenceRef.trim().length > 0;
+}
+
 function safeObserved(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!value) return undefined;
   const blocked = /token|secret|password|credential|cookie|authorization|private.?key/i;
@@ -39,9 +46,10 @@ export function verifyOutcome(input: {
       if (check.required !== false) unresolved.push(`${check.id}: no result`);
       continue;
     }
-    const stale = check.freshnessMs !== undefined && result.observedAt !== undefined && now - result.observedAt > check.freshnessMs;
-    if (result.status === "passed" && !stale && sameExpected(result.observed, check.expected)) passed += check.required === false ? 0 : 1;
-    else if (check.required !== false) unresolved.push(`${check.id}: ${stale ? "evidence is stale" : result.reason || result.status || "failed"}`);
+    const missingTimestamp = check.kind === "provider_read" && check.freshnessMs !== undefined && result.observedAt === undefined;
+    const stale = check.freshnessMs !== undefined && result.observedAt !== undefined && (result.observedAt > now + 30_000 || now - result.observedAt > check.freshnessMs);
+    if (hasEvidence(result, check.kind) && !missingTimestamp && !stale && sameExpected(result.observed, check.expected)) passed += check.required === false ? 0 : 1;
+    else if (check.required !== false) unresolved.push(`${check.id}: ${missingTimestamp ? "evidence timestamp is missing" : stale ? "evidence is stale or from the future" : result.reason || result.status || "failed"}`);
   }
   const status = unresolved.length === 0 && passed >= required ? "verified" : input.results.some((r) => r.status === "uncertain") ? "uncertain" : "failed";
   return {
@@ -51,7 +59,7 @@ export function verifyOutcome(input: {
     ...(input.runId ? { runId: input.runId } : {}),
     status,
     checks: input.checks.map((check) => ({ ...check, id: check.id.slice(0, 160), description: check.description.slice(0, 1000), expected: safeObserved(check.expected) })),
-    results: input.results.map((result) => ({ ...result, observed: safeObserved(result.observed), evidenceRef: result.evidenceRef?.slice(0, 300), reason: result.reason?.slice(0, 500) })),
+    results: input.results.map((result) => ({ ...result, observed: safeObserved(result.observed), evidenceRef: result.evidenceRef?.slice(0, 300), provider: result.provider?.slice(0, 120), reason: result.reason?.slice(0, 500) })),
     confidence: required === 0 ? 1 : Math.max(0, Math.min(1, passed / required)),
     unresolved,
     startedAt: now,

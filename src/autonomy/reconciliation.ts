@@ -36,18 +36,84 @@ function domainMatches(domain: string, patterns: string[]): boolean {
   const value = domain.toLowerCase();
   return patterns.some((pattern) => { const normalized = String(pattern).trim().toLowerCase(); return normalized && (value === normalized || value.startsWith(`${normalized}.`) || value.includes(normalized)); });
 }
-function extractJson(text: string): Record<string, unknown> | undefined {
-  const match = text.match(/AUTONOMY_RESULT\s*:\s*(\{[\s\S]*?\})(?:\s|$)/i);
-  if (!match) return undefined;
-  try { const parsed = JSON.parse(match[1]); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined; } catch { return undefined; }
+interface AutonomyResultPayload {
+  changed: boolean;
+  summary: string;
+  cursor?: string;
+  signals: NormalizedBusinessSignal[];
 }
-function normalizeSignals(value: unknown, source: string): NormalizedBusinessSignal[] {
+
+/**
+ * Parse the model's bounded reconciliation protocol. A regex is not enough
+ * here: provider records can contain nested objects and braces inside quoted
+ * strings. Failing closed prevents prose or malformed JSON from advancing a
+ * checkpoint as if a provider read had completed.
+ */
+function extractJson(text: string): Record<string, unknown> | undefined {
+  const marker = /AUTONOMY_RESULT\s*:/ig;
+  const match = marker.exec(text);
+  if (!match) return undefined;
+  const start = text.indexOf("{", match.index + match[0].length);
+  if (start < 0 || start - match.index > 200) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < Math.min(text.length, start + 20_000); index += 1) {
+    const character = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') { inString = true; continue; }
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          const parsed = JSON.parse(text.slice(start, index + 1));
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+        } catch { return undefined; }
+      }
+    }
+  }
+  return undefined;
+}
+
+function boundedTimestamp(value: unknown, now: number): string | number | undefined {
+  const parsed = typeof value === "number"
+    ? (Number.isFinite(value) ? (value < 10_000_000_000 ? value * 1000 : value) : NaN)
+    : typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > now + 5 * 60_000) return undefined;
+  return typeof value === "number" ? parsed : String(value).trim().slice(0, 80);
+}
+
+function normalizeSignals(value: unknown, source: string, now: number): NormalizedBusinessSignal[] {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 100).filter((item) => item && typeof item === "object").map((item: any) => ({
-    id: typeof item.id === "string" ? item.id.slice(0, 180) : undefined,
-    source: compact(item.source || source, 120), kind: compact(item.kind || item.type, 80), subject: compact(item.subject || item.name || item.title, 180), status: compact(item.status, 80),
-    createdAt: item.createdAt, updatedAt: item.updatedAt, dueAt: item.dueAt, lastActivityAt: item.lastActivityAt, repliedAt: item.repliedAt, assignedTo: compact(item.assignedTo, 100), expectedCount: typeof item.expectedCount === "number" ? item.expectedCount : undefined, actualCount: typeof item.actualCount === "number" ? item.actualCount : undefined, amount: typeof item.amount === "number" ? item.amount : undefined, currency: compact(item.currency, 8),
-  }));
+  return value.slice(0, 100).filter((item) => item && typeof item === "object").flatMap((item: any) => {
+    const normalizedSource = compact(item.source || source, 120);
+    const kind = compact(item.kind || item.type, 80);
+    if (!normalizedSource || !kind) return [];
+    const count = (candidate: unknown): number | undefined => typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 && candidate <= 1_000_000_000 ? candidate : undefined;
+    const amount = typeof item.amount === "number" && Number.isFinite(item.amount) && Math.abs(item.amount) <= 1_000_000_000_000 ? item.amount : undefined;
+    return [{
+      id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 180) : undefined,
+      source: normalizedSource, kind, subject: compact(item.subject || item.name || item.title, 180), status: compact(item.status, 80),
+      createdAt: boundedTimestamp(item.createdAt, now), updatedAt: boundedTimestamp(item.updatedAt, now), dueAt: boundedTimestamp(item.dueAt, now), lastActivityAt: boundedTimestamp(item.lastActivityAt, now), repliedAt: boundedTimestamp(item.repliedAt, now), assignedTo: compact(item.assignedTo, 100), expectedCount: count(item.expectedCount), actualCount: count(item.actualCount), amount, currency: compact(item.currency, 8),
+    } satisfies NormalizedBusinessSignal];
+  });
+}
+
+function parseAutonomyResult(text: string, source: string, now: number): AutonomyResultPayload {
+  const parsed = extractJson(text);
+  if (!parsed || typeof parsed.changed !== "boolean" || typeof parsed.summary !== "string") {
+    throw new Error("Reconciliation returned no valid AUTONOMY_RESULT protocol payload.");
+  }
+  if (parsed.summary.length > MAX_OUTPUT) throw new Error("Reconciliation summary exceeded the bounded output limit.");
+  if (parsed.cursor !== undefined && (typeof parsed.cursor !== "string" || parsed.cursor.length > 500)) throw new Error("Reconciliation cursor is invalid or too large.");
+  if (parsed.signals !== undefined && !Array.isArray(parsed.signals)) throw new Error("Reconciliation signals must be an array.");
+  return { changed: parsed.changed, summary: compact(parsed.summary, 4000), ...(typeof parsed.cursor === "string" && parsed.cursor.trim() ? { cursor: compact(parsed.cursor, 500) } : {}), signals: normalizeSignals(parsed.signals, source, now) };
 }
 
 async function defaultExecute(userId: number, watch: AutonomyWatchRecord, toolSlugs: string[], prompt: string, composioAccount?: string): Promise<{ text: string; toolsSucceeded?: string[] }> {
@@ -121,14 +187,15 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       const composioAccount = options.execute ? undefined : await resolveComposioAccount(userId, watch, toolSlugs);
       const prompt = [`Reconcile the owner’s standing watch “${compact(watch.name, 160)}” for domain ${compact(watch.domain, 100)}.`, `Objective: ${compact(watch.objective, 1500)}`, watch.query ? `Query: ${compact(watch.query, 800)}` : "", watch.cursor ? `Last cursor/checkpoint: ${compact(watch.cursor, 300)}` : "", composioAccount ? `Use only connected account ${compact(composioAccount, 200)} for every provider call.` : "", `Inspect at most ${watch.maxItems} records. Compare with the checkpoint and report only new, changed, overdue, missing, or unresolved items. Never mutate provider state.`, "Return AUTONOMY_RESULT: {changed, summary, cursor?, signals:[{id,source,kind,subject,status,createdAt,updatedAt,dueAt,lastActivityAt,repliedAt,assignedTo,expectedCount,actualCount,amount,currency}] }"].filter(Boolean).join("\n");
       const executed = await (options.execute ? options.execute({ userId, watch, toolSlugs, prompt }) : defaultExecute(userId, watch, toolSlugs, prompt, composioAccount));
-      const parsed = extractJson(executed.text);
-      const changed = Boolean(parsed?.changed) || (!!executed.text.trim() && !/^NO_ACTION$/i.test(executed.text.trim()));
-      const summary = compact(parsed?.summary || executed.text, 4000) || "No changes found.";
-      const signals = normalizeSignals(parsed?.signals, watch.domain);
+      if (!options.execute && (!executed.toolsSucceeded || executed.toolsSucceeded.length === 0)) throw new Error("Reconciliation did not complete a read-only provider tool call.");
+      const parsed = parseAutonomyResult(executed.text, watch.domain, now);
+      const changed = parsed.changed;
+      const summary = parsed.summary || "No changes found.";
+      const signals = parsed.signals;
       const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
       await recordGaps(userId, gaps);
-      const digestKey = createHash("sha256").update(JSON.stringify({ watch: watch.id, summary, cursor: parsed?.cursor, gaps: gaps.map((gap) => gap.key) })).digest("hex").slice(0, 32);
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed?.cursor ? compact(parsed.cursor, 500) : watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
+      const digestKey = createHash("sha256").update(JSON.stringify({ watch: watch.id, summary, cursor: parsed.cursor, gaps: gaps.map((gap) => gap.key) })).digest("hex").slice(0, 32);
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {
       const message = compact(error instanceof Error ? error.message : error, 1000);

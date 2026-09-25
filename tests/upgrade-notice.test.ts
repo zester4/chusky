@@ -58,12 +58,12 @@ test("tool reliability upgrade preset describes bounded diagnostics and approved
   assert.match(bullets[2], /typed SDK, single-tool MCP runs, and durable A2A task skills/);
 });
 
-test("media bridge upgrade preset describes scoped assets, approval-resume, and provider receipts", () => {
+test("media bridge upgrade preset describes direct execution, scoped assets, and provider receipts", () => {
   const bullets = getAgentUpgradePreset("mediaBridge");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaBridge]);
   assert.match(bullets[0], /exact connected-app actions/);
-  assert.match(bullets[1], /privately retained before approval/);
+  assert.match(bullets[1], /run in the same turn/);
   assert.match(bullets[2], /provider confirms/);
 });
 
@@ -94,6 +94,6 @@ test("current upgrade manifest announces the connected-app media bridge release"
   assert.equal(notice?.id, "release-4.8.0");
   assert.equal(notice?.version, "4.8.0");
   assert.match(formatAgentUpgradeNotice(notice!), /current conversation, generated images, or saved image assets/);
-  assert.match(formatAgentUpgradeNotice(notice!), /privately retained before approval/);
+  assert.match(formatAgentUpgradeNotice(notice!), /run in the same turn/);
   assert.match(formatAgentUpgradeNotice(notice!), /provider confirms that exact action succeeded/);
 });

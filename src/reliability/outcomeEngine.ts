@@ -4,7 +4,7 @@ import { appendTraceEvent, saveOutcomeVerification } from "./persistence.js";
 import { verifyOutcome } from "./evaluator.js";
 
 export interface OutcomeReadAdapter {
-  read: (input: { toolSlug: string; provider?: string; check: OutcomeCheck }) => Promise<{ observed?: Record<string, unknown>; evidenceRef?: string; observedAt?: number }>;
+  read: (input: { toolSlug: string; provider?: string; check: OutcomeCheck }) => Promise<{ observed?: Record<string, unknown>; evidenceRef?: string; provider?: string; observedAt?: number }>;
 }
 
 /** Execute provider-backed checks through a read-only adapter and persist the proof. */
@@ -15,6 +15,7 @@ export async function executeOutcomeVerification(input: {
   checks: OutcomeCheck[];
   suppliedResults?: OutcomeCheckResult[];
   adapter?: OutcomeReadAdapter;
+  maxAttempts?: number;
   now?: number;
 }): Promise<OutcomeVerification> {
   const now = input.now ?? Date.now();
@@ -35,12 +36,20 @@ export async function executeOutcomeVerification(input: {
       results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: "No provider read adapter is available in this execution context." });
       continue;
     }
-    try {
-      const observed = await input.adapter.read({ toolSlug: check.toolSlug, provider: check.provider, check });
-      results.push({ checkId: check.id, status: "passed", observed: observed.observed, evidenceRef: observed.evidenceRef, observedAt: observed.observedAt ?? now });
-    } catch (error) {
-      results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: error instanceof Error ? error.message.slice(0, 500) : "Provider read failed." });
+    let lastError = "Provider read failed.";
+    const attempts = Math.max(1, Math.min(3, Math.floor(input.maxAttempts ?? 2)));
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const observed = await input.adapter.read({ toolSlug: check.toolSlug, provider: check.provider, check });
+        if (observed.observedAt === undefined || observed.observedAt > now + 30_000) throw new Error("Provider read did not return a trustworthy observation timestamp.");
+        results.push({ checkId: check.id, status: "passed", observed: observed.observed, evidenceRef: observed.evidenceRef, provider: observed.provider ?? check.provider, observedAt: observed.observedAt });
+        lastError = "";
+        break;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message.slice(0, 500) : "Provider read failed.";
+      }
     }
+    if (lastError) results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: lastError });
   }
   const verification = verifyOutcome({ ownerId: input.ownerId, missionId: input.missionId, runId: input.runId, checks: input.checks, results, now });
   await saveOutcomeVerification(verification);

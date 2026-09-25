@@ -342,6 +342,10 @@ paths:
     post: { summary: Replay a submitted scenario or durable mission history, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Replay passed }, '409': { description: Replay invariant failed } } }
   /operator/provider-matrix:
     get: { summary: Show channel parity and honest live-proof state, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Provider matrix } } }
+  /operator/provider-proof:
+    post: { summary: Persist a signed root-only real-provider smoke-test proof, parameters: [{ $ref: '#/components/parameters/ProviderProofSignature' }], requestBody: { required: true, content: { application/json: { schema: { type: object, required: [proof], properties: { proof: { type: object, required: [surface, inboundText, inboundImage, outboundText, outboundImage, verifiedAt, expiresAt, correlationId, checks], properties: { surface: { type: string, enum: [telegram, slack, whatsapp, imessage, web, cli, sdk, xchat, meetings] }, inboundText: { type: boolean, const: true }, inboundImage: { type: boolean, const: true }, outboundText: { type: boolean, const: true }, outboundImage: { type: boolean, const: true }, verifiedAt: { type: integer }, expiresAt: { type: integer }, correlationId: { type: string, maxLength: 160 }, checks: { type: array, minItems: 1, maxItems: 20, items: { type: object, required: [name, status], properties: { name: { type: string, maxLength: 120 }, status: { type: string, const: passed }, detail: { type: string, maxLength: 500 } } } } } } } } } }, responses: { '201': { description: Persisted provider proof }, '400': { description: Invalid or stale proof }, '401': { description: Invalid attestation signature }, '403': { description: Root API key required }, '503': { description: Smoke attestation is not configured } } }
+  /operator/readiness:
+    get: { summary: Read production durability and fresh provider-proof readiness, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Readiness report } } }
   /operator/escalations:
     get: { summary: List owner-scoped approval escalations, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Approval escalations } } }
   /operator/escalations/run:
@@ -364,4 +368,5 @@ components:
   parameters:
     UserId: { name: X-Chusky-User-Id, in: header, required: true, schema: { type: string, maxLength: 200 } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 255 } }
+    ProviderProofSignature: { name: X-Chusky-Provider-Proof-Signature, in: header, required: true, schema: { type: string, minLength: 43, maxLength: 43 } }
     MissionId: { name: missionId, in: path, required: true, schema: { type: string, pattern: '^mis_[A-Za-z0-9_-]+$' } }

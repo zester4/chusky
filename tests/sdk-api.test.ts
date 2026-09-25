@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
@@ -14,6 +14,7 @@ import { redeemLinkCode } from "../src/channels/identity.js";
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = false;
+  (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "provider-smoke-secret";
   setWebAuthSessionResolverForTests();
   setOrganizationAccessResolverForTests();
   setSdkTaskWorkflowEnqueuerForTests();
@@ -21,7 +22,10 @@ beforeEach(async () => {
   setPhoneCallLauncherForTests(async (userId, input) => ({ id: `twc_test_${userId}`, userId, provider: "twilio", direction: "outbound", callProfile: input.callProfile, phoneNumber: input.phoneNumber, purpose: input.purpose, status: "bridging", createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }));
 });
 
-afterEach(() => setPhoneCallLauncherForTests());
+afterEach(() => {
+  setPhoneCallLauncherForTests();
+  (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "";
+});
 
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
@@ -57,6 +61,21 @@ test("operator reliability surfaces are owner-scoped and expose honest provider 
   assert.match(JSON.stringify(await matrix.json()), /configured_unverified|not_configured/);
   const other = await api.fetch(new Request("http://local/v1/operator/reliability?operation=operator.test", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-other" } }));
   assert.equal((await other.json() as { data: { sampleCount: number } }).data.sampleCount, 0);
+});
+
+test("root provider smoke attestation persists only a signed, complete proof", async () => {
+  const api = app();
+  const proof = { surface: "web", inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, verifiedAt: Date.now(), expiresAt: Date.now() + 60 * 60_000, correlationId: "smoke_web_1", checks: [{ name: "web round trip", status: "passed" }] };
+  const signature = createHmac("sha256", "provider-smoke-secret").update(JSON.stringify(proof)).digest("base64url");
+  const response = await api.fetch(new Request("http://local/v1/operator/provider-proof", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-Provider-Proof-Signature": signature, "Content-Type": "application/json" }, body: JSON.stringify({ proof }) }));
+  assert.equal(response.status, 201);
+  assert.equal((await response.json() as { surface: string }).surface, "web");
+  const matrix = await api.fetch(new Request("http://local/v1/operator/provider-matrix", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "smoke-owner" } }));
+  const web = ((await matrix.json()) as { data: Array<{ surface: string; liveProof: string; proofCorrelationId?: string }> }).data.find((entry) => entry.surface === "web");
+  assert.deepEqual(web, { surface: "web", inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, liveProof: "verified", proofExpiresAt: proof.expiresAt, proofCorrelationId: "smoke_web_1" });
+
+  const invalid = await api.fetch(new Request("http://local/v1/operator/provider-proof", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-Provider-Proof-Signature": "invalid", "Content-Type": "application/json" }, body: JSON.stringify({ proof }) }));
+  assert.equal(invalid.status, 401);
 });
 
 test("custom MCP catalogue entries remain scoped to the authenticated SDK identity", async () => {

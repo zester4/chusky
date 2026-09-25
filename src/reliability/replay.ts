@@ -40,13 +40,19 @@ function apply(state: ReplayState, event: ReplayEvent, violations: string[]): vo
 }
 
 export function replayScenario(scenario: ReplayScenario): ReplayReport {
-  const events = [...scenario.events].sort((a, b) => a.at - b.at);
+  const events = [...scenario.events].sort((a, b) => a.at - b.at || a.type.localeCompare(b.type) || (a.id ?? "").localeCompare(b.id ?? ""));
   const violations: string[] = [];
   const state: ReplayState = { status: "queued", completedSteps: new Set(), checkpoints: [], approvals: new Set(), receipts: new Set() };
-  for (const event of events) apply(state, event, violations);
+  const seen = new Set<string>();
+  for (const event of events) {
+    const identity = `${event.type}:${event.id ?? "-"}:${event.at}`;
+    if (seen.has(identity)) { violations.push("duplicate_event_replayed"); continue; }
+    seen.add(identity);
+    apply(state, event, violations);
+  }
   if (state.status !== scenario.expected.terminalStatus) violations.push(`terminal_status_expected_${scenario.expected.terminalStatus}_got_${state.status}`);
   for (const invariant of scenario.expected.requiredInvariants ?? []) {
-    if (invariant === "every_completed_step_has_receipt" && state.completedSteps.size > state.receipts.size) violations.push("completed_step_missing_receipt");
+    if (invariant === "every_completed_step_has_receipt" && [...state.completedSteps].some((step) => !state.receipts.has(step))) violations.push("completed_step_missing_receipt");
     if (invariant === "has_checkpoint" && state.checkpoints.length === 0) violations.push("missing_checkpoint");
   }
   return { scenarioId: scenario.id, status: violations.length ? "failed" : "passed", finalStatus: state.status, replayedEvents: events.length, violations, checkpoints: state.checkpoints };

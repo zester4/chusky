@@ -1,42 +1,51 @@
-# Chusky AI Agent
+# Chusky
 
-Chusky is a production-oriented personal AI agent with access to **1,000+ tools** via Composio managed auth, powered by any OpenRouter model. Chusky can connect apps, run shell commands, browse the web, handle real-time trigger events, and execute across major SaaS platforms from Telegram, linked channels, or a terminal.
+Chusky is a TypeScript AI agent service you can run locally or deploy for your
+team. It connects OpenRouter models to owner-authorized apps through Composio,
+and exposes the same governed agent runtime through Telegram, an authenticated
+CLI and dashboard, supported messaging channels, and developer interfaces.
 
-The service has two layers:
+The agent runtime owns model inference, connected-app tools, native tools,
+approvals, private context, and durable work. Channel adapters handle
+provider-specific identity, verification, formatting, and delivery. Access is
+account-scoped; routine communication and explicitly requested publishing run
+without an extra approval prompt, while destructive, financial, permission,
+deployment, and other materially harmful actions retain their safeguards.
 
-- The agent layer owns model inference, Composio sessions, native tools, approvals, memory, tasks, and durable workflows.
-- The transport layer owns Telegram, CLI, Slack, WhatsApp, Sendblue, Twilio SMS, and XChat delivery. Provider-specific payloads never enter the agent layer directly.
+For production, configure Redis for durable state and QStash for scheduled or
+resumable work. In-memory storage is for local development and tests only; it
+does not survive restarts.
 
-Production deployments should use Redis and QStash. In-memory persistence is intended for local development and tests only; it does not survive restarts and must not be used for production reminders, approvals, memories, or channel deduplication.
+## Start here
+
+| Goal | Start with |
+|---|---|
+| Run the Telegram service locally | [Local quickstart](#quickstart-local-dev) |
+| Deploy the service | [Deployment guide](#deploy) |
+| Pair the terminal client | [Terminal CLI](#terminal-cli) |
+| Integrate from a TypeScript server | [Developer SDK](sdk/README.md) |
+| Connect an external agent over A2A | [A2A guide](docs/a2a.md) |
+| Connect an MCP client to Chusky | [Remote MCP server](cloudflare/chusky-mcp/README.md) |
+| Let Chusky call a third-party MCP server | [MCP setup below](#calling-third-party-mcp-servers) |
+| Configure runtime settings | [Environment variables](#environment-variables) |
+
+The sections below are the detailed self-hosting and operations reference.
 
 ---
 
-## What Chusky can do
+## Capabilities at a glance
 
-| Capability | How |
-|---|---|
-| **1,000+ app tools** | Composio managed OAuth (GitHub, Gmail, Slack, Notion, Linear, Stripe…) |
-| **Connect apps inline** | `COMPOSIO_MANAGE_CONNECTIONS` surfaces OAuth links mid-conversation |
-| **Run shell commands** | `COMPOSIO_REMOTE_BASH_TOOL` — sandboxed bash in a remote environment |
-| **Persistent workspace** | `COMPOSIO_REMOTE_WORKBENCH` — stateful remote environment per session |
-| **Tool discovery** | `COMPOSIO_SEARCH_TOOL` — finds the right tool by intent |
-| **Real-time triggers** | Composio webhook → Chusky notifies you on Slack messages, GitHub commits, emails, etc. |
-| **Any LLM** | Switch model per-user at runtime via `/model` |
-| **Redis persistence** | Sessions, memories, approvals, tasks, and channel events survive restarts; memory mode is development-only |
-| **Native scheduling** | Natural-language one-time reminders and recurring CRON jobs via Upstash |
-| **Voice replies** | `/voice on` adds an OpenRouter TTS audio reply while retaining the readable text response |
-| **Meeting representative** | Disclosed Recall bots can represent an owner-approved sales, onboarding, or customer-success role, contribute proactively, and use narrowly granted connected-app actions, reminders, and tasks |
-| **Private scratchpad** | Chusky can save and retrieve per-user working notes across turns |
-| **Daytona computer** | Optional isolated per-user workspace for code, files, and commands |
-| **Rate limiting** | Per-user throttling |
-| **Export** | `/export` downloads full conversation as `.txt` |
-| **Inline mode** | `@chusky query` in any chat |
-| **Linked CLI** | Continue the same Redis-backed session from a terminal |
-| **Shared channel gateway** | One account identity and durable conversation/outbox boundary for Telegram, CLI, Slack, WhatsApp, and Sendblue |
-| **Verified Slack adapter** | Signed Events API/interactions, DMs, mentions, threads, OAuth installation, and Block Kit approvals |
-| **Verified WhatsApp adapter** | Signed Cloud API webhooks, text/media normalization, and durable outbound receipts |
-| **Verified Sendblue adapter** | iMessage webhooks, durable workflows, direct/group replies, media, typing indicators, and iMessage-safe formatting |
-| **Provider boundaries** | SMS/Twilio, encrypted XChat, and voice use provider-specific adapters behind the normalized channel gateway |
+| Area | What it provides | Important boundary |
+|---|---|---|
+| Connected apps | Composio app discovery, account connections, and a large catalog of provider actions | Uses the account's connected apps; availability depends on the selected action and connection |
+| Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, and XChat, plus optional voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
+| Durable work | Owner-scoped tasks, missions, reminders, recurring jobs, triggers, and resumable workflows | Production durability requires Redis; scheduled and continued work also requires QStash |
+| Workspaces and media | Optional Daytona computer/browser workspaces, generated media, and verified artifacts | Optional provider configuration and capability limits apply |
+| Developer access | REST API and TypeScript SDK, plus A2A and remote MCP integrations | Project scopes, stable user identity, budgets, and approvals are enforced server-side |
+
+See [channel support and operating model](#channel-support-and-operating-model)
+for channel-specific behavior, and the linked integration guides above for
+developer setup.
 
 ---
 
@@ -230,24 +239,32 @@ production so stage state and enqueue operations survive process restarts.
 
 ## Quickstart (local dev)
 
+Use Node.js 22 (the version used by CI) and obtain a Telegram bot token,
+Composio API key, and OpenRouter API key before setup.
+
 ```bash
-git clone <repo> && cd tg-agent
-npm install
-cp .env.example .env
-chusky setup
-# Or: npm run setup
+git clone https://github.com/zester4/chusky.git
+cd chusky
+npm ci
+npm run setup
+# Choose polling mode for a local bot; the setup wizard writes .env.
 # For reminders/jobs and durable scheduled tasks, also set QSTASH_TOKEN and the two public workflow URLs.
-# Leave WEBHOOK_URL blank — uses polling
+npm run doctor
 
 npm run telegram
-
-# From a linked terminal, after deploying Chusky:
-npm run cli
 ```
 
-`chusky setup` is safe to rerun: it preserves existing `.env` values, hides secret input, generates missing webhook secrets, and lets you skip optional Redis, QStash, and Daytona integrations. `chusky doctor` reports configured or missing settings and checks the deployed `/health` endpoint when webhook mode is enabled. The development aliases are `npm run setup` and `npm run doctor`.
+`npm run setup` is safe to rerun: it preserves existing `.env` values, hides
+secret input, generates missing webhook secrets, and lets you skip optional
+Redis, QStash, and Daytona integrations. `npm run doctor` reports configured
+and missing settings and checks the deployed `/health` endpoint in webhook
+mode. For durable reminders, recurring jobs, or continued background work,
+configure Redis, QStash, and the public workflow URLs; polling mode alone does
+not make those features durable.
 
-Use `chusky chat` for terminal chat and `chusky telegram` to run the Telegram service. `chusky start` is an alias for the service. `npm run dev` remains available for TypeScript watch-mode development.
+Use `npm run telegram` to run the Telegram service and `npm run dev` for
+TypeScript watch mode. For terminal chat, use `npm run chat` after pairing the
+authenticated CLI with a deployed Chusky service; see [Terminal CLI](#terminal-cli).
 
 ### Terminal CLI
 
@@ -951,17 +968,33 @@ In webhook mode, provider routes must be publicly reachable over HTTPS. Slack us
 
 The channel gateway is intentionally provider-neutral. It resolves provider identity to `account_<telegram-user-id>`, applies private/shared conversation scope, obtains the distributed account lock, runs the shared agent handler, and recovers queued outbound messages after a process restart. Keep provider parsing, signature verification, and formatting inside `src/channels/`; do not add provider payload parsing to `agent.ts` or `handlers.ts`.
 
-### Current product gaps
+### Production readiness and remaining gates
 
-The core agent and Sendblue conversation loop are operational. Remaining product work is concentrated in production operations and channel breadth:
+The core agent, durable missions, outcome verification, replay evaluation, operator
+timeline, compensation queue, memory conflict checks, autonomy policy compiler,
+provider matrix, and owner-scoped execution quotas are implemented and covered by
+the local regression suite. The authenticated `/v1/ops/health` and
+`/v1/operator/readiness` surfaces expose the same operational state to the dashboard,
+SDK, and CLI integrations.
 
-- Dashboard operations pages now expose provider readiness, channel status, runtime failure counters, and delivery health through the authenticated `/v1/ops/health` endpoint.
-- The CLI doctor now prints the same provider checks and runtime failure summary; Redis is fail-closed in production and webhook mode.
+The remaining gates are deployment evidence rather than unbounded feature claims:
+
+- Configure Redis and QStash in the target environment; production readiness fails
+  closed when durable persistence is unavailable.
+- Run fresh, real inbound/outbound text-and-image smoke tests for every enabled
+  provider and persist the resulting proof. Configuration alone is never treated as
+  live provider certification.
+- Configure `PROVIDER_SMOKE_SIGNING_SECRET` and have a deployment-side smoke runner
+  submit its complete, fresh results to the root-only `POST /v1/operator/provider-proof`
+  endpoint. The attestation is HMAC-bound and expires; unsigned or partial reports are
+  rejected and never change readiness.
+- Run the real-provider matrix, Redis/QStash outage tests, duplicate-webhook tests,
+  and long-running worker tests against the deployed services before declaring that
+  deployment production-certified.
 - Add Sendblue App Cards for interactive actions where a plain URL is not sufficient.
-- Voice remains provider-specific and opt-in. Twilio SMS/MMS and XChat are implemented through provider adapters, signed webhook routes, one-time account linking, and the shared channel gateway.
-- Expand end-to-end deployment tests for Redis outages, provider retries, duplicate webhooks, concurrent messages, and long-running tool calls.
 
-Treat this list as a roadmap, not as a claim that these capabilities are already complete.
+Until those external checks have fresh evidence, the readiness endpoint intentionally
+reports `degraded` or `blocked`; local unit and integration tests do not override it.
 
 ---
 
@@ -985,6 +1018,7 @@ Treat this list as a roadmap, not as a claim that these capabilities are already
 | `TTS_VOICE` | — | `flux-kit-en` | Voice ID accepted by the selected TTS model |
 | `QSTASH_TOKEN` | reminders/jobs/triggers | — | Upstash QStash token |
 | `QSTASH_URL` | QStash client | `https://qstash-us-east-1.upstash.io` | Regional Upstash QStash API URL |
+| `PROVIDER_SMOKE_SIGNING_SECRET` | provider certification | — | HMAC secret used only by the deployment smoke runner when posting fresh proof to `/v1/operator/provider-proof` |
 | `MISSION_WEBHOOK_SECRET` | signed mission events | — | HMAC secret for provider callbacks to `/v1/missions/:id/events/signed` |
 | `REMINDER_WORKFLOW_URL` | reminders | — | Public `.../workflows/reminder` URL |
 | `JOB_WORKFLOW_URL` | recurring jobs | — | Public `.../workflows/job` URL |

@@ -2,6 +2,14 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.6.1 - 2026-09-25
+
+- Add typed operator readiness and provider-matrix proof details.
+- Expose durable-store, workflow, and fresh real-provider proof status without
+  conflating configuration with certification.
+- Document the root-only HMAC provider-proof attestation endpoint used by
+  deployment smoke runners; unsigned or partial evidence is rejected.
+
 ## 1.6.0 - 2026-09-25
 
 - Add typed operator reliability resources for timelines, outcome

@@ -77,3 +77,25 @@ test("reconciliation uses a distributed watch lease across concurrent workers", 
   assert.equal([...left, ...right].filter((item) => item.status === "completed").length, 1);
   assert.equal([...left, ...right].filter((item) => item.status === "skipped").length, 1);
 });
+
+test("reconciliation fails closed on prose or malformed protocol and preserves its checkpoint", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990007;
+  await createAttentionRecord(userId, "autonomy_watch", { name: "Inbox", domain: "gmail", objective: "Find changes", toolSlugs: ["GMAIL_LIST_MESSAGES"], cursor: "page-1", cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 10, nextCheckAt: 1 });
+  const result = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.parse("2026-01-31"), execute: async () => ({ text: "I found nothing new, and the provider said {not-json}." }) });
+  assert.equal(result[0]?.status, "failed");
+  const watch = (await listAttentionRecords(userId, "autonomy_watch") as any[])[0];
+  assert.equal(watch.cursor, "page-1");
+  assert.match(watch.lastError, /AUTONOMY_RESULT/);
+  assert.equal(watch.lastResult, undefined);
+});
+
+test("reconciliation parses nested provider evidence without treating it as a checkpoint", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990008;
+  await createAttentionRecord(userId, "autonomy_watch", { name: "Inbox", domain: "gmail", objective: "Find changes", toolSlugs: ["GMAIL_LIST_MESSAGES"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 10, nextCheckAt: 1 });
+  const result = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.parse("2026-01-31"), execute: async () => ({ text: 'prefix AUTONOMY_RESULT: {"changed":false,"summary":"No changes {confirmed}","cursor":"page-2","signals":[{"id":"m-1","source":"gmail","kind":"message","metadata":{"ignored":"data"}}]} trailing' }) });
+  assert.equal(result[0]?.status, "completed");
+  const watch = (await listAttentionRecords(userId, "autonomy_watch") as any[])[0];
+  assert.equal(watch.cursor, "page-2");
+});

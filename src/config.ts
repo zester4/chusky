@@ -93,6 +93,10 @@ export const config = {
   qstashUrl: optional("QSTASH_URL", ""),
   qstashCurrentSigningKey: optional("QSTASH_CURRENT_SIGNING_KEY", ""),
   qstashNextSigningKey: optional("QSTASH_NEXT_SIGNING_KEY", ""),
+  // Deployment smoke runners may attest a fresh provider round-trip through
+  // the root-only operator endpoint. Keep this separate from all provider
+  // credentials and never expose it to model or tenant context.
+  providerSmokeSigningSecret: optional("PROVIDER_SMOKE_SIGNING_SECRET", ""),
   triggerWorkflowUrl: optional("TRIGGER_WORKFLOW_URL", ""),
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
   reminderWorkflowUrl: optional("REMINDER_WORKFLOW_URL", ""),

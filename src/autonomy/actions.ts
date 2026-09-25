@@ -75,7 +75,7 @@ export async function beginExternalAction(input: {
 }
 
 export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string): Promise<void> {
-  const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), error: undefined });
+  const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), receiptVerification: "provider_response", verifiedAt: Date.now(), error: undefined });
   await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "success", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
   await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.succeeded", at: Date.now(), correlationId: logicalActionId, summary: `${receipt?.tool ?? "External action"} was confirmed by the provider.`, metadata: { providerId: providerId ?? null } }).catch(() => undefined);
   // This is the production trusted-evidence boundary: the provider/tool

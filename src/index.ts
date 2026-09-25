@@ -10,6 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
+import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
@@ -2201,10 +2202,16 @@ async function main(): Promise<void> {
                   return { status: "blocked" as const, message: blocked?.error ?? "Mission budget preflight failed", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
                 }
               }
+              let quotaReservationId: string | undefined;
+              if (task.sdkRunId) {
+                const admission = await reserveExecutionQuota(task.userId, "sdk.run", { maxConcurrent: 4 }, task.quotaReservationId ?? `quota_${task.id}`);
+                if (!admission.allowed) return { status: "queued" as const, message: admission.reason ?? "Execution quota is temporarily full.", checkpoint: task.checkpoint, nextAction: "Retry when the owner's execution quota has capacity.", runAt: Date.now() + 30_000 };
+                quotaReservationId = admission.reservationId;
+              }
               let missionLeaseToken: string | undefined;
               if (mission) {
                 const leased = await acquireMissionLease(task.userId, mission.id, `workflow:${workflow.workflowRunId ?? "task"}:${attempt}`);
-                if (!leased?.lease) return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 };
+                if (!leased?.lease) { if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch(() => undefined); return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 }; }
                 mission = leased;
                 missionLeaseToken = leased.lease.token;
               }
@@ -2307,6 +2314,7 @@ async function main(): Promise<void> {
                 clearInterval(cancellationPoll);
                 if (missionLeaseRenewal) clearInterval(missionLeaseRenewal);
                 if (mission?.id && missionLeaseToken) await releaseMissionLease(task.userId, mission.id, missionLeaseToken);
+                if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch((error) => logger.warn({ err: error, taskId: task.id }, "Execution quota reservation release failed"));
               }
               if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
               if (result.taskWait) {
@@ -2670,7 +2678,8 @@ async function main(): Promise<void> {
         return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, configurationIssues: { recallChat: recallChatIssue }, composioTriggers: composioTriggerSetup, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
-        return c.json({ ok: false, error: String(e) }, 503);
+        logger.warn({ errorName: e instanceof Error ? e.name : "UnknownError" }, "Deep health check failed");
+        return c.json({ ok: false, status: "degraded", error: "Health checks are temporarily unavailable." }, 503);
       }
     });
 

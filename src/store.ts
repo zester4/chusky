@@ -23,7 +23,7 @@ import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type Flu
 import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
 import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
-import type { CompensationRecord, OutcomeVerification, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
+import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 
 export interface Message {
@@ -54,9 +54,13 @@ export interface UserSession {
   externalActions?: ExternalActionReceipt[];
   /** Durable reliability evidence and operator trace records. */
   reliabilitySamples?: ReliabilitySample[];
+  /** Short-lived owner-scoped admission slots for queued/concurrent runs. */
+  executionReservations?: ExecutionReservation[];
   outcomeVerifications?: OutcomeVerification[];
   compensations?: CompensationRecord[];
   reliabilityTrace?: ReliabilityTraceEvent[];
+  /** System-level live provider smoke evidence is kept in the control session. */
+  providerProofs?: ProviderProof[];
   approvalEscalations?: ApprovalEscalationRecord[];
   scratchpad: Record<string, ScratchpadEntry>;
   memories: MemoryFact[];
@@ -855,6 +859,8 @@ export interface TaskRecord {
   sdkStartedAt?: number;
   sdkSkills?: string[];
   sdkInstructions?: string;
+  /** Admission slot held for an asynchronous SDK run until it settles. */
+  quotaReservationId?: string;
   /** Narrow delayed meeting follow-up context; deliberately excludes general chat history and arbitrary tools. */
   meetingFollowUp?: {
     meetingId: string;
@@ -941,6 +947,9 @@ export interface ExternalActionReceipt {
   status: "started" | "succeeded" | "failed" | "ambiguous";
   resultSummary?: string;
   providerId?: string;
+  /** How the external effect was proven. A response is not the same as a read-back. */
+  receiptVerification?: "provider_response" | "provider_read" | "manual" | "missing";
+  verifiedAt?: number;
   error?: string;
   createdAt: number;
   updatedAt: number;
@@ -3574,7 +3583,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -3860,7 +3869,7 @@ function normalizeExternalAction(value: unknown, uid: number): ExternalActionRec
     ...(typeof input.occurrenceId === "string" ? { occurrenceId: input.occurrenceId.slice(0, 240) } : {}), status: input.status,
     ...(input.missionEvidenceStatus === "persisted" || input.missionEvidenceStatus === "failed" ? { missionEvidenceStatus: input.missionEvidenceStatus } : {}),
     ...(typeof input.missionEvidenceError === "string" ? { missionEvidenceError: input.missionEvidenceError.slice(0, 500) } : {}),
-    ...(typeof input.resultSummary === "string" ? { resultSummary: input.resultSummary.slice(0, 8_000) } : {}), ...(typeof input.providerId === "string" ? { providerId: input.providerId.slice(0, 240) } : {}), ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
+    ...(typeof input.resultSummary === "string" ? { resultSummary: input.resultSummary.slice(0, 8_000) } : {}), ...(typeof input.providerId === "string" ? { providerId: input.providerId.slice(0, 240) } : {}), ...(input.receiptVerification === "provider_response" || input.receiptVerification === "provider_read" || input.receiptVerification === "manual" || input.receiptVerification === "missing" ? { receiptVerification: input.receiptVerification } : {}), ...(typeof input.verifiedAt === "number" && Number.isFinite(input.verifiedAt) ? { verifiedAt: input.verifiedAt } : {}), ...(typeof input.error === "string" ? { error: input.error.slice(0, 1_000) } : {}),
     createdAt: typeof input.createdAt === "number" ? input.createdAt : Date.now(), updatedAt: typeof input.updatedAt === "number" ? input.updatedAt : Date.now(),
   };
 }
@@ -3889,6 +3898,7 @@ export async function getSession(uid: number): Promise<UserSession> {
   // key or provider secrets/bridge session identifiers into the current model.
   const { faceTimeCalls: legacyCalls, ...s } = raw;
   const savedCalls = Array.isArray(s.phoneCalls) ? s.phoneCalls as unknown[] : Array.isArray(legacyCalls) ? legacyCalls : [];
+  s.executionReservations = Array.isArray(s.executionReservations) ? s.executionReservations.filter((item): item is ExecutionReservation => Boolean(item) && typeof item.id === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(item.id) && typeof item.operation === "string" && item.operation.length <= 100 && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt)).slice(-100) : [];
   const phoneCalls = savedCalls.flatMap((value): PhoneCallRecord[] => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return [];
     const item = value as Record<string, unknown>;
@@ -3937,12 +3947,62 @@ export async function getSession(uid: number): Promise<UserSession> {
     timeline: normalizeMeetingTimeline(meeting.timeline),
   })) : [];
   s.approvalEscalations = Array.isArray(s.approvalEscalations) ? s.approvalEscalations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.approvalId === "string" && ["pending", "escalated", "acknowledged", "closed", "failed"].includes(item.status)).slice(-500) : [];
-  return { ...fresh(), ...s, voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
+  return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+/**
+ * Serialize a read/modify/write mutation for the durable session blob. Redis
+ * session writes are otherwise vulnerable to lost updates when a worker and a
+ * webhook update the same owner at the same time. The lease is deliberately
+ * short; callers should keep the mutator CPU-only and never perform provider
+ * I/O while holding it.
+ */
+export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>): Promise<T> {
+  const token = randomUUID();
+  const key = `session-mutate:${uid}`;
+  let acquired = false;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await backend.acquireKeyLock(key, token, 15)) { acquired = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 25 + Math.floor(Math.random() * 50)));
+  }
+  if (!acquired) throw new Error("Session mutation is busy; retry shortly.");
+  try {
+    const session = await getSession(uid);
+    const result = await mutator(session);
+    await saveSession(uid, session);
+    return result;
+  } finally {
+    await backend.releaseKeyLock(key, token);
+  }
+}
+
+export async function listProviderProofs(now = Date.now()): Promise<ProviderProof[]> {
+  return (await getSession(0)).providerProofs?.filter((proof) => proof.expiresAt > now).slice(-100) ?? [];
+}
+
+export async function saveProviderProof(proof: ProviderProof): Promise<ProviderProof> {
+  if (!/^[a-z0-9_-]{1,40}$/i.test(proof.surface) || !/^[A-Za-z0-9_-]{1,160}$/.test(proof.correlationId)) throw new Error("Provider proof identity is invalid.");
+  if (!Array.isArray(proof.checks)) throw new Error("Provider proof checks are invalid.");
+  const normalized: ProviderProof = {
+    surface: proof.surface.toLowerCase().slice(0, 40),
+    inboundText: proof.inboundText === true,
+    inboundImage: proof.inboundImage === true,
+    outboundText: proof.outboundText === true,
+    outboundImage: proof.outboundImage === true,
+    verifiedAt: Number.isFinite(proof.verifiedAt) ? proof.verifiedAt : Date.now(),
+    expiresAt: Number.isFinite(proof.expiresAt) ? proof.expiresAt : Date.now() + 24 * 60 * 60_000,
+    correlationId: proof.correlationId.slice(0, 160),
+    checks: proof.checks.slice(0, 20).map((check) => ({ name: String(check.name).slice(0, 120), status: check.status === "passed" ? "passed" : "failed", ...(check.detail ? { detail: String(check.detail).slice(0, 500) } : {}) })),
+  };
+  await mutateSession(0, (control) => {
+    control.providerProofs = [...(control.providerProofs ?? []).filter((item) => item.surface !== normalized.surface), normalized].slice(-100);
+  });
+  return normalized;
 }
 
 function assertMeetingRoomId(id: string): void {
@@ -4919,6 +4979,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
+    ...(typeof task.quotaReservationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.quotaReservationId) ? { quotaReservationId: task.quotaReservationId } : { quotaReservationId: undefined }),
     ...(task.enqueueClaim && typeof task.enqueueClaim === "object" && typeof task.enqueueClaim.token === "string" && Number.isFinite(task.enqueueClaim.expiresAt)
       ? { enqueueClaim: { token: task.enqueueClaim.token.slice(0, 120), expiresAt: Number(task.enqueueClaim.expiresAt) } }
       : { enqueueClaim: undefined }),
@@ -4958,6 +5019,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkStartedAt: input.sdkStartedAt,
     sdkSkills: input.sdkSkills,
     sdkInstructions: input.sdkInstructions,
+    quotaReservationId: input.quotaReservationId,
     meetingFollowUp: input.meetingFollowUp,
     missionId: input.missionId,
     missionStepId: input.missionStepId,
@@ -5807,19 +5869,14 @@ export async function getAutonomyRun(uid: number, id: string): Promise<Autonomou
  * multiple wakeups in flight.
  */
 export async function saveAutonomyRun(record: AutonomousRunRecord, expectedVersion?: number): Promise<AutonomousRunRecord | undefined> {
-  const session = await getSession(record.userId);
-  const runs = session.autonomyRuns ?? [];
-  const current = runs.find((run) => run.id === record.id);
-  if (current && expectedVersion !== undefined && current.version !== expectedVersion) return undefined;
-  const next: AutonomousRunRecord = {
-    ...record,
-    userId: record.userId,
-    version: current ? current.version + 1 : Math.max(0, record.version),
-    updatedAt: Date.now(),
-  };
-  session.autonomyRuns = [...runs.filter((run) => run.id !== record.id), next].slice(-200);
-  await saveSession(record.userId, session);
-  return next;
+  return mutateSession(record.userId, (session) => {
+    const runs = session.autonomyRuns ?? [];
+    const current = runs.find((run) => run.id === record.id);
+    if (current && expectedVersion !== undefined && current.version !== expectedVersion) return undefined;
+    const next: AutonomousRunRecord = { ...record, userId: record.userId, version: current ? current.version + 1 : Math.max(0, record.version), updatedAt: Date.now() };
+    session.autonomyRuns = [...runs.filter((run) => run.id !== record.id), next].slice(-200);
+    return next;
+  });
 }
 
 export async function listJobOccurrences(uid: number, jobId?: string, limit = 50): Promise<JobOccurrenceRecord[]> {
@@ -5836,24 +5893,24 @@ export async function getJobOccurrence(uid: number, jobId: string, occurrenceId:
 
 /** Create or return the durable occurrence ledger row for a scheduled run. */
 export async function createJobOccurrence(record: JobOccurrenceRecord): Promise<JobOccurrenceRecord> {
-  const session = await getSession(record.userId);
-  const occurrences = session.jobOccurrences ?? [];
-  const existing = occurrences.find((occurrence) => occurrence.jobId === record.jobId && occurrence.occurrenceId === record.occurrenceId);
-  if (existing) return existing;
-  session.jobOccurrences = [...occurrences, record].slice(-400);
-  await saveSession(record.userId, session);
-  return record;
+  return mutateSession(record.userId, (session) => {
+    const occurrences = session.jobOccurrences ?? [];
+    const existing = occurrences.find((occurrence) => occurrence.jobId === record.jobId && occurrence.occurrenceId === record.occurrenceId);
+    if (existing) return existing;
+    session.jobOccurrences = [...occurrences, record].slice(-400);
+    return record;
+  });
 }
 
 export async function updateJobOccurrence(uid: number, id: string, patch: Partial<JobOccurrenceRecord>, expectedVersion?: number): Promise<JobOccurrenceRecord | undefined> {
-  const session = await getSession(uid);
-  const occurrences = session.jobOccurrences ?? [];
-  const current = occurrences.find((occurrence) => occurrence.id === id && occurrence.userId === uid);
-  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) return undefined;
-  const next: JobOccurrenceRecord = { ...current, ...patch, id: current.id, userId: uid, version: current.version + 1, updatedAt: Date.now() };
-  session.jobOccurrences = [...occurrences.filter((occurrence) => occurrence.id !== id), next].slice(-400);
-  await saveSession(uid, session);
-  return next;
+  return mutateSession(uid, (session) => {
+    const occurrences = session.jobOccurrences ?? [];
+    const current = occurrences.find((occurrence) => occurrence.id === id && occurrence.userId === uid);
+    if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) return undefined;
+    const next: JobOccurrenceRecord = { ...current, ...patch, id: current.id, userId: uid, version: current.version + 1, updatedAt: Date.now() };
+    session.jobOccurrences = [...occurrences.filter((occurrence) => occurrence.id !== id), next].slice(-400);
+    return next;
+  });
 }
 
 /**
@@ -5877,23 +5934,23 @@ export async function getExternalAction(userId: number, logicalActionId: string)
 }
 
 export async function saveExternalAction(record: ExternalActionReceipt): Promise<ExternalActionReceipt> {
-  const session = await getSession(record.userId);
-  const existing = (session.externalActions ?? []).find((action) => action.logicalActionId === record.logicalActionId);
-  if (existing && existing.status === "succeeded") return existing;
-  const next = { ...record, userId: record.userId, updatedAt: Date.now() };
-  session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== record.logicalActionId), next].slice(-400);
-  await saveSession(record.userId, session);
-  return next;
+  return mutateSession(record.userId, (session) => {
+    const existing = (session.externalActions ?? []).find((action) => action.logicalActionId === record.logicalActionId);
+    if (existing && existing.status === "succeeded") return existing;
+    const next = { ...record, userId: record.userId, updatedAt: Date.now() };
+    session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== record.logicalActionId), next].slice(-400);
+    return next;
+  });
 }
 
 export async function updateExternalAction(userId: number, logicalActionId: string, patch: Partial<ExternalActionReceipt>): Promise<ExternalActionReceipt | undefined> {
-  const session = await getSession(userId);
-  const current = (session.externalActions ?? []).find((action) => action.logicalActionId === logicalActionId);
-  if (!current) return undefined;
-  const next = { ...current, ...patch, id: current.id, userId, logicalActionId, updatedAt: Date.now() };
-  session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== logicalActionId), next].slice(-400);
-  await saveSession(userId, session);
-  return next;
+  return mutateSession(userId, (session) => {
+    const current = (session.externalActions ?? []).find((action) => action.logicalActionId === logicalActionId);
+    if (!current) return undefined;
+    const next = { ...current, ...patch, id: current.id, userId, logicalActionId, updatedAt: Date.now() };
+    session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== logicalActionId), next].slice(-400);
+    return next;
+  });
 }
 
 export async function listExternalActions(userId: number, limit = 50): Promise<ExternalActionReceipt[]> {

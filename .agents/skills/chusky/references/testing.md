@@ -92,7 +92,7 @@ Maintain fixtures for:
 17. `CHUCK_ARTIFACT_QA` checks an existing owner workspace document without registering it or mutating its source; unavailable independent render evidence fails closed.
 18. `CHUCK_FILE_BRIDGE` uses only the authenticated owner's artifact and exact current Composio-session action schema, requires the normal approval, rejects ambiguous binary fields and caller-supplied file bytes, and never retries an ambiguous upload.
 19. `CHUCK_TOOL_RECOVERY` reads persisted results only for the owner, recommends verification for ambiguous/legacy failures, and never dispatches a retry.
-20. `CHUCK_MEDIA_BRIDGE` transfers a current, generated, or saved image only through the exact exposed Composio action schema, injects one unambiguous URL or binary field, requires the normal approval boundary, and returns a bounded receipt without exposing bytes or credentials.
+20. `CHUCK_MEDIA_BRIDGE` transfers a current, generated, or saved image immediately after the owner's direct request, only through the exact exposed Composio action schema; it injects one unambiguous URL or binary field and returns a bounded receipt without exposing bytes or credentials.
 
 ## Test command
 

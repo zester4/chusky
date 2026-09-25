@@ -75,6 +75,16 @@ export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promi
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
+
+function providerReceiptId(value: unknown): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["id", "message_id", "messageId", "event_id", "eventId", "issueKey", "issue_key", "provider_id", "providerId"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim() && candidate.length <= 240) return candidate.trim();
+  }
+  return undefined;
+}
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
 const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
@@ -1780,7 +1790,7 @@ export async function runAgent(
           : JSON.stringify(execResult) ?? "undefined";
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
-        if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result);
+        if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult));
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) {

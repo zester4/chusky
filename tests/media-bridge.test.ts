@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildMediaBridgeArguments } from "../src/mediaBridge.js";
-import { executeMediaBridgeAction, prepareMediaBridgeApprovalSource, setAgentDependenciesForTests } from "../src/agent.js";
+import { executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
 const file = { name: "brand.png", contentType: "image/png", data: Buffer.from("png-bytes") } as const;
 
@@ -50,7 +50,7 @@ test("media bridge rejects unsafe URLs and images outside its transfer bound", (
   assert.throws(() => buildMediaBridgeArguments(schema, {}, { ...file, data: Buffer.alloc(25 * 1024 * 1024 + 1) }, "https://cdn.example/image.png"), /25 MB/i);
 });
 
-test("approved current-image transfer resumes from its owner-scoped asset and confirms the exact provider action", async () => {
+test("owner-requested current-image transfer executes immediately and confirms the exact provider action", async () => {
   const userId = 839101;
   const imageBytes = Buffer.alloc(24);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
@@ -86,20 +86,20 @@ test("approved current-image transfer resumes from its owner-scoped asset and co
   };
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
   try {
-    const approvalArgs = await prepareMediaBridgeApprovalSource(userId, { source: "current", sourceIndex: 0, toolSlug: "INSTAGRAM_CREATE_POST", arguments: { caption: "Launch" }, account: "brand" }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
-    assert.deepEqual(approvalArgs, { source: "asset", assetId: "img_owner_839101", toolSlug: "INSTAGRAM_CREATE_POST", arguments: { caption: "Launch" }, account: "brand" });
+    const directTools = await session.tools();
+    const requestArgs = { source: "current", sourceIndex: 0, toolSlug: "INSTAGRAM_CREATE_POST", arguments: { caption: "Launch" }, account: "brand" };
+    const runtime = { currentImages: [{ data: imageBytes, mediaType: "image/png" }] };
+    const result = await executeMediaBridgeAction(userId, session, directTools, requestArgs, runtime);
     assert.equal(saved.length, 1);
     assert.equal(saved[0]?.owner, userId);
     assert.deepEqual(saved[0]?.bytes, imageBytes);
-    const directTools = await session.tools();
-    const result = await executeMediaBridgeAction(userId, session, directTools, approvalArgs, {});
-    assert.deepEqual(result, { providerActionSucceeded: true, mediaTransferred: true, toolSlug: "INSTAGRAM_CREATE_POST", source: "asset", mode: "url", assetId: "img_owner_839101", size: imageBytes.length, contentType: "image/png", mediaId: "provider-media-456", status: "published" });
+    assert.deepEqual(result, { providerActionSucceeded: true, mediaTransferred: true, toolSlug: "INSTAGRAM_CREATE_POST", source: "current", mode: "url", assetId: "img_owner_839101", size: imageBytes.length, contentType: "image/png", mediaId: "provider-media-456", status: "published" });
     assert.equal(executed.length, 1);
     assert.equal(executed[0]?.slug, "INSTAGRAM_CREATE_POST");
     assert.equal(executed[0]?.account, "brand");
     assert.deepEqual(executed[0]?.args, { caption: "Launch", image_url: "https://signed.example/private-image?token=short-lived" });
     providerSuccessful = false;
-    await assert.rejects(() => executeMediaBridgeAction(userId, session, directTools, approvalArgs, {}), /did not confirm.*succeeded/i);
+    await assert.rejects(() => executeMediaBridgeAction(userId, session, directTools, requestArgs, runtime), /did not confirm.*succeeded/i);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }

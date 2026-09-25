@@ -11,6 +11,10 @@ import { buildOperatorTimeline } from "../src/reliability/timeline.js";
 import { runDueApprovalEscalations, scheduleApprovalEscalation } from "../src/approvals/escalation.js";
 import { verifyMeetingFollowThrough } from "../src/meetings/followThroughVerification.js";
 import { detectBusinessOpportunities } from "../src/autonomy/opportunityDetectors.js";
+import { providerMatrixWithProofs } from "../src/reliability/providerMatrix.js";
+import { runProviderSmokeSuite } from "../src/reliability/providerSmoke.js";
+import { buildReadinessReport } from "../src/reliability/readiness.js";
+import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability/quotas.js";
 
 test("outcome verification rejects stale or missing provider evidence and accepts fresh matching evidence", () => {
   const now = 1_000_000;
@@ -39,6 +43,13 @@ test("compiled autonomy policy narrows authority, domains, tools, and budgets", 
   assert.deepEqual(compiled.allowedTools, ["GMAIL_GET_MESSAGES"]);
   assert.equal(compiled.maxToolCalls, 5);
   assert.equal(compiled.maxCostUsd, 2);
+});
+
+test("compiled autonomy policy defaults to observe when no authority is granted", () => {
+  const compiled = compileAutonomyPolicy({ ownerId: 12, mode: "personal", now: 123 });
+  assert.equal(compiled.authority, "observe");
+  assert.equal(compiled.enabled, true);
+  assert.deepEqual({ checks: compiled.maxChecksPerDay, actions: compiled.maxActionsPerDay, toolCalls: compiled.maxToolCalls, costUsd: compiled.maxCostUsd }, { checks: 24, actions: 20, toolCalls: 100, costUsd: 25 });
 });
 
 test("compensation records are durable, approval-gated, and idempotent", async () => {
@@ -101,4 +112,49 @@ test("meeting follow-through and opportunity detection fail closed on missing re
   assert.equal(verifyMeetingFollowThrough([{ id: "f1", required: true, status: "scheduled", dueAt: 1 }], 2).status, "pending");
   assert.equal(verifyMeetingFollowThrough([{ id: "f1", required: true, status: "ambiguous" }]).status, "blocked");
   assert.equal(detectBusinessOpportunities([{ source: "crm", kind: "lead", id: "l1", status: "qualified", subject: "A" }]).length, 1);
+});
+
+test("provider certification requires fresh proof for every modality", async () => {
+  const proofs = await runProviderSmokeSuite([{ surface: "web", run: async () => [
+    { name: "inbound text", status: "passed", inboundText: true },
+    { name: "inbound image", status: "passed", inboundImage: true },
+    { name: "outbound text", status: "passed", outboundText: true },
+    { name: "outbound image", status: "passed", outboundImage: true },
+  ] }], 10_000, 60_000);
+  assert.equal(proofs.length, 1);
+  assert.equal(providerMatrixWithProofs({}, proofs, 10_001).find((entry) => entry.surface === "web")?.liveProof, "verified");
+  assert.equal(providerMatrixWithProofs({}, proofs, 70_001).find((entry) => entry.surface === "web")?.liveProof, "configured_unverified");
+});
+
+test("readiness blocks ephemeral persistence and reports unverified providers", () => {
+  const report = buildReadinessReport({ durableStore: false, qstashConfigured: false, providerMatrix: providerMatrixWithProofs({}), proofs: [], now: 1 });
+  assert.equal(report.status, "blocked");
+  assert.ok(report.blocking.includes("durable_store"));
+  assert.ok(report.warnings.includes("provider_proofs"));
+});
+
+test("execution quota admission is atomic across concurrent durable workers", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 991300;
+  const [left, right] = await Promise.all([
+    reserveExecutionQuota(ownerId, "sdk.run", { maxConcurrent: 1 }, "quota_left", 1_000),
+    reserveExecutionQuota(ownerId, "sdk.run", { maxConcurrent: 1 }, "quota_right", 1_000),
+  ]);
+  assert.equal([left, right].filter((item) => item.allowed).length, 1);
+  const winner = left.allowed ? left : right;
+  await releaseExecutionQuota(ownerId, winner.reservationId!);
+  const after = await reserveExecutionQuota(ownerId, "sdk.run", { maxConcurrent: 1 }, "quota_after", 2_000);
+  assert.equal(after.allowed, true);
+  const otherOperation = await reserveExecutionQuota(ownerId, "other.run", { maxConcurrent: 1 }, "quota_other", 2_000);
+  assert.equal(otherOperation.allowed, true);
+  const replay = await reserveExecutionQuota(ownerId, "other.run", { maxConcurrent: 1 }, "quota_other", 2_000);
+  assert.equal(replay.allowed, true);
+  await releaseExecutionQuota(ownerId, "quota_after");
+  await releaseExecutionQuota(ownerId, "quota_other");
+  const dailyOwner = 991301;
+  const dailyFirst = await reserveExecutionQuota(dailyOwner, "sdk.run", { maxCallsPerDay: 1, maxConcurrent: 10 }, "quota_daily_first", 1_000);
+  const dailySecond = await reserveExecutionQuota(dailyOwner, "sdk.run", { maxCallsPerDay: 1, maxConcurrent: 10 }, "quota_daily_second", 1_000);
+  assert.equal(dailyFirst.allowed, true);
+  assert.equal(dailySecond.allowed, false);
+  await releaseExecutionQuota(dailyOwner, "quota_daily_first");
 });

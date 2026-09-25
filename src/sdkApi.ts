@@ -11,7 +11,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { listJobOccurrences } from "./store.js";
 import { logger } from "./logger.js";
@@ -61,14 +61,15 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { appendReliabilitySample, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth, saveOutcomeVerification } from "./reliability/persistence.js";
 import { replayMission, replayScenario } from "./reliability/replay.js";
 import { verifyOutcome } from "./reliability/evaluator.js";
-import type { OutcomeCheck, OutcomeCheckResult, ReplayScenario } from "./reliability/contracts.js";
+import type { OutcomeCheck, OutcomeCheckResult, ProviderProof, ReplayScenario } from "./reliability/contracts.js";
 import { compileAutonomyPolicy } from "./reliability/policy.js";
 import { detectMemoryConflicts } from "./memory/conflicts.js";
 import { chooseReliableRoute } from "./reliability/routing.js";
-import { providerMatrix } from "./reliability/providerMatrix.js";
+import { PROVIDER_SURFACES, providerMatrixWithProofs } from "./reliability/providerMatrix.js";
+import { buildReadinessReport } from "./reliability/readiness.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
-import { checkExecutionQuota } from "./reliability/quotas.js";
+import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 
 let sdkTaskWorkflowEnqueuer = enqueueTaskWorkflow;
 /** Test-only seam for durable task submission; production uses the configured QStash workflow client. */
@@ -372,7 +373,7 @@ function isAdminRequest(c: { req: { path: string; url: string } }): boolean {
   // expose a route-relative `req.path`, which must not downgrade a root-only route
   // into a user-scoped developer request.
   const pathname = new URL(c.req.url).pathname;
-  return pathname === "/v1/admin" || pathname.startsWith("/v1/admin/") || c.req.path === "/v1/admin" || c.req.path.startsWith("/v1/admin/");
+  return pathname === "/v1/admin" || pathname.startsWith("/v1/admin/") || pathname === "/v1/operator/provider-proof" || c.req.path === "/v1/admin" || c.req.path.startsWith("/v1/admin/") || c.req.path === "/v1/operator/provider-proof";
 }
 
 function accountProjectScopes(value: unknown): string[] | undefined {
@@ -981,10 +982,10 @@ export function registerSdkApi(app: Hono): void {
             CHUCK_INTEGRATION_HEALTH: "Connected integration health",
             CHUCK_ARTIFACT_QA: "Document artifact quality assurance",
             CHUCK_FILE_BRIDGE: "Approval-gated artifact transfer",
-            CHUCK_MEDIA_BRIDGE: "Approval-gated image transfer",
+            CHUCK_MEDIA_BRIDGE: "Owner-requested image transfer",
             CHUCK_TOOL_RECOVERY: "Tool failure recovery inspection",
           };
-          return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: slug === "CHUCK_MEDIA_BRIDGE" ? ["text/plain", "application/json"] : ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [slug === "CHUCK_MEDIA_BRIDGE" ? "Upload an image through /v1/files, then send its file ID in data.chuskyFileIds with the image-transfer request." : `Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];
+          return [{ id: slug, name: name[slug], description: tool.function.description, tags: ["tool-reliability", "native-tools"], inputModes: slug === "CHUCK_MEDIA_BRIDGE" ? ["text/plain", "application/json"] : ["text/plain"], outputModes: ["text/plain", "application/json"], examples: [slug === "CHUCK_MEDIA_BRIDGE" ? "Upload an image through /v1/files, then send its file ID with a direct owner-requested image-transfer run." : `Use ${slug} through a governed Chusky task; preserve the normal policy and approval requirements.`] }];
         }),
       ],
       defaultInputModes: ["text/plain"],
@@ -1192,7 +1193,7 @@ export function registerSdkApi(app: Hono): void {
     }
   });
 
-  app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
+  app.use("/v1/*", cors({ origin: (origin) => origin && config.betterAuthTrustedOrigins.includes(origin) ? origin : "", credentials: true, allowHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "X-Chusky-User-Id", "X-Chusky-Provider-Proof-Signature"], allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] }));
   app.use("/v1/*", async (c, next) => {
     const token = (c.req.header("Authorization") ?? "").replace(/^Bearer\s+/i, "");
     let principal = await authorized(token);
@@ -1248,7 +1249,17 @@ export function registerSdkApi(app: Hono): void {
     const ok = checks.redis === "ok" && Object.values(checks).every((value) => value !== "misconfigured");
     const monitoring = monitoringSnapshot();
     const vectorCheck = !vectorConfigured() ? "disabled" : monitoring.vector.degraded ? "degraded" : "configured";
-    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring });
+    let readiness: ReturnType<typeof buildReadinessReport>;
+    try {
+      const proofs = await listProviderProofs();
+      const providerMatrix = providerMatrixWithProofs(process.env, proofs);
+      readiness = buildReadinessReport({ durableStore: redis, qstashConfigured: Boolean(config.qstashToken && config.qstashCurrentSigningKey && config.qstashNextSigningKey), providerMatrix, proofs });
+    } catch (error) {
+      logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Operator readiness check failed");
+      const providerMatrix = providerMatrixWithProofs(process.env);
+      readiness = { status: "blocked", generatedAt: Date.now(), durableStore: redis, checks: [{ id: "readiness_store", status: "failed", detail: "Readiness evidence could not be loaded from the configured store." }], providerMatrix, blocking: ["readiness_store"], warnings: [] };
+    }
+    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring, readiness });
   });
 
   app.get("/v1/account/overview", async (c) => {
@@ -2164,14 +2175,26 @@ export function registerSdkApi(app: Hono): void {
     const lockToken = randomUUID();
     if (!(await acquireUserLock(owner.userId, lockToken))) return apiError(c, 409, "run_in_progress", "Another Chusky request is already running for this user.");
     try {
-    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now }; thread.runs.push(run);
+    const now = Date.now(); const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: body.wait === false ? "queued" : "running", ...(owner.organizationId ? { companyProjectId: owner.projectId } : {}), input: resolved.input, model: body.model ?? session.model, agentId: companyPolicy.agent?.id, agentName: companyPolicy.agent?.name, agentInstructions: companyPolicy.agent?.instructions, attachments: resolved.attachments, metadata: body.metadata, budget: body.budget, tools: body.tools, skills: body.skills, events: [event(body.wait === false ? "run.queued" : "run.started")], createdAt: now, updatedAt: now };
+    let quotaReservationId: string | undefined;
+    if (body.wait === false) {
+      try {
+        const admission = await reserveExecutionQuota(owner.userId, "sdk.run", { maxConcurrent: 4 }, `quota_${run.id}`);
+        if (!admission.allowed) { await releaseUserLock(owner.userId, lockToken); return apiError(c, 429, "execution_quota_exceeded", admission.reason ?? "Execution quota exceeded."); }
+        quotaReservationId = admission.reservationId;
+      } catch (error) {
+        await releaseUserLock(owner.userId, lockToken);
+        return apiError(c, 503, "quota_unavailable", error instanceof Error ? error.message : "Execution quota is temporarily unavailable.");
+      }
+    }
+    thread.runs.push(run);
     if (body.wait === false) {
       let task: Awaited<ReturnType<typeof createTask>>;
       try {
-        task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills, sdkInstructions: companyPolicy.agent?.instructions });
+        task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills, sdkInstructions: companyPolicy.agent?.instructions, quotaReservationId });
         const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
         if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly."); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
-      } catch (error) { if (task!) await cancelTask(owner.userId, task.id); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
+      } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
     }
     try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
@@ -2505,7 +2528,48 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/operator/verifications", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listOutcomeVerifications(owner.userId, c.req.query("mission_id")) }); });
   app.get("/v1/operator/reliability", async (c) => { const owner = sdkUser(c)!; const operation = String(c.req.query("operation") ?? "agent").slice(0, 160); return c.json({ data: await reliabilityHealth(owner.userId, operation, Date.now(), Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(c.req.query("window_ms") ?? 3_600_000) || 3_600_000))) }); });
   app.get("/v1/operator/escalations", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listApprovalEscalations(owner.userId) }); });
-  app.get("/v1/operator/provider-matrix", async (c) => c.json({ data: providerMatrix(), note: "Configured is not live proof; run the provider smoke suite with real credentials before marking a surface verified." }));
+  app.post("/v1/operator/provider-proof", async (c) => {
+    const principal = (c.get as (key: string) => unknown)("sdkPrincipal") as SdkPrincipal | undefined;
+    if (!principal?.root) return apiError(c, 403, "root_required", "Root API key required.");
+    if (!config.providerSmokeSigningSecret) return apiError(c, 503, "provider_smoke_unconfigured", "Provider smoke attestation is not configured.");
+    const signature = c.req.header("X-Chusky-Provider-Proof-Signature") ?? "";
+    const body = await c.req.json().catch(() => ({})) as { proof?: unknown };
+    const proofValue = body.proof;
+    if (!proofValue || typeof proofValue !== "object" || Array.isArray(proofValue)) return apiError(c, 400, "invalid_provider_proof", "A provider proof object is required.");
+    const canonical = JSON.stringify(proofValue);
+    if (canonical.length > 32_000) return apiError(c, 413, "provider_proof_too_large", "Provider proof is too large.");
+    const expected = createHmac("sha256", config.providerSmokeSigningSecret).update(canonical).digest("base64url");
+    if (!signature || signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return apiError(c, 401, "invalid_provider_proof_signature", "Provider proof signature is invalid.");
+    const value = proofValue as Record<string, unknown>;
+    const surfaces = new Set<string>(PROVIDER_SURFACES);
+    const surface = typeof value.surface === "string" ? value.surface.trim().toLowerCase() : "";
+    const correlationId = typeof value.correlationId === "string" ? value.correlationId.trim() : "";
+    const verifiedAt = typeof value.verifiedAt === "number" ? value.verifiedAt : Number.NaN;
+    const expiresAt = typeof value.expiresAt === "number" ? value.expiresAt : Number.NaN;
+    const now = Date.now();
+    const checks = Array.isArray(value.checks) ? value.checks : [];
+    const normalizedChecks = checks.slice(0, 20).flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const check = item as Record<string, unknown>;
+      if (typeof check.name !== "string" || !check.name.trim() || check.name.length > 120 || check.status !== "passed" || (check.detail !== undefined && (typeof check.detail !== "string" || check.detail.length > 500))) return [];
+      return [{ name: check.name.trim(), status: "passed" as const, ...(typeof check.detail === "string" ? { detail: check.detail } : {}) }];
+    });
+    const valid = surfaces.has(surface) && /^[A-Za-z0-9_-]{1,160}$/.test(correlationId) && Number.isFinite(verifiedAt) && Number.isFinite(expiresAt) && verifiedAt <= now + 30_000 && verifiedAt >= now - 15 * 60_000 && expiresAt > now && expiresAt <= verifiedAt + 7 * 24 * 60 * 60_000 && value.inboundText === true && value.inboundImage === true && value.outboundText === true && value.outboundImage === true && normalizedChecks.length === checks.length && normalizedChecks.length > 0;
+    if (!valid) return apiError(c, 400, "invalid_provider_proof", "Provider proof must contain fresh, complete, passed text and image round-trip evidence.");
+    try {
+      const saved = await saveProviderProof({ surface: surface as ProviderProof["surface"], inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, verifiedAt, expiresAt, correlationId, checks: normalizedChecks });
+      return c.json(saved, 201);
+    } catch (error) {
+      logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Provider proof persistence failed");
+      return apiError(c, 503, "provider_proof_unavailable", "Provider proof could not be persisted by the configured store.");
+    }
+  });
+  app.get("/v1/operator/provider-matrix", async (c) => c.json({ data: providerMatrixWithProofs(process.env, await listProviderProofs()), note: "Configured is not live proof; only fresh persisted real-provider smoke evidence is marked verified." }));
+  app.get("/v1/operator/readiness", async (c) => {
+    const proofs = await listProviderProofs();
+    const matrix = providerMatrixWithProofs(process.env, proofs);
+    return c.json(buildReadinessReport({ durableStore: isDurableStore(), qstashConfigured: Boolean(config.qstashToken && config.qstashCurrentSigningKey && config.qstashNextSigningKey), providerMatrix: matrix, proofs }));
+  });
   app.post("/v1/operator/escalations/run", async (c) => { const owner = sdkUser(c)!; const result = await runDueApprovalEscalations(owner.userId, { create: async (record) => { if (!record.toolSlug) throw new Error("No exact escalation action was configured; no external issue or message was created."); const output = await executeExactComposioAction(owner.userId, record.toolSlug, record.toolArgs ?? {}); const payload = output && typeof output === "object" ? output as Record<string, unknown> : {}; const key = [payload.key, payload.issueKey, payload.issue_key, payload.id].find((value): value is string => typeof value === "string" && value.length <= 240); return { ...(key ? { externalIssueKey: key } : {}), summary: key ? `Escalation action completed (${key}).` : "Escalation action completed." }; } }); return c.json({ data: result, executed: result.some((item) => item.status === "escalated"), message: result.length ? "Due escalations were processed through the exact owner-selected connected-app action." : "No due escalations." }); });
   app.post("/v1/operator/outcomes/verify", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const checks = Array.isArray(body.checks) ? body.checks.filter((item): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50) : []; const results = Array.isArray(body.results) ? body.results.filter((item): item is OutcomeCheckResult => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).checkId === "string" && ["passed", "failed", "uncertain", "skipped"].includes(String((item as Record<string, unknown>).status))).slice(0, 50) : []; if (!checks.length) return apiError(c, 400, "invalid_checks", "At least one outcome check is required."); const verification = verifyOutcome({ ownerId: owner.userId, missionId: typeof body.missionId === "string" ? body.missionId : undefined, runId: typeof body.runId === "string" ? body.runId : undefined, checks, results }); await saveOutcomeVerification(verification); return c.json(verification, verification.status === "verified" ? 200 : 409); });
   app.post("/v1/operator/replay", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; if (typeof body.missionId === "string" && body.events === undefined) { const mission = await getMission(owner.userId, body.missionId); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); const report = replayMission(mission); return c.json(report, report.status === "passed" ? 200 : 409); } const scenario = body as unknown as ReplayScenario; if (!scenario || typeof scenario.id !== "string" || typeof scenario.missionId !== "string" || !Array.isArray(scenario.events) || !scenario.expected || typeof scenario.expected !== "object" || !["completed", "blocked", "failed", "cancelled"].includes(String(scenario.expected.terminalStatus))) return apiError(c, 400, "invalid_replay", "A replay scenario with id, missionId, events, and expected terminalStatus is required."); const report = replayScenario({ ...scenario, ownerId: owner.userId }); return c.json(report, report.status === "passed" ? 200 : 409); });

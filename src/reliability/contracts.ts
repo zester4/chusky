@@ -21,6 +21,8 @@ export interface OutcomeCheckResult {
   status: "passed" | "failed" | "uncertain" | "skipped";
   observed?: Record<string, unknown>;
   evidenceRef?: string;
+  /** The provider or system that produced the evidence. */
+  provider?: string;
   observedAt?: number;
   reason?: string;
 }
@@ -130,6 +132,14 @@ export interface ReliabilitySample {
   provider?: string;
 }
 
+/** Short-lived durable admission slot held while queued work is executing. */
+export interface ExecutionReservation {
+  id: string;
+  operation: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface ReliabilityHealth {
   operation: string;
   windowMs: number;
@@ -140,6 +150,19 @@ export interface ReliabilityHealth {
   state: "healthy" | "degraded" | "meltdown";
   reasons: string[];
   calculatedAt: number;
+}
+
+/** A bounded, persisted proof that a real transport smoke test completed. */
+export interface ProviderProof {
+  surface: string;
+  inboundText: boolean;
+  inboundImage: boolean;
+  outboundText: boolean;
+  outboundImage: boolean;
+  verifiedAt: number;
+  expiresAt: number;
+  correlationId: string;
+  checks: Array<{ name: string; status: "passed" | "failed"; detail?: string }>;
 }
 
 export interface CompiledAutonomyPolicy {

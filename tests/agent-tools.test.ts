@@ -14,7 +14,7 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
-test("tool reliability diagnostics are explicit, bounded, and keep transfers approval-bound", () => {
+test("tool reliability diagnostics are explicit; artifact uploads stay gated and image publishing is autonomous", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"]) assert.equal(names.has(name), true, name);
   for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
@@ -27,6 +27,7 @@ test("tool reliability diagnostics are explicit, bounded, and keep transfers app
   assert.match(bridge.function.description, /base64\/binary field/i);
   const media = chuckTools.find((entry) => entry.function.name === "CHUCK_MEDIA_BRIDGE")!;
   assert.deepEqual(media.function.parameters.required, ["source", "toolSlug", "arguments"]);
+  assert.match(media.function.description, /without asking for separate approval/i);
   assert.match(media.function.description, /fail closed/i);
   const qa = chuckTools.find((entry) => entry.function.name === "CHUCK_ARTIFACT_QA")!;
   assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);
