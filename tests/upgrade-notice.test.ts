@@ -39,6 +39,24 @@ test("autonomy upgrade preset covers the current orchestration surfaces", () => 
   assert.match(bullets[2], /Daytona browser and artifact execution/);
 });
 
+test("attention upgrade preset describes evidence-based proactive reconciliation", () => {
+  const bullets = getAgentUpgradePreset("attention");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.attention]);
+  assert.match(bullets[0], /blocked or failed tasks and missions/);
+  assert.match(bullets[1], /Personal and business watches are isolated/);
+  assert.match(bullets[2], /preserving approval boundaries/);
+});
+
+test("tool reliability upgrade preset describes bounded diagnostics and approved artifact transfer", () => {
+  const bullets = getAgentUpgradePreset("toolReliability");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.toolReliability]);
+  assert.match(bullets[0], /exact exposed schema/);
+  assert.match(bullets[1], /never blindly replays/);
+  assert.match(bullets[2], /approval-gated transfer/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -52,12 +70,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the autonomy release", async () => {
+test("current upgrade manifest announces the tool reliability release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.1.0");
-  assert.equal(notice?.version, "4.1.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Chusky autonomy and orchestration are now live/);
-  assert.match(formatAgentUpgradeNotice(notice!), /personal and business autonomy queues/);
-  assert.match(formatAgentUpgradeNotice(notice!), /dependency-graph workflow composer/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Daytona browser and artifact execution/);
+  assert.equal(notice?.id, "release-4.4.0");
+  assert.equal(notice?.version, "4.4.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /tool preflight and connected-account health/);
+  assert.match(formatAgentUpgradeNotice(notice!), /read-only PDF, DOCX, PPTX, and XLSX QA/);
+  assert.match(formatAgentUpgradeNotice(notice!), /approval-gated transfer/);
 });

@@ -1076,6 +1076,8 @@ export interface StandingOrderRecord {
 }
 export interface AutonomyWatchRecord {
   id: string; userId: number; name: string; domain: string; toolkit?: string; connectedAccountId?: string; accountAlias?: string;
+  /** Legacy watches default to personal; new business watches stay isolated from personal policy. */
+  mode?: "personal" | "business";
   objective: string; query?: string; /** Exact owner-selected read-only Composio/native slugs. */
   toolSlugs?: string[]; cursor?: string; lastDigestKey?: string; consecutiveFailures?: number;
   cadenceSeconds: number;
@@ -2619,7 +2621,13 @@ class RedisBackend implements Backend {
   }
   async claimChannelInboundEvent(eventId: string): Promise<boolean> {
     const key = this.channelInboundEventKey(eventId);
-    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return 0 end; local r=cjson.decode(v); if r.status ~= 'received' then return 0 end; r.status='queued'; r.updatedAt=tonumber(ARGV[1]); redis.call('set',KEYS[1],cjson.encode(r),'EX',86400); return 1", 1, key, Date.now());
+    // A provider can retry after a transient QStash/network failure. Failed
+    // events, and queued/running events whose lease has gone stale, must be
+    // reclaimable; otherwise the webhook returns a duplicate acknowledgement
+    // forever and the user never receives a response.
+    const now = Date.now();
+    const staleBefore = now - 5 * 60 * 1000;
+    const claimed = await this.r.eval("local v=redis.call('get',KEYS[1]); if not v then return 0 end; local r=cjson.decode(v); local retryable=(r.status == 'received' or r.status == 'failed' or ((r.status == 'queued' or r.status == 'running') and tonumber(r.updatedAt or 0) < tonumber(ARGV[2]))); if not retryable then return 0 end; r.status='queued'; r.error=nil; r.workflowRunId=nil; r.updatedAt=tonumber(ARGV[1]); redis.call('set',KEYS[1],cjson.encode(r),'EX',86400); return 1", 1, key, now, staleBefore);
     return Number(claimed) === 1;
   }
   async updateChannelInboundEvent(eventId: string, patch: Partial<ChannelInboundEventRecord>): Promise<ChannelInboundEventRecord | undefined> {
@@ -3474,8 +3482,13 @@ class MemoryBackend implements Backend {
   async getChannelInboundEvent(eventId: string) { return this.channelInboundEvents.get(eventId); }
   async claimChannelInboundEvent(eventId: string) {
     const current = this.channelInboundEvents.get(eventId);
-    if (!current || current.status !== "received") return false;
+    if (!current) return false;
+    const stale = Date.now() - current.updatedAt > 5 * 60 * 1000;
+    const retryable = current.status === "received" || current.status === "failed" || (stale && (current.status === "queued" || current.status === "running"));
+    if (!retryable) return false;
     current.status = "queued";
+    current.error = undefined;
+    current.workflowRunId = undefined;
     current.updatedAt = Date.now();
     return true;
   }
@@ -5237,6 +5250,35 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
   });
 }
 
+/**
+ * Finalize a mission after the last executable slice has settled.
+ *
+ * A model should still be told to verify and complete explicitly, but durable
+ * execution cannot depend on a final model turn: once every step is complete
+ * there is no dependency-ready task left to wake that turn. This helper is
+ * therefore the server-side closeout path. It only completes legacy missions
+ * automatically or strict missions whose evidence already verifies. Callers
+ * that have finished a slice may request an honest blocked state when strict
+ * evidence is still missing; callers handling a manual step completion can
+ * leave the mission running so evidence can still be attached before closeout.
+ */
+export async function finalizeMissionIfReady(userId: number, id: string, options: { blockOnUnresolved?: boolean } = {}): Promise<MissionRecord | undefined> {
+  let mission = await getMission(userId, id);
+  if (!mission || ["completed", "cancelled"].includes(mission.status) || mission.steps.some((step) => step.status !== "completed")) return mission;
+
+  if (mission.verification?.mode === "strict") {
+    mission = await verifyMission(userId, id) ?? mission;
+    if (!mission.verification?.verified) {
+      if (!options.blockOnUnresolved || ["blocked", "failed"].includes(mission.status)) return mission;
+      const unresolved = mission.verification?.unresolved?.slice(0, 5).join("; ") || "Required mission evidence is incomplete.";
+      return await blockMission(userId, id, `Mission steps are complete, but verification is incomplete: ${unresolved}`, "Attach or obtain the missing evidence, then resume and verify the mission.") ?? mission;
+    }
+  }
+
+  const result = mission.result ?? mission.steps.map((step) => `${step.title}: ${step.result ?? "completed"}`).join("\n");
+  return await completeMission(userId, id, result.slice(0, 12000)) ?? mission;
+}
+
 export async function repairMission(userId: number, id: string, input: { reason: string; nextAction?: string; replan?: boolean }): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => ["completed", "cancelled"].includes(mission.status) ? undefined : { status: "blocked", error: input.reason.slice(0, 2000), nextAction: (input.nextAction ?? "Review the failed step and repair or replan before resuming.").slice(0, 2000), events: [...mission.events, missionEvent("repaired", `Repair required: ${input.reason}`)] });
 }
@@ -6364,7 +6406,7 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as StandingOrderRecord["status"], expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"), lastUsedAt: attentionTimestamp(raw.lastUsedAt, "lastUsedAt"),
     };
     case "autonomy-watches": return {
-      ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), connectedAccountId: attentionText(raw.connectedAccountId, "connectedAccountId", 200), accountAlias: attentionText(raw.accountAlias, "accountAlias", 120), objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
+      ...base, name: attentionText(raw.name, "name", 200, true)!, domain: attentionText(raw.domain, "domain", 120, true)!, toolkit: attentionText(raw.toolkit, "toolkit", 120), connectedAccountId: attentionText(raw.connectedAccountId, "connectedAccountId", 200), accountAlias: attentionText(raw.accountAlias, "accountAlias", 120), mode: raw.mode === "business" ? "business" : "personal", objective: attentionText(raw.objective, "objective", 2000, true)!, query: attentionText(raw.query, "query", 1000),
       toolSlugs: attentionArray(raw.toolSlugs, "toolSlugs", 20)?.map((item) => item.trim()).filter((item) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(item)), cursor: attentionText(raw.cursor, "cursor", 500), lastDigestKey: attentionText(raw.lastDigestKey, "lastDigestKey", 128), consecutiveFailures: Math.round(attentionNumber(raw.consecutiveFailures, "consecutiveFailures", 0, 0, 100)),
       cadenceSeconds: Math.round(attentionNumber(raw.cadenceSeconds, "cadenceSeconds", 3600, 300, 2_592_000)), authority: attentionStatus(raw.authority, ["observe", "prepare", "execute_reversible"], "observe") as AutonomyWatchRecord["authority"], status: attentionStatus(raw.status, ["active", "paused", "revoked"], "active") as AutonomyWatchRecord["status"],
       nextCheckAt: attentionTimestamp(raw.nextCheckAt, "nextCheckAt"), lastCheckedAt: attentionTimestamp(raw.lastCheckedAt, "lastCheckedAt"), lastChangedAt: attentionTimestamp(raw.lastChangedAt, "lastChangedAt"), lastResult: attentionText(raw.lastResult, "lastResult", 4000), lastError: attentionText(raw.lastError, "lastError", 1000), maxItems: Math.round(attentionNumber(raw.maxItems, "maxItems", 20, 1, 100)),

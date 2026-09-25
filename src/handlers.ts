@@ -43,6 +43,7 @@ import { FLUX_TTS_VOICES, fluxTtsVoiceName, type LiveVoiceProvider } from "./voi
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { connectMcpServer, disconnectMcpServer, listMcpCatalog, listMcpConnections } from "./mcp/client.js";
 import { browserSessionHealth } from "./vault/vault.js";
+import { defaultMediaInstruction } from "./mediaInput.js";
 import {
   cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPreparedCalendarMeeting, joinRecallMeeting, leaveRecallMeeting,
   listRecallMeetingsForUser, lookupRecallMeetingContext, prepareRecallMeetingMission,
@@ -853,7 +854,7 @@ function telegramMessageReceivedAt(ctx: Context): number {
   return typeof date === "number" && Number.isFinite(date) && date > 0 ? date * 1000 : Date.now();
 }
 
-async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string, afterAgent?: () => Promise<void>): Promise<void> {
+async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: string, afterAgent?: (selectedModel: string) => Promise<void>): Promise<void> {
   if (!(await guard(ctx))) return;
   if (!(await checkRateLimit(ctx.from!.id))) {
     await ctx.reply(`⏱ Easy there. Max ${config.rateLimit} messages per ${config.rateWindowSeconds}s.`);
@@ -905,7 +906,7 @@ async function handleMedia(ctx: Context, parts: ContentPart[], historyLabel: str
     }
     // Keep enrichment out of the conversational turn so it cannot create a
     // second, description-like experience before the selected model replies.
-    if (afterAgent) void afterAgent().catch((error) => logger.warn({ err: error, userId }, "Background media indexing failed"));
+    if (afterAgent) void afterAgent(s.model).catch((error) => logger.warn({ err: error, userId }, "Background media indexing failed"));
   } catch (e) {
     logger.error({ err: e, userId }, "Chusky media error");
     await ctx.api.editMessageText(ctx.chat!.id, status.message_id, e instanceof DOMException && e.name === "AbortError" ? "🛑 Request cancelled." : `❌ ${String(e).slice(0, 500)}`);
@@ -2903,7 +2904,7 @@ function toolFooterLabel(slug: string): string {
     try {
       const file = await downloadTelegramFile(ctx, photo.file_id);
       const mime = file.path.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
-      const caption = ctx.message.caption?.trim() || "Describe and analyze this image.";
+      const caption = ctx.message.caption?.trim() || defaultMediaInstruction("image");
       if (r2Configured()) {
         try {
           const r2Key = `telegram/${ctx.from!.id}/images/${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`;
@@ -2914,8 +2915,8 @@ function toolFooterLabel(slug: string): string {
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "image_url", image_url: { url: `data:${mime};base64,${file.data.toString("base64")}` } },
-      ], `[Image attached] ${caption}`, vectorConfigured() ? async () => {
-        await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime), sourceType: "telegram_image" });
+      ], `[Image attached] ${caption}`, vectorConfigured() ? async (selectedModel) => {
+        await indexExtractedDocument({ userId: String(ctx.from!.id), documentId: `telegram_${photo.file_id}`, filename: `telegram-${photo.file_id}.${mime === "image/png" ? "png" : "jpg"}`, contentType: mime, text: await extractMediaText(file.data, `telegram-${photo.file_id}`, mime, selectedModel), sourceType: "telegram_image" });
       } : undefined);
     } catch (e) {
       await ctx.reply(`❌ Could not download the image: ${String(e).slice(0, 300)}`);
@@ -2929,24 +2930,26 @@ function toolFooterLabel(slug: string): string {
       const file = await downloadTelegramFile(ctx, doc.file_id);
       const filename = doc.file_name || file.path.split("/").pop() || "document";
       const mime = doc.mime_type || "application/octet-stream";
-      const prompt = ctx.message.caption?.trim() || "Read this document and summarize its key points.";
+      const prompt = ctx.message.caption?.trim() || defaultMediaInstruction("document");
       const documentId = `telegram_${doc.file_id}`;
       if (r2Configured()) {
         try { await putR2Object(`telegram/${ctx.from!.id}/${documentId}/${filename.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120)}`, file.data, mime); }
         catch (error) { logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not persist Telegram document in R2"); }
       }
-      if (vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename) || mime === "application/pdf" || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) {
-        try {
-          const extracted = mime === "application/pdf" || mime.includes("wordprocessingml") ? await extractMediaText(file.data, filename, mime) : file.data.toString("utf8");
-          await indexExtractedDocument({ userId: String(ctx.from!.id), documentId, filename, contentType: mime, text: extracted, sourceType: "telegram_upload" });
-        } catch (error) {
-          logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not index text document");
+      const indexDocument = vectorConfigured() && (mime === "text/plain" || mime === "text/markdown" || /\.md$/i.test(filename) || mime === "application/pdf" || mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+        ? async (selectedModel: string) => {
+          try {
+            const extracted = mime === "application/pdf" || mime.includes("wordprocessingml") ? await extractMediaText(file.data, filename, mime, selectedModel) : file.data.toString("utf8");
+            await indexExtractedDocument({ userId: String(ctx.from!.id), documentId, filename, contentType: mime, text: extracted, sourceType: "telegram_upload" });
+          } catch (error) {
+            logger.warn({ err: error, userId: ctx.from?.id, filename }, "Could not index text document");
+          }
         }
-      }
+        : undefined;
       await handleMedia(ctx, [
         { type: "text", text: prompt },
         { type: "file", file: { filename, file_data: `data:${mime};base64,${file.data.toString("base64")}` } },
-      ], `[Document attached: ${filename}] ${prompt}`);
+      ], `[Document attached: ${filename}] ${prompt}`, indexDocument);
     } catch (e) {
       await ctx.reply(`❌ Could not process the document: ${String(e).slice(0, 300)}`);
     }
@@ -2985,7 +2988,7 @@ function toolFooterLabel(slug: string): string {
   bot.on("message:video", async (ctx) => {
     try {
       const file = await downloadTelegramFile(ctx, ctx.message.video.file_id);
-      const caption = ctx.message.caption?.trim() || "Analyze this video.";
+      const caption = ctx.message.caption?.trim() || defaultMediaInstruction("video");
       await handleMedia(ctx, [
         { type: "text", text: caption },
         { type: "video_url", video_url: { url: `data:${ctx.message.video.mime_type || "video/mp4"};base64,${file.data.toString("base64")}` } },

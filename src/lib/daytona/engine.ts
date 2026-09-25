@@ -2839,12 +2839,12 @@ export class DaytonaEngine {
     }
   }
 
-  private async validateArtifactVisual(sandbox: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}): Promise<Record<string, unknown> | undefined> {
+  private async validateArtifactVisual(sandbox: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}, allowWorkspaceRendererFallback = true): Promise<Record<string, unknown> | undefined> {
     if (!STRUCTURED_ARTIFACT_TYPES.has(type)) return undefined;
     const script = artifactVisualQaScript(type, path, expectedText, expectedFormulaValues);
     const encoded = Buffer.from(script, "utf8").toString("base64");
     let result = await sandbox.process.executeCommand(`python3 -c "import base64;exec(base64.b64decode('${encoded}'))"`, await sandbox.getUserHomeDir(), undefined, 900);
-    if (result.exitCode === 3) result = await this.validateInRenderer(sandbox, path, type, expectedText, expectedFormulaValues);
+    if (result.exitCode === 3) result = await this.validateInRenderer(sandbox, path, type, expectedText, expectedFormulaValues, allowWorkspaceRendererFallback);
     if (result.exitCode !== 0) {
       throw new DaytonaInputError(`${type.toUpperCase()} visual QA failed for '${path}': ${String(result.result ?? "unknown rendering error").slice(0, 500)}`);
     }
@@ -2852,6 +2852,27 @@ export class DaytonaEngine {
     if (!match) return undefined;
     try { return JSON.parse(match[1]!) as Record<string, unknown>; }
     catch { return undefined; }
+  }
+
+  /** Read-only QA of an existing owner workspace file; this does not register or rewrite it. */
+  async qaArtifact(userId: number, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const path = safeDaytonaPath(args.path, "path");
+    const type = artifactType(args.type);
+    if (!STRUCTURED_ARTIFACT_TYPES.has(type)) throw new DaytonaInputError("Artifact QA supports only PDF, DOCX, PPTX, and XLSX files.");
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    const details = await sandbox.fs.getFileDetails(path) as { size?: number; isDir?: boolean };
+    if (details.isDir) throw new DaytonaInputError("Artifact QA path must identify a file, not a directory.");
+    const size = Number(details.size ?? 0);
+    if (!Number.isSafeInteger(size) || size < 1 || size > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError(`Artifact QA accepts files from 1 byte to ${DAYTONA_MAX_ARTIFACT_BYTES} bytes.`);
+    const expectedTitle = args.expectedTitle === undefined ? undefined : boundedText(args.expectedTitle, "expectedTitle", 300);
+    const expectedFormulaValues = args.expectedFormulaValues === undefined ? {} : args.expectedFormulaValues as Record<string, string | number | boolean>;
+    if (Object.keys(expectedFormulaValues).length > 100 || Object.entries(expectedFormulaValues).some(([key, value]) => !/^[^/\\!]{1,120}\.xml![A-Z]{1,3}[1-9][0-9]{0,6}$/.test(key) || !(typeof value === "string" || typeof value === "number" && Number.isFinite(value) || typeof value === "boolean"))) {
+      throw new DaytonaInputError("expectedFormulaValues must contain at most 100 valid sheet-cell references and primitive values.");
+    }
+    await this.validateArtifactStructure(sandbox, path, type);
+    const verification = await this.validateArtifactVisual(sandbox, path, type, expectedTitle, expectedFormulaValues, false);
+    if (!verification) throw new DaytonaInputError("Artifact QA completed without independent verification evidence; do not register it as verified.");
+    return { status: "passed", path, type, size, verification, registered: false, sourceChanged: false };
   }
 
   /**
@@ -2912,7 +2933,7 @@ export class DaytonaEngine {
     );
   }
 
-  private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}) {
+  private async validateInRenderer(source: Sandbox, path: string, type: ArtifactType, expectedText?: string, expectedFormulaValues: Record<string, string | number | boolean> = {}, allowWorkspaceFallback = true) {
     const bytes = Buffer.from(await source.fs.downloadFile(path));
     if (!bytes.length || bytes.length > DAYTONA_MAX_ARTIFACT_BYTES) {
       throw new DaytonaInputError("Artifact is empty or exceeds the rendering size limit");
@@ -2934,6 +2955,7 @@ export class DaytonaEngine {
         renderer = await this.createArtifactRenderer(params);
       } catch (error) {
         if (DAYTONA_RENDERER_CAPACITY_RESTRICTION.test(String((error as { message?: unknown })?.message ?? error))) {
+          if (!allowWorkspaceFallback) throw new DaytonaInputError("An isolated artifact QA workspace could not be allocated, so QA stopped without installing packages or modifying the source workspace.");
           return this.validateWithWorkspaceRenderer(source, path, type, expectedText, expectedFormulaValues);
         }
         throw error;

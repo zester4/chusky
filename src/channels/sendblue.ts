@@ -203,10 +203,23 @@ export class SendblueAdapter implements ChannelAdapter {
     if (!response.ok) throw new Error(`Sendblue reaction failed: ${response.status}`);
   }
 
-  async configureReceiveWebhook(url: string, secret: string): Promise<void> {
+  async ensureReceiveWebhook(url: string, secret: string): Promise<"existing" | "created"> {
     if (!this.apiKey || !this.apiSecret) throw new Error("Sendblue API credentials are required");
-    const response = await this.fetchImpl("https://api.sendblue.com/api/account/webhooks", { method: "POST", headers: this.headers(), body: JSON.stringify({ webhooks: [{ url, secret }], type: "receive" }) });
+    const endpoint = "https://api.sendblue.com/api/account/webhooks";
+    const currentResponse = await this.fetchImpl(endpoint, { method: "GET", headers: this.headers() });
+    if (!currentResponse.ok) throw new Error(`Sendblue webhook lookup failed: ${currentResponse.statusText}`);
+    const current = await currentResponse.json().catch(() => ({})) as { webhooks?: { receive?: unknown[] } };
+    const receive = Array.isArray(current.webhooks?.receive) ? current.webhooks.receive : [];
+    const registered = receive.some((entry) => typeof entry === "string" ? entry === url : Boolean(entry && typeof entry === "object" && (entry as { url?: unknown }).url === url));
+    if (registered) return "existing";
+    const response = await this.fetchImpl(endpoint, { method: "POST", headers: this.headers(), body: JSON.stringify({ webhooks: [{ url, secret }], type: "receive" }) });
     if (!response.ok) throw new Error(`Sendblue webhook registration failed: ${response.statusText}`);
+    return "created";
+  }
+
+  /** Backward-compatible explicit registration alias for setup callers. */
+  async configureReceiveWebhook(url: string, secret: string): Promise<void> {
+    await this.ensureReceiveWebhook(url, secret);
   }
 
   async createPhoneVerification(serviceSid: string, phoneNumber: string): Promise<{ verificationId: string; code: string; destinationNumber: string; deepLink?: string }> {

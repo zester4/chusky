@@ -17,7 +17,7 @@ interface ChannelRouteOptions {
   gateway: ChannelGateway;
   slack?: { adapter: SlackAdapter; signingSecret: string };
   whatsapp?: { adapter: WhatsAppAdapter; appSecret: string; verifyToken: string };
-  sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void> };
+  sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void>; processInline?: (eventId: string) => Promise<void> };
   twilioSms?: { adapter: TwilioSmsAdapter; authToken: string; webhookUrl?: string; statusWebhookUrl?: string };
   xchat?: { adapter: XchatAdapter; consumerSecret: string };
 }
@@ -191,6 +191,14 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
             await sendblue.enqueue(eventId);
           } catch (error) {
             await updateChannelInboundEvent(eventId, { status: "received", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+            if (sendblue.processInline) {
+              // QStash is the durable path. If publishing fails, process the
+              // persisted event as a rescue path instead of silently dropping
+              // the user's message. Channel-level event claiming still keeps
+              // an accepted QStash delivery from producing a second turn.
+              void sendblue.processInline(eventId).catch((fallbackError) => logger.error({ err: fallbackError, eventId }, "Sendblue inline rescue processing failed"));
+              return c.json({ ok: true, queued: false, fallback: "inline" }, 202);
+            }
             throw error;
           }
           return c.json({ ok: true, queued: true }, 202);

@@ -19,6 +19,7 @@ export function externalArgumentsHash(args: Record<string, unknown>): string {
  */
 export function isExternalWriteTool(tool: string): boolean {
   const normalized = tool.toUpperCase();
+  if (["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"].includes(normalized)) return false;
   if (/^CHUCK_(MISSION|TASK)_/.test(normalized)) return false;
   if (normalized.startsWith("CHUCK_") && /(^|_)(LIST|GET|SEARCH|FIND|LOOKUP|READ|STATUS|STATE|CHECK|PREVIEW|HEALTH|DETAILS|FILES)(_|$)/.test(normalized)) return false;
   if (normalized.startsWith("CHUCK_") && ["CHUCK_TASK_CHECKPOINT", "CHUCK_MISSION_CHECKPOINT", "CHUCK_ATTENTION_STATE"].includes(normalized)) return false;

@@ -14,6 +14,7 @@ export type ToolApprovalPolicy = "private" | "approval_required";
 
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
+  "CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER", "CHUCK_PAUSE_REMINDER", "CHUCK_RESUME_REMINDER", "CHUCK_RUN_REMINDER_NOW",
   "CHUCK_EMAIL_ARTIFACT",
   "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
@@ -154,6 +155,11 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 
 const STATUSES: Record<string, string> = {
   CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",
+  CHUCK_TOOL_PREFLIGHT: "🧪 I’m checking the tool and its arguments…",
+  CHUCK_INTEGRATION_HEALTH: "🔌 I’m checking the connected app status…",
+  CHUCK_ARTIFACT_QA: "📄 I’m independently checking the rendered file…",
+  CHUCK_TOOL_RECOVERY: "🛠️ I’m checking the saved execution outcome…",
+  CHUCK_FILE_BRIDGE: "📎 I’m preparing the approved file transfer…",
   CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the supporting guidance…",
   CHUCK_READ_SKILL_FILE: "📖 I’m reviewing the relevant guidance…",
   CHUCK_START_PHONE_CALL: "📞 I’m preparing that phone call…",

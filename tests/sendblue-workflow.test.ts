@@ -37,7 +37,10 @@ test("Sendblue workflow performs state transitions within its durable step", asy
   });
   assert.equal(processed, 1);
   assert.deepEqual(result, { skipped: false });
-  assert.deepEqual(updates, [{ status: "running", workflowRunId: "wfr-2" }, { status: "completed" }]);
+  assert.equal(updates[0]?.status, "running");
+  assert.equal(updates[0]?.workflowRunId, "wfr-2");
+  assert.equal(updates[1]?.status, "completed");
+  assert.equal(updates[1]?.error, undefined);
 });
 
 test("Sendblue workflow records a failed durable step and remains retryable", async () => {

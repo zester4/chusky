@@ -14,6 +14,28 @@ type SendblueWorkflowDependencies = {
   recordFailure(error: unknown, context: Record<string, unknown>): void;
 };
 
+/** Process one persisted Sendblue event outside the Workflow runtime. */
+export async function processSendblueEvent(
+  eventId: string,
+  dependencies: SendblueWorkflowDependencies,
+  workflowRunId?: string,
+): Promise<{ skipped: boolean }> {
+  const event = await dependencies.getEvent(eventId);
+  if (!event || event.provider !== "sendblue") throw new Error("Sendblue event is missing or invalid");
+  if (event.status === "completed") return { skipped: true };
+  try {
+    await dependencies.updateEvent(event.eventId, { status: "running", ...(workflowRunId ? { workflowRunId } : {}) });
+    const hydrated = await dependencies.hydrate(event.message);
+    await dependencies.process(hydrated);
+    await dependencies.updateEvent(event.eventId, { status: "completed", error: undefined });
+    return { skipped: false };
+  } catch (error) {
+    await dependencies.updateEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
+    dependencies.recordFailure(error, { workflow: "sendblue-event", eventId });
+    throw error;
+  }
+}
+
 /**
  * Keep every stateful lookup and branch inside one durable Workflow step.
  * Workflow replays can arrive after delivery has completed; returning before
@@ -24,20 +46,5 @@ export async function processSendblueWorkflow(
   eventId: string,
   dependencies: SendblueWorkflowDependencies,
 ): Promise<{ skipped: boolean }> {
-  return workflow.run("process-sendblue-message", async () => {
-    const event = await dependencies.getEvent(eventId);
-    if (!event || event.provider !== "sendblue") throw new Error("Sendblue event is missing or invalid");
-    if (event.status === "completed") return { skipped: true };
-    try {
-      await dependencies.updateEvent(event.eventId, { status: "running", workflowRunId: workflow.workflowRunId });
-      const hydrated = await dependencies.hydrate(event.message);
-      await dependencies.process(hydrated);
-      await dependencies.updateEvent(event.eventId, { status: "completed" });
-      return { skipped: false };
-    } catch (error) {
-      await dependencies.updateEvent(event.eventId, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500) });
-      dependencies.recordFailure(error, { workflow: "sendblue-event", eventId: event.eventId });
-      throw error;
-    }
-  });
+  return workflow.run("process-sendblue-message", () => processSendblueEvent(eventId, dependencies, workflow.workflowRunId));
 }

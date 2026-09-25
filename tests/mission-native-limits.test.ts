@@ -17,7 +17,9 @@ test("mission native tools honor their published long-text limits", async () => 
 
   const checkpoint = "c".repeat(7_500);
   const nextAction = "n".repeat(1_800);
-  const updated = await nativeTool(userId, "CHUCK_MISSION_CHECKPOINT", { id: mission.id, checkpoint, nextAction }) as { checkpoint: string; nextAction: string };
+  const args = { id: mission.id, checkpoint, nextAction };
+  validateNativeToolArguments("CHUCK_MISSION_CHECKPOINT", args);
+  const updated = await nativeTool(userId, "CHUCK_MISSION_CHECKPOINT", args) as { checkpoint: string; nextAction: string };
 
   assert.equal(updated.checkpoint, checkpoint);
   assert.equal(updated.nextAction, nextAction);

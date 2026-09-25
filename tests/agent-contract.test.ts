@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRepresentativeProfile } from "../src/store.js";
-import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, parseLegacyDsmlToolCalls, parseToolArguments, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
@@ -16,8 +16,8 @@ function chatResponse(message: any) {
   return new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
-function toolResponse(name: string, args: string, id = "call-1") {
-  return new Response(JSON.stringify({ choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
+function toolResponse(name: string, args: string, id = "call-1", finishReason = "tool_calls") {
+  return new Response(JSON.stringify({ choices: [{ finish_reason: finishReason, message: { role: "assistant", content: null, tool_calls: [{ id, type: "function", function: { name, arguments: args } }] } }] }), { status: 200, headers: { "content-type": "application/json" } });
 }
 
 test("preview links are included exactly once even when the model omits them", () => {
@@ -48,19 +48,19 @@ test("tool-bearing runs reject bare completion language until the result is clos
   assert.equal(needsAutonomyCloseoutNudge("Done.", 0), false);
 });
 
-async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false) {
+async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false, safeToolSchema: Record<string, unknown> = { type: "object" }) {
   const originalFetch = globalThis.fetch;
   let index = 0;
   const session = {
     sessionId: "test-composio-session",
     tools: async () => [
-      { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
+      { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: safeToolSchema } },
       { type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", description: "Test-only risky tool", parameters: { type: "object" } } },
     ],
     execute,
   };
   if (includeMultiExecute) session.tools = async () => [
-    { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: { type: "object" } } },
+    { type: "function", function: { name: "TEST_SAFE_TOOL", description: "Test-only safe tool", parameters: safeToolSchema } },
     { type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", description: "Test-only risky tool", parameters: { type: "object" } } },
     { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Test-only multi tool", parameters: { type: "object" } } },
   ];
@@ -68,7 +68,10 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    return responses[index++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+    if (url.includes("/chat/completions")) return responses[index++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+    // Async SDK telemetry and unrelated provider requests must not consume a
+    // queued model completion merely because this test replaces global fetch.
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try { await fn(); } finally {
     globalThis.fetch = originalFetch;
@@ -179,6 +182,67 @@ test("emails a generated artifact through the exact connected Composio action", 
     assert.equal((sentArguments?.attachment as Array<Record<string, string>>)?.[0]?.file_data, Buffer.from("pdf-bytes").toString("base64"));
   } finally {
     (daytonaEngine as any).createPdf = originalCreatePdf;
+    (daytonaEngine as any).downloadArtifact = originalDownloadArtifact;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("file bridge requires approval and uploads only an owner artifact through the exposed action schema", async () => {
+  const userId = 830056;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const originalDownloadArtifact = daytonaEngine.downloadArtifact;
+  let executed: { slug: string; args: Record<string, unknown> } | undefined;
+  const session = {
+    sessionId: "artifact-bridge-session",
+    tools: async () => [{
+      type: "function",
+      function: {
+        name: "GOOGLEDRIVE_UPLOAD_FILE",
+        description: "Upload a file",
+        parameters: { type: "object", required: ["parent_id", "file"], properties: {
+          parent_id: { type: "string" },
+          file: { type: "object", required: ["name", "data", "mime_type"], properties: {
+            name: { type: "string" }, data: { type: "string", description: "base64 encoded file bytes" }, mime_type: { type: "string" },
+          } },
+        } },
+      },
+    }],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      executed = { slug, args };
+      return { successful: true, data: { id: "drive-file-123", name: "brief.pdf" } };
+    },
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  (daytonaEngine as any).downloadArtifact = async (owner: number, id: string) => {
+    assert.equal(owner, userId);
+    assert.equal(id, "artifact_bridge_1");
+    return { id, name: "brief.pdf", type: "pdf", contentType: "application/pdf", size: 9, data: Buffer.from("pdf-bytes") };
+  };
+  const modelRequests: Array<Record<string, any>> = [];
+  let responseIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    modelRequests.push(JSON.parse(String(init?.body ?? "{}")));
+    return responseIndex++ === 0
+      ? toolResponse("CHUCK_FILE_BRIDGE", JSON.stringify({ artifactId: "artifact_bridge_1", toolSlug: "GOOGLEDRIVE_UPLOAD_FILE", arguments: { parent_id: "folder_123" } }), "call-file-bridge")
+      : chatResponse({ role: "assistant", content: "The approved PDF was uploaded." });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(() => runAgent(userId, "Upload my PDF to Drive", [], "test/model"), (error: unknown) => error instanceof ApprovalRequiredError);
+    assert.equal(executed, undefined, "must not upload before approval");
+    const approval = (await getSession(userId)).approvals[0];
+    assert.equal(approval.toolSlug, "CHUCK_FILE_BRIDGE");
+    await import("../src/store.js").then(({ setApprovalStatus }) => setApprovalStatus(userId, approval.id, "approved"));
+    responseIndex = 0;
+    const result = await runAgent(userId, approval.request, approval.history, approval.model, undefined, undefined, undefined, approval.id);
+    assert.match(result.text, /approved PDF was uploaded/);
+    assert.equal(executed?.slug, "GOOGLEDRIVE_UPLOAD_FILE");
+    assert.deepEqual(executed?.args, { parent_id: "folder_123", file: { name: "brief.pdf", data: Buffer.from("pdf-bytes").toString("base64"), mime_type: "application/pdf" } });
+    const exposed = modelRequests.at(-1)?.tools?.map((item: any) => item.function?.name);
+    assert.ok(exposed?.includes("GOOGLEDRIVE_UPLOAD_FILE"));
+  } finally {
     (daytonaEngine as any).downloadArtifact = originalDownloadArtifact;
     globalThis.fetch = originalFetch;
   }
@@ -573,6 +637,95 @@ test("tool argument parser repairs literal newlines inside model strings", () =>
   assert.deepEqual(parseToolArguments('{"content":"line one\nline two"}'), { content: "line one\nline two" });
 });
 
+test("tool argument parser preserves Unicode and significant edge whitespace", () => {
+  const value = "  Café 🧪 — line one\nline two  ";
+  assert.deepEqual(parseToolArguments(JSON.stringify({ content: value })), { content: value });
+  const markup = `<|DSML|tool_calls><|DSML|invoke name="TEST_SAFE_TOOL"><|DSML|parameter name="content" string="true">  ${value}  </|DSML|parameter></|DSML|invoke></|DSML|tool_calls>`;
+  const dsmlArgs = JSON.parse(parseLegacyDsmlToolCalls(markup)[0]?.function.arguments ?? "{}") as { content: string };
+  assert.equal(dsmlArgs.content, `  ${value}  `);
+});
+
+test("stream parser flushes the unterminated final SSE record and preserves exact tool arguments", async () => {
+  const events = [
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-final", type: "function", function: { name: "TEST_SAFE_TOOL", arguments: '{"value":"A ' } }] }, finish_reason: null }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-final", type: "function", function: { name: "", arguments: "🧪 B" } }] }, finish_reason: null }] },
+    { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-final", type: "function", function: { name: "", arguments: '"}' } }] }, finish_reason: "tool_calls" }] },
+  ];
+  const payload = new TextEncoder().encode(`${events.slice(0, -1).map((event) => `data: ${JSON.stringify(event)}\n`).join("")}data: ${JSON.stringify(events.at(-1))}`);
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let offset = 0; offset < payload.length;) {
+        const size = [1, 2, 7, 13, 5][offset % 5]!;
+        controller.enqueue(payload.slice(offset, offset + size));
+        offset += size;
+      }
+      controller.close();
+    },
+  });
+  const response = await readStreamingChat(new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+  const call = response.choices[0]?.message.tool_calls?.[0];
+  assert.equal(response.choices[0]?.finish_reason, "tool_calls");
+  assert.equal(call?.id, "call-final");
+  assert.deepEqual(parseToolArguments(call?.function.arguments), { value: "A 🧪 B" });
+});
+
+test("stream parser rejects incomplete and provider-error streams instead of inventing a stop", async () => {
+  const incomplete = new Response("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}", { headers: { "content-type": "text/event-stream" } });
+  await assert.rejects(() => readStreamingChat(incomplete), /before a terminal finish reason/);
+  const providerError = new Response("data: {\"error\":{\"message\":\"private provider details\"}}", { headers: { "content-type": "text/event-stream" } });
+  await assert.rejects(() => readStreamingChat(providerError), /in-stream error/);
+});
+
+test("a partial streamed answer is not retried after text has reached the client", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalMaxAttempts = config.openRouterMaxAttempts;
+  let requests = 0;
+  const deltas: string[] = [];
+  config.openRouterMaxAttempts = 3;
+  globalThis.fetch = (async () => {
+    requests++;
+    return new Response('data: {"choices":[{"delta":{"content":"visible partial"},"finish_reason":null}]}', { headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    await assert.rejects(() => orChat("test/model", [{ role: "user", content: "hello" }], [], undefined, (text) => { deltas.push(text); }), /terminal finish reason/);
+    assert.equal(requests, 1);
+    assert.deepEqual(deltas, ["visible partial"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.openRouterMaxAttempts = originalMaxAttempts;
+  }
+});
+
+test("schema-invalid Composio arguments are rejected before execution and corrected on the next round", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830016);
+  const executed: unknown[] = [];
+  const schema = { type: "object", properties: { value: { type: "string", maxLength: 40 } }, required: ["value"], additionalProperties: false };
+  await withAgentMocks([
+    toolResponse("TEST_SAFE_TOOL", "{}"),
+    toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: "  Café 🧪  " })),
+    chatResponse({ role: "assistant", content: "The exact value was accepted and processed." }),
+  ], async (_slug, args) => { executed.push(args); return { ok: true }; }, async () => {
+    const result = await runAgent(830016, "use the connected action", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
+    assert.match(result.text, /exact value was accepted/);
+  }, false, schema);
+  assert.deepEqual(executed, [{ value: "  Café 🧪  " }]);
+});
+
+test("a length-limited tool call is never executed, even when its argument prefix parses", async () => {
+  await initStore({ memoryOnly: true });
+  invalidateSession(830017);
+  let executions = 0;
+  await withAgentMocks([
+    toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: "possibly incomplete" }), "call-truncated", "length"),
+    chatResponse({ role: "assistant", content: "The model response was truncated; no tool action ran." }),
+  ], async () => { executions++; return { ok: true }; }, async () => {
+    const result = await runAgent(830017, "do the action", [], "test/model");
+    assert.match(result.text, /no tool action ran/);
+    assert.equal(executions, 0);
+  });
+});
+
 test("repeated provider tool-call IDs execute only once", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830009);
@@ -612,6 +765,9 @@ test("full-width DSML from Composio multi-execute output is converted and hidden
   const markup = `<｜DSML｜tool_calls><｜DSML｜invoke name="COMPOSIO_MULTI_EXECUTE_TOOL"><｜DSML｜parameter name="current_step" string="true">VERIFYING_LINKEDIN_POST</｜DSML｜parameter><｜DSML｜parameter name="current_step_metric" string="true">3/3</｜DSML｜parameter><｜DSML｜parameter name="session_id" string="true">both</｜DSML｜parameter><｜DSML｜parameter name="sync_response_to_workbench" string="false">false</｜DSML｜parameter><｜DSML｜parameter name="thought" string="true">Get the final result.</｜DSML｜parameter><｜DSML｜parameter name="tools" string="false">[{"arguments":{"taskId":"task-1","lastStepSeen":7},"tool_slug":"BROWSER_TOOL_WATCH_TASK"}]</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`;
   const parsed = parseLegacyDsmlToolCalls(markup);
   assert.equal(parsed[0]?.function.name, "COMPOSIO_MULTI_EXECUTE_TOOL");
+  const parsedAgain = parseLegacyDsmlToolCalls(markup);
+  assert.equal(parsedAgain[0]?.function.name, "COMPOSIO_MULTI_EXECUTE_TOOL", "a prior parse must not leave a shared global-regex cursor behind");
+  assert.equal(JSON.parse(parsedAgain[0]?.function.arguments ?? "{}").current_step, "VERIFYING_LINKEDIN_POST");
   const args = JSON.parse(parsed[0]?.function.arguments ?? "{}");
   assert.equal(args.current_step, "VERIFYING_LINKEDIN_POST");
   assert.match(args.tools, /BROWSER_TOOL_WATCH_TASK/);
@@ -623,7 +779,7 @@ test("full-width DSML from Composio multi-execute output is converted and hidden
     const result = await runAgent(830008, "verify the LinkedIn post", [], "test/model");
     assert.equal(result.text, "LinkedIn verification completed.");
     assert.deepEqual(result.toolsUsed, ["COMPOSIO_MULTI_EXECUTE_TOOL"]);
-  });
+  }, true);
 });
 
 test("agent retries transient OpenRouter responses with a bounded retry", async () => {

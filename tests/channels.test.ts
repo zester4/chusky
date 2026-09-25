@@ -19,7 +19,7 @@ import { nativeTool } from "../src/nativeTools.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
-import { acquireUserLock, appendChannelConversationMessages, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel } from "../src/store.js";
+import { acquireUserLock, appendChannelConversationMessages, claimChannelInboundEvent, createChannelInboundEvent, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel, updateChannelInboundEvent } from "../src/store.js";
 import type { ChannelAdapter, DeliveryReceipt, InboundMessage, OutboundMessage } from "../src/channels/contracts.js";
 
 test("channel approval resumes preserve shared privacy boundaries", () => {
@@ -110,6 +110,27 @@ test("Sendblue verifies its webhook secret and normalizes direct and group iMess
   const group = normalizeSendblueMessage({ message_handle: "sb-2", from_number: "+15550001", sendblue_number: "+15550002", group_id: "group-1", content: "plan this", participants: ["+15550001", "+15550002"] });
   assert.equal(group?.providerConversationId, "group-1");
   assert.equal(group?.scope, "shared");
+});
+
+test("Sendblue webhook reconciliation is idempotent and creates a missing receive hook", async () => {
+  const requests: string[] = [];
+  const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async (url: string | URL, init?: RequestInit) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+    if ((init?.method ?? "GET") === "GET") return new Response(JSON.stringify({ webhooks: { receive: [{ url: "https://chusky.example/sendblue/webhook" }] } }), { status: 200 });
+    return new Response(JSON.stringify({ status: "OK" }), { status: 200 });
+  }) as typeof fetch);
+  assert.equal(await adapter.ensureReceiveWebhook("https://chusky.example/sendblue/webhook", "secret"), "existing");
+  assert.equal(requests.length, 1);
+  assert.equal(await adapter.ensureReceiveWebhook("https://new.example/sendblue/webhook", "secret"), "created");
+  assert.deepEqual(requests.slice(1), ["GET https://api.sendblue.com/api/account/webhooks", "POST https://api.sendblue.com/api/account/webhooks"]);
+});
+
+test("failed Sendblue inbound events can be reclaimed for provider retries", async () => {
+  const message = normalizeSendblueMessage({ message_handle: "sb-retry", from_number: "+15550001", sendblue_number: "+15550002", content: "retry me" })!;
+  const record = await createChannelInboundEvent(message);
+  assert.equal(await claimChannelInboundEvent(record.eventId), true);
+  await updateChannelInboundEvent(record.eventId, { status: "failed", error: "temporary queue outage" });
+  assert.equal(await claimChannelInboundEvent(record.eventId), true);
 });
 
 test("shared iMessage turns preserve sender attribution without leaking raw provider IDs", () => {

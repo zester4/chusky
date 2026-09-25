@@ -23,6 +23,7 @@ import { sharedGroupInstructions } from "./groupInstructions.js";
 import { formatInboundMessageForAgent } from "./conversations.js";
 import { resumeApprovedDelegation } from "../subagents/executor.js";
 import { SHARED_CHANNEL_TOOL_DENY } from "../sharedChannelPolicy.js";
+import { defaultMediaInstruction } from "../mediaInput.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -128,9 +129,14 @@ function transcriptionFormat(mimeType: string): "mp3" | "m4a" | "wav" | "webm" |
 
 async function buildAgentInput(message: InboundMessage): Promise<{ input: string | ContentPart[]; historyLabel: string }> {
   const attachments = message.attachments.slice(0, 5);
+  const rawMessageText = (message.text ?? "").trim();
   const messageText = formatInboundMessageForAgent(message, message.text ?? "");
   if (!attachments.length) return { input: messageText, historyLabel: messageText };
-  const parts: ContentPart[] = [{ type: "text", text: messageText || "Please analyze the attached media." }];
+  const defaultKind = attachments.length === 1
+    ? attachments[0].kind === "image" || attachments[0].kind === "video" || attachments[0].kind === "document" ? attachments[0].kind : "attachment"
+    : "attachment";
+  const mediaInstruction = rawMessageText ? messageText : formatInboundMessageForAgent(message, defaultMediaInstruction(defaultKind));
+  const parts: ContentPart[] = [{ type: "text", text: mediaInstruction }];
   const labels: string[] = [];
   for (const attachment of attachments) {
     const decoded = attachment.url ? dataUrlBytes(attachment.url) : undefined;

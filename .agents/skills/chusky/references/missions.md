@@ -135,6 +135,12 @@ every `dependsOn` step is completed. `CHUCK_MISSION_STEP_COMPLETE` and the
 server-side completion path must enforce this invariant; never let a client
 complete a pending step merely by supplying its ID.
 
+When the final slice completes all steps, the server performs a bounded closeout
+after the model turn: legacy missions complete from their step results, while
+strict missions are verified from persisted evidence and become blocked with a
+concrete recovery action if proof is still missing. This prevents an empty
+dependency frontier from becoming an infinite requeue loop.
+
 When a step fails, preserve its result/error and attempts. Retry only within its
 `retryLimit` and bounded backoff. If the failure changes the plan, use replan to
 replace unfinished steps while preserving completed work and validating the new
@@ -160,6 +166,8 @@ Use `CHUCK_MISSION_WAIT_EVENT` when the mission is waiting for one exact
 provider event. Store the provider and stable event ID in `waiting`. A signed
 provider adapter should verify the raw request, persist/deduplicate the event,
 and resume only the matching owner mission. Replayed delivery must be harmless.
+The task worker blocks or sleeps until that callback (or an explicit expiry)
+instead of hot-polling.
 The generic authenticated mission event route is useful for providers without a
 dedicated signed adapter, but it is not a substitute for signature verification.
 

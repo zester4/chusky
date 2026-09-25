@@ -19,7 +19,7 @@ test("reconciliation executes only exact read-only scopes, checkpoints, and dedu
   await initStore({ memoryOnly: true });
   const userId = 990001;
   await createAttentionRecord(userId, "autonomy_profile", { mode: "business", enabled: true, allowedDomains: ["stripe"], deniedDomains: [] });
-  const watch = await createAttentionRecord(userId, "autonomy_watch", { name: "Invoices", domain: "stripe", objective: "Find changed invoices", toolSlugs: ["STRIPE_LIST_INVOICES", "STRIPE_CREATE_INVOICE"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 20, nextCheckAt: 1 });
+  const watch = await createAttentionRecord(userId, "autonomy_watch", { name: "Invoices", domain: "stripe", objective: "Find changed invoices", mode: "business", toolSlugs: ["STRIPE_LIST_INVOICES", "STRIPE_CREATE_INVOICE"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 20, nextCheckAt: 1 });
   let seen: string[] = [];
   const execute = async ({ toolSlugs }: { toolSlugs: string[] }) => { seen = toolSlugs; return { text: `AUTONOMY_RESULT: ${JSON.stringify({ changed: true, summary: "One invoice is overdue", cursor: "page-2", signals: [{ id: "inv-1", source: "stripe", kind: "invoice", subject: "Acme", status: "open", dueAt: "2026-01-01" }] })}`, toolsSucceeded: toolSlugs }; };
   const first = await runDueAutonomyWatches(userId, { mode: "business", now: Date.parse("2026-01-31"), execute: execute as any });
@@ -31,6 +31,27 @@ test("reconciliation executes only exact read-only scopes, checkpoints, and dedu
   assert.equal(second.length, 0);
   assert.equal((await listAttentionRecords(userId, "attention_candidate") as any[]).length, 1);
   assert.equal(watch.userId, userId);
+});
+
+test("reconciliation never crosses personal and business watch boundaries", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990006;
+  await createAttentionRecord(userId, "autonomy_profile", { mode: "personal", enabled: true });
+  await createAttentionRecord(userId, "autonomy_profile", { mode: "business", enabled: true });
+  const personalWatch = await createAttentionRecord(userId, "autonomy_watch", { name: "Personal calendar", domain: "calendar", objective: "Check personal events", mode: "personal", toolSlugs: ["GOOGLECALENDAR_LIST_EVENTS"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 10, nextCheckAt: 1 });
+  const businessWatch = await createAttentionRecord(userId, "autonomy_watch", { name: "Business invoices", domain: "stripe", objective: "Check company invoices", mode: "business", toolSlugs: ["STRIPE_LIST_INVOICES"], cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 10, nextCheckAt: 1 });
+  const seen: string[] = [];
+  const execute = async ({ watch }: { watch: { name: string } }) => {
+    seen.push(watch.name);
+    return { text: "AUTONOMY_RESULT: {\"changed\":false,\"summary\":\"No changes\"}" };
+  };
+
+  const personal = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), execute: execute as any });
+  const business = await runDueAutonomyWatches(userId, { mode: "business", now: Date.now(), execute: execute as any });
+
+  assert.deepEqual(personal.map((item) => item.watchId), [personalWatch.id]);
+  assert.deepEqual(business.map((item) => item.watchId), [businessWatch.id]);
+  assert.deepEqual(seen, ["Personal calendar", "Business invoices"]);
 });
 
 test("reconciliation respects denied domains and records a bounded failure without disabling the watch", async () => {

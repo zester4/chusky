@@ -6,6 +6,7 @@ import {
   completeMissionStep,
   completeMission,
   createMission,
+  finalizeMissionIfReady,
   getMission,
   initStore,
   pauseMission,
@@ -130,6 +131,30 @@ test("mission step completion is idempotent for a replay but never revives cance
   assert.equal(replay?.steps.find((step) => step.id === "research")?.result, "Original verified result.");
   await cancelMission(userId, mission.id, "Owner stopped the mission.");
   assert.equal(await completeMissionStep(userId, mission.id, "research", "Late replay."), undefined);
+});
+
+test("server-side mission closeout completes legacy work after the final slice", async () => {
+  const userId = 951009;
+  const mission = await createMission(userId, input({ idempotencyKey: "server-closeout-legacy", steps: [
+    { id: "research", title: "Research", objective: "Collect sources." },
+  ] }));
+  const started = await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Sources collected.");
+  const finalized = await finalizeMissionIfReady(userId, mission.id);
+  assert.equal(finalized?.status, "completed");
+  assert.match(finalized?.result ?? "", /Research/);
+});
+
+test("strict server-side closeout blocks honestly until evidence verifies", async () => {
+  const userId = 951010;
+  const mission = await createMission(userId, input({ idempotencyKey: "server-closeout-strict", requiredEvidence: ["kind:tool_receipt"], verificationMode: "strict", steps: [
+    { id: "send", title: "Send", objective: "Perform the approved action." },
+  ] }));
+  const started = await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Action completed.");
+  const blocked = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
+  assert.equal(blocked?.status, "blocked");
+  assert.match(blocked?.nextAction ?? "", /evidence|verify/i);
 });
 
 test("mission replanning preserves verified steps and selects the next dependency-ready step", async () => {

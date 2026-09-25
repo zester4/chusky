@@ -98,7 +98,9 @@ multi-stage business operation. A mission is not an unbounded background loop.
 It is a sequence of short, checkpointed execution slices. Each slice observes
 current ground truth, performs bounded work, records the next action, and
 schedules the next slice through QStash. Waiting on an external service uses
-`CHUCK_TASK_WAIT`, so the worker sleeps without holding a process open.
+`CHUCK_TASK_WAIT`, so the worker sleeps without holding a process open; provider
+and approval waits resume from the exact callback or owner decision instead of
+polling.
 
 Every mission has a concrete objective and verifiable definition of done,
 maximum duration/steps/tool calls/cost, an owner-scoped checkpoint and next
@@ -111,7 +113,9 @@ The authenticated API exposes `POST /v1/missions`, `GET /v1/missions`,
 `POST /v1/missions/:id/events` for an exact provider callback
 (`provider + providerEventId`). Replayed callbacks are harmless. Missions can
 also contain dependency-aware steps; the agent advances a step only after
-`CHUCK_MISSION_STEP_COMPLETE` records its verified result. The Telegram
+`CHUCK_MISSION_STEP_COMPLETE` records its verified result. After the final
+slice, the server closes legacy missions automatically or verifies strict
+evidence and blocks with a concrete recovery action when proof is missing. The Telegram
 `/missions` command and dashboard Missions page expose the same owner-scoped
 state and controls. The dashboard also shows execution proof, evidence,
 verification state, branch activity, budgets, durable events, and the governed
@@ -389,7 +393,7 @@ Chusky can receive real-time events from connected apps (new Slack message, GitH
 2. Set `COMPOSIO_WEBHOOK_SECRET` and optionally `COMPOSIO_WEBHOOK_URL=https://your-domain.com/composio/triggers`. When the URL is blank, Chusky derives it from `WEBHOOK_URL`.
 3. On startup, Chusky reconciles the project subscription through Composio's current **v3.1** API and explicitly requests the V3 `composio.trigger.message` payload. Check `/health`: `checks.composioTriggers` must be `configured` before relying on triggers.
 
-Missions waiting for a Composio callback should store `provider: "composio"` and the exact stable trigger `eventId` with `CHUCK_MISSION_WAIT_EVENT`. After signature verification, Chusky matches that provider event to the same owner and resumes only the mission waiting for that exact event, then wakes its durable root task through the configured task queue. The generic mission-event API remains available for providers whose signed webhook adapter has not been added yet.
+Missions waiting for a Composio callback should store `provider: "composio"` and the exact stable trigger `eventId` with `CHUCK_MISSION_WAIT_EVENT`. After signature verification, Chusky matches that provider event to the same owner and resumes only the mission waiting for that exact event, then schedules every dependency-ready branch through the configured task queue. The generic mission-event API remains available for providers whose signed webhook adapter has not been added yet.
 
 To create a trigger programmatically, tell Chusky:
 > *"Create a trigger for new GitHub commits on my repo my-org/my-repo"*
@@ -484,8 +488,12 @@ status?” A custom CRON expression can be supplied when enabling it. Enabling c
 default private Telegram delivery preference only when one does not already exist; existing
 quiet-hour, silent, or disabled preferences are preserved. Daily limits count delivered pulse
 digests on the pulse job itself, and an open loop is not closed merely because it was mentioned
-in a digest—Elena must complete or explicitly snooze/update the loop. Pulse runs use a narrower
-task, reminder, and attention-state tool surface than ordinary Elena work; connected-app
+in a digest—Elena must complete or explicitly snooze/update the loop. Pulse plans also surface
+blocked/failed durable tasks and missions, expired non-timer waits, and due owner-configured
+watches; paused work and future waits stay dormant. Watch reconciliation is mode-scoped
+(personal/business) and strictly read-only. Handling is counted only after a tool confirms
+completion, not when it merely starts or is inspected. Pulse runs use a narrower task, reminder,
+mission-inspection, and attention-state tool surface than ordinary Elena work; connected-app
 actions require an explicit capability expansion. Redis and QStash are required in production.
 
 ### Event-driven Composio triggers

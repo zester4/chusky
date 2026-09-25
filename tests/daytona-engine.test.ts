@@ -777,6 +777,29 @@ test("creates branded DOCX and XLSX artifacts with native Office builders", asyn
   assert.match(worksheetXml, /<c r="C4"[^>]*><f>SUM\(B4:B4\)<\/f><v>100<\/v><\/c>/);
 });
 
+test("artifact QA returns rendered evidence without registering or rewriting the source file", async () => {
+  const userId = 820061;
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(userId) as any;
+  sandbox.commandResult = 'CHUSKY_VERIFICATION_JSON={"type":"pdf","pagesRendered":2,"extractedCharacters":180,"expectedTitleChecked":false,"expectedTitleMatched":true,"formulaCellsRecalculated":0,"formulaValuesInspected":0,"formulaExpectationsChecked":0,"formulaErrors":0}';
+  const result = await e.qaArtifact(userId, { path: "reports/brief.pdf", type: "pdf" });
+  assert.equal(result.status, "passed");
+  assert.deepEqual(result.verification, { type: "pdf", pagesRendered: 2, extractedCharacters: 180, expectedTitleChecked: false, expectedTitleMatched: true, formulaCellsRecalculated: 0, formulaValuesInspected: 0, formulaExpectationsChecked: 0, formulaErrors: 0 });
+  assert.equal(result.registered, false);
+  assert.equal(result.sourceChanged, false);
+  assert.deepEqual((await getSession(userId)).artifacts, []);
+});
+
+test("artifact QA fails closed on renderer validation failure and rejects unsafe paths", async () => {
+  const userId = 820062;
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(userId) as any;
+  sandbox.commandExitCode = 1;
+  await assert.rejects(e.qaArtifact(userId, { path: "reports/bad.pdf", type: "pdf" }), /validation failed/);
+  await assert.rejects(e.qaArtifact(userId, { path: "../private.pdf", type: "pdf" }), /workspace-relative/);
+  assert.deepEqual((await getSession(userId)).artifacts, []);
+});
+
 test("cancellable Daytona execution kills only its owned PTY and returns command output", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820070) as any;

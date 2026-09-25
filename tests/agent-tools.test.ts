@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chuckTools, validateNativeToolArguments } from "../src/agentTools.js";
+import { chuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 
 test("native tool catalog has unique names", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -12,6 +12,21 @@ test("native catalog includes core agent capabilities", () => {
   for (const name of ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS", "CHUCK_SET_REMINDER", "CHUCK_SCHEDULE_JOB", "CHUCK_TASK_WAIT", "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT", "CHUCK_MISSION_PAUSE", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_CANCEL", "CHUCK_MISSION_BLOCK", "CHUCK_MISSION_COMPLETE", "CHUCK_SAVE_MEMORY", "CHUCK_SCRATCHPAD_WRITE", "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO", "CHUCK_VIDEO_STATUS", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET"]) {
     assert.equal(names.has(name), true, name);
   }
+});
+
+test("tool reliability diagnostics are explicit, bounded, and keep transfers approval-bound", () => {
+  const names = new Set(chuckTools.map((tool) => tool.function.name));
+  for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_TOOL_RECOVERY"]) assert.equal(names.has(name), true, name);
+  for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
+    const tool = chuckTools.find((entry) => entry.function.name === name)!;
+    assert.deepEqual(tool.function.parameters.additionalProperties, false, name);
+  }
+  const bridge = chuckTools.find((entry) => entry.function.name === "CHUCK_FILE_BRIDGE")!;
+  assert.deepEqual(bridge.function.parameters.required, ["artifactId", "toolSlug", "arguments"]);
+  assert.match(bridge.function.description, /requires approval/i);
+  assert.match(bridge.function.description, /base64\/binary field/i);
+  const qa = chuckTools.find((entry) => entry.function.name === "CHUCK_ARTIFACT_QA")!;
+  assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);
 });
 
 test("internal task wait requires a checkpoint and an exact next action", () => {
@@ -145,4 +160,16 @@ test("native tool validation enforces nested JSON-schema constraints", () => {
   assert.throws(() => validateNativeToolArguments("CHUCK_TASK_LIST", null as never), /arguments must be an object/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_VERIFY", { id: "m1", verifiedBy: "human" }), /verifiedBy.*not allowed/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { detectors: [{ password: "no" }] }), /password.*not allowed/i);
+});
+
+test("tool argument validation bounds payload size and nesting before dispatch", () => {
+  const schema = { type: "object", properties: { value: { type: "string" } } };
+  assert.throws(() => validateToolArgumentsAgainstSchema("TEST_TOOL", { value: "x".repeat(1_048_577) }, schema), /1048576-byte limit/);
+  let nested: Record<string, unknown> = { value: "ok" };
+  let nestedSchema: Record<string, unknown> = { type: "object", properties: { value: { type: "string" } } };
+  for (let depth = 0; depth < 66; depth++) {
+    nested = { nested };
+    nestedSchema = { type: "object", properties: { nested: nestedSchema } };
+  }
+  assert.throws(() => validateToolArgumentsAgainstSchema("TEST_TOOL", nested, nestedSchema), /nesting depth of 64/);
 });

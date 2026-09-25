@@ -70,7 +70,7 @@ const baseChuckTools = [
   { type: "function", function: { name: "CHUCK_FORGET_IMAGE_ASSET", description: "Permanently remove a saved image asset from private R2 storage and its Vector index when the user explicitly asks.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
   { type: "function", function: { name: "CHUCK_SEARCH_MEMORY", description: "Search only the user's relevant saved memories. A query is preferred; never request or return the entire memory store. Filter by category, projectId, or personKey when the context identifies one. Results are bounded and exclude expired records.", parameters: { type: "object", properties: { query: { type: "string" }, category: { type: "string", enum: ["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction"] }, projectId: { type: "string" }, personKey: { type: "string" }, limit: { type: "number", minimum: 1, maximum: 20 } } } } },
   { type: "function", function: { name: "CHUCK_FORGET_MEMORY", description: "Forget a saved memory by key or ID when explicitly requested.", parameters: { type: "object", properties: { key: { type: "string" } }, required: ["key"] } } },
-  { type: "function", function: { name: "CHUCK_ATTENTION_STATE", description: "Read or explicitly update Chusky's durable attention state: observations, open loops, attention candidates, standing orders, delivery preferences, relationships, project states, personal/business autonomy watches, and autonomy profiles. Do not invent monitoring or permissions; only persist a watch or profile when the owner explicitly asks for it.", parameters: { type: "object", properties: {
+  { type: "function", function: { name: "CHUCK_ATTENTION_STATE", description: "Read or explicitly update Chusky's durable attention state: observations, open loops, attention candidates, standing orders, delivery preferences, relationships, project states, personal/business autonomy watches, and autonomy profiles. New autonomy watches default to personal mode; set mode=business for a company watch so the matching profile and policy are applied. Do not invent monitoring or permissions; only persist a watch or profile when the owner explicitly asks for it.", parameters: { type: "object", properties: {
     action: { type: "string", enum: ["create", "list", "update"] }, kind: { type: "string", enum: ["observation", "open_loop", "attention_candidate", "standing_order", "delivery_preference", "relationship", "project_state", "autonomy_watch", "autonomy_profile"] }, id: { type: "string" }, query: { type: "string" }, status: { type: "string" }, limit: { type: "number" },
     source: { type: "string" }, eventType: { type: "string" }, summary: { type: "string" }, title: { type: "string" }, objective: { type: "string" }, dueAt: { type: "number" }, priority: { type: "number" }, confidence: { type: "number" }, importance: { type: "number" }, novelty: { type: "number" }, reason: { type: "string" }, proposedAction: { type: "string" }, candidateType: { type: "string", enum: ["nudge", "digest", "prepare", "ask", "act"] },
     name: { type: "string" }, instruction: { type: "string" }, authority: { type: "string", enum: ["observe", "prepare", "execute_reversible"] }, scope: { type: "array", items: { type: "string" } }, provider: { type: "string" }, conversationId: { type: "string" }, enabled: { type: "boolean" }, mode: { type: "string", enum: ["immediate", "digest", "silent", "personal", "business"] },
@@ -185,7 +185,15 @@ const shoppingAndBrowserTools = [
   { type: "function", function: { name: "CHUCK_SHOPPING_REMOVE_SITE", description: "Remove one of the caller's saved shopping-site preferences. It does not delete a separately saved vault login or any external account.", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } },
 ] as const;
 
-export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools] as const;
+const toolReliabilityTools = [
+  { type: "function", function: { name: "CHUCK_TOOL_PREFLIGHT", description: "Check whether one exact tool is exposed in this run, validate its proposed arguments against the exact schema shown to the model, and report whether normal human approval is required. This is inspection only: it never searches for, grants, approves, or executes a tool. Use before a complex or high-impact call when argument correctness is uncertain.", parameters: { type: "object", properties: { toolName: { type: "string", minLength: 1, maxLength: 200 }, arguments: { type: "object", additionalProperties: true } }, required: ["toolName", "arguments"], additionalProperties: false } } },
+  { type: "function", function: { name: "CHUCK_INTEGRATION_HEALTH", description: "Inspect owner-scoped Composio connection status. This reports only the provider's account status; it does not test each app scope or perform a live write. Unknown statuses remain unverified. Never returns credentials or raw provider payloads.", parameters: { type: "object", properties: { toolkit: { type: "string", maxLength: 120, description: "Optional toolkit slug such as gmail or slack" } }, additionalProperties: false } } },
+  { type: "function", function: { name: "CHUCK_ARTIFACT_QA", description: "Independently validate and render-check a workspace-relative PDF, DOCX, PPTX, or XLSX without registering, rewriting, or delivering it. Returns bounded structural and rendered-page evidence; isolated renderer capacity may be needed, and QA fails closed if it is unavailable. It cannot certify editorial correctness or accessibility. Use after generation and before CHUCK_ARTIFACT registration when a file needs an explicit QA pass.", parameters: { type: "object", properties: { path: { type: "string", minLength: 1, maxLength: 1000 }, type: { type: "string", enum: ["pdf", "docx", "presentation", "spreadsheet"] }, expectedTitle: { type: "string", maxLength: 300 }, expectedFormulaValues: { type: "object", maxProperties: 100, additionalProperties: { type: ["string", "number", "boolean"] }, description: "Optional independent assertions keyed as sheet1.xml!C4 for spreadsheet formulas." } }, required: ["path", "type"], additionalProperties: false } } },
+  { type: "function", function: { name: "CHUCK_FILE_BRIDGE", description: "Upload one of your owner-owned registered Daytona artifacts to one exact connected Composio app action. First inspect the exact action schema; supply its normal non-file arguments and artifactId. Chusky injects file bytes server-side only when the current session schema unambiguously declares a base64/binary field. The external upload requires approval, never accepts a local path, URL, credential, or model-supplied file bytes, and never downloads arbitrary provider URLs. Optional account selects an owner-connected account ID or alias.", parameters: { type: "object", properties: { artifactId: { type: "string", minLength: 1, maxLength: 160 }, toolSlug: { type: "string", minLength: 1, maxLength: 200 }, arguments: { type: "object", additionalProperties: true }, account: { type: "string", maxLength: 160 } }, required: ["artifactId", "toolSlug", "arguments"], additionalProperties: false } } },
+  { type: "function", function: { name: "CHUCK_TOOL_RECOVERY", description: "Inspect a persisted tool result from your own agent run and recommend whether it already succeeded, is safe to correct/retry because execution never began, or requires provider-state verification first. This tool never replays an action and never returns raw arguments, tool output, or error text. Omit runId to inspect the current run; an optional toolCallId selects one call.", parameters: { type: "object", properties: { runId: { type: "string", maxLength: 200 }, toolCallId: { type: "string", maxLength: 200 } }, additionalProperties: false } } },
+] as const;
+
+export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools, ...toolReliabilityTools] as const;
 
 // Formula cells are explicit, bounded per-sheet inputs. The Daytona boundary
 // validates them again and LibreOffice independently recalculates them before
@@ -232,8 +240,19 @@ export function validateNativeToolArguments(name: string, args: Record<string, u
       args[key] = [value];
     }
   }
+  validateToolArgumentsAgainstSchema(name, args, schema);
+}
+
+/** Validate provider-generated arguments against the exact advertised schema. */
+export function validateToolArgumentsAgainstSchema(name: string, args: Record<string, unknown>, inputSchema: unknown, maxBytes = 1_048_576): void {
+  if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(`${name} arguments must be an object`);
+  let serialized: string;
+  try { serialized = JSON.stringify(args); } catch { throw new Error(`${name} arguments are not valid JSON data`); }
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 40 * 1024 * 1024) throw new Error("Invalid internal argument validation limit");
+  if (Buffer.byteLength(serialized, "utf8") > maxBytes) throw new Error(`${name} arguments exceed the ${maxBytes}-byte limit`);
+  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) throw new Error(`${name} has an invalid argument schema`);
   const errors: string[] = [];
-  validateJsonSchema(args, schema, "", name, errors);
+  validateJsonSchema(args, inputSchema as JsonSchema, "", name, errors, { nodes: 0 });
   if (errors.length) throw new Error(errors[0]);
 }
 
@@ -268,7 +287,10 @@ function jsonSchemaTypeMatches(value: unknown, type: string): boolean {
   }
 }
 
-function validateJsonSchema(value: unknown, schema: JsonSchema, path: string, toolName: string, errors: string[]): void {
+function validateJsonSchema(value: unknown, schema: JsonSchema, path: string, toolName: string, errors: string[], budget: { nodes: number }, depth = 0): void {
+  budget.nodes += 1;
+  if (depth > 64) throw new Error(`${toolName} arguments exceed the maximum nesting depth of 64`);
+  if (budget.nodes > 25_000) throw new Error(`${toolName} arguments exceed the maximum of 25000 validated values`);
   const displayPath = path ? `${toolName}${path.startsWith("[") ? "" : "."}${path}` : toolName;
   const types = schema.type === undefined ? [] : Array.isArray(schema.type) ? schema.type : [schema.type];
   if (types.length && !types.some((type) => jsonSchemaTypeMatches(value, type))) {
@@ -295,12 +317,14 @@ function validateJsonSchema(value: unknown, schema: JsonSchema, path: string, to
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) errors.push(`${displayPath} must contain at least ${schema.minItems} items (minItems)`);
     if (schema.maxItems !== undefined && value.length > schema.maxItems) errors.push(`${displayPath} exceeds maxItems ${schema.maxItems}`);
-    if (schema.items) value.forEach((item, index) => validateJsonSchema(item, schema.items!, `${path}[${index}]`, toolName, errors));
+    if (schema.items) value.forEach((item, index) => validateJsonSchema(item, schema.items!, `${path}[${index}]`, toolName, errors, budget, depth + 1));
   }
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     const object = value as Record<string, unknown>;
-    if (schema.minProperties !== undefined && Object.keys(object).length < schema.minProperties) errors.push(`${displayPath} must contain at least ${schema.minProperties} properties`);
-    if (schema.maxProperties !== undefined && Object.keys(object).length > schema.maxProperties) errors.push(`${displayPath} exceeds maxProperties ${schema.maxProperties}`);
+    const keys = Object.keys(object);
+    if (keys.length > 25_000) throw new Error(`${toolName} arguments exceed the maximum of 25000 object properties`);
+    if (schema.minProperties !== undefined && keys.length < schema.minProperties) errors.push(`${displayPath} must contain at least ${schema.minProperties} properties`);
+    if (schema.maxProperties !== undefined && keys.length > schema.maxProperties) errors.push(`${displayPath} exceeds maxProperties ${schema.maxProperties}`);
     for (const required of schema.required ?? []) {
       if (!(required in object) || object[required] === undefined || object[required] === null || (typeof object[required] === "string" && !object[required].trim())) {
         errors.push(`${displayPath} requires argument: ${required}`);
@@ -309,9 +333,9 @@ function validateJsonSchema(value: unknown, schema: JsonSchema, path: string, to
     for (const [key, child] of Object.entries(object)) {
       const childSchema = schema.properties?.[key];
       const childPath = path ? `${path}.${key}` : key;
-      if (childSchema) validateJsonSchema(child, childSchema, childPath, toolName, errors);
+      if (childSchema) validateJsonSchema(child, childSchema, childPath, toolName, errors, budget, depth + 1);
       else if (schema.additionalProperties === false) errors.push(`${toolName}.${childPath} is not allowed`);
-      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") validateJsonSchema(child, schema.additionalProperties, childPath, toolName, errors);
+      else if (schema.additionalProperties && typeof schema.additionalProperties === "object") validateJsonSchema(child, schema.additionalProperties, childPath, toolName, errors, budget, depth + 1);
     }
   }
 }

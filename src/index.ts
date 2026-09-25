@@ -10,7 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -23,6 +23,7 @@ import { scheduleMissionSteps } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
+import type { InboundMessage } from "./channels/contracts.js";
 import { registerChannelRoutes } from "./channels/routes.js";
 import { SlackAdapter } from "./channels/slack.js";
 import { WhatsAppAdapter } from "./channels/whatsapp.js";
@@ -75,6 +76,7 @@ import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisi
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
+import { defaultMediaInstruction } from "./mediaInput.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -133,14 +135,12 @@ async function resumeMissionsFromComposioEvent(userId: number, providerEventId: 
   for (const mission of waitingMissions) {
     if (mission.waiting?.kind !== "provider_event" || mission.waiting.provider !== "composio" || mission.waiting.providerEventId !== providerEventId) continue;
     const resumed = await resumeMissionFromProviderEvent(userId, mission.id, "composio", providerEventId);
-    if (!resumed?.rootTaskId) continue;
-    const existingTask = await getTask(userId, resumed.rootTaskId);
-    const task = existingTask?.status === "queued"
-      ? await updateTask(userId, existingTask.id, { runAt: Date.now(), error: undefined })
-      : await retryTask(userId, resumed.rootTaskId);
-    if (!task) continue;
-    await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now());
-    resumedCount += 1;
+    if (!resumed) continue;
+    // A mission may have several independent branches. Re-scheduling the
+    // dependency-ready set wakes the exact waiting branch instead of assuming
+    // that rootTaskId is the only executable task.
+    const scheduled = await scheduleMissionSteps(userId, resumed, enqueueTaskWorkflow);
+    if (scheduled?.activeStepIds?.length) resumedCount += scheduled.activeStepIds.length;
   }
   return resumedCount;
 }
@@ -155,8 +155,12 @@ function boundedRecallChatReply(value: string, maxCharacters: number): string {
 async function sdkTaskMessage(task: Awaited<ReturnType<typeof getTask>>): Promise<string | ContentPart[]> {
   const continuationGuidance = "\n\nDurable task control: if an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action. This pauses the same task without notifying the user and wakes it once; do not use a user reminder for internal polling. Do not perform risky external actions without the normal approval flow.";
   if (!task?.sdkAttachments?.length) return `${task?.sdkInput ?? task?.objective ?? "Continue the durable task."}${continuationGuidance}`;
-  const parts: ContentPart[] = [{ type: "text", text: `${task.sdkInput || "Please analyze the attached file(s)."}${continuationGuidance}` }];
   const session = await getSession(task.userId);
+  const files = task.sdkAttachments.map((reference) => session.sdkFiles?.find((candidate) => candidate.id === reference.id && candidate.status === "available")).filter((file): file is NonNullable<typeof file> => Boolean(file));
+  const defaultKind = files.length === 1
+    ? files[0].contentType.startsWith("image/") ? "image" : files[0].contentType.startsWith("video/") ? "video" : files[0].contentType.startsWith("audio/") ? "attachment" : "document"
+    : "attachment";
+  const parts: ContentPart[] = [{ type: "text", text: `${task.sdkInput || defaultMediaInstruction(defaultKind)}${continuationGuidance}` }];
   for (const reference of task.sdkAttachments) {
     const file = session.sdkFiles?.find((candidate) => candidate.id === reference.id && candidate.status === "available");
     if (!file) continue;
@@ -186,7 +190,7 @@ import { setVoiceReplies, setLiveVoicePreference } from "./store.js";
 import { isWorkflowControlFlow } from "./workflowControl.js";
 import { daytonaEngine, safeDaytonaPath } from "./lib/daytona/index.js";
 import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./video.js";
-import { processSendblueWorkflow } from "./sendblueWorkflow.js";
+import { processSendblueEvent, processSendblueWorkflow } from "./sendblueWorkflow.js";
 import { posthog } from "./posthog.js";
 
 async function main(): Promise<void> {
@@ -295,11 +299,30 @@ async function main(): Promise<void> {
     );
     const whatsappAdapter = new WhatsAppAdapter(config.whatsappAccessToken, config.whatsappPhoneNumberId, config.whatsappGraphVersion);
     const sendblueAdapter = new SendblueAdapter(config.sendblueApiKey, config.sendblueApiSecret, config.sendblueNumber, `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/status`);
+    if (config.sendblueEnabled) {
+      try {
+        const receiveWebhookUrl = `${config.webhookUrl.replace(/\/+$/, "")}/sendblue/webhook`;
+        const webhookState = await sendblueAdapter.ensureReceiveWebhook(receiveWebhookUrl, config.sendblueWebhookSecret);
+        logger.info({ webhookState, webhookUrl: receiveWebhookUrl }, "Sendblue receive webhook reconciled");
+      } catch (error) {
+        // Keep the service available for diagnostics and direct delivery even if
+        // Sendblue's management API is temporarily unavailable. Health and logs
+        // still expose the setup failure without leaking provider credentials.
+        logger.warn({ err: error }, "Sendblue receive webhook reconciliation failed");
+      }
+    }
     const twilioSmsWebhookUrl = config.twilioSmsWebhookUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms`;
     const twilioSmsStatusCallbackUrl = config.twilioSmsStatusCallbackUrl || `${config.webhookUrl.replace(/\/+$/, "")}/twilio/sms/status`;
     const twilioSmsAdapter = config.twilioSmsEnabled && config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid)
       ? new TwilioSmsAdapter({ accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken, phoneNumber: config.twilioPhoneNumber, messagingServiceSid: config.twilioMessagingServiceSid, statusCallbackUrl: twilioSmsStatusCallbackUrl })
       : undefined;
+    const sendblueEventDependencies = {
+      getEvent: getChannelInboundEvent,
+      updateEvent: updateChannelInboundEvent,
+      hydrate: (message: InboundMessage) => sendblueAdapter.hydrateInbound(message),
+      process: (message: InboundMessage) => channelGateway.processInbound(message),
+      recordFailure: (error: unknown, context: Record<string, unknown>) => recordFailure("workflow_failure", error, context),
+    };
     const xchatAdapter = config.xchatEnabled && config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin
       ? new XchatAdapter({
         accessToken: config.xchatBotToken,
@@ -359,6 +382,7 @@ async function main(): Promise<void> {
       ...(config.sendblueEnabled ? { sendblue: {
         adapter: sendblueAdapter,
         webhookSecret: config.sendblueWebhookSecret,
+        processInline: async (eventId: string) => { await processSendblueEvent(eventId, sendblueEventDependencies); },
         enqueue: async (eventId: string) => {
           if (!config.qstashToken) throw new Error("Sendblue workflows require QSTASH_TOKEN");
           const url = config.sendblueWorkflowUrl || `${config.webhookUrl.replace(/\/+$/, "")}/workflows/sendblue-event`;
@@ -372,13 +396,7 @@ async function main(): Promise<void> {
     if (config.sendblueEnabled) {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
         const payload = workflow.requestPayload as { eventId: string };
-        await processSendblueWorkflow(workflow, payload.eventId, {
-          getEvent: getChannelInboundEvent,
-          updateEvent: updateChannelInboundEvent,
-          hydrate: (message) => sendblueAdapter.hydrateInbound(message),
-          process: (message) => channelGateway.processInbound(message),
-          recordFailure: (error, context) => recordFailure("workflow_failure", error, context),
-        });
+        await processSendblueWorkflow(workflow, payload.eventId, sendblueEventDependencies);
       }, { url: resolveWorkflowEndpoint(config.sendblueWorkflowUrl, config.webhookUrl, "/workflows/sendblue-event", "Sendblue workflows") }));
     }
     channelGateway.startRecovery();
@@ -1072,12 +1090,12 @@ async function main(): Promise<void> {
       const filename = uploaded.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "attachment";
       let parts: ContentPart[];
       let historyLabel = `Attached ${filename}`;
-      if (mime.startsWith("image/")) parts = [{ type: "text", text: message || "Please analyze this image." }, { type: "image_url", image_url: { url: dataUrl } }];
+      if (mime.startsWith("image/")) parts = [{ type: "text", text: message || defaultMediaInstruction("image") }, { type: "image_url", image_url: { url: dataUrl } }];
       else if (mime.startsWith("audio/")) {
         const transcript = await transcribeAudio(bytes, mime.split("/")[1] === "mpeg" ? "mp3" : mime.split("/")[1]);
         parts = [{ type: "text", text: `${message}\n\nTranscript of ${filename}:\n${transcript}`.trim() }];
         historyLabel += `\nTranscript: ${transcript}`;
-      } else if (mime.startsWith("video/")) parts = [{ type: "text", text: message || "Please analyze this video." }, { type: "video_url", video_url: { url: dataUrl } }];
+      } else if (mime.startsWith("video/")) parts = [{ type: "text", text: message || defaultMediaInstruction("video") }, { type: "video_url", video_url: { url: dataUrl } }];
       else parts = [{ type: "text", text: `${message}\n\nPlease read and analyze the attached file: ${filename}`.trim() }, { type: "file", file: { filename, file_data: dataUrl } }];
       const s = await getSession(device.userId);
       const result = await withCliLock(device.userId, c.req.raw.signal, () => runAgent(device.userId, parts, s.history, s.model, undefined, c.req.raw.signal));
@@ -2133,12 +2151,27 @@ async function main(): Promise<void> {
               }
               if (mission?.status === "waiting") {
                 if (mission.waiting?.kind === "provider_event") {
-                  const wakeAt = mission.waiting.expiresAt ?? Date.now() + 7 * 24 * 60 * 60 * 1000;
-                  return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: wakeAt };
+                  const expiresAt = mission.waiting.expiresAt;
+                  if (expiresAt && expiresAt <= Date.now()) {
+                    const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "The provider-event wait expired before the expected event arrived.", nextAction: "Reconcile the provider state, then resume or replan the mission." });
+                    return { status: "blocked" as const, message: blocked?.error ?? "Provider-event wait expired", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+                  }
+                  // A provider callback, not polling, resumes this task. If an
+                  // expiry exists, one durable wake checks it; otherwise the
+                  // task becomes blocked and the signed event route will retry it.
+                  if (expiresAt) return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
+                  return { status: "blocked" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: "Wait for the exact provider event; the mission will resume automatically when it arrives." };
                 }
                 if (mission.waiting?.kind === "approval") {
-                  const wakeAt = mission.waiting.expiresAt ?? Date.now() + 24 * 60 * 60 * 1000;
-                  return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: wakeAt };
+                  const expiresAt = mission.waiting.expiresAt;
+                  if (expiresAt && expiresAt <= Date.now()) {
+                    const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "The approval wait expired before a decision was recorded.", nextAction: "Review the exact pending action and resume or replan the mission." });
+                    return { status: "blocked" as const, message: blocked?.error ?? "Approval wait expired", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
+                  }
+                  // Approval callbacks enqueue the original task immediately;
+                  // no background polling is needed while the owner decides.
+                  if (expiresAt) return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
+                  return { status: "blocked" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: "Approve or deny the exact pending action; the mission will resume automatically after approval." };
                 }
                 await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
               }
@@ -2280,7 +2313,12 @@ async function main(): Promise<void> {
                 const timeoutSeconds = result.missionWait.timeoutSeconds === undefined ? undefined : Math.min(30 * 24 * 60 * 60, Math.max(60, result.missionWait.timeoutSeconds));
                 const expiresAt = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
                 await waitMission(task.userId, mission.id, { kind: "provider_event", provider: result.missionWait.provider, providerEventId: result.missionWait.providerEventId, stepId: result.missionWait.stepId, expiresAt }, result.missionWait.checkpoint, result.missionWait.nextAction);
-                return { status: "queued" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt ?? Date.now() + 7 * 24 * 60 * 60 * 1000 };
+                // An event with no expiry has no safe polling deadline. Leave
+                // the task blocked until the signed provider callback wakes
+                // the exact mission branch; an expiry gets one durable wake
+                // that can convert a missed event into an honest blocker.
+                if (!expiresAt) return { status: "blocked" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction ?? "Wait for the exact provider event; the mission will resume automatically when it arrives." };
+                return { status: "queued" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt };
               }
               if (mission) {
                 const currentMission = await getMission(task.userId, mission.id);
@@ -2289,6 +2327,13 @@ async function main(): Promise<void> {
                 if (currentMission?.status === "paused" || currentMission?.status === "blocked" || currentMission?.status === "failed") return { status: "blocked" as const, message: currentMission.error ?? "Autonomous mission is waiting for intervention", checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
                 const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission?.checkpoint ?? result.text, nextAction: currentMission?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
                 if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
+                // Close out after the final model/tool turn. Without this
+                // server-side handoff, a mission with no ready steps would be
+                // requeued forever waiting for a model to remember a separate
+                // verify/complete call.
+                const finalized = await finalizeMissionIfReady(task.userId, mission.id, { blockOnUnresolved: true });
+                if (finalized?.status === "completed") return { status: "completed" as const, message: "Autonomous mission completed", result: finalized.result, checkpoint: finalized.checkpoint };
+                if (finalized?.status === "blocked" || finalized?.status === "failed") return { status: "blocked" as const, message: finalized.error ?? "Autonomous mission needs evidence or repair", checkpoint: finalized.checkpoint, nextAction: finalized.nextAction };
                 const refreshed = await getMission(task.userId, mission.id);
                 if (refreshed) {
                   await scheduleMissionSteps(task.userId, refreshed, enqueueTaskWorkflow);
@@ -2338,11 +2383,14 @@ async function main(): Promise<void> {
       for (let attempt = 0; attempt < 10; attempt++) {
         const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string; missionId?: string };
         if (run.taskId) await onComposerTaskSettled(payload.userId, run.taskId).catch((error) => logger.warn({ err: error, taskId: run.taskId }, "Composer stage reconciliation failed"));
-        if (run.missionId && run.status === "queued" && run.runAt) {
-          await enqueueTaskWithClaim(payload.userId, run.taskId!, run.runAt);
+        if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
+        // Keep the continuation inside the durable workflow while the delay is
+        // short. Re-publishing a mission task immediately was a hot-loop bug:
+        // provider and approval waits were never actually allowed to sleep.
+        if (attempt >= 9) {
+          if (run.taskId) await enqueueTaskWithClaim(payload.userId, run.taskId, run.runAt);
           break;
         }
-        if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
         await workflow.sleep(`retry-delay-${attempt}`, Math.max(1, Math.ceil((run.runAt - Date.now()) / 1000)));
       }
     }, { url: resolveWorkflowEndpoint("", config.webhookUrl, "/workflows/task", "Task workflows") }));

@@ -128,22 +128,30 @@ second scheduler.
 The pulse is proactive work, not surveillance and not a generic “summarize my
 account” prompt. It is enabled only after explicit owner intent and runs on a
 stable QStash schedule. `buildAttentionPulsePlan()` bounds open loops,
-attention candidates, and standing orders, then creates a compact plan with a
-dedupe key.
+attention candidates, active standing orders, blocked/failed durable tasks and
+missions, expired non-timer mission waits, and due autonomy watches, then
+creates a compact plan with a dedupe key. It excludes owner-paused work and
+waits that are not due. Watches are personal/business scoped; legacy watches
+normalize to personal, and reconciliation filters by the matching mode.
 
 The pulse must:
 
-1. Re-read active open loops, candidates, standing orders, delivery preference,
-   quiet hours, and daily delivery count.
+1. Re-read active open loops, candidates, standing orders, blocked/failed
+   durable work, due watches, delivery preference, quiet hours, and daily
+   delivery count.
 2. Prefer handle/delegate/prepare over a status-only digest when actionable
    work exists.
-3. Use only the standing order's authority and scope.
+3. Use only the matching item's existing authority and scope. Tasks/missions
+   retain their owner-defined objective and grants; watches use exact
+   owner-configured read-only scopes and the matching autonomy profile.
 4. Leave irreversible, financial, destructive, permission-changing, or other
    high-impact actions at the normal approval boundary.
 5. Close an open loop only after real handling evidence, not because it was
    mentioned in a digest.
 6. Suppress duplicates through the plan/digest key and delivery limits.
-7. Record what was handled, delegated, deferred, or delivered.
+7. Count only confirmed-completed tools as handling evidence; started, missing,
+   failed, cancelled, and read-only inspection entries do not count. Record what
+   was handled, delegated, deferred, or delivered.
 
 `NO_ACTION` is a valid quiet result only when no actionable work remains or the
 delivery policy suppresses it. It must not hide a failed tool call or an

@@ -83,6 +83,15 @@ Maintain fixtures for:
 8. A rejected OpenRouter request (must show a useful error)
 9. Two simultaneous updates for one user (must serialize)
 10. A cancelled reminder whose queued workflow still runs (must not deliver)
+11. A streamed tool call split across arbitrary UTF-8/SSE boundaries, including a final record without a newline (must preserve the full argument and call ID)
+12. A tool call with missing or schema-invalid Composio arguments (must not execute, must explain the precise field error to the model, and must allow a corrected call without charging the tool budget)
+13. A tool call returned with `finish_reason: length` or an incomplete/error stream (must not execute any partial call)
+14. Arguments containing leading/trailing whitespace, line breaks, quotes, and non-ASCII characters (must arrive unchanged at the native or provider boundary)
+15. `CHUCK_TOOL_PREFLIGHT` checks only the exact current model tool catalog and reports approval without granting or executing; hidden tools remain unavailable.
+16. `CHUCK_INTEGRATION_HEALTH` returns unknown when metadata is absent or an unfamiliar provider status is received, scopes results to the requested toolkit, and never exposes credentials.
+17. `CHUCK_ARTIFACT_QA` checks an existing owner workspace document without registering it or mutating its source; unavailable independent render evidence fails closed.
+18. `CHUCK_FILE_BRIDGE` uses only the authenticated owner's artifact and exact current Composio-session action schema, requires the normal approval, rejects ambiguous binary fields and caller-supplied file bytes, and never retries an ambiguous upload.
+19. `CHUCK_TOOL_RECOVERY` reads persisted results only for the owner, recommends verification for ambiguous/legacy failures, and never dispatches a retry.
 
 ## Test command
 

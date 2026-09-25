@@ -35,7 +35,7 @@ import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./n
 import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, type ExternalActionClaim } from "./autonomy/actions.js";
 import { isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
-import { chuckTools, validateNativeToolArguments } from "./agentTools.js";
+import { chuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
@@ -54,6 +54,7 @@ import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
+import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
@@ -144,7 +145,7 @@ function requiredModality(message: string | ContentPart[]): string | undefined {
 }
 
 interface Choice {
-  finish_reason: "stop" | "tool_calls" | "length" | "content_filter" | null;
+  finish_reason: "stop" | "tool_calls" | "length" | "content_filter" | "error" | null;
   message: ApiMessage;
 }
 
@@ -173,6 +174,7 @@ function normalizeLegacyDsml(value: string): string {
 export function parseToolArguments(raw: unknown): Record<string, unknown> {
   if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
   if (typeof raw !== "string") throw new Error("Tool arguments must be a JSON object");
+  if (Buffer.byteLength(raw, "utf8") > 1_048_576) throw new Error("Tool arguments exceed the 1048576-byte limit");
   let value = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
   const first = value.indexOf("{");
   const last = value.lastIndexOf("}");
@@ -235,7 +237,9 @@ function malformedToolArgumentsResult(slug: string): string {
 }
 
 function decodeLegacyDsml(value: string): string {
-  return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").trim();
+  // Preserve leading/trailing whitespace: these are argument data, not
+  // protocol formatting, and trimming can corrupt code, prompts, or filenames.
+  return value.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 }
 
 export function parseLegacyDsmlToolCalls(content: string): ToolCall[] {
@@ -243,9 +247,16 @@ export function parseLegacyDsmlToolCalls(content: string): ToolCall[] {
   const block = normalized.match(LEGACY_DSML_BLOCK)?.[1];
   if (!block) return [];
   const calls: ToolCall[] = [];
-  for (const invoke of block.matchAll(LEGACY_DSML_INVOKE)) {
+  // String.prototype.matchAll starts from a global regex object's lastIndex.
+  // Reusing the module-level regex leaked its cursor across parses and could
+  // silently drop a later valid legacy tool call in the same process.
+  const invokePattern = new RegExp(LEGACY_DSML_INVOKE.source, LEGACY_DSML_INVOKE.flags);
+  for (const invoke of block.matchAll(invokePattern)) {
     const args: Record<string, string> = {};
-    for (const parameter of invoke[2].matchAll(LEGACY_DSML_PARAMETER)) args[parameter[1]] = decodeLegacyDsml(parameter[2]);
+    // Parameter parsing has the same state hazard: clone the global regex for
+    // each invocation instead of sharing its mutable lastIndex across calls.
+    const parameterPattern = new RegExp(LEGACY_DSML_PARAMETER.source, LEGACY_DSML_PARAMETER.flags);
+    for (const parameter of invoke[2].matchAll(parameterPattern)) args[parameter[1]] = decodeLegacyDsml(parameter[2]);
     calls.push({ id: `legacy_${randomUUID()}`, type: "function", function: { name: invoke[1], arguments: JSON.stringify(args) } });
   }
   return calls;
@@ -256,21 +267,29 @@ export function cleanModelText(text: string): string {
   return (marker ? text.slice(0, marker.index) : text).trim();
 }
 
-async function readStreamingChat(res: Response, onDelta?: (text: string) => void | Promise<void>): Promise<ChatResponse> {
+export async function readStreamingChat(res: Response, onDelta?: (text: string) => void | Promise<void>): Promise<ChatResponse> {
   if (!res.body) throw new Error("OpenRouter returned an empty stream");
   const reader = res.body.getReader();
-  const decoder = new TextDecoder();
+  // Invalid UTF-8 must fail closed. Replacing malformed bytes with U+FFFD can
+  // silently alter code, filenames, identifiers, or other tool arguments.
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
   let content = "";
   let emittedContent = "";
   const calls = new Map<number, ToolCall>();
   let usage: { cost?: number } | undefined;
+  let finishReason: Choice["finish_reason"] = null;
   const consume = async (line: string) => {
-    if (!line.startsWith("data: ")) return;
-    const raw = line.slice(6).trim();
+    // SSE permits an optional single space after the colon. Be tolerant of
+    // both forms while still ignoring comments and other event fields.
+    if (!line.startsWith("data:")) return;
+    const raw = line.slice(5).replace(/^ /, "").trim();
     if (!raw || raw === "[DONE]") return;
     const chunk = JSON.parse(raw) as any;
-    const delta = chunk.choices?.[0]?.delta;
+    if (chunk.error) throw new Error("OpenRouter returned an in-stream error");
+    const choice = chunk.choices?.[0];
+    const delta = choice?.delta;
+    if (choice?.finish_reason !== undefined && choice.finish_reason !== null) finishReason = choice.finish_reason;
     if (typeof delta?.content === "string") {
       content += delta.content;
       if (onDelta) {
@@ -286,21 +305,42 @@ async function readStreamingChat(res: Response, onDelta?: (text: string) => void
     for (const call of delta?.tool_calls ?? []) {
       const index = call.index ?? 0;
       const existing = calls.get(index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
-      existing.id += call.id ?? "";
+      // IDs are identifiers, not streamed text fragments. Providers may
+      // repeat them on later deltas; appending would corrupt tool_call_id.
+      if (typeof call.id === "string" && call.id) existing.id = call.id;
+      if (call.type === "function") existing.type = "function";
       existing.function.name += call.function?.name ?? "";
       existing.function.arguments += call.function?.arguments ?? "";
       calls.set(index, existing);
     }
     if (chunk.usage) usage = { cost: chunk.usage.cost };
   };
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-    const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
-    for (const line of lines) await consume(line.trim());
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const lines = buffer.split("\n"); buffer = lines.pop() ?? "";
+      for (const line of lines) await consume(line.trim());
+      if (done) break;
+    }
+    // A valid SSE stream does not have to end its last data record with a line
+    // feed (notably when a proxy closes immediately after the final argument
+    // delta). Flush the decoder and consume that record instead of silently
+    // dropping the last bytes/argument fragment.
+    buffer += decoder.decode();
+    if (buffer.trim()) await consume(buffer.trim());
+    if (!finishReason) throw new Error("OpenRouter stream ended before a terminal finish reason");
+    if (finishReason === "error") throw new Error("OpenRouter returned an in-stream error");
+    if (calls.size && finishReason !== "tool_calls" && finishReason !== "length") {
+      throw new Error("OpenRouter stream ended with incomplete tool-call data");
+    }
+    return { choices: [{ finish_reason: finishReason, message: { role: "assistant", content, ...(calls.size ? { tool_calls: [...calls.values()] } : {}) } }], usage };
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
   }
-  return { choices: [{ finish_reason: calls.size ? "tool_calls" : "stop", message: { role: "assistant", content, ...(calls.size ? { tool_calls: [...calls.values()] } : {}) } }], usage };
 }
 
 export interface OrChatOptions {
@@ -356,6 +396,7 @@ export async function orChat(
   }
 
   let lastError: unknown;
+  let streamedOutputExposed = false;
   for (let attempt = 0; attempt < config.openRouterMaxAttempts; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     try {
@@ -372,7 +413,10 @@ export async function orChat(
         body: JSON.stringify({ ...body, stream: Boolean(onDelta), ...(onDelta ? { stream_options: { include_usage: true } } : {}) }),
         signal: attemptSignal,
       });
-      if (res.ok) return onDelta ? readStreamingChat(res, onDelta) : res.json() as Promise<ChatResponse>;
+      if (res.ok) {
+        if (onDelta) return await readStreamingChat(res, async (text) => { streamedOutputExposed = true; await onDelta(text); });
+        return await res.json() as ChatResponse;
+      }
       const err = await res.text().catch(() => res.statusText);
       if (![408, 429, 500, 502, 503, 504].includes(res.status)) {
         throw new Error(`OpenRouter ${res.status}: ${err}`);
@@ -380,6 +424,10 @@ export async function orChat(
       lastError = new Error(`OpenRouter ${res.status}: ${err}`);
     } catch (e) {
       if (signal?.aborted) throw e;
+      // Once text has reached the client, retrying a partially streamed answer
+      // would duplicate visible output. Tool-call-only partial streams remain
+      // safe to retry because no action has executed yet.
+      if (streamedOutputExposed) throw e;
       lastError = e;
     }
     if (attempt + 1 < config.openRouterMaxAttempts) {
@@ -512,6 +560,49 @@ async function sendArtifactEmail(
   const providerArguments = buildArtifactEmailArguments(directTool, emailArguments as Record<string, unknown>, files);
   await composioExecute(sessionObj, emailTool, providerArguments, signal);
   return { emailSent: true, emailTool, artifactIds, note: "The connected email action confirmed delivery with the generated attachment(s)." };
+}
+
+async function uploadArtifactToConnectedTool(
+  userId: number,
+  sessionObj: any,
+  availableComposioTools: any[],
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (!sessionObj) throw new Error("File uploads require an active connected-app session.");
+  const toolSlug = typeof args.toolSlug === "string" ? args.toolSlug.trim() : "";
+  if (!toolSlug || toolSlug.startsWith("CHUCK_") || toolSlug.startsWith("COMPOSIO_") || toolSlug.startsWith("MCP_")) throw new Error("toolSlug must be one exact connected Composio app action, not a Chusky, Composio meta-tool, or MCP action.");
+  const artifactId = typeof args.artifactId === "string" ? args.artifactId.trim() : "";
+  if (!artifactId) throw new Error("artifactId is required.");
+  const actionArguments = args.arguments;
+  if (!actionArguments || typeof actionArguments !== "object" || Array.isArray(actionArguments)) throw new Error("arguments must match the selected app action schema.");
+  // A bridge must not unlock a hidden action. The exact action and schema must
+  // have been included in this model turn's already-filtered tool catalog.
+  const directTool = availableComposioTools.find((tool) => toolSchemaName(tool) === toolSlug);
+  if (!directTool) throw new Error(`The exact action ${toolSlug} is not available in this owner's current Composio session; no upload was attempted.`);
+  const schema = directTool.function?.parameters;
+  if (!schema || typeof schema !== "object") throw new Error("The selected action did not advertise an input schema; no upload was attempted.");
+  const downloaded = await abortable(daytonaEngine.downloadArtifact(userId, artifactId), signal);
+  const providerArguments = buildArtifactUploadArguments(schema, actionArguments as Record<string, unknown>, {
+    name: downloaded.name,
+    contentType: downloaded.contentType,
+    data: downloaded.data,
+  });
+  const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
+  // Validate the complete provider argument shape after the trusted binary
+  // value is inserted. Server-owned bytes may legitimately exceed the model
+  // argument limit, but the upload builder caps them at 25 MB.
+  validateToolArgumentsAgainstSchema(toolSlug, providerArguments, schema, 36 * 1024 * 1024);
+  const result = await composioExecute(sessionObj, toolSlug, account ? { ...providerArguments, account } : providerArguments, signal);
+  const status = typeof result?.successful === "boolean" ? result.successful : result?.data?.successful;
+  if (status === false || result?.ok === false || result?.error) throw new Error("The connected app rejected the upload. Check the app connection and required action fields before retrying.");
+  const data = result?.data && typeof result.data === "object" ? result.data : {};
+  const receipt: Record<string, unknown> = { uploaded: true, toolSlug, artifactId, name: downloaded.name, contentType: downloaded.contentType, size: downloaded.size };
+  for (const key of ["id", "fileId", "documentId", "name", "status"]) {
+    const value = data[key];
+    if (typeof value === "string" || typeof value === "number") receipt[key] = typeof value === "string" ? value.slice(0, 200) : value;
+  }
+  return receipt;
 }
 
 const sessionCache = new Map<number, ComposioSession>();
@@ -993,11 +1084,13 @@ export async function runAgent(
   ].filter(Boolean).join("\n\n");
   let accountContext = "";
   let composioRouteContext = "";
+  let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
   // Connected-account metadata is private context. Never expose a user's
   // account aliases or tool access to a shared channel conversation.
   if (!voiceTurn && channelContext?.scope !== "shared") {
     try {
       const accounts = await listConnectedAccounts(userId);
+      connectedAccountSnapshot = accounts;
       if (accounts.length) {
         accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
       }
@@ -1153,6 +1246,18 @@ export async function runAgent(
     const legacyToolCalls = typeof assistantMsg.content === "string" ? parseLegacyDsmlToolCalls(assistantMsg.content) : [];
     const toolCalls = assistantMsg.tool_calls ?? legacyToolCalls;
 
+    // A length-limited completion can contain a syntactically valid prefix
+    // of a tool call. Do not execute it: required arguments may have been cut
+    // off, or the provider may have stopped before completing the call.
+    if (finish_reason === "length" && toolCalls.length) {
+      malformedToolCallPending = true;
+      const partialText = typeof assistantMsg.content === "string" ? cleanModelText(assistantMsg.content) : "";
+      messages.push({ role: "assistant", content: partialText || null });
+      messages.push({ role: "user", content: "Your previous tool call was truncated by the model output limit and was not executed. Reissue the complete call with all required arguments, or explain what you need from me. Do not omit or shorten user-provided values." });
+      await persistRun("running", "run.tool_call_truncated", undefined, { round, toolCount: toolCalls.length });
+      continue;
+    }
+
     // Shared conversations must not present current financial, pricing, news,
     // or other externally verifiable facts from model memory when the live web
     // tool is available. A short model nudge is safer than silently accepting
@@ -1221,6 +1326,8 @@ export async function runAgent(
       let toolFailed = false;
       let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
       let externalClaim: ExternalActionClaim | undefined;
+      let executionDispatched = false;
+      let toolFailureMeta: { failureClass: string; retrySafety: "safe_retry" | "verify_first" } | undefined;
       try {
         // A tool must be in the exact tool list shown to the model. In
         // particular, meta-tools are not implicit grants when an allowlist is
@@ -1244,8 +1351,17 @@ export async function runAgent(
         const args = parseToolArguments(call.function.arguments);
         // A malformed provider payload was never a real tool attempt. Do not
         // charge it against the user's bounded execution budget.
-        toolCallsExecuted += 1;
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
+        else if (!slug.startsWith("MCP_")) {
+          const advertised = availableTools.find((tool) => toolSchemaName(tool) === slug);
+          const schema = advertised?.function?.parameters;
+          // Some legacy Composio meta-tools advertise no parameters schema.
+          // Validate against every concrete schema we do receive, before any
+          // provider side effect, so missing/truncated fields can be repaired
+          // by the model instead of surfacing as opaque provider errors.
+          if (schema && typeof schema === "object") validateToolArgumentsAgainstSchema(slug, args, schema);
+        }
+        toolCallsExecuted += 1;
         let executionArgs = options?.meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
           ? applyMeetingComposioAccountAlias(slug, args, options.meetingComposioAccountAliases)
           : args;
@@ -1294,10 +1410,13 @@ export async function runAgent(
         // session.execute() routes the call through Composio:
         // - meta tools (COMPOSIO_MANAGE_CONNECTIONS, COMPOSIO_REMOTE_BASH_TOOL, etc.) → Composio server
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
+        executionDispatched = externalClaim?.state !== "succeeded";
         if (externalClaim?.state === "succeeded") {
           execResult = { idempotentReplay: true, priorResult: externalClaim.receipt?.resultSummary ?? "The same external action was already confirmed successful." };
         } else if (slug === "CHUCK_EMAIL_ARTIFACT") {
           execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
+        } else if (slug === "CHUCK_FILE_BRIDGE") {
+          execResult = await uploadArtifactToConnectedTool(userId, sessionObj, availableTools, executionArgs, signal);
         } else if (slug === "CHUCK_GENERATE_IMAGE") {
           const imageRuntime = currentImageRuntime(userMessage);
           const mode = args.mode === "edit" || args.mode === "reference_variations" ? args.mode : "generate";
@@ -1394,7 +1513,7 @@ export async function runAgent(
           execResult = accounts.slice(0, limit).map(({ id, alias, toolkit: connectedToolkit, status, createdAt, updatedAt }) => ({ id, alias, toolkit: connectedToolkit, status, ...(createdAt ? { createdAt } : {}), ...(updatedAt ? { updatedAt } : {}) }));
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
@@ -1480,6 +1599,11 @@ export async function runAgent(
         }
         if (externalClaim?.state === "new") await failExternalAction(userId, externalClaim.logicalActionId, e instanceof Error ? e.message : String(e)).catch(() => undefined);
         toolFailed = true;
+        const rawErrorName = e instanceof Error ? e.name : "UnknownError";
+        toolFailureMeta = {
+          failureClass: /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(rawErrorName) ? rawErrorName : "Error",
+          retrySafety: !executionDispatched && !externalClaim ? "safe_retry" : "verify_first",
+        };
         if (String(e).includes("Tool arguments are malformed or truncated JSON")) malformedToolCallPending = true;
         logger.warn(safeToolAudit({ tool: slug, args: effectiveAuditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "failed", error: e }), "Tool execution failed");
         result = String(e).includes("Tool arguments are malformed or truncated JSON")
@@ -1505,7 +1629,7 @@ export async function runAgent(
         tool_call_id: call.id,
         content: result,
       });
-      await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed });
+      await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed, ...(toolFailureMeta ?? {}) });
       if (taskWaitRequest || missionWaitRequest) break;
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
         const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };

@@ -1,11 +1,11 @@
 {
-  "id": "release-4.1.0",
-  "version": "4.1.0",
-  "title": "Chusky autonomy and orchestration are now live",
+  "id": "release-4.4.0",
+  "version": "4.4.0",
+  "title": "Chusky has been upgraded",
   "bullets": [
-    "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
-    "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
-    "Extended the governed runtime across meetings, A2A, Daytona browser and artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state."
+    "Added tool preflight and connected-account health checks so Chusky can validate the exact exposed schema and report connection state without executing actions.",
+    "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
+    "Added approval-gated transfer of owner-owned Daytona artifacts to exact schema-verified connected-app actions, with file bytes kept server-side."
   ],
-  "createdAt": "2026-09-23T07:56:41.969Z"
+  "createdAt": "2026-09-24T23:43:31.946Z"
 }

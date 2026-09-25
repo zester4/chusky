@@ -17,15 +17,25 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
     "Extended the governed runtime across meetings, A2A, Daytona browser and artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
   ],
+  attention: [
+    "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
+    "Personal and business watches are isolated by mode, and only confirmed successful tool calls count as handling; paused work and future waits remain untouched.",
+    "The pulse inspects current evidence, routes authorized recovery to the right specialist, and explains real blockers while preserving approval boundaries.",
+  ],
   missions: [
-    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, and restart-safe execution.",
-    "Missions can fan out independent work, wait for timers or exact provider events, pause, resume, repair, replan, and attach evidence before verification and completion.",
+    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, and server-side closeout.",
+    "Missions can fan out independent work, sleep for timers, resume on exact provider events or approvals without polling loops, pause, repair, and replan.",
     "Mission status, proof, controls, and owner isolation are available across Telegram, the CLI, SDK/API, dashboard, and MCP through the same persisted runtime.",
   ],
   meetings: [
     "Added Recall-powered meeting participation for Zoom, Google Meet, Microsoft Teams, and Webex, with natural copilot and owner-scoped representative modes.",
     "Meeting representatives can support sales and onboarding with approved connected-app tools, participant chat, contact capture, calendar availability, reminders, tasks, and follow-through.",
     "Added optional screen-share understanding, Nova-3 live transcription, encrypted opt-in transcript retention, private outcomes, and scratchpad/Notion follow-through.",
+  ],
+  toolReliability: [
+    "Added tool preflight and connected-account health checks so Chusky can validate the exact exposed schema and report connection state without executing actions.",
+    "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
+    "Added approval-gated transfer of owner-owned Daytona artifacts to exact schema-verified connected-app actions, with file bytes kept server-side.",
   ],
 } as const;
 

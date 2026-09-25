@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
-import { createAttentionRecord, initStore, listAttentionRecords, listHandoffRecords, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
+import { blockTask, createAttentionRecord, createMission, createTask, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
 import { executeDelegation } from "../src/subagents/executor.js";
 
 const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
@@ -45,6 +45,8 @@ test("attention pulse native contract and no-action sentinel are stable", () => 
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "COMPOSIO_HUBSPOT_CREATE_CONTACT", status: "completed" }]), true);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_HANDOFF_SUBAGENT", status: "completed" }]), true);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "completed" }]), true);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "started" }]), false);
+  assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE" }]), false);
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "failed" }]), false);
 });
 
@@ -94,4 +96,60 @@ test("attention pulse bounds context and deduplicates unchanged state", async ()
   if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
   const changed = await buildAttentionPulsePlan(userId);
   assert.notEqual(changed.dedupeKey, first.dedupeKey);
+});
+
+test("attention pulse finds blocked durable work and due watches without waking paused or future work", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910009;
+  const now = Date.now();
+  const task = await createTask(userId, { title: "Recover the import", objective: "Finish the failed import", nextAction: "Check the source file" });
+  await blockTask(userId, task.id, "The import needs attention", "Check the source file");
+  const mission = await createMission(userId, { title: "Launch readiness", objective: "Finish readiness review", definitionOfDone: "All checks pass" });
+  await repairMission(userId, mission.id, { reason: "A readiness check failed", nextAction: "Rerun the failed check" });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Invoice status", domain: "billing", objective: "Check for overdue invoices", cadenceSeconds: 3600,
+    authority: "observe", status: "active", nextCheckAt: now - 1000, maxItems: 10,
+  });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Future shipment", domain: "shipping", objective: "Check shipment status", cadenceSeconds: 3600,
+    authority: "observe", status: "active", nextCheckAt: now + 60_000, maxItems: 10,
+  });
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Business renewal", domain: "crm", objective: "Check renewal progress", cadenceSeconds: 3600,
+    authority: "observe", status: "active", mode: "business", maxItems: 10,
+  });
+  const pausedMission = await createMission(userId, { title: "Paused work", objective: "Do not resume", definitionOfDone: "Owner decides" });
+  await pauseMission(userId, pausedMission.id);
+
+  const plan = await buildAttentionPulsePlan(userId, now);
+
+  assert.equal(plan.hasWork, true);
+  assert.match(plan.prompt, /Recover the import/);
+  assert.match(plan.prompt, /Launch readiness/);
+  assert.match(plan.prompt, /Invoice status/);
+  assert.match(plan.prompt, /Business renewal/);
+  assert.match(plan.prompt, /personal.*Invoice status|Invoice status.*personal/);
+  assert.match(plan.prompt, /business.*Business renewal|Business renewal.*business/);
+  assert.doesNotMatch(plan.prompt, /Future shipment/);
+  assert.doesNotMatch(plan.prompt, /Paused work/);
+});
+
+test("attention pulse reopens dedupe when a due watch's autonomy profile changes", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910010;
+  const now = Date.UTC(2026, 8, 24, 12);
+  const watch = await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Profile-gated check", domain: "billing", objective: "Check invoice status", cadenceSeconds: 3600,
+    authority: "observe", status: "active", nextCheckAt: now - 1000, maxItems: 10,
+  });
+  const profile = await createAttentionRecord(userId, "autonomy_profile", { mode: "personal", enabled: false });
+  const before = await buildAttentionPulsePlan(userId, now);
+  assert.match(before.prompt, /personal: disabled/);
+  await updateAttentionRecord(userId, "autonomy_profile", profile.id, { enabled: true });
+  const after = await buildAttentionPulsePlan(userId, now);
+  assert.notEqual(after.dedupeKey, before.dedupeKey);
+  assert.match(after.prompt, /personal: enabled/);
+  assert.equal(watch.status, "active");
+  const nextUtcDay = await buildAttentionPulsePlan(userId, now + 24 * 60 * 60 * 1000);
+  assert.notEqual(nextUtcDay.dedupeKey, after.dedupeKey);
 });

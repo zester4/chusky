@@ -13,7 +13,7 @@ import {
   upsertMeetingContact, listMeetingContacts, deleteMeetingContact, getMeetingContact, updateMeetingContact,
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
-  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, setApprovalStatus, updateTask, getHandoffRecord,
+  blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
@@ -50,6 +50,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
 
 const MAX_TEXT = 1000;
@@ -102,6 +103,10 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** Exact model-visible tool catalog and safe owner connection snapshot for read-only diagnostics. */
+  toolCatalog?: unknown[];
+  connectedAccounts?: Array<{ id: string; toolkit: string; status: string; alias?: string; updatedAt?: string }>;
+  currentRunId?: string;
   /** Set by the internal task-wait tool; the workflow settles the run after the agent turn ends. */
   requestTaskWait?: (request: TaskWaitRequest) => void;
   /** Set by the mission event-wait tool; the workflow parks the durable slice. */
@@ -461,6 +466,9 @@ const ATTENTION_PULSE_SCHEDULE_ID = (userId: number) => `chuck-attention-pulse-$
 const ATTENTION_PULSE_TOOLS = [
   "CHUCK_TASK_LIST",
   "CHUCK_TASK_GET",
+  "CHUCK_MISSION_LIST",
+  "CHUCK_MISSION_GET",
+  "CHUCK_MISSION_PROOF",
   "CHUCK_TASK_CHECKPOINT",
   "CHUCK_TASK_BLOCK",
   "CHUCK_TASK_COMPLETE",
@@ -833,6 +841,21 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
   validateNativeToolArguments(slug, args);
   switch (slug) {
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_TOOL_PREFLIGHT": {
+      const requestedTool = text(args.toolName, 200);
+      const callArguments = args.arguments;
+      if (!callArguments || typeof callArguments !== "object" || Array.isArray(callArguments)) throw new Error("arguments must be an object");
+      return preflightToolCall(runtime.toolCatalog, requestedTool, callArguments as Record<string, unknown>);
+    }
+    case "CHUCK_INTEGRATION_HEALTH":
+      return summarizeIntegrationHealth(runtime.connectedAccounts, args.toolkit === undefined ? undefined : text(args.toolkit, 120));
+    case "CHUCK_TOOL_RECOVERY": {
+      const runId = args.runId === undefined ? runtime.currentRunId : text(args.runId, 200);
+      if (!runId) return { status: "not_found", retryAdvice: "verify_first", message: "No current run is available; pass an owned run ID. No action was replayed." };
+      const run = await getAgentRun(userId, runId);
+      if (!run || run.userId !== userId) return { status: "not_found", retryAdvice: "verify_first", message: "That run was not found for this owner. No action was replayed." };
+      return inspectToolRecovery(run.events, args.toolCallId === undefined ? undefined : text(args.toolCallId, 200));
+    }
     case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
     case "CHUCK_READ_SKILL_FILE": return readSkillFile(text(args.name), args.path === undefined ? "SKILL.md" : text(args.path), args.maxChars === undefined ? 12_000 : Number(args.maxChars));
     case "CHUCK_SET_REMINDER": return setReminder(userId, args, runtime);
@@ -1282,6 +1305,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_DAYTONA_LIST_FILES": return daytonaCall(runtime, () => daytonaEngine.listFiles(userId, args.path ? text(args.path) : undefined, args.depth === undefined ? undefined : Number(args.depth)));
     case "CHUCK_DAYTONA_READ_FILE": return daytonaCall(runtime, () => daytonaEngine.readFile(userId, text(args.path), args.maxChars === undefined ? undefined : Number(args.maxChars)));
     case "CHUCK_DAYTONA_WRITE_FILE": return daytonaCall(runtime, () => daytonaEngine.writeFile(userId, text(args.path), fileContent(args.content)));
+    case "CHUCK_ARTIFACT_QA": return daytonaCall(runtime, () => daytonaEngine.qaArtifact(userId, args));
+    case "CHUCK_FILE_BRIDGE": throw new Error("CHUCK_FILE_BRIDGE must be executed by the authenticated agent Composio-session dispatcher; it cannot run outside an active connected-app session.");
     case "CHUCK_DAYTONA_REPLACE_FILES": return daytonaCall(runtime, () => daytonaEngine.replaceFiles(userId, args.files, args.pattern, args.newValue));
     case "CHUCK_DAYTONA_SET_FILE_PERMISSIONS": return daytonaCall(runtime, () => daytonaEngine.setFilePermissions(userId, args.path, args.permissions));
     case "CHUCK_DAYTONA_FIND_FILES": return daytonaCall(runtime, () => daytonaEngine.findFiles(userId, args.path ? text(args.path) : undefined, text(args.pattern)));

@@ -86,6 +86,16 @@ test("owner-scoped autonomy controls do not become approval prompts in strict ru
   assert.equal(requiresToolApproval("STRIPE_CREATE_PAYMENT", {}, false), true);
 });
 
+test("tool diagnostics stay read-only while external artifact transfers require approval", () => {
+  for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
+    assert.equal(toolApprovalPolicy(slug), "private", slug);
+    assert.equal(requiresToolApproval(slug), false, slug);
+  }
+  assert.equal(toolApprovalPolicy("CHUCK_FILE_BRIDGE"), "approval_required");
+  assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE"), true);
+  assert.match(humanToolStatus("CHUCK_FILE_BRIDGE"), /approved file transfer/i);
+});
+
 test("provider metadata classifies dynamic Composio tools before heuristic fallback", () => {
   clearComposioToolMetadata();
   registerComposioToolMetadata({ name: "MYSTERY_READ", annotations: { readOnlyHint: true } });

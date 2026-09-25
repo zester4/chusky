@@ -108,8 +108,8 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
     chatCalls += 1;
     const chunks = chatCalls === 1
-      ? [{ choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_search_skills", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] } }] }]
-      : [{ choices: [{ delta: { role: "assistant", content: "Done." } }] }];
+      ? [{ choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_search_skills", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] }, finish_reason: "tool_calls" }] }]
+      : [{ choices: [{ delta: { role: "assistant", content: "Done." }, finish_reason: "stop" }] }];
     return new Response(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n`).join("")}data: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
   }) as typeof fetch;
   try {
@@ -255,12 +255,12 @@ test("SDK tool activity survives a disconnected stream while the same run keeps 
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
     chatCalls += 1;
     if (chatCalls === 1) {
-      const chunk = { choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_refresh_search", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] } }] };
+      const chunk = { choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_refresh_search", type: "function", function: { name: "CHUCK_SEARCH_SKILLS", arguments: JSON.stringify({ query: "sales" }) } }] }, finish_reason: "tool_calls" }] };
       return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
     }
     markSecondCallStarted();
     await secondCallGate;
-    const final = { choices: [{ delta: { role: "assistant", content: "Finished after reconnect." } }] };
+    const final = { choices: [{ delta: { role: "assistant", content: "Finished after reconnect." }, finish_reason: "stop" }] };
     return new Response(`data: ${JSON.stringify(final)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
   }) as typeof fetch;
 
