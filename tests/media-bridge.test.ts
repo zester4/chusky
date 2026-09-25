@@ -130,6 +130,7 @@ test("media bridge resolves an exact discovered action through Composio schema m
   const session = {
     sessionId: "media-bridge-meta-session",
     tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
+    search: async () => ({ toolSchemas: { INSTAGRAM_CREATE_POST: { toolSlug: "INSTAGRAM_CREATE_POST", schemaRef: { tool: "COMPOSIO_GET_TOOL_SCHEMAS", args: { toolSlugs: ["INSTAGRAM_CREATE_POST"] } } } } }),
     execute: async (slug: string, args: Record<string, unknown>) => {
       calls.push({ slug, args });
       if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: { INSTAGRAM_CREATE_POST: { toolSlug: "INSTAGRAM_CREATE_POST", inputSchema: schema } } }, error: null };
@@ -149,6 +150,7 @@ test("media bridge resolves an exact discovered action through Composio schema m
     }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
     assert.equal(result.providerActionSucceeded, true);
     assert.equal(result.toolSlug, "INSTAGRAM_CREATE_POST");
+    assert.equal(calls.length, 2);
     assert.deepEqual(calls[0], { slug: "COMPOSIO_GET_TOOL_SCHEMAS", args: { tool_slugs: ["INSTAGRAM_CREATE_POST"] } });
     assert.equal(calls[1]?.slug, "INSTAGRAM_CREATE_POST");
     assert.deepEqual(calls[1]?.args.image_url, "https://signed.example/private-image");
@@ -174,6 +176,11 @@ test("Instagram stages image bytes then publishes the returned container using t
       { type: "function", function: { name: "INSTAGRAM_POST_IG_USER_MEDIA", parameters: actionSchema } },
       { type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } },
     ],
+    search: async ({ query }: { query: string }) => {
+      const slug = query.match(/INSTAGRAM_[A-Z_]+/)?.[0];
+      const inputSchema = slug === "INSTAGRAM_POST_IG_USER_MEDIA" ? actionSchema : publishSchema;
+      return { toolSchemas: { [slug!]: { toolSlug: slug, inputSchema } } };
+    },
     execute: async (slug: string, args: Record<string, unknown>) => {
       executions.push({ slug, args });
       if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: {
@@ -213,7 +220,6 @@ test("Instagram stages image bytes then publishes the returned container using t
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA", args: {
         caption: "A launch", image_file: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/instagram-image" },
       } },
-      { slug: "COMPOSIO_GET_TOOL_SCHEMAS", args: { tool_slugs: ["INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH"] } },
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", args: { creation_id: "instagram-container-1" } },
     ]);
   } finally {
@@ -238,6 +244,11 @@ test("X image publishing stages media through the exact upload action before cre
   const session = {
     sessionId: "media-bridge-twitter-session",
     tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
+    search: async ({ query }: { query: string }) => {
+      const slug = query.match(/TWITTER_[A-Z_]+/)?.[0];
+      const inputSchema = slug === "TWITTER_UPLOAD_MEDIA" ? uploadSchema : postSchema;
+      return { toolSchemas: { [slug!]: { toolSlug: slug, inputSchema } } };
+    },
     execute: async (slug: string, args: Record<string, unknown>) => {
       calls.push({ slug, args });
       if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") {
@@ -269,14 +280,14 @@ test("X image publishing stages media through the exact upload action before cre
     assert.equal(result.providerActionSucceeded, true);
     assert.equal(result.id, "x-post-456");
     assert.deepEqual(calls.map(({ slug }) => slug), [
-      "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_GET_TOOL_SCHEMAS", "TWITTER_UPLOAD_MEDIA", "TWITTER_CREATION_OF_A_POST",
+      "TWITTER_UPLOAD_MEDIA", "TWITTER_CREATION_OF_A_POST",
     ]);
-    assert.deepEqual(calls[2]?.args, {
+    assert.deepEqual(calls[0]?.args, {
       media: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/x-image" },
       media_type: "image/png",
       media_category: "tweet_image",
     });
-    assert.deepEqual(calls[3]?.args, { text: "A launch", media_media_ids: ["x-media-123"] });
+    assert.deepEqual(calls[1]?.args, { text: "A launch", media_media_ids: ["x-media-123"] });
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
@@ -296,7 +307,11 @@ test("LinkedIn image publishing initializes, uploads, and posts the exact return
   const session = {
     sessionId: "media-bridge-linkedin-session",
     tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
-    search: async () => ({ toolSchemas: { LINKEDIN_INITIALIZE_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", inputSchema: initSchema } } }),
+    search: async ({ query }: { query: string }) => {
+      const slug = query.match(/LINKEDIN_[A-Z_]+/)?.[0] ?? (query.includes("Initialize an image upload") ? "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" : undefined);
+      const inputSchema = slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" ? initSchema : postSchema;
+      return { toolSchemas: { [slug!]: { toolSlug: slug, inputSchema } } };
+    },
     execute: async (slug: string, args: Record<string, unknown>) => {
       actions.push({ slug, args });
       if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: { LINKEDIN_CREATE_LINKED_IN_POST: { toolSlug: slug === "COMPOSIO_GET_TOOL_SCHEMAS" ? "LINKEDIN_CREATE_LINKED_IN_POST" : slug, inputSchema: postSchema } } }, error: null };
@@ -328,9 +343,9 @@ test("LinkedIn image publishing initializes, uploads, and posts the exact return
     assert.equal(uploaded?.method, "PUT");
     assert.equal(uploaded?.contentType, "image/png");
     assert.deepEqual(uploaded?.bytes, imageBytes);
-    assert.deepEqual(actions.map(({ slug }) => slug), ["COMPOSIO_GET_TOOL_SCHEMAS", "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", "LINKEDIN_CREATE_LINKED_IN_POST"]);
-    assert.deepEqual(actions[1]?.args, { owner: "urn:li:person:owner" });
-    assert.deepEqual(actions[2]?.args, { author: "urn:li:person:owner", commentary: "Hello from Chusky", images: ["urn:li:image:abc123"] });
+    assert.deepEqual(actions.map(({ slug }) => slug), ["LINKEDIN_INITIALIZE_IMAGE_UPLOAD", "LINKEDIN_CREATE_LINKED_IN_POST"]);
+    assert.deepEqual(actions[0]?.args, { owner: "urn:li:person:owner" });
+    assert.deepEqual(actions[1]?.args, { author: "urn:li:person:owner", commentary: "Hello from Chusky", images: ["urn:li:image:abc123"] });
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }

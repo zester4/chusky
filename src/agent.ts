@@ -545,27 +545,44 @@ async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], 
   const directSchema = directTool?.function?.parameters ?? directTool?.inputSchema;
   if (directSchema && typeof directSchema === "object") return directSchema;
 
-  // Composio sessions normally expose meta-tools rather than every app action.
-  // Fetch only the exact slug already selected by the agent; never substitute
-  // a similar action or infer a provider schema from its name.
-  if (!availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
+  // Tool Router sessions expose meta-tools by default. Discover the exact
+  // requested action into this session before asking for its schema or running
+  // it; a globally known slug is not proof it is available to this owner.
+  let discoveredSchema: any;
+  if (typeof sessionObj?.search === "function") {
+    const search: any = await abortable(sessionObj.search(
+      { query: `Find the exact Composio action ${toolSlug} for the requested connected-app operation.` },
+      signal ? { signal } : undefined,
+    ), signal);
+    const schemas = search?.toolSchemas ?? search?.tool_schemas;
+    const entry = Array.isArray(schemas)
+      ? schemas.find((candidate: any) => (candidate?.toolSlug ?? candidate?.tool_slug) === toolSlug)
+      : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
+    const returnedSlug = entry?.toolSlug ?? entry?.tool_slug ?? (entry ? toolSlug : undefined);
+    if (returnedSlug !== toolSlug) {
+      throw new Error(`Composio search did not discover the exact action ${toolSlug} in this owner's session; no image transfer was attempted.`);
+    }
+    discoveredSchema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
+  } else if (!availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
     throw new Error(`The exact action ${toolSlug} has no schema in this owner's current Composio session; no image transfer was attempted.`);
   }
-  const response = await composioExecute(sessionObj, "COMPOSIO_GET_TOOL_SCHEMAS", { tool_slugs: [toolSlug] }, signal);
-  if (response?.error || response?.successful === false) {
-    throw new Error(`Composio could not retrieve the exact schema for ${toolSlug}; no image transfer was attempted.`);
+  if (discoveredSchema && typeof discoveredSchema === "object" && !Array.isArray(discoveredSchema)) return discoveredSchema;
+
+  if (availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
+    const response = await composioExecute(sessionObj, "COMPOSIO_GET_TOOL_SCHEMAS", { tool_slugs: [toolSlug] }, signal);
+    if (response?.error || response?.successful === false) {
+      throw new Error(`Composio could not retrieve the exact schema for ${toolSlug}; no image transfer was attempted.`);
+    }
+    const data = response?.data && typeof response.data === "object" ? response.data : response;
+    const schemas = data?.toolSchemas ?? data?.tool_schemas ?? response?.toolSchemas ?? response?.tool_schemas;
+    const entry = Array.isArray(schemas)
+      ? schemas.find((candidate: any) => candidate?.toolSlug === toolSlug || candidate?.tool_slug === toolSlug)
+      : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
+    const returnedSlug = entry?.toolSlug ?? entry?.tool_slug ?? (entry ? toolSlug : undefined);
+    const schema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
+    if (returnedSlug === toolSlug && schema && typeof schema === "object" && !Array.isArray(schema)) return schema;
   }
-  const data = response?.data && typeof response.data === "object" ? response.data : response;
-  const schemas = data?.toolSchemas ?? data?.tool_schemas ?? response?.toolSchemas ?? response?.tool_schemas;
-  const entry = Array.isArray(schemas)
-    ? schemas.find((candidate: any) => candidate?.toolSlug === toolSlug || candidate?.tool_slug === toolSlug)
-    : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
-  const returnedSlug = entry?.toolSlug ?? entry?.tool_slug;
-  const schema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
-  if ((returnedSlug !== undefined && returnedSlug !== toolSlug) || !schema || typeof schema !== "object" || Array.isArray(schema)) {
-    throw new Error(`The exact action ${toolSlug} is not available with a usable schema in this owner's current Composio session; no image transfer was attempted.`);
-  }
-  return schema;
+  throw new Error(`The exact action ${toolSlug} is not available with a usable schema in this owner's current Composio session; no image transfer was attempted.`);
 }
 
 async function resolveMediaBridgeToolkitSlug(composioClient: any, toolSlug: string, signal?: AbortSignal): Promise<string> {
