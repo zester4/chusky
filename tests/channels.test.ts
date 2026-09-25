@@ -13,6 +13,7 @@ import { sendblueFileExtensionForMime } from "../src/channels/sendblueMedia.js";
 import { formatSendblueText } from "../src/channels/sendblueFormatting.js";
 import { formatWhatsAppText } from "../src/channels/whatsappFormatting.js";
 import { formatInboundMessageForAgent, sharedSenderLabel } from "../src/channels/conversations.js";
+import { normalizeInboundImages } from "../src/channels/imageMedia.js";
 import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { SHARED_CHANNEL_TOOL_DENY } from "../src/sharedChannelPolicy.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -149,6 +150,27 @@ test("Sendblue hydrates bounded media for the shared agent handler", async () =>
   const adapter = new SendblueAdapter("key", "secret", "+15550002", undefined, (async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "image/png", "content-length": "3" } })) as typeof fetch);
   const hydrated = await adapter.hydrateInbound({ provider: "sendblue", providerEventId: "sb-media", providerUserId: "+15550001", providerConversationId: "+15550001", text: "edit this", attachments: [{ id: "m1", kind: "image", url: "https://cdn.example/image.png" }], receivedAt: Date.now(), scope: "private" });
   assert.match(hydrated.attachments[0].url ?? "", /^data:image\/png;base64,/);
+});
+
+test("shared image normalization verifies bytes and corrects provider MIME drift", async () => {
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  const message = {
+    provider: "sendblue" as const, providerEventId: "sb-valid-image", providerUserId: "+15550001", providerConversationId: "+15550001", receivedAt: Date.now(), scope: "private" as const,
+    attachments: [{ id: "image", kind: "image" as const, mimeType: "image/jpeg", url: `data:image/jpeg;base64,${png.toString("base64")}` }],
+  };
+  const normalized = await normalizeInboundImages(message);
+  assert.equal(normalized.attachments[0].mediaError, undefined);
+  assert.equal(normalized.attachments[0].mimeType, "image/png");
+  assert.match(normalized.attachments[0].url ?? "", /^data:image\/png;base64,/);
+});
+
+test("shared image normalization rejects malformed image bytes before model dispatch", async () => {
+  const message = {
+    provider: "sendblue" as const, providerEventId: "sb-invalid-image", providerUserId: "+15550001", providerConversationId: "+15550001", receivedAt: Date.now(), scope: "private" as const,
+    attachments: [{ id: "image", kind: "image" as const, mimeType: "image/jpeg", url: "data:image/jpeg;base64,SGVsbG8=" }],
+  };
+  const normalized = await normalizeInboundImages(message);
+  assert.equal(normalized.attachments[0].mediaError, "invalid_media");
 });
 
 test("Sendblue recognizes and hydrates group PDFs and Office documents", async () => {

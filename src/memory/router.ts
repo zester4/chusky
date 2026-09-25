@@ -30,6 +30,7 @@ export class MemoryRouter {
       value: string;
       source?: string;
       confidence?: number;
+      sensitivity?: "normal" | "sensitive";
       projectId?: string;
       personKey?: string;
       expiresAt?: number;
@@ -61,6 +62,9 @@ export class MemoryRouter {
       value: input.value.trim(),
       source: input.source ?? "user_explicit",
       confidence: Math.max(0, Math.min(1, input.confidence ?? 1.0)),
+      // Fail closed: callers must explicitly classify facts as normal before
+      // they can be shared with a specialist. Unclassified saves stay private.
+      sensitivity: input.sensitivity === "normal" ? "normal" : "sensitive",
       createdAt: now,
       updatedAt: now,
       expiresAt: input.expiresAt,
@@ -106,13 +110,17 @@ export class MemoryRouter {
     const allowedCategories = CAPABILITY_MEMORY_ACCESS_MATRIX[workerName] ?? [];
     const now = Date.now();
 
-    // Filter active, non-expired memories within worker's allowed category scope
+    // Specialist prompts are a disclosure boundary. Legacy records without a
+    // sensitivity label, sensitive records, and records due for review are
+    // excluded rather than implicitly downgraded to normal.
     let candidates = memories.filter((m) => {
       const isStatusValid = options?.includeSuperseded ? m.status !== "deleted" : m.status === "active";
       const isCategoryAllowed = allowedCategories.includes(m.category);
       const isNotExpired = !m.expiresAt || m.expiresAt > now;
+      const isNotDueForReview = !m.reviewAt || m.reviewAt > now;
+      const isSafeForSpecialist = m.sensitivity === "normal";
 
-      if (!isStatusValid || !isCategoryAllowed || !isNotExpired) return false;
+      if (!isStatusValid || !isCategoryAllowed || !isNotExpired || !isNotDueForReview || !isSafeForSpecialist) return false;
 
       if (options?.category) {
         const filterCategories = Array.isArray(options.category) ? options.category : [options.category];
@@ -171,6 +179,7 @@ export class MemoryRouter {
       value: newValue.trim(),
       source: updates?.source ?? target.source ?? "user_update",
       confidence: Math.max(0, Math.min(1, updates?.confidence ?? target.confidence ?? 1.0)),
+      sensitivity: updates?.sensitivity ?? target.sensitivity ?? "sensitive",
       createdAt: now,
       updatedAt: now,
       expiresAt: updates?.expiresAt ?? target.expiresAt,

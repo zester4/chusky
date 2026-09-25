@@ -154,6 +154,35 @@ test("meeting joins default to proactive copilot or the enabled representative p
   await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
 });
 
+test("direct representative joins automatically carry a bounded owner-approved meeting brief", async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_ready_brief_123" }), { status: 201 });
+  await updateMeetingRepresentativeProfile(ownerId, {
+    enabled: true,
+    role: "client_onboarding",
+    objective: "Prepare the customer for a successful onboarding launch",
+    approvedKnowledge: "We provide a guided onboarding program.",
+  });
+  const session = await getSession(ownerId);
+  session.memories = [
+    { id: "mem_acme_onboarding", category: "relationship", key: "Acme onboarding blocker", value: "Their operations lead needs an import checklist before kickoff.", confidence: 1, source: "owner", sensitivity: "normal", status: "active", personKey: "acme", createdAt: 1, updatedAt: 10 },
+    { id: "mem_other_onboarding", category: "relationship", key: "Globex onboarding", value: "A different customer needs a migration plan.", confidence: 1, source: "owner", sensitivity: "normal", status: "active", personKey: "globex", createdAt: 1, updatedAt: 11 },
+    { id: "mem_private_acme", category: "relationship", key: "Acme confidential", value: "Private negotiation details.", confidence: 1, source: "owner", sensitivity: "sensitive", status: "active", personKey: "acme", createdAt: 1, updatedAt: 12 },
+  ];
+  await saveSession(ownerId, session);
+
+  const meeting = await joinRecallMeeting(ownerId, {
+    meetingUrl: "https://meet.google.com/direct-acme-onboarding",
+    title: "Acme onboarding kickoff",
+  });
+  assert.equal(meeting.interactionMode, "representative");
+  assert.equal(meeting.mission?.clientName, "Acme onboarding kickoff");
+  assert.equal(meeting.mission?.objective, "Prepare the customer for a successful onboarding launch");
+  const stored = await getRecallMeeting(ownerId, meeting.id);
+  assert.match(stored?.mission?.brief ?? "", /import checklist before kickoff/);
+  assert.doesNotMatch(stored?.mission?.brief ?? "", /Globex|confidential|Private negotiation/);
+  await updateMeetingRepresentativeProfile(ownerId, { enabled: false });
+});
+
 test("empty optional client fields do not break an ordinary meeting join", async () => {
   globalThis.fetch = async () => new Response(JSON.stringify({ id: "bot_empty_client_fields" }), { status: 201 });
   await updateMeetingRepresentativeProfile(ownerId, { enabled: false });

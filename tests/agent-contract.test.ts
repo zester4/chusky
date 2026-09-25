@@ -326,6 +326,152 @@ test("ephemeral shared turns expose no tools, skip Composio, and do not persist 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test("enabled private meeting representatives discover owner calendar tools and cannot write before a successful availability read", async () => {
+  const userId = 830056;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const executions: Array<{ slug: string; args: Record<string, unknown>; account?: string }> = [];
+  const schema = { type: "object", properties: { eventId: { type: "string" }, timeMin: { type: "string" }, timeMax: { type: "string" }, start: { type: "string" }, end: { type: "string" } }, additionalProperties: false };
+  const session = {
+    sessionId: "meeting-calendar-session",
+    tools: async () => [],
+    search: async ({ toolkits }: { toolkits: string[] }) => {
+      assert.deepEqual(toolkits, ["googlecalendar"]);
+      return { toolSchemas: Object.fromEntries([
+        ["GOOGLECALENDAR_LIST_EVENTS", { toolSlug: "GOOGLECALENDAR_LIST_EVENTS", toolkit: "googlecalendar", description: "List events in a time window", inputSchema: schema }],
+        ["GOOGLECALENDAR_UPDATE_EVENT", { toolSlug: "GOOGLECALENDAR_UPDATE_EVENT", toolkit: "googlecalendar", description: "Update an event", inputSchema: schema }],
+        ["GOOGLECALENDAR_DELETE_EVENT", { toolSlug: "GOOGLECALENDAR_DELETE_EVENT", toolkit: "googlecalendar", description: "Delete an event", inputSchema: schema }],
+        ["GMAIL_SEND_EMAIL", { toolSlug: "GMAIL_SEND_EMAIL", toolkit: "gmail", description: "Send email", inputSchema: schema }],
+      ]) };
+    },
+    execute: async (slug: string, args: Record<string, unknown>, options?: { account?: string }) => {
+      executions.push({ slug, args, account: options?.account });
+      return { successful: true, data: { events: [] } };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => [{ id: "calendar-account-1", alias: "work-calendar", toolkit: { slug: "googlecalendar" }, status: "ACTIVE" }] },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return requests.length === 1
+        ? toolResponse("GOOGLECALENDAR_UPDATE_EVENT", JSON.stringify({ eventId: "event-1", start: "2026-10-01T10:00:00Z", end: "2026-10-01T11:00:00Z" }), "call-1")
+        : requests.length === 2
+          ? toolResponse("GOOGLECALENDAR_LIST_EVENTS", "{}", "call-2")
+          : requests.length === 3
+            ? toolResponse("GOOGLECALENDAR_UPDATE_EVENT", JSON.stringify({ eventId: "event-1", start: "2026-10-01T10:00:00Z", end: "2026-10-01T11:00:00Z" }), "call-3")
+            : chatResponse({ role: "assistant", content: "I checked availability and rescheduled the meeting." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Reschedule the meeting to 10:00 UTC on October 1.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: "meeting:mtg_calendar", provider: "telegram", conversationId: "mtg_calendar", scope: "shared" },
+      { ephemeral: true, meetingId: "mtg_calendar", meetingAppAccess: true, meetingCapabilityContext: { role: "sales", objective: "Reschedule an agreed customer meeting", subject: "Acme" }, meetingComposioAccountAliases: {}, toolAllow: ["CHUCK_MEETING_JOIN"], maxToolCalls: 8 },
+    );
+    assert.match(result.text, /checked availability and rescheduled/);
+    const shownNames = requests[0]?.tools?.map((tool: any) => tool.function?.name) ?? [];
+    assert.equal(shownNames.includes("GOOGLECALENDAR_LIST_EVENTS"), true);
+    assert.equal(shownNames.includes("GOOGLECALENDAR_UPDATE_EVENT"), true);
+    assert.equal(shownNames.includes("GOOGLECALENDAR_DELETE_EVENT"), false);
+    assert.equal(shownNames.includes("GMAIL_SEND_EMAIL"), false);
+    assert.deepEqual(executions.map(({ slug }) => slug), ["GOOGLECALENDAR_LIST_EVENTS", "GOOGLECALENDAR_UPDATE_EVENT"]);
+    assert.equal(executions.every((call) => call.account === "work-calendar"), true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("private meeting mission discovers owner-connected HR and CRM schemas while shared meetings stay explicitly scoped", async () => {
+  const userId = 830057;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const discoveryRequests: Array<{ query: string; toolkits: string[] }> = [];
+  const executions: Array<{ slug: string; args: Record<string, unknown>; account?: string }> = [];
+  const schema = { type: "object", properties: { person: { type: "string" }, query: { type: "string" }, recordId: { type: "string" } }, additionalProperties: false };
+  const session = {
+    sessionId: "meeting-business-systems-session",
+    tools: async () => [],
+    search: async ({ query, toolkits }: { query: string; toolkits: string[] }) => {
+      discoveryRequests.push({ query, toolkits });
+      return { toolSchemas: {
+        ASHBY_SEARCH_CANDIDATES: { toolSlug: "ASHBY_SEARCH_CANDIDATES", toolkit: "ashby", description: "Find the candidate record", inputSchema: schema },
+        ASHBY_GET_APPLICATION: { toolSlug: "ASHBY_GET_APPLICATION", toolkit: "ashby", description: "Read application status", inputSchema: schema },
+        HUBSPOT_SEARCH_CONTACTS: { toolSlug: "HUBSPOT_SEARCH_CONTACTS", toolkit: "hubspot", description: "Find the connected customer contact", inputSchema: schema },
+        HUBSPOT_CREATE_NOTE: { toolSlug: "HUBSPOT_CREATE_NOTE", toolkit: "hubspot", description: "Add a meeting follow-up note", inputSchema: schema },
+        GMAIL_SEND_EMAIL: { toolSlug: "GMAIL_SEND_EMAIL", toolkit: "gmail", description: "Send email", inputSchema: schema },
+        ASHBY_DELETE_CANDIDATE: { toolSlug: "ASHBY_DELETE_CANDIDATE", toolkit: "ashby", description: "Delete candidate", inputSchema: schema },
+        COMPOSIO_EXECUTE_TOOL: { toolSlug: "COMPOSIO_EXECUTE_TOOL", toolkit: "ashby", description: "Generic executor", inputSchema: schema },
+      } };
+    },
+    execute: async (slug: string, args: Record<string, unknown>, options?: { account?: string }) => {
+      executions.push({ slug, args, account: options?.account });
+      return { successful: true, data: { record: "owner-connected record result" } };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => [
+      { id: "ashby-account-1", alias: "hiring", toolkit: { slug: "ashby" }, status: "ACTIVE" },
+      { id: "hubspot-account-1", alias: "company-crm", toolkit: { slug: "hubspot" }, status: "ACTIVE" },
+      { id: "gmail-account-1", alias: "personal-mail", toolkit: { slug: "gmail" }, status: "ACTIVE" },
+    ] },
+  } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return requests.length === 1
+        ? toolResponse("ASHBY_SEARCH_CANDIDATES", JSON.stringify({ person: "Amina" }), "call-1")
+        : requests.length === 2
+          ? toolResponse("HUBSPOT_SEARCH_CONTACTS", JSON.stringify({ query: "Amina" }), "call-2")
+          : requests.length === 3
+            ? toolResponse("HUBSPOT_CREATE_NOTE", JSON.stringify({ recordId: "contact-1" }), "call-3")
+            : chatResponse({ role: "assistant", content: "I checked the hiring and CRM records and saved the agreed follow-up." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Prepare Amina's onboarding by checking her application and CRM account, then save the agreed follow-up.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: "meeting:mtg_business_systems", provider: "telegram", conversationId: "mtg_business_systems", scope: "shared" },
+      { ephemeral: true, meetingId: "mtg_business_systems", meetingAppAccess: true, meetingCapabilityContext: { role: "custom", objective: "Prepare an accurate onboarding discussion from hiring and CRM records", subject: "Amina" }, meetingComposioAccountAliases: {}, toolAllow: ["CHUCK_MEETING_JOIN"], maxToolCalls: 8 },
+    );
+    assert.match(result.text, /checked the hiring and CRM records/);
+    assert.deepEqual(discoveryRequests[0]?.toolkits, ["ashby", "hubspot", "gmail"]);
+    assert.match(discoveryRequests[0]?.query ?? "", /onboarding/i);
+    assert.match(discoveryRequests[0]?.query ?? "", /Amina/i);
+    const shownNames = requests[0]?.tools?.map((tool: any) => tool.function?.name) ?? [];
+    assert.equal(shownNames.includes("ASHBY_SEARCH_CANDIDATES"), true);
+    assert.equal(shownNames.includes("ASHBY_GET_APPLICATION"), true);
+    assert.equal(shownNames.includes("HUBSPOT_SEARCH_CONTACTS"), true);
+    assert.equal(shownNames.includes("HUBSPOT_CREATE_NOTE"), true);
+    assert.equal(shownNames.includes("GMAIL_SEND_EMAIL"), false);
+    assert.equal(shownNames.includes("ASHBY_DELETE_CANDIDATE"), false);
+    assert.equal(shownNames.includes("COMPOSIO_EXECUTE_TOOL"), false);
+    assert.deepEqual(executions.map(({ slug }) => slug), ["ASHBY_SEARCH_CANDIDATES", "HUBSPOT_SEARCH_CONTACTS", "HUBSPOT_CREATE_NOTE"]);
+    assert.deepEqual(executions.map(({ account }) => account), ["hiring", "company-crm", "company-crm"]);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("private voice turns keep the Chusky context but skip Composio setup and durable agent-run overhead", async () => {
   const userId = 830052;
   await initStore({ memoryOnly: true });

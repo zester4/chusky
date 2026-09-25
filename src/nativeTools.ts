@@ -37,7 +37,7 @@ import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlia
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
-import { isMeetingRepresentativeEmailTool } from "./meetings/representative.js";
+import { isMeetingRepresentativeEmailTool, needsPrivateMeetingBriefBeforeJoin } from "./meetings/representative.js";
 import type { TaskWaitRequest } from "./types.js";
 import { createTaskWaitRequest } from "./taskWait.js";
 import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
@@ -1035,6 +1035,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw new Error("Searchable meeting transcript retention can be enabled only from a private owner conversation");
       }
       const profile = await getMeetingRepresentativeProfile(userId);
+      if (needsPrivateMeetingBriefBeforeJoin(profile, {
+        interactionMode: args.interactionMode,
+        title: args.title,
+        clientName: args.clientName,
+        objective: args.objective,
+        clientContext: args.clientContext,
+        hasSourceMeeting: Boolean(runtime.meetingId),
+      })) {
+        throw new Error("Before joining as the company representative, ask the owner privately for the client or meeting title and the specific purpose. Do not enter the meeting unprepared.");
+      }
       const clientName = typeof args.clientName === "string" && args.clientName.trim() ? args.clientName : undefined;
       // Objective/context without a named client is incomplete model carry-over,
       // not authorization for representative mode. Drop the incomplete brief so

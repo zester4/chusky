@@ -11,7 +11,7 @@ export type ChannelProvider = "telegram" | "slack" | "whatsapp" | "sendblue" | "
 export type AttachmentKind = "image" | "audio" | "video" | "document";
 
 /** A bounded, user-safe explanation of an inbound-media failure. */
-export type ChannelMediaError = "download_failed" | "unsupported_media_type" | "too_large" | "empty_media";
+export type ChannelMediaError = "download_failed" | "unsupported_media_type" | "invalid_media" | "too_large" | "empty_media";
 
 export interface ChannelAttachment {
   id: string;

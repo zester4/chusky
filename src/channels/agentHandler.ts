@@ -24,6 +24,7 @@ import { formatInboundMessageForAgent } from "./conversations.js";
 import { resumeApprovedDelegation } from "../subagents/executor.js";
 import { SHARED_CHANNEL_TOOL_DENY } from "../sharedChannelPolicy.js";
 import { defaultMediaInstruction } from "../mediaInput.js";
+import { decodeMediaDataUrl, normalizeInboundImages } from "./imageMedia.js";
 
 function reply(conversation: ChuskyConversation, text: string, idempotencySeed: string, extra: Partial<OutboundMessage> = {}): OutboundMessage {
   return {
@@ -73,9 +74,9 @@ async function saveConversation(conversation: ChuskyConversation, message: Inbou
 }
 
 function dataUrlBytes(url: string): { mimeType: string; bytes: Buffer; dataUrl: string } | undefined {
-  const match = url.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/);
-  if (!match) return undefined;
-  return { mimeType: match[1], bytes: Buffer.from(match[2], "base64"), dataUrl: url };
+  const decoded = decodeMediaDataUrl(url);
+  if (!decoded) return undefined;
+  return { mimeType: decoded.mimeType, bytes: decoded.bytes, dataUrl: `data:${decoded.mimeType};base64,${decoded.bytes.toString("base64")}` };
 }
 
 async function persistInboundImages(message: InboundMessage, userId: number): Promise<void> {
@@ -101,6 +102,8 @@ function mediaFailureText(error: ChannelMediaError, kind: InboundMessage["attach
       return kind === "audio"
         ? "I received the voice message, but its audio format is not supported yet. Please try again as an iMessage voice note, M4A, AAC, MP3, WAV, OGG, WebM, or send it as text."
         : `I received the ${label}, but its format is not supported yet. Please send it as a PDF, Word document, text file, JPEG, PNG, WebP, MP4, or a supported audio format.`;
+    case "invalid_media":
+      return `I received the ${label}, but the downloaded file was not a valid ${label}. Please send it again.`;
     case "too_large":
       return kind === "audio" ? "I received the voice message, but it is too large to process. Please send a shorter recording." : `I received the ${label}, but it is too large to process safely. Please send a file under 12 MB.`;
     case "empty_media":
@@ -216,15 +219,19 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
     if (message.interaction?.kind === "approval") return handleApproval(message, conversation);
     const text = message.text?.trim();
     if (!text && !message.attachments.length) return reply(conversation, "I received that, but there was no text or supported attachment to work with.", message.providerEventId);
-    const mediaFailure = message.attachments.find((attachment) => attachment.mediaError);
+    // Normalize and validate every inbound image before it reaches OpenRouter.
+    // This is intentionally shared across providers: CDN content-type headers
+    // are not proof that the downloaded bytes represent a real image.
+    const normalizedMessage = await normalizeInboundImages(message);
+    const mediaFailure = normalizedMessage.attachments.find((attachment) => attachment.mediaError);
     if (mediaFailure?.mediaError) return reply(conversation, mediaFailureText(mediaFailure.mediaError, mediaFailure.kind), message.providerEventId);
-    if (message.attachments.length && message.attachments.some((attachment) => !attachment.url)) return reply(conversation, "I received the attachment, but the channel could not provide its media bytes safely.", message.providerEventId);
+    if (normalizedMessage.attachments.length && normalizedMessage.attachments.some((attachment) => !attachment.url)) return reply(conversation, "I received the attachment, but the channel could not provide its media bytes safely.", message.providerEventId);
     const { history, model } = await privateOrSharedHistory(conversation);
     try {
-      const prepared = await buildAgentInput(message);
-      await persistInboundImages(message, conversation.userId);
+      const prepared = await buildAgentInput(normalizedMessage);
+      await persistInboundImages(normalizedMessage, conversation.userId);
       const result = await runAgent(conversation.userId, prepared.input, history, model, undefined, undefined, undefined, undefined, { accountId: conversation.accountId, provider: conversation.provider, conversationId: conversation.conversationId, scope: conversation.scope, deliveryTarget: conversation.replyTarget, runId: `channel_${message.provider}_${message.providerEventId}` }, channelAgentRunOptions(conversation, message.receivedAt));
-      await saveConversation(conversation, message, prepared.historyLabel, result.text);
+      await saveConversation(conversation, normalizedMessage, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
       const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];

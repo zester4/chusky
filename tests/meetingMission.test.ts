@@ -32,6 +32,17 @@ test("meeting context lookup cannot expand beyond the mission's frozen source me
   assert.deepEqual(lookupMeetingMission(mission, memories, "different offer").facts, ["No approved meeting-context fact matched that question."]);
 });
 
+test("meeting brief excludes facts that are past their review date", () => {
+  const context: MemoryFact[] = [
+    { id: "mem_current_acme", category: "relationship", key: "Acme current rollout", value: "The pilot starts in October.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 20 },
+    { id: "mem_review_acme", category: "relationship", key: "Acme old rollout", value: "The pilot starts in March.", confidence: 1, source: "owner", sensitivity: "normal", personKey: "acme", createdAt: 1, updatedAt: 30, reviewAt: 99 },
+  ];
+  const mission = prepareMeetingMission({ clientName: "Acme", objective: "pilot rollout" }, context, 100);
+  assert.deepEqual(mission.sourceMemoryIds, ["mem_current_acme"]);
+  assert.match(mission.brief, /October/);
+  assert.doesNotMatch(mission.brief, /March/);
+});
+
 test("meeting business lookup uses relevant current business facts, never personal or sensitive memories", () => {
   const context: MemoryFact[] = [
     ...memories,
@@ -39,6 +50,7 @@ test("meeting business lookup uses relevant current business facts, never person
     { id: "mem_private_personal", category: "personal", key: "Home address", value: "14 Private Road.", confidence: 1, source: "owner", sensitivity: "normal", createdAt: 1, updatedAt: 30 },
     { id: "mem_internal_sensitive", category: "business", key: "Internal margin", value: "Never mention our margin.", confidence: 1, source: "owner", sensitivity: "sensitive", createdAt: 1, updatedAt: 40 },
     { id: "mem_old", category: "business", key: "Old pricing", value: "The old plan was $19.", confidence: 1, source: "owner", sensitivity: "normal", status: "superseded", createdAt: 1, updatedAt: 50 },
+    { id: "mem_review", category: "business", key: "Pricing awaiting review", value: "Pricing is not confirmed.", confidence: 1, source: "owner", sensitivity: "normal", createdAt: 1, updatedAt: 60, reviewAt: Date.now() - 1 },
   ];
   const result = lookupMeetingBusinessKnowledge(context, "pricing plan");
   assert.deepEqual(result.facts, ["Standard pricing: The standard plan starts at $49 per month."]);

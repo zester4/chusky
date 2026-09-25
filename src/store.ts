@@ -3616,7 +3616,9 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
     value: String(memory.value ?? ""),
     confidence: typeof memory.confidence === "number" && Number.isFinite(memory.confidence) ? Math.max(0, Math.min(1, memory.confidence)) : 1,
     source: String(memory.source ?? "legacy"),
-    sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    // Legacy records without an explicit classification must not become
+    // broadly shareable merely because they predate the sensitivity field.
+    sensitivity: memory.sensitivity === "normal" ? "normal" : "sensitive",
     status: memory.status === "superseded" || memory.status === "deleted" ? memory.status : "active",
     supersedesId: typeof memory.supersedesId === "string" ? memory.supersedesId : undefined,
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,

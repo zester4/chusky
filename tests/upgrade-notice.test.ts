@@ -15,9 +15,9 @@ test("meeting upgrade preset contains bounded, accurate release highlights", () 
   const bullets = getAgentUpgradePreset("meetings");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.meetings]);
-  assert.match(bullets[0], /Zoom/);
-  assert.match(bullets[1], /sales and onboarding/);
-  assert.match(bullets[2], /screen-share/);
+  assert.match(bullets[0], /client-matched readiness brief/);
+  assert.match(bullets[1], /contribute naturally without waiting to be addressed/);
+  assert.match(bullets[2], /sensitive and unrelated memories are excluded/);
   assert.throws(() => getAgentUpgradePreset("unknown"), /Unknown upgrade preset/);
 });
 
@@ -80,11 +80,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the custom MCP release", async () => {
+test("current upgrade manifest announces the meeting representative release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.6.0");
-  assert.equal(notice?.version, "4.6.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /third-party MCP servers/);
-  assert.match(formatAgentUpgradeNotice(notice!), /private\/link-local targets and redirects/);
-  assert.match(formatAgentUpgradeNotice(notice!), /account isolation from group and meeting contexts/);
+  assert.equal(notice?.id, "release-4.7.0");
+  assert.equal(notice?.version, "4.7.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /client-matched readiness brief/);
+  assert.match(formatAgentUpgradeNotice(notice!), /yield when participants speak/);
+  assert.match(formatAgentUpgradeNotice(notice!), /approval boundaries/);
 });

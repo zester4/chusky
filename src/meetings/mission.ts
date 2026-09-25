@@ -11,6 +11,10 @@ export interface MeetingMission {
 }
 
 const SAFE_CATEGORIES = new Set<MemoryFact["category"]>(["business", "relationship", "project", "procedural", "fact"]);
+const GENERIC_CLIENT_TOKENS = new Set([
+  "a", "an", "and", "call", "client", "customer", "follow", "for", "kickoff", "meeting", "onboarding",
+  "project", "review", "session", "the", "with", "workshop",
+]);
 
 function clean(value: unknown, maximum: number, field: string, required = false): string {
   if (value === undefined || value === null) {
@@ -36,6 +40,15 @@ function tokenScore(memory: MemoryFact, query: string): number {
     .reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0);
 }
 
+function matchesNamedClient(memory: MemoryFact, clientName: string): boolean {
+  const tokens = [...new Set(clientName.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 1 && !GENERIC_CLIENT_TOKENS.has(token)))];
+  if (!tokens.length) return false;
+  const identity = memory.personKey?.toLowerCase();
+  if (identity) return tokens.some((token) => identity.split(/[^a-z0-9]+/).includes(token));
+  const searchable = `${memory.key} ${memory.value}`.toLowerCase();
+  return tokens.some((token) => searchable.split(/[^a-z0-9]+/).includes(token));
+}
+
 /** Builds a compact, reviewable relationship brief from normal-sensitivity owner memories only. */
 export function prepareMeetingMission(input: {
   clientName: unknown;
@@ -46,16 +59,16 @@ export function prepareMeetingMission(input: {
   const objective = clean(input.objective, 1_500, "objective");
   const ownerContext = clean(input.clientContext, 4_000, "clientContext");
   const query = `${clientName} ${objective}`.trim();
-  const clientQuery = clientName.toLowerCase();
   const selected = memories
     .filter((memory) => (memory.status === undefined || memory.status === "active")
       && memory.sensitivity === "normal"
       && SAFE_CATEGORIES.has(memory.category)
-      && (!memory.expiresAt || memory.expiresAt > now))
-    .map((memory) => ({ memory, score: tokenScore(memory, query), clientScore: tokenScore(memory, clientQuery) }))
+      && (!memory.expiresAt || memory.expiresAt > now)
+      && (!memory.reviewAt || memory.reviewAt > now))
+    .map((memory) => ({ memory, score: tokenScore(memory, query), clientMatches: matchesNamedClient(memory, clientName) }))
     // A meeting never inherits a fact merely because its generic objective
     // happens to overlap. The selected client must match the memory itself.
-    .filter(({ clientScore }) => clientScore > 0)
+    .filter(({ clientMatches }) => clientMatches)
     .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
     .slice(0, 8)
     .map(({ memory }) => memory);
@@ -100,7 +113,8 @@ export function lookupMeetingMission(mission: MeetingMission, memories: MemoryFa
       && (memory.status === undefined || memory.status === "active")
       && memory.sensitivity === "normal"
       && SAFE_CATEGORIES.has(memory.category)
-      && (!memory.expiresAt || memory.expiresAt > Date.now()))
+      && (!memory.expiresAt || memory.expiresAt > Date.now())
+      && (!memory.reviewAt || memory.reviewAt > Date.now()))
     .map((memory) => ({ memory, score: tokenScore(memory, question) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)
@@ -122,7 +136,8 @@ export function lookupMeetingBusinessKnowledge(memories: MemoryFact[], query: un
       && (memory.status === undefined || memory.status === "active")
       && !memory.personKey
       && !memory.projectId
-      && (!memory.expiresAt || memory.expiresAt > now))
+      && (!memory.expiresAt || memory.expiresAt > now)
+      && (!memory.reviewAt || memory.reviewAt > now))
     .map((memory) => ({ memory, score: tokenScore(memory, question) }))
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt)

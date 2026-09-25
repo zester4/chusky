@@ -49,7 +49,7 @@ import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, l
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
-import { applyMeetingComposioAccountAlias, isMeetingRepresentativeComposioTool } from "./meetings/representative.js";
+import { applyMeetingComposioAccountAlias, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRepresentativeComposioTool, selectMeetingToolsForToolkit } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
 import { resolveComposioRoute } from "./composioRouting.js";
@@ -782,6 +782,9 @@ export interface AgentRunOptions {
   toolAllow?: string[];
   /** Meeting-only, owner-configured Composio account routing; participant selectors are ignored. */
   meetingComposioAccountAliases?: Record<string, string>;
+  /** Discover mission-relevant tools from owner-connected apps for a private representative run. */
+  meetingAppAccess?: boolean;
+  meetingCapabilityContext?: { role: string; objective: string; subject?: string };
   /** Owner-selected connected account routing for autonomous read-only checks. */
   composioAccount?: string;
   /** Authenticated meeting identity for scoped native meeting tools. */
@@ -953,7 +956,8 @@ export async function runAgent(
 
   let requestModel = model;
 
-  const allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
+  let allow = options?.toolAllow === undefined ? undefined : new Set(options.toolAllow);
+  let meetingComposioAccountAliases = options?.meetingComposioAccountAliases;
   const toolsDisabled = allow?.size === 0;
   const toolName = (tool: any): string => String(tool?.function?.name ?? tool?.name ?? "");
   if (voiceTurn && (!allow || [...allow].some((name) => !VOICE_TURN_TOOL_NAMES.has(name)))) {
@@ -966,6 +970,24 @@ export async function runAgent(
   // pay the Composio session/tools round trips before beginning speech.
   const sessionObj = toolsDisabled || voiceTurn ? undefined : (await getOrCreateComposioSession(userId)).sessionObj;
 
+  let discoveredMeetingTools: any[] = [];
+  if (options?.meetingAppAccess && sessionObj && allow) {
+    try {
+      const discovery = await discoverMeetingMissionTools(userId, sessionObj, options.meetingCapabilityContext, meetingComposioAccountAliases);
+      discoveredMeetingTools = discovery.tools;
+      allow = new Set(allow);
+      for (const tool of discoveredMeetingTools) {
+        const slug = String(tool?.function?.name ?? tool?.name ?? "").trim().toUpperCase();
+        if (slug) allow.add(slug);
+      }
+      meetingComposioAccountAliases = { ...discovery.accountAliases, ...(meetingComposioAccountAliases ?? {}) };
+    } catch (error) {
+      // App discovery is optional for the spoken meeting turn. Keep the
+      // meeting responsive, but make the capability failure visible to ops.
+      logger.warn({ err: error, userId }, "Could not discover meeting mission actions");
+    }
+  }
+
   if (onStatus) await onStatus(humanProgressStatus("preparing"));
 
   const deny = new Set(options?.toolDeny ?? []);
@@ -976,11 +998,14 @@ export async function runAgent(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fullComposioTools: any[] = sessionObj ? await sessionObj.tools() : [];
   fullComposioTools.forEach((tool: unknown) => registerComposioToolMetadata(tool));
-  const composioTools = (fullComposioTools.length > 80
-    ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
-    : fullComposioTools)
+  const composioTools = [
+    ...(fullComposioTools.length > 80
+      ? fullComposioTools.filter((tool) => toolName(tool).startsWith("COMPOSIO_") || Boolean(allow?.has(toolName(tool))))
+      : fullComposioTools),
+    ...discoveredMeetingTools,
+  ]
     .filter((tool) => !HIDDEN_COMPOSIO_MODEL_TOOLS.has(toolName(tool)))
-    .map(addAccountSelector).map((tool) => options?.meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
+    .map(addAccountSelector).map((tool) => meetingComposioAccountAliases ? hideMeetingAccountSelector(tool) : tool);
   composioTools.push(...LOCAL_TOOLS);
   const mcpDiscovery = (!toolsDisabled && !voiceTurn && channelContext?.scope !== "shared" && !options?.meetingId)
     ? await mcpClient.discoverToolsForUser(userId, signal)
@@ -995,6 +1020,7 @@ export async function runAgent(
     && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
     && availableTools.some((tool) => ["CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(toolName(tool)));
   let malformedToolCallPending = false;
+  let meetingCalendarAvailabilityChecked = false;
 
   if (!options?.ephemeral && !voiceTurn) {
     const capabilityModel = model.replace(/^~/, "");
@@ -1365,9 +1391,12 @@ export async function runAgent(
           // by the model instead of surfacing as opaque provider errors.
           if (schema && typeof schema === "object") validateToolArgumentsAgainstSchema(slug, args, schema);
         }
+        if (options?.meetingId && isMeetingCalendarWriteTool(slug) && !meetingCalendarAvailabilityChecked) {
+          throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
+        }
         toolCallsExecuted += 1;
-        let executionArgs = options?.meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
-          ? applyMeetingComposioAccountAlias(slug, args, options.meetingComposioAccountAliases)
+        let executionArgs = meetingComposioAccountAliases && !slug.startsWith("CHUCK_")
+          ? applyMeetingComposioAccountAlias(slug, args, meetingComposioAccountAliases)
           : args;
         if (options?.composioAccount && !slug.startsWith("CHUCK_")) executionArgs = { ...executionArgs, account: options.composioAccount };
         const groupArtifactTool = channelContext?.scope === "shared" && GROUP_ARTIFACT_TOOLS.has(slug);
@@ -1585,6 +1614,9 @@ export async function runAgent(
         } else {
           execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
         }
+        if (options?.meetingId && isMeetingCalendarAvailabilityTool(slug) && isSuccessfulCalendarResult(execResult)) {
+          meetingCalendarAvailabilityChecked = true;
+        }
         result = typeof execResult === "string"
           ? execResult
           : JSON.stringify(execResult) ?? "undefined";
@@ -1712,6 +1744,96 @@ export async function listConnectedAccounts(userId: number, toolkit?: string): P
     createdAt: item.createdAt ? String(item.createdAt) : undefined,
     updatedAt: item.updatedAt ? String(item.updatedAt) : undefined,
   })).filter((item: ConnectedComposioAccount) => item.id);
+}
+
+type MeetingMissionToolDiscovery = { tools: any[]; accountAliases: Record<string, string> };
+
+function isSuccessfulCalendarResult(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  const status = typeof result.status === "string" ? result.status.toLowerCase() : "";
+  return result.successful !== false && result.error === undefined && status !== "error" && status !== "failed";
+}
+
+/** Discover concrete mission-relevant actions, pinned to an unambiguous owner-connected account per toolkit. */
+async function discoverMeetingMissionTools(
+  userId: number,
+  sessionObj: any,
+  context: { role: string; objective: string; subject?: string } | undefined,
+  configuredAliases: Record<string, string> = {},
+): Promise<MeetingMissionToolDiscovery> {
+  const activeAccounts = (await listConnectedAccounts(userId)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+  const connectedByToolkit = new Map<string, ConnectedComposioAccount[]>();
+  for (const account of activeAccounts) {
+    const key = account.toolkit.replace(/[^a-z0-9]/gi, "").toUpperCase();
+    const group = connectedByToolkit.get(key) ?? [];
+    group.push(account);
+    connectedByToolkit.set(key, group);
+  }
+
+  if (!connectedByToolkit.size) return { tools: [], accountAliases: {} };
+  const role = String(context?.role ?? "custom").replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 80);
+  const objective = String(context?.objective ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 1_500);
+  const subject = String(context?.subject ?? "").replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 180);
+  const query = [
+    `Meeting mission role: ${role}.`,
+    `Objective: ${objective}.`,
+    subject ? `Person, account, or project in scope: ${subject}.` : "",
+    "Find the exact connected-app actions and schemas needed to verify relevant owner records, prior interactions, commitments, status, and next steps for this meeting. Include suitable read actions and only routine, reversible follow-up actions. Do not select deletion, permission, payment, legal, contract-signing, or other high-impact actions.",
+  ].filter(Boolean).join(" ").slice(0, 1_900);
+  const toolkitSlugs = [...connectedByToolkit.values()].flatMap((accounts) => accounts.slice(0, 1).map((account) => account.toolkit)).slice(0, 50);
+  const searchResult = await sessionObj.search({ query, toolkits: toolkitSlugs });
+
+  const accountAliases: Record<string, string> = {};
+  const selectedAccounts = new Map<string, ConnectedComposioAccount>();
+  for (const [toolkitKey, accounts] of connectedByToolkit) {
+    const configured = Object.entries(configuredAliases).find(([prefix]) => prefix.replace(/[^a-z0-9]/gi, "").toUpperCase() === toolkitKey)?.[1];
+    const account = configured
+      ? accounts.find((candidate) => candidate.id === configured || candidate.alias === configured)
+      : accounts.length === 1 ? accounts[0] : undefined;
+    // Never let meeting speech choose between personal and work accounts.
+    // Multiple connections require an owner-pinned alias in the profile.
+    if (!account) continue;
+    selectedAccounts.set(toolkitKey, account);
+    accountAliases[toolkitKey] = account.alias || account.id;
+  }
+
+  const discovered: any[] = [];
+  const schemas = searchResult?.toolSchemas ?? searchResult?.tool_schemas;
+  if (schemas && typeof schemas === "object" && !Array.isArray(schemas)) {
+    for (const schema of Object.values(schemas) as any[]) {
+      const toolkit = String(schema?.toolkit ?? "").trim();
+      const account = selectedAccounts.get(toolkit.replace(/[^a-z0-9]/gi, "").toUpperCase());
+      const slug = String(schema?.toolSlug ?? schema?.tool_slug ?? "").trim();
+      const parameters = schema?.inputSchema ?? schema?.input_schema;
+      if (!account || !slug || !parameters || typeof parameters !== "object" || schema?.hasFullSchema === false) continue;
+      const candidate = {
+        type: "function",
+        function: {
+          name: slug,
+          description: String(schema?.description ?? slug).slice(0, 1_000),
+          parameters,
+        },
+      };
+      discovered.push(...selectMeetingToolsForToolkit(account.toolkit, [candidate]));
+    }
+  }
+  // Compatibility with older Tool Router response shapes; still require an
+  // exact active toolkit, an owner-pinned account, and a full input schema.
+  const legacyCandidates = Array.isArray(searchResult) ? searchResult : Array.isArray(searchResult?.items) ? searchResult.items : [];
+  for (const candidate of legacyCandidates) {
+    const resolvedToolkit = String(candidate?.toolkit?.slug ?? candidate?.toolkit ?? candidate?.toolkitSlug ?? "").trim();
+    const account = selectedAccounts.get(resolvedToolkit.replace(/[^a-z0-9]/gi, "").toUpperCase());
+    if (!account) continue;
+    discovered.push(...selectMeetingToolsForToolkit(account.toolkit, [candidate]));
+  }
+
+  const unique = new Map<string, any>();
+  for (const tool of discovered) {
+    const slug = String(tool?.function?.name ?? tool?.name ?? "").trim().toUpperCase();
+    if (slug && !unique.has(slug)) unique.set(slug, tool);
+  }
+  return { tools: [...unique.values()].slice(0, 32), accountAliases };
 }
 
 /** Permanently revoke one Composio connection only after proving it belongs to this Chusky owner. */

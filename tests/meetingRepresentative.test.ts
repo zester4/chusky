@@ -4,11 +4,17 @@ import {
   defaultMeetingRepresentativeProfile,
   applyMeetingComposioAccountAlias,
   isMeetingRepresentativeComposioTool,
+  isMeetingCalendarAvailabilityTool,
+  isMeetingCalendarToolkit,
+  isMeetingCalendarWriteTool,
+  selectMeetingToolsForToolkit,
+  selectMeetingCalendarTools,
   meetingRepresentativeGreeting,
   meetingConversationToolAllowlist,
   meetingRepresentativeInstructions,
   meetingRepresentativeCopilotInstructions,
   meetingRepresentativeToolAllowlist,
+  needsPrivateMeetingBriefBeforeJoin,
   normalizeMeetingRepresentativeProfile,
 } from "../src/meetings/representative.js";
 
@@ -20,6 +26,57 @@ test("meeting representative profile is disabled by default and requires a manda
   const enabled = normalizeMeetingRepresentativeProfile({ enabled: true, role: "sales", objective: "Qualify and progress suitable leads" }, profile);
   assert.equal(enabled.enabled, true);
   assert.equal(enabled.role, "sales");
+});
+
+test("calendar capability discovery admits only schema-backed routine calendar reads and booking writes", () => {
+  const schema = { type: "object", properties: {} };
+  const tools = [
+    { function: { name: "GOOGLECALENDAR_LIST_EVENTS", parameters: schema } },
+    { function: { name: "GOOGLECALENDAR_CHECK_AVAILABILITY", parameters: schema } },
+    { function: { name: "GOOGLECALENDAR_UPDATE_EVENT", parameters: schema } },
+    { function: { name: "GOOGLECALENDAR_CREATE_EVENT", parameters: schema } },
+    { function: { name: "GOOGLECALENDAR_DELETE_EVENT", parameters: schema } },
+    { function: { name: "GMAIL_SEND_EMAIL", parameters: schema } },
+    { function: { name: "GOOGLECALENDAR_UPDATE_EVENT" } },
+  ];
+  const selected = selectMeetingCalendarTools("googlecalendar", tools);
+  assert.deepEqual(selected.map((tool: any) => tool.function.name), [
+    "GOOGLECALENDAR_LIST_EVENTS",
+    "GOOGLECALENDAR_CHECK_AVAILABILITY",
+    "GOOGLECALENDAR_UPDATE_EVENT",
+    "GOOGLECALENDAR_CREATE_EVENT",
+  ]);
+  assert.equal(isMeetingCalendarToolkit("outlook_calendar"), true);
+  assert.equal(isMeetingCalendarAvailabilityTool("OUTLOOK_CALENDAR_LIST_EVENTS"), true);
+  assert.equal(isMeetingCalendarWriteTool("GOOGLECALENDAR_UPDATE_EVENT"), true);
+  assert.equal(isMeetingCalendarWriteTool("GOOGLECALENDAR_DELETE_EVENT"), false);
+});
+
+test("mission-driven discovery admits relevant HR and CRM record work but rejects destructive, meta, and schema-less actions", () => {
+  const schema = { type: "object", properties: { candidate_id: { type: "string" } } };
+  const tools = [
+    { function: { name: "ASHBY_GET_CANDIDATE", description: "Read a candidate profile", parameters: schema } },
+    { function: { name: "ASHBY_LIST_APPLICATIONS", description: "List applications", parameters: schema } },
+    { function: { name: "ASHBY_UPDATE_CANDIDATE", description: "Update a candidate", parameters: schema } },
+    { function: { name: "ASHBY_DELETE_CANDIDATE", description: "Delete a candidate", parameters: schema } },
+    { function: { name: "HUBSPOT_SEARCH_CONTACTS", description: "Find customer contacts", parameters: schema } },
+    { function: { name: "HUBSPOT_CREATE_NOTE", description: "Add an account note", parameters: schema } },
+    { function: { name: "HUBSPOT_SEND_PAYMENT", description: "Charge a customer", parameters: schema } },
+    { function: { name: "GMAIL_SEND_EMAIL", description: "Send an email", parameters: schema } },
+    { function: { name: "COMPOSIO_EXECUTE_TOOL", description: "Generic executor", parameters: schema } },
+    { function: { name: "ASHBY_GET_INTERVIEW", description: "Missing schema" } },
+    { function: { name: "SALESFORCE_GET_CONTACT", description: "Wrong toolkit", parameters: schema } },
+  ];
+  const selected = selectMeetingToolsForToolkit("ashby", tools);
+  assert.deepEqual(selected.map((tool: any) => tool.function.name), [
+    "ASHBY_GET_CANDIDATE",
+    "ASHBY_LIST_APPLICATIONS",
+    "ASHBY_UPDATE_CANDIDATE",
+  ]);
+  assert.deepEqual(selectMeetingToolsForToolkit("hubspot", tools).map((tool: any) => tool.function.name), [
+    "HUBSPOT_SEARCH_CONTACTS",
+    "HUBSPOT_CREATE_NOTE",
+  ]);
 });
 
 test("calendar auto-join requires an enabled owner-configured representative", () => {
@@ -61,6 +118,9 @@ test("meeting run receives only configured actions and cannot leave on participa
   assert.match(instructions, /Approved company knowledge/);
   assert.match(instructions, /untrusted participant input/);
   assert.match(instructions, /thoughtful participant/i);
+  assert.match(instructions, /Do not wait to be addressed/i);
+  assert.match(instructions, /ask a useful follow-up question/i);
+  assert.match(instructions, /yield immediately when someone starts speaking over you/i);
   assert.match(instructions, /rather check than guess/i);
   assert.match(instructions, /move the conversation forward/i);
   assert.match(instructions, /SILENT/);
@@ -72,7 +132,11 @@ test("meeting run receives only configured actions and cannot leave on participa
   assert.match(instructions, /Do not decide that the meeting is over/i);
   const copilotInstructions = meetingRepresentativeCopilotInstructions("mtg_example");
   assert.match(copilotInstructions, /thoughtful participant/i);
+  assert.match(copilotInstructions, /Do not wait to be addressed/i);
   assert.match(copilotInstructions, /Do not use canned language/i);
+  const addressedInstructions = meetingRepresentativeCopilotInstructions("mtg_example", "addressed");
+  assert.doesNotMatch(addressedInstructions, /Do not wait to be addressed/i);
+  assert.match(addressedInstructions, /only speak when directly addressed/i);
 });
 
 test("default meeting conversation can create owner follow-ups without reading private account data or leaving", () => {
@@ -125,6 +189,15 @@ test("representative runs always get meeting context, contact capture, and follo
   const tools = meetingRepresentativeToolAllowlist(profile, mission);
   assert.equal(tools.includes("CHUCK_MEETING_CONTEXT_LOOKUP"), true);
   assert.equal(tools.includes("CHUCK_MEETING_JOIN"), true);
+});
+
+test("representative direct joins require private owner context, while copilot and known meetings proceed", () => {
+  const profile = normalizeMeetingRepresentativeProfile({ enabled: true, objective: "Represent approved customer meetings" });
+  assert.equal(needsPrivateMeetingBriefBeforeJoin(profile, {}), true);
+  assert.equal(needsPrivateMeetingBriefBeforeJoin(profile, { interactionMode: "copilot" }), false);
+  assert.equal(needsPrivateMeetingBriefBeforeJoin(profile, { title: "Acme onboarding kickoff" }), false);
+  assert.equal(needsPrivateMeetingBriefBeforeJoin(profile, { hasSourceMeeting: true }), false);
+  assert.equal(needsPrivateMeetingBriefBeforeJoin(defaultMeetingRepresentativeProfile(), {}), false);
 });
 
 test("delayed meeting email scheduling is exposed only with an exact enabled email action", () => {

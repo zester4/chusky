@@ -522,8 +522,24 @@ export async function joinRecallMeeting(userId: number, input: {
   if (hasMissionInput && inheritedMission) throw new Error("A follow-up meeting cannot replace its inherited client context");
   if ((hasMissionInput || inheritedMission?.mission) && interactionMode !== "representative") throw new Error("Client meeting context requires representative mode");
   if (hasMissionInput && (typeof input.clientName !== "string" || !input.clientName.trim())) throw new Error("clientName is required when adding client meeting context");
-  const mission = inheritedMission?.mission ?? (hasMissionInput
-    ? prepareMeetingMission({ clientName: input.clientName, objective: input.objective, clientContext: input.clientContext }, (await getSession(userId)).memories)
+  const automaticMeetingContext = interactionMode === "representative" && representativeProfile.enabled && !inheritedMission?.mission
+    ? {
+      // A direct join and a calendar join use the same private readiness
+      // brief. The title is only a matching hint; it never grants authority.
+      clientName: typeof input.clientName === "string" && input.clientName.trim() ? input.clientName : title,
+      objective: typeof input.objective === "string" && input.objective.trim() ? input.objective : representativeProfile.objective,
+      clientContext: input.clientContext,
+    }
+    : undefined;
+  const missionInput = inheritedMission?.mission
+    ? undefined
+    : hasMissionInput
+      ? { clientName: input.clientName, objective: input.objective ?? representativeProfile.objective, clientContext: input.clientContext }
+      : automaticMeetingContext && title
+        ? automaticMeetingContext
+        : undefined;
+  const mission = inheritedMission?.mission ?? (missionInput
+    ? prepareMeetingMission(missionInput, (await getSession(userId)).memories)
     : undefined);
   const meetingUrlHash = createHash("sha256").update(meeting.url).digest("hex");
   // Immediate joins dedupe by URL; scheduled joins dedupe by URL + exact

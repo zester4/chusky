@@ -18,6 +18,8 @@ export interface MemoryRecord {
   value: string;
   source: string;
   confidence: number; // 0.0 to 1.0
+  /** Missing/legacy sensitivity is treated as sensitive at retrieval boundaries. */
+  sensitivity: "normal" | "sensitive";
   createdAt: number;
   updatedAt: number;
   expiresAt?: number;
