@@ -8,8 +8,9 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationA
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
+import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -61,6 +62,36 @@ test("operator reliability surfaces are owner-scoped and expose honest provider 
   assert.match(JSON.stringify(await matrix.json()), /configured_unverified|not_configured/);
   const other = await api.fetch(new Request("http://local/v1/operator/reliability?operation=operator.test", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-other" } }));
   assert.equal((await other.json() as { data: { sampleCount: number } }).data.sampleCount, 0);
+});
+
+test("operator timeline joins mission receipts, child traces, verifications, and compensations without leaking provider payloads", async () => {
+  const externalUserId = "timeline-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const mission = await createMission(ownerId, { title: "Verify an email action", objective: "Send and inspect one message", definitionOfDone: "The provider outcome is known", steps: [{ id: "send", title: "Send", objective: "Send the requested message" }] });
+  const receipt = await saveExternalAction({
+    id: "act_timeline_receipt", userId: ownerId, provider: "composio", tool: "GMAIL_SEND_EMAIL",
+    argumentsHash: "must-not-be-exposed", logicalActionId: "mission:timeline-action-hash", sourceKind: "mission",
+    sourceId: mission.id, missionStepId: "send", status: "ambiguous", resultSummary: "PRIVATE_PROVIDER_PAYLOAD_MARKER",
+    receiptVerification: "missing", createdAt: 100, updatedAt: 200,
+  });
+  await appendTraceEvent({ ownerId, kind: "tool", type: "external_action.requested", at: 150, correlationId: receipt.logicalActionId, summary: "The email write was dispatched." });
+  await saveOutcomeVerification({ id: "verify_timeline", ownerId, missionId: mission.id, status: "uncertain", checks: [], results: [], confidence: 0.2, unresolved: ["Provider state needs read-back"], startedAt: 180, completedAt: 190, version: 1 });
+  await queueCompensation({ ownerId, originalActionId: receipt.id, provider: "composio", objective: "Undo only after the provider state is verified", missionId: mission.id, missionStepId: "send" });
+
+  const foreignUserId = "timeline-foreign";
+  const foreignOwnerId = Number.parseInt(createHash("sha256").update(`sdk:root:${foreignUserId}`).digest("hex").slice(0, 12), 16);
+  await saveExternalAction({ id: "act_foreign_timeline", userId: foreignOwnerId, provider: "composio", tool: "GMAIL_SEND_EMAIL", argumentsHash: "foreign-hash", logicalActionId: "foreign-action", sourceKind: "mission", sourceId: mission.id, status: "succeeded", createdAt: 100, updatedAt: 200 });
+
+  const api = app();
+  const response = await api.fetch(new Request(`http://local/v1/operator/timeline?mission_id=${encodeURIComponent(mission.id)}`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId } }));
+  assert.equal(response.status, 200);
+  const items = (await response.json() as { data: Array<{ id: string; type: string; source: string; status?: string; summary: string }> }).data;
+  assert.ok(items.some((item) => item.id === "act_timeline_receipt" && item.type === "external_action.ambiguous" && item.source === "receipt" && item.summary.includes("GMAIL_SEND_EMAIL") && item.summary.includes("receipt: missing") && item.summary.includes("step: send")));
+  assert.ok(items.some((item) => item.type === "external_action.requested"), "includes child trace correlated by the action receipt");
+  assert.ok(items.some((item) => item.id === "verify_timeline" && item.source === "verification" && item.status === "uncertain"));
+  assert.ok(items.some((item) => item.source === "compensation"));
+  assert.ok(!items.some((item) => item.id === "act_foreign_timeline"));
+  assert.doesNotMatch(JSON.stringify(items), /PRIVATE_PROVIDER_PAYLOAD_MARKER|must-not-be-exposed|foreign-hash/);
 });
 
 test("operator outcome verification reads current provider state instead of trusting submitted provider results", async () => {

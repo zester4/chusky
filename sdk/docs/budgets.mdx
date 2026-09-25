@@ -39,3 +39,17 @@ Pass `?include_state=true` only when the checkpointed messages and tool results
 are needed for debugging. The trace is owner-scoped, versioned for optimistic
 concurrency, and retained independently from chat history. Worker handoffs use
 the same trace model and expose their `runId` through the worker endpoints.
+
+For an owner-scoped operational view across durable work, use the unified
+operator timeline:
+
+```ts
+const timeline = await chusky.operator.timeline(missionId);
+```
+
+It joins mission lifecycle events with linked external-action receipt status,
+provider-action trace events, outcome verification, compensation, and approvals.
+Mission filtering follows a mission's durable action receipts so child provider
+events are not lost just because they use the action ID as their correlation ID.
+The timeline reports bounded summaries and statuses, not provider arguments or
+raw provider responses.

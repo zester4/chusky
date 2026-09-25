@@ -331,7 +331,19 @@ paths:
   /operator/trace:
     get: { summary: List owner-scoped reliability trace events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Trace events } } }
   /operator/timeline:
-    get: { summary: Read the unified mission, receipt, approval, and reliability timeline, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Causal operator timeline } } }
+    get:
+      summary: >-
+        Read the owner-scoped mission, external receipt, approval, verification,
+        compensation, and reliability timeline. Mission filtering includes child action events.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - name: mission_id
+          in: query
+          schema: { type: string }
+          description: Restrict the timeline to one owner-owned mission and its linked records.
+      responses:
+        '200': { description: Causal operator timeline }
+        '404': { description: Mission does not exist for this owner }
   /operator/reliability:
     get: { summary: Read measured reliability health for an operation, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Reliability health } } }
   /operator/compensations:

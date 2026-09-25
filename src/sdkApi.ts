@@ -2524,7 +2524,33 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/audit-events", async (c) => { const session = await getSession(sdkUser(c)!.userId); const after = Number(c.req.query("after") ?? 0) || 0; return c.json({ data: session.sdkAudit!.filter((item) => item.at > after) }); });
   app.get("/v1/activity", async (c) => { const userId = sdkUser(c)!.userId; const since = Number(c.req.query("since") ?? 0) || 0; const session = await getSession(userId); return c.json({ now: Date.now(), approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()), tasks: (await listTasks(userId)).filter((item) => item.updatedAt > since).slice(0, 50), reminders: (await listReminders(userId)).filter((item) => item.createdAt > since).slice(0, 50), jobs: (await listJobs(userId)).filter((item) => item.createdAt > since).slice(0, 50) }); });
   app.get("/v1/operator/trace", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listTraceEvents(owner.userId, c.req.query("correlation_id"), Number(c.req.query("limit") ?? 500) || 500) }); });
-  app.get("/v1/operator/timeline", async (c) => { const owner = sdkUser(c)!; const missionId = c.req.query("mission_id"); const mission = missionId ? await getMission(owner.userId, missionId) : undefined; if (missionId && !mission) return apiError(c, 404, "not_found", "Mission not found."); const session = await getSession(owner.userId); const trace = await listTraceEvents(owner.userId, missionId, 1000); return c.json({ data: buildOperatorTimeline({ mission, trace, approvals: session.approvals.filter((item) => !missionId || item.args?.missionId === missionId).map((item) => ({ id: item.id, createdAt: item.createdAt, status: item.status, request: item.request })) }) }); });
+  app.get("/v1/operator/timeline", async (c) => {
+    const owner = sdkUser(c)!;
+    const missionId = c.req.query("mission_id");
+    const mission = missionId ? await getMission(owner.userId, missionId) : undefined;
+    if (missionId && !mission) return apiError(c, 404, "not_found", "Mission not found.");
+    const session = await getSession(owner.userId);
+    // Load the bounded owner trace once, then join mission-linked child actions
+    // through their durable receipt IDs. A direct mission correlation lookup
+    // misses tool events whose parent is the action receipt rather than mission.
+    const trace = await listTraceEvents(owner.userId, undefined, 5000);
+    const receipts = (session.externalActions ?? []).filter((item) => item.userId === owner.userId);
+    return c.json({ data: buildOperatorTimeline({
+      mission,
+      missionId,
+      trace,
+      receipts,
+      verifications: session.outcomeVerifications ?? [],
+      compensations: session.compensations ?? [],
+      approvals: session.approvals.map((item) => ({
+        id: item.id,
+        createdAt: item.createdAt,
+        status: item.status,
+        request: item.request,
+        ...(typeof item.args?.missionId === "string" ? { missionId: item.args.missionId } : {}),
+      })),
+    }) });
+  });
   app.get("/v1/operator/compensations", async (c) => { const owner = sdkUser(c)!; const status = c.req.query("status"); return c.json({ data: await listCompensations(owner.userId, status ? [status as never] : undefined) }); });
   app.get("/v1/operator/verifications", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listOutcomeVerifications(owner.userId, c.req.query("mission_id")) }); });
   app.get("/v1/operator/reliability", async (c) => { const owner = sdkUser(c)!; const operation = String(c.req.query("operation") ?? "agent").slice(0, 160); return c.json({ data: await reliabilityHealth(owner.userId, operation, Date.now(), Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(c.req.query("window_ms") ?? 3_600_000) || 3_600_000))) }); });
