@@ -60,6 +60,8 @@ import { buildArtifactUploadArguments } from "./artifactBridge.js";
 import { composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
+import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
+import type { OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -538,6 +540,105 @@ function toolSchemaName(tool: any): string {
   return String(tool?.function?.name ?? tool?.name ?? "");
 }
 
+async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], toolSlug: string, signal?: AbortSignal): Promise<unknown> {
+  const directTool = availableTools.find((tool) => toolSchemaName(tool) === toolSlug);
+  const directSchema = directTool?.function?.parameters ?? directTool?.inputSchema;
+  if (directSchema && typeof directSchema === "object") return directSchema;
+
+  // Composio sessions normally expose meta-tools rather than every app action.
+  // Fetch only the exact slug already selected by the agent; never substitute
+  // a similar action or infer a provider schema from its name.
+  if (!availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
+    throw new Error(`The exact action ${toolSlug} has no schema in this owner's current Composio session; no image transfer was attempted.`);
+  }
+  const response = await composioExecute(sessionObj, "COMPOSIO_GET_TOOL_SCHEMAS", { tool_slugs: [toolSlug] }, signal);
+  if (response?.error || response?.successful === false) {
+    throw new Error(`Composio could not retrieve the exact schema for ${toolSlug}; no image transfer was attempted.`);
+  }
+  const data = response?.data && typeof response.data === "object" ? response.data : response;
+  const schemas = data?.toolSchemas ?? data?.tool_schemas ?? response?.toolSchemas ?? response?.tool_schemas;
+  const entry = Array.isArray(schemas)
+    ? schemas.find((candidate: any) => candidate?.toolSlug === toolSlug || candidate?.tool_slug === toolSlug)
+    : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
+  const returnedSlug = entry?.toolSlug ?? entry?.tool_slug;
+  const schema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
+  if ((returnedSlug !== undefined && returnedSlug !== toolSlug) || !schema || typeof schema !== "object" || Array.isArray(schema)) {
+    throw new Error(`The exact action ${toolSlug} is not available with a usable schema in this owner's current Composio session; no image transfer was attempted.`);
+  }
+  return schema;
+}
+
+async function executeLinkedinImagePost(
+  sessionObj: any,
+  toolSlug: string,
+  postSchema: any,
+  actionArguments: Record<string, unknown>,
+  file: { data: Buffer; contentType: string },
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ result: any; mode: "linkedin_upload" }> {
+  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST") throw new Error("Unsupported LinkedIn image action; no provider upload was attempted.");
+  if (typeof actionArguments.author !== "string" || !actionArguments.author.trim()) {
+    throw new Error("A LinkedIn author URN is required for an image post. Read the connected profile first; no image upload was attempted.");
+  }
+  if (Object.hasOwn(actionArguments, "images")) throw new Error("Do not supply LinkedIn images; Chusky adds the uploaded image URN after a successful upload.");
+  const imagesSchema = postSchema?.properties?.images;
+  if (imagesSchema?.type !== "array" || imagesSchema.items?.type !== "string") {
+    throw new Error("The current LinkedIn post schema does not support an images string array; no image upload was attempted.");
+  }
+  if (typeof sessionObj.search !== "function") throw new Error("Composio image-upload discovery is unavailable in this session; no image upload was attempted.");
+
+  const discovery = await abortable(sessionObj.search({ query: "Initialize an image upload for a LinkedIn post", toolkits: ["linkedin"] }, signal ? { signal } : undefined), signal) as any;
+  const uploadTool = discovery?.toolSchemas?.LINKEDIN_INITIALIZE_IMAGE_UPLOAD;
+  const uploadSchema = uploadTool?.inputSchema ?? uploadTool?.input_schema;
+  if (discovery?.error || !uploadSchema || uploadTool?.toolSlug && uploadTool.toolSlug !== "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") {
+    throw new Error("Composio did not return the exact LinkedIn image-initialize action schema; no image upload was attempted.");
+  }
+  const initializeArguments: Record<string, unknown> = { owner: actionArguments.author.trim() };
+  validateToolArgumentsAgainstSchema("LINKEDIN_INITIALIZE_IMAGE_UPLOAD", initializeArguments, uploadSchema);
+  const initialized = await composioExecute(sessionObj, "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", initializeArguments, signal);
+  if (initialized?.successful !== true || initialized?.error) throw new Error("LinkedIn did not confirm image-upload initialization; no image bytes were uploaded.");
+
+  const uploadUrl = findProviderString(initialized.data, (key, value) => /^(upload_?url|uploadUrl)$/i.test(key) && /^https:\/\//i.test(value));
+  const imageUrn = findProviderString(initialized.data, (_key, value) => /^urn:li:image:[A-Za-z0-9:_-]{1,240}$/.test(value));
+  if (!uploadUrl || !imageUrn) throw new Error("LinkedIn's upload initialization did not return a usable HTTPS upload URL and image URN.");
+  const parsedUploadUrl = new URL(uploadUrl);
+  const host = parsedUploadUrl.hostname.toLowerCase();
+  if (parsedUploadUrl.protocol !== "https:" || parsedUploadUrl.username || parsedUploadUrl.password || (parsedUploadUrl.port && parsedUploadUrl.port !== "443") || !(host === "linkedin.com" || host.endsWith(".linkedin.com") || host === "licdn.com" || host.endsWith(".licdn.com"))) {
+    throw new Error("LinkedIn returned an unexpected image-upload destination; no image bytes were sent.");
+  }
+  const uploadSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000);
+  const uploadResponse = await mediaBridgeFetch(uploadUrl, {
+    method: "PUT",
+    headers: { "content-type": file.contentType, "content-length": String(file.data.byteLength) },
+    body: file.data,
+    redirect: "error",
+    signal: uploadSignal,
+  });
+  if (!uploadResponse.ok) throw new Error(`LinkedIn image upload was not confirmed (HTTP ${uploadResponse.status}); verify the provider state before retrying.`);
+
+  const postArguments = { ...actionArguments, images: [imageUrn] };
+  validateToolArgumentsAgainstSchema(toolSlug, postArguments, postSchema, 36 * 1024 * 1024);
+  const result = await composioExecute(sessionObj, toolSlug, account ? { ...postArguments, account } : postArguments, signal);
+  return { result, mode: "linkedin_upload" };
+}
+
+function findProviderString(
+  value: unknown,
+  matches: (key: string, value: string) => boolean,
+  depth = 0,
+): string | undefined {
+  if (depth > 12 || !value || typeof value !== "object") return undefined;
+  for (const [key, candidate] of Object.entries(value as Record<string, unknown>).slice(0, 200)) {
+    if (typeof candidate === "string" && matches(key, candidate)) return candidate;
+    if (candidate && typeof candidate === "object") {
+      const nested = findProviderString(candidate, matches, depth + 1);
+      if (nested) return nested;
+    }
+  }
+  return undefined;
+}
+
 async function sendArtifactEmail(
   userId: number,
   sessionObj: any,
@@ -680,10 +781,7 @@ export async function executeMediaBridgeAction(
   }
   const source = args.source === "asset" || args.source === "generated" ? args.source : "current";
   const sourceIndex = Number.isInteger(Number(args.sourceIndex)) ? Math.max(0, Math.floor(Number(args.sourceIndex))) : 0;
-  const directTool = availableComposioTools.find((tool) => toolSchemaName(tool) === toolSlug);
-  if (!directTool) throw new Error(`The exact action ${toolSlug} is not available in this owner's current Composio session; no image transfer was attempted.`);
-  const schema = directTool.function?.parameters;
-  if (!schema || typeof schema !== "object") throw new Error("The selected action did not advertise an input schema; no image transfer was attempted.");
+  const schema = await resolveMediaBridgeSchema(sessionObj, availableComposioTools, toolSlug, signal);
 
   let file: { data: Buffer; name: string; contentType: "image/jpeg" | "image/png" | "image/webp" };
   let assetId: string | undefined;
@@ -728,13 +826,22 @@ export async function executeMediaBridgeAction(
     throw new Error("The selected image is invalid, unsupported, or larger than 25 MB.");
   }
 
-  const built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
-  validateToolArgumentsAgainstSchema(toolSlug, built.arguments, schema, 36 * 1024 * 1024);
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
-  const result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
+  let result: any;
+  let mode: "url" | "binary" | "linkedin_upload";
+  if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
+    const linkedIn = await executeLinkedinImagePost(sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
+    result = linkedIn.result;
+    mode = linkedIn.mode;
+  } else {
+    const built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
+    validateToolArgumentsAgainstSchema(toolSlug, built.arguments, schema, 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
+    mode = built.mode;
+  }
   if (result?.successful !== true || result?.error) throw new Error("The connected app did not confirm this image action succeeded. Check the provider state before retrying to avoid a duplicate.");
   const data = result?.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
-  const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode: built.mode, ...(assetId ? { assetId } : {}), size: file.data.byteLength, contentType: file.contentType };
+  const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode, ...(assetId ? { assetId } : {}), size: file.data.byteLength, contentType: file.contentType };
   for (const key of ["id", "postId", "messageId", "mediaId", "media_id", "uploadId", "status"]) {
     const value = data[key];
     if (typeof value === "string" || typeof value === "number") receipt[key] = typeof value === "string" ? value.slice(0, 200) : value;
@@ -743,11 +850,13 @@ export async function executeMediaBridgeAction(
 }
 
 const sessionCache = new Map<number, ComposioSession>();
+let mediaBridgeFetch: typeof fetch = globalThis.fetch.bind(globalThis);
 
 /** Replace provider dependencies in contract tests without contacting Composio. */
-export function setAgentDependenciesForTests(dependencies: { composio: any; mediaBridgeStorage?: MediaBridgeStorage }): void {
+export function setAgentDependenciesForTests(dependencies: { composio: any; mediaBridgeStorage?: MediaBridgeStorage; mediaBridgeFetch?: typeof fetch }): void {
   composio = dependencies.composio;
   mediaBridgeStorage = dependencies.mediaBridgeStorage ?? { saveImageAsset, getImageAsset, readR2Object, signR2Download };
+  mediaBridgeFetch = dependencies.mediaBridgeFetch ?? globalThis.fetch.bind(globalThis);
   sessionCache.clear();
 }
 
@@ -807,6 +916,29 @@ async function getOrCreateComposioSession(userId: number): Promise<ComposioSessi
 
   logger.info({ userId, sessionId }, "Composio session ready");
   return result;
+}
+
+/** Lazily create an owner-scoped read adapter for authenticated operator verification. */
+export function createUserOutcomeReadAdapter(userId: number): OutcomeReadAdapter {
+  let adapterPromise: Promise<OutcomeReadAdapter> | undefined;
+  return {
+    read: async (input) => {
+      adapterPromise ??= (async () => {
+        const sessionObj = (await getOrCreateComposioSession(userId)).sessionObj;
+        const tools = await sessionObj.tools();
+        return createComposioOutcomeReadAdapter({
+          availableToolSlugs: tools.map(toolSchemaName),
+          execute: (toolSlug, args) => composioExecute(sessionObj, toolSlug, args),
+        });
+      })();
+      try {
+        return await (await adapterPromise).read(input);
+      } catch (error) {
+        adapterPromise = undefined;
+        throw error;
+      }
+    },
+  };
 }
 
 /**
@@ -1714,7 +1846,7 @@ export async function runAgent(
           execResult = accounts.slice(0, limit).map(({ id, alias, toolkit: connectedToolkit, status, createdAt, updatedAt }) => ({ id, alias, toolkit: connectedToolkit, status, ...(createdAt ? { createdAt } : {}), ...(updatedAt ? { updatedAt } : {}) }));
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: fullComposioTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {

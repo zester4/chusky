@@ -14,7 +14,7 @@ import {
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
-  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
+  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord,
   type TaskStatus, type MissionStatus,
@@ -52,9 +52,9 @@ import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
-import { verifyOutcome } from "./reliability/evaluator.js";
-import { saveOutcomeVerification, appendTraceEvent, listCompensations, updateCompensation } from "./reliability/persistence.js";
-import type { OutcomeCheck, OutcomeCheckResult } from "./reliability/contracts.js";
+import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
+import { appendTraceEvent, listCompensations, updateCompensation } from "./reliability/persistence.js";
+import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
 
 const MAX_TEXT = 1000;
@@ -112,6 +112,8 @@ export interface NativeToolRuntime {
   toolCatalog?: unknown[];
   connectedAccounts?: Array<{ id: string; toolkit: string; status: string; alias?: string; updatedAt?: string }>;
   currentRunId?: string;
+  /** Executes provider outcome checks only through an active, exact read-only tool grant. */
+  outcomeReadAdapter?: OutcomeReadAdapter;
   /** Set by the internal task-wait tool; the workflow settles the run after the agent turn ends. */
   requestTaskWait?: (request: TaskWaitRequest) => void;
   /** Set by the mission event-wait tool; the workflow parks the durable slice. */
@@ -138,6 +140,14 @@ export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTest
 function text(value: unknown, max = MAX_TEXT): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > max) throw new Error(`Text must be 1-${max} characters`);
+  return result;
+}
+
+function optionalIdentifier(value: unknown, max = 200): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const result = value.trim();
+  if (!result) return undefined;
+  if (result.length > max) throw new Error(`Text must be 1-${max} characters`);
   return result;
 }
 
@@ -855,11 +865,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_INTEGRATION_HEALTH":
       return summarizeIntegrationHealth(runtime.connectedAccounts, args.toolkit === undefined ? undefined : text(args.toolkit, 120));
     case "CHUCK_TOOL_RECOVERY": {
-      const runId = args.runId === undefined ? runtime.currentRunId : text(args.runId, 200);
+      const runId = optionalIdentifier(args.runId) ?? runtime.currentRunId;
       if (!runId) return { status: "not_found", retryAdvice: "verify_first", message: "No current run is available; pass an owned run ID. No action was replayed." };
       const run = await getAgentRun(userId, runId);
       if (!run || run.userId !== userId) return { status: "not_found", retryAdvice: "verify_first", message: "That run was not found for this owner. No action was replayed." };
-      return inspectToolRecovery(run.events, args.toolCallId === undefined ? undefined : text(args.toolCallId, 200));
+      return inspectToolRecovery(run.events, optionalIdentifier(args.toolCallId));
     }
     case "CHUCK_LIST_SKILL_FILES": return listSkillFiles(text(args.name), args.maxFiles === undefined ? 100 : Number(args.maxFiles));
     case "CHUCK_READ_SKILL_FILE": return readSkillFile(text(args.name), args.path === undefined ? "SKILL.md" : text(args.path), args.maxChars === undefined ? 12_000 : Number(args.maxChars));
@@ -1269,15 +1279,17 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_VERIFY": {
-      // Model-authored tool calls cannot attest that a human verified the work.
       const missionId = text(args.id);
-      if (Array.isArray(args.checks) && Array.isArray(args.results)) {
+      if (Array.isArray(args.checks)) {
         const checks = args.checks.filter((item: unknown): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50);
-        const results = args.results.filter((item: unknown): item is OutcomeCheckResult => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).checkId === "string" && ["passed", "failed", "uncertain", "skipped"].includes(String((item as Record<string, unknown>).status))).slice(0, 50);
-        const verification = verifyOutcome({ ownerId: userId, missionId, checks, results, now: Date.now() });
-        await saveOutcomeVerification(verification);
-        await appendTraceEvent({ ownerId: userId, kind: "verification", type: "mission.outcome_verified", at: Date.now(), correlationId: missionId, status: verification.status, summary: `Mission outcome verification ${verification.status}.`, metadata: { confidence: verification.confidence, unresolved: verification.unresolved.length } });
+        const verification = await executeOutcomeVerification({ ownerId: userId, missionId, checks, adapter: runtime.outcomeReadAdapter });
         if (verification.status !== "verified") return { missionId, verification, mission: await getMission(userId, missionId) };
+        const trustedReadEvidence = verification.results.flatMap((result) => {
+          if (result.status !== "passed" || !result.provider || !result.evidenceRef) return [];
+          const check = checks.find((candidate) => candidate.id === result.checkId);
+          return check?.kind === "provider_read" ? [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: `Provider state verified: ${check.description}`, source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }] : [];
+        });
+        if (trustedReadEvidence.length) await recordTrustedMissionEvidence(userId, missionId, trustedReadEvidence);
       }
       const mission = await verifyMission(userId, missionId, { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");

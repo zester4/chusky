@@ -25,7 +25,7 @@ test("mission upgrade preset contains bounded, accurate release highlights", () 
   const bullets = getAgentUpgradePreset("missions");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.missions]);
-  assert.match(bullets[0], /dependency-aware steps/);
+  assert.match(bullets[0], /live provider outcome verification/);
   assert.match(bullets[1], /provider events/);
   assert.match(bullets[2], /Telegram, the CLI, SDK\/API, dashboard, and MCP/);
 });
@@ -89,11 +89,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the connected-app media bridge release", async () => {
+test("current upgrade manifest announces the mission and connected-app media bridge release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.8.0");
-  assert.equal(notice?.version, "4.8.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /current conversation, generated images, or saved image assets/);
-  assert.match(formatAgentUpgradeNotice(notice!), /run in the same turn/);
+  assert.equal(notice?.id, "release-4.9.0");
+  assert.equal(notice?.version, "4.9.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /live provider outcome verification/);
+  assert.match(formatAgentUpgradeNotice(notice!), /conversation, generated, or saved images/);
   assert.match(formatAgentUpgradeNotice(notice!), /provider confirms that exact action succeeded/);
 });

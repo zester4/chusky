@@ -46,7 +46,8 @@ export async function executeOutcomeVerification(input: {
         lastError = "";
         break;
       } catch (error) {
-        lastError = error instanceof Error ? error.message.slice(0, 500) : "Provider read failed.";
+        const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,60}$/.test(error.name) ? error.name : "Error";
+        lastError = `Provider read failed (${errorName}).`;
       }
     }
     if (lastError) results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: lastError });

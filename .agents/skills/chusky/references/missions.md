@@ -78,6 +78,15 @@ Never present a mission as complete because it has a checkpoint, a queued task,
 or a model-generated summary. Completion requires completed steps and, for
 strict missions, successful verification of required evidence.
 
+Provider outcome checks are executed by the server through the owner's current
+Composio session. Supply the exact available read-only `toolSlug` and bounded
+non-secret `arguments`; do not submit a model-authored `passed` result for a
+provider read. The API and native mission tool ignore such submitted provider
+results. Successful reads are timestamped, redacted before persistence, and
+recorded as trusted mission evidence. Reads that fail, are stale, or cannot be
+executed leave the mission unverified so the durable supervisor can reconcile
+the provider state or record a concrete blocker.
+
 ## Starting a mission
 
 Use `CHUCK_MISSION_START` or `POST /v1/missions` with:
@@ -203,6 +212,13 @@ safe summaries and hashes, never credentials or raw provider payloads.
 missions cannot be completed until verification succeeds. `CHUCK_MISSION_PROOF`
 is the operator-facing bounded view of definition of done, step results,
 evidence, verification, budget, and recent events.
+
+Provider-backed outcome checks execute the exact read-only Composio action in
+the owner's session and compare its fresh result with the expected fields.
+Model- or client-supplied pass results are not accepted as evidence. The active
+tool allow/deny policy still applies, and raw read arguments are omitted from
+persisted verification records. Receipt, artifact, and human checks remain
+uncertain until backed by trusted server-side evidence.
 
 ## Pause, resume, cancel, repair, and replan
 

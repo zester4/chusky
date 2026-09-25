@@ -1,11 +1,11 @@
 {
-  "id": "release-4.8.0",
-  "version": "4.8.0",
+  "id": "release-4.9.0",
+  "version": "4.9.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added owner-scoped image transfer from the current conversation, generated images, or saved image assets into exact connected-app actions using their advertised URL or binary upload schema.",
-    "Explicitly requested image transfers run in the same turn, are validated, and use the selected owner's connected account without exposing bytes or signed URLs to the model.",
-    "Upload-only provider actions return bounded media identifiers for a separate publish/send step; direct posts or emails are reported complete only after the provider confirms that exact action succeeded."
+    "Added durable autonomous missions for concrete outcomes, with dependency-aware steps, bounded budgets, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",
+    "Owner-scoped image transfers work from conversation, generated, or saved images through exact connected-app actions; publish/send completion is reported only after the provider confirms that exact action succeeded.",
+    "Missions can fan out, sleep, resume on exact events or approvals, pause, repair, and replan; mission status and proof span Telegram, CLI, SDK/API, dashboard, and MCP."
   ],
-  "createdAt": "2026-09-25T13:42:01.004Z"
+  "createdAt": "2026-09-25T21:02:26.020Z"
 }

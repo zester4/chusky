@@ -100,6 +100,16 @@ test("native mission verification cannot claim a human verifier", async () => {
   assert.equal(result.verification?.verifiedBy, "agent");
 });
 
+test("mission verification tool rejects caller supplied provider outcome results", async () => {
+  await initStore({ memoryOnly: true });
+  const mission = await createMission(972051, { title: "Provider evidence", objective: "Verify external state", definitionOfDone: "Current provider state is confirmed" });
+  await assert.rejects(() => nativeTool(972051, "CHUCK_MISSION_VERIFY", {
+    id: mission.id,
+    checks: [{ id: "crm", kind: "provider_read", description: "Lead is qualified", toolSlug: "CRM_GET_LEAD", arguments: { id: "lead_1" }, expected: { status: "qualified" } }],
+    results: [{ checkId: "crm", status: "passed", observed: { status: "qualified" }, provider: "crm", evidenceRef: "fabricated", observedAt: Date.now() }],
+  }), /additional propert|not allowed/i);
+});
+
 test("terminal task failure reconciles the linked mission step and mission status", async () => {
   const userId = 972006;
   const mission = await createMission(userId, { title: "Failure recovery", objective: "Run one bounded step", definitionOfDone: "The step succeeds", steps: [{ id: "only", title: "Only step", objective: "Run once", retryLimit: 0 }] });

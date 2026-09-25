@@ -104,3 +104,94 @@ test("owner-requested current-image transfer executes immediately and confirms t
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
 });
+
+test("media bridge resolves an exact discovered action through Composio schema meta-tools", async () => {
+  const userId = 839102;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const schema = { type: "object", properties: { commentary: { type: "string" }, image_url: { type: "string", description: "Public image URL" } } };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    sessionId: "media-bridge-meta-session",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      calls.push({ slug, args });
+      if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: { INSTAGRAM_CREATE_POST: { toolSlug: "INSTAGRAM_CREATE_POST", inputSchema: schema } } }, error: null };
+      return { successful: true, data: { id: "urn:li:share:confirmed" } };
+    },
+  };
+  const mediaBridgeStorage = {
+    saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => ({ id: `img_owner_${owner}`, r2Key: "images/owner/image.png", name: input.name, contentType: input.contentType, size: bytes.byteLength }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://signed.example/private-image",
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "INSTAGRAM_CREATE_POST", arguments: { commentary: "Hello" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.equal(result.toolSlug, "INSTAGRAM_CREATE_POST");
+    assert.deepEqual(calls[0], { slug: "COMPOSIO_GET_TOOL_SCHEMAS", args: { tool_slugs: ["INSTAGRAM_CREATE_POST"] } });
+    assert.equal(calls[1]?.slug, "INSTAGRAM_CREATE_POST");
+    assert.deepEqual(calls[1]?.args.image_url, "https://signed.example/private-image");
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("LinkedIn image publishing initializes, uploads, and posts the exact returned image URN", async () => {
+  const userId = 839103;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const postSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
+    author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } },
+  }, additionalProperties: false };
+  const initSchema = { type: "object", required: ["owner"], properties: { owner: { type: "string" } }, additionalProperties: false };
+  const actions: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let uploaded: { url: string; method: string; contentType: string; bytes: Buffer } | undefined;
+  const session = {
+    sessionId: "media-bridge-linkedin-session",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
+    search: async () => ({ toolSchemas: { LINKEDIN_INITIALIZE_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", inputSchema: initSchema } } }),
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      actions.push({ slug, args });
+      if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: { LINKEDIN_CREATE_LINKED_IN_POST: { toolSlug: slug === "COMPOSIO_GET_TOOL_SCHEMAS" ? "LINKEDIN_CREATE_LINKED_IN_POST" : slug, inputSchema: postSchema } } }, error: null };
+      if (slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") return { successful: true, data: { uploadUrl: "https://www.linkedin.com/dms-uploads/upload-token", image: "urn:li:image:abc123" } };
+      return { successful: true, data: { id: "urn:li:share:confirmed" } };
+    },
+  };
+  const mediaBridgeStorage = {
+    saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => ({ id: `img_owner_${owner}`, r2Key: "images/owner/image.png", name: input.name, contentType: input.contentType, size: bytes.byteLength }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://signed.example/private-image",
+  };
+  setAgentDependenciesForTests({
+    composio: { create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage,
+    mediaBridgeFetch: async (url: string | URL | Request, init?: RequestInit) => {
+      uploaded = { url: String(url), method: String(init?.method), contentType: new Headers(init?.headers).get("content-type") ?? "", bytes: Buffer.from(init?.body as Uint8Array) };
+      return new Response(null, { status: 201 });
+    },
+  } as any);
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST",
+      arguments: { author: "urn:li:person:owner", commentary: "Hello from Chusky" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.equal(uploaded?.url, "https://www.linkedin.com/dms-uploads/upload-token");
+    assert.equal(uploaded?.method, "PUT");
+    assert.equal(uploaded?.contentType, "image/png");
+    assert.deepEqual(uploaded?.bytes, imageBytes);
+    assert.deepEqual(actions.map(({ slug }) => slug), ["COMPOSIO_GET_TOOL_SCHEMAS", "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", "LINKEDIN_CREATE_LINKED_IN_POST"]);
+    assert.deepEqual(actions[1]?.args, { owner: "urn:li:person:owner" });
+    assert.deepEqual(actions[2]?.args, { author: "urn:li:person:owner", commentary: "Hello from Chusky", images: ["urn:li:image:abc123"] });
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});

@@ -359,7 +359,38 @@ paths:
   /operator/route:
     post: { summary: Select a measured reliable route from bounded candidates, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Selected route }, '409': { description: No eligible route } } }
   /operator/outcomes/verify:
-    post: { summary: Verify an outcome from receipts or read-only provider evidence, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Verified outcome }, '409': { description: Unresolved outcome checks } } }
+    post:
+      summary: Verify an outcome using live read-only provider evidence
+      description: Provider-read results are executed through the owner's active Composio session. Client-supplied results are never accepted as evidence. Secret-bearing arguments are rejected, and input arguments are not persisted with the verification record.
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [checks]
+              properties:
+                missionId: { type: string, pattern: '^mis_[A-Za-z0-9_-]+$' }
+                runId: { type: string, maxLength: 200 }
+                checks:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items:
+                    type: object
+                    required: [id, kind, description]
+                    properties:
+                      id: { type: string, maxLength: 160 }
+                      kind: { type: string, enum: [provider_read, receipt, artifact, human] }
+                      description: { type: string, maxLength: 1000 }
+                      provider: { type: string, maxLength: 120 }
+                      toolSlug: { type: string, maxLength: 200, description: Required for provider_read; must be available in the owner's Composio session and read-only. }
+                      arguments: { type: object, description: Bounded non-secret arguments for the exact read-only provider action; max 16 KB. }
+                      freshnessMs: { type: integer, minimum: 1000, maximum: 2592000000 }
+                      required: { type: boolean }
+                      expected: { type: object }
+      responses: { '200': { description: Verified outcome }, '409': { description: Unresolved outcome checks } }
   /approvals/{approvalId}/escalate:
     post: { summary: Schedule an owner-approved escalation with an exact connected-app action, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '201': { description: Scheduled escalation }, '409': { description: Approval is not escalatable } } }
 components:

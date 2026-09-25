@@ -8,7 +8,7 @@ import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationA
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, createApproval, createCliDevice, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 
 beforeEach(async () => {
@@ -61,6 +61,47 @@ test("operator reliability surfaces are owner-scoped and expose honest provider 
   assert.match(JSON.stringify(await matrix.json()), /configured_unverified|not_configured/);
   const other = await api.fetch(new Request("http://local/v1/operator/reliability?operation=operator.test", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "operator-other" } }));
   assert.equal((await other.json() as { data: { sampleCount: number } }).data.sampleCount, 0);
+});
+
+test("operator outcome verification reads current provider state instead of trusting submitted provider results", async () => {
+  const externalUserId = "outcome-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const mission = await createMission(ownerId, { title: "Verify CRM state", objective: "Confirm provider record state", definitionOfDone: "The lead state is verified", requiredEvidence: ["before_after"], steps: [{ id: "verify", title: "Verify CRM", objective: "Read the exact lead state" }] });
+  const started = await startMission(ownerId, mission.id);
+  await completeMissionStep(ownerId, mission.id, started!.currentStepId!, "Requested provider verification");
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  setAgentDependenciesForTests({ composio: { create: async () => ({
+    sessionId: "outcome-read-session",
+    tools: async () => [{ function: { name: "CRM_GET_LEAD", parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } }],
+    execute: async (slug: string, args: Record<string, unknown>) => { executed.push({ slug, args }); return { data: { status: "qualified" } }; },
+  }) } });
+  const api = app();
+  const response = await api.fetch(new Request("http://local/v1/operator/outcomes/verify", {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      missionId: mission.id,
+      checks: [
+        { id: "lead", kind: "provider_read", description: "Lead is qualified", provider: "crm", toolSlug: "CRM_GET_LEAD", arguments: { id: "lead_1" }, freshnessMs: 60_000, expected: { status: "qualified" } },
+        { id: "human", kind: "human", description: "Human confirmed the sales handoff", required: false },
+      ],
+      results: [
+        { checkId: "lead", status: "passed", observed: { status: "qualified" }, provider: "fake", evidenceRef: "fabricated", observedAt: Date.now() },
+        { checkId: "human", status: "passed", evidenceRef: "human:forged" },
+      ],
+    }),
+  }));
+  assert.equal(response.status, 200);
+  const verification = await response.json() as { status: string; results: Array<{ checkId: string; status: string; provider?: string; evidenceRef?: string; observed?: Record<string, unknown> }>; checks: Array<Record<string, unknown>> };
+  assert.equal(verification.status, "verified");
+  assert.deepEqual(executed, [{ slug: "CRM_GET_LEAD", args: { id: "lead_1" } }]);
+  assert.equal(verification.results[0]?.provider, "crm");
+  assert.match(verification.results[0]?.evidenceRef ?? "", /^composio-read:CRM_GET_LEAD:/);
+  assert.equal(verification.results.find((result) => result.checkId === "human")?.status, "uncertain");
+  assert.equal("arguments" in verification.checks[0]!, false);
+  const updatedMission = await getMission(ownerId, mission.id);
+  assert.equal(updatedMission?.verification?.verified, true);
+  assert.equal(updatedMission?.evidence?.[0]?.verifiedBy, "system");
 });
 
 test("root provider smoke attestation persists only a signed, complete proof", async () => {

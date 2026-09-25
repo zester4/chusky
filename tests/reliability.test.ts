@@ -7,6 +7,7 @@ import { executeCompensation, listCompensations, queueCompensation } from "../sr
 import { initStore } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
+import { createComposioOutcomeReadAdapter } from "../src/reliability/composioReadAdapter.js";
 import { buildOperatorTimeline } from "../src/reliability/timeline.js";
 import { runDueApprovalEscalations, scheduleApprovalEscalation } from "../src/approvals/escalation.js";
 import { verifyMeetingFollowThrough } from "../src/meetings/followThroughVerification.js";
@@ -80,6 +81,41 @@ test("provider outcome engine only executes read-only checks and persists proof"
   const result = await executeOutcomeVerification({ ownerId: 21, missionId: "mis_engine", checks: [{ id: "read", kind: "provider_read", description: "record is qualified", toolSlug: "CRM_GET_RECORD", expected: { status: "qualified" } }, { id: "write", kind: "provider_read", description: "must never execute", toolSlug: "CRM_UPDATE_RECORD" }], adapter: { read: async ({ toolSlug }) => { assert.equal(toolSlug, "CRM_GET_RECORD"); return { observed: { status: "qualified" }, evidenceRef: "crm:1", observedAt: Date.now() }; } } });
   assert.equal(result.status, "uncertain");
   assert.ok(result.unresolved.some((item) => item.includes("read-only")));
+});
+
+test("Composio outcome reads execute only exact available read tools and bound their inputs", async () => {
+  const executed: string[] = [];
+  const adapter = createComposioOutcomeReadAdapter({
+    availableToolSlugs: ["GMAIL_GET_MESSAGE", "GMAIL_SEND_EMAIL"],
+    now: () => 1234,
+    execute: async (slug, args) => { executed.push(`${slug}:${String(args.message_id)}`); return { data: { status: "sent", nested: [{ password: "private", label: "ok" }] } }; },
+  });
+  const observed = await adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "mail", kind: "provider_read", description: "Message was sent", arguments: { message_id: "m1" } } });
+  assert.deepEqual(executed, ["GMAIL_GET_MESSAGE:m1"]);
+  assert.equal(observed.provider, "gmail");
+  assert.equal(observed.observedAt, 1234);
+  await assert.rejects(() => adapter.read({ toolSlug: "GMAIL_SEND_EMAIL", check: { id: "write", kind: "provider_read", description: "write", arguments: {} } }), /read-only/);
+  const restricted = createComposioOutcomeReadAdapter({ availableToolSlugs: ["CRM_GET_LEAD"], allowedToolSlugs: ["GMAIL_GET_MESSAGE"], execute: async () => ({}) });
+  await assert.rejects(() => restricted.read({ toolSlug: "CRM_GET_LEAD", check: { id: "policy", kind: "provider_read", description: "not granted", arguments: {} } }), /active tool policy/);
+  await assert.rejects(() => adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "secret", kind: "provider_read", description: "read", arguments: { password: "never" } } }), /not allowed/);
+  assert.equal(executed.length, 1);
+});
+
+test("outcome engine ignores model-supplied provider pass results without a provider read", async () => {
+  await initStore({ memoryOnly: true });
+  const result = await executeOutcomeVerification({
+    ownerId: 210,
+    checks: [{ id: "crm", kind: "provider_read", description: "Lead is qualified", toolSlug: "CRM_GET_LEAD", freshnessMs: 60_000, expected: { status: "qualified" } }],
+    suppliedResults: [{ checkId: "crm", status: "passed", observed: { status: "qualified" }, provider: "crm", evidenceRef: "fake", observedAt: Date.now() }],
+  });
+  assert.equal(result.status, "uncertain");
+  assert.match(result.unresolved[0]!, /No provider read adapter/);
+});
+
+test("persisted outcome observations redact sensitive fields recursively and omit read arguments", () => {
+  const result = verifyOutcome({ ownerId: 211, checks: [{ id: "read", kind: "provider_read", description: "Read", toolSlug: "GMAIL_GET_MESSAGE", arguments: { message_id: "private-id" } }], results: [{ checkId: "read", status: "passed", provider: "gmail", evidenceRef: "proof", observedAt: 100, observed: { nested: [{ password: "hidden", label: "visible" }] } }], now: 100 });
+  assert.equal("arguments" in result.checks[0]!, false);
+  assert.deepEqual(result.results[0]?.observed, { nested: [{ label: "visible" }] });
 });
 
 test("mission replay and operator timeline are deterministic", () => {

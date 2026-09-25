@@ -9,6 +9,8 @@ Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
   conflating configuration with certification.
 - Document the root-only HMAC provider-proof attestation endpoint used by
   deployment smoke runners; unsigned or partial evidence is rejected.
+- Provider outcome checks now run exact read-only Composio actions; caller-supplied
+  provider pass results are ignored, and verified evidence is linked to missions.
 
 ## 1.6.0 - 2026-09-25
 

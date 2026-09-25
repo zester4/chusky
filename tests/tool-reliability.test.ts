@@ -102,3 +102,17 @@ test("tool recovery reads persisted results only for the requesting owner and ne
   const hidden = await nativeTool(202, "CHUCK_TOOL_RECOVERY", { runId: run.id });
   assert.equal((hidden as { status: string }).status, "not_found");
 });
+
+test("tool recovery treats blank optional identifiers as omitted", async () => {
+  await initStore({ memoryOnly: true });
+  const run = {
+    id: "run_owner_blank_recovery", userId: 303, kind: "supervisor" as const, objective: "Inspect a failed call", status: "failed" as const,
+    version: 0, createdAt: 10, updatedAt: 20,
+    events: [{ id: "event_1", type: "run.tool_result", at: 20, data: { tool: "LINKEDIN_CREATE_LINKED_IN_POST", callId: "call_1", ok: false, retrySafety: "verify_first", failureClass: "Error" } }],
+  };
+  await saveAgentRun(run);
+  const result = await nativeTool(303, "CHUCK_TOOL_RECOVERY", { runId: run.id, toolCallId: "   " }) as { status: string; toolCallId: string };
+  assert.deepEqual({ status: result.status, toolCallId: result.toolCallId }, { status: "failed", toolCallId: "call_1" });
+  const currentRun = await nativeTool(303, "CHUCK_TOOL_RECOVERY", { runId: "  " }, { currentRunId: run.id }) as { status: string; toolCallId: string };
+  assert.deepEqual({ status: currentRun.status, toolCallId: currentRun.toolCallId }, { status: "failed", toolCallId: "call_1" });
+});

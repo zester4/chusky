@@ -23,7 +23,7 @@ export const AGENT_UPGRADE_PRESETS = {
     "The pulse inspects current evidence, routes authorized recovery to the right specialist, and explains real blockers while preserving approval boundaries.",
   ],
   missions: [
-    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, and server-side closeout.",
+    "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",
     "Missions can fan out independent work, sleep for timers, resume on exact provider events or approvals without polling loops, pause, repair, and replan.",
     "Mission status, proof, controls, and owner isolation are available across Telegram, the CLI, SDK/API, dashboard, and MCP through the same persisted runtime.",
   ],

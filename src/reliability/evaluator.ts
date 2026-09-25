@@ -20,10 +20,24 @@ function hasEvidence(result: OutcomeCheckResult, kind: OutcomeCheck["kind"]): bo
   return typeof result.evidenceRef === "string" && result.evidenceRef.trim().length > 0;
 }
 
+function safeValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return value.slice(0, 500);
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+  if (depth >= 5) return "[depth-limited]";
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => safeValue(item, depth + 1));
+  if (value && typeof value === "object") {
+    const blocked = /token|secret|password|credential|cookie|authorization|private.?key/i;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !blocked.test(key))
+      .slice(0, 50)
+      .map(([key, item]) => [key.slice(0, 100), safeValue(item, depth + 1)]));
+  }
+  return "[unsupported]";
+}
+
 function safeObserved(value: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
   if (!value) return undefined;
-  const blocked = /token|secret|password|credential|cookie|authorization|private.?key/i;
-  return Object.fromEntries(Object.entries(value).filter(([key]) => !blocked.test(key)).slice(0, 50).map(([key, item]) => [key.slice(0, 100), typeof item === "string" ? item.slice(0, 500) : typeof item === "number" || typeof item === "boolean" || item === null ? item : Array.isArray(item) ? item.slice(0, 20).map((entry) => typeof entry === "string" ? entry.slice(0, 200) : entry) : "[object]" ]));
+  return safeValue(value) as Record<string, unknown>;
 }
 
 export function verifyOutcome(input: {
@@ -58,7 +72,7 @@ export function verifyOutcome(input: {
     ...(input.missionId ? { missionId: input.missionId } : {}),
     ...(input.runId ? { runId: input.runId } : {}),
     status,
-    checks: input.checks.map((check) => ({ ...check, id: check.id.slice(0, 160), description: check.description.slice(0, 1000), expected: safeObserved(check.expected) })),
+    checks: input.checks.map(({ arguments: _arguments, ...check }) => ({ ...check, id: check.id.slice(0, 160), description: check.description.slice(0, 1000), expected: safeObserved(check.expected) })),
     results: input.results.map((result) => ({ ...result, observed: safeObserved(result.observed), evidenceRef: result.evidenceRef?.slice(0, 300), provider: result.provider?.slice(0, 120), reason: result.reason?.slice(0, 500) })),
     confidence: required === 0 ? 1 : Math.max(0, Math.min(1, passed / required)),
     unresolved,
