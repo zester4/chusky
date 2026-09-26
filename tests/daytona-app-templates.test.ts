@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { transformSync } from "esbuild";
+import { chuckTools } from "../src/agentTools.js";
 import { buildAppTemplateFiles, resolveAppDesign } from "../src/lib/daytona/appTemplates.js";
 
 const archetypes = ["saas-dashboard", "fintech-dashboard", "hr-dashboard", "waitlist", "portfolio", "business-site"] as const;
-const styles = ["harbor", "ledger", "grove", "editorial", "signal"] as const;
+const styles = ["harbor", "ledger", "grove", "editorial", "signal", "nocturne"] as const;
 
 test("every app archetype resolves to an intentional non-purple design direction", () => {
   const expectedStyles = ["harbor", "ledger", "grove", "editorial", "signal", "grove"];
@@ -50,6 +51,26 @@ test("Next.js templates use the same archetype and design tokens without replaci
   assert.match(files["app/globals.css"], /--color-primary:/);
   assert.match(files["app/layout.tsx"], /Ledger \/ forest ink and fresh green/);
   assert.doesNotThrow(() => transformSync(files["app/page.tsx"], { loader: "tsx", jsx: "automatic" }));
+});
+
+test("nocturne provides an opt-in editorial landing style without changing dashboard composition", () => {
+  const appTool = chuckTools.find((tool) => tool.function.name === "CHUCK_DAYTONA_APP");
+  assert.ok(appTool);
+  assert.ok((appTool.function.parameters.properties.style as { enum: readonly string[] }).enum.includes("nocturne"));
+
+  const landing = buildAppTemplateFiles("vite-react", "business-site", "nocturne", "studio-site");
+  assert.match(landing["src/App.tsx"], /className="app business-site style-nocturne editorial-landing"/);
+  assert.match(landing["src/index.css"], /--color-canvas:#0e0c08/);
+  assert.match(landing["src/index.css"], /--color-primary:#f0c34e/);
+  assert.match(landing["src/index.css"], /--shadow:none/);
+  assert.match(landing["src/index.css"], /\.editorial-landing \.overline/);
+  assert.match(landing["src/index.css"], /font-style:italic/);
+  assert.match(landing["src/index.css"], /prefers-reduced-motion/);
+
+  const dashboard = buildAppTemplateFiles("vite-react", "saas-dashboard", "nocturne", "studio-dashboard");
+  assert.match(dashboard["src/App.tsx"], /className="app saas-dashboard style-nocturne"/);
+  assert.doesNotMatch(dashboard["src/App.tsx"], /editorial-landing/);
+  assert.match(dashboard["src/App.tsx"], /dashboard-nav/);
 });
 
 test("design inputs reject unsupported values instead of silently selecting a look", () => {

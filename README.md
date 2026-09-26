@@ -606,7 +606,9 @@ presented as if the user could open them directly.
 `CHUCK_DAYTONA_APP` can scaffold Vite or Next.js starters for SaaS dashboards, fintech, HR,
 waitlists, portfolios, and business websites. Each archetype has its own layout and an `auto`
 art direction (harbor, ledger, grove, editorial, or signal), with responsive CSS tokens and
-editable source files; the palette deliberately avoids generic purple defaults. Generated screens
+editable source files; the palette deliberately avoids generic purple defaults. An explicit
+`nocturne` style adds dark editorial treatment for product-fit marketing pages without changing
+automatic defaults or overriding a stated brand palette. Generated screens
 are starter previews with sample content, not connected product data. The agent should replace
 that content for the user's task, run the app checks, inspect the available preview screenshot,
 review the responsive breakpoints in source, and report what was not verified. Google Fonts are
