@@ -124,6 +124,16 @@ type SavedImageCandidate = {
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const BINARY_FIELD_NAMES = new Set(["file_data", "file_content", "content_bytes", "contentbytes", "base64", "data_base64", "content_base64", "bytes_base64"]);
 
+function actionableMediaRequestText(request: string): string {
+  // A read-back can mention a "post ID" and forbid posting in the same
+  // sentence. Those words are context, not authority to transfer an image.
+  if (/^(?:read[- ]only|verification only|verify only)\b/i.test(request.trim())
+    && !/\b(?:then|after(?:ward|wards)?|subsequently)\s+(?:post|publish|share|send|email|attach|include|upload)\b/i.test(request)) return "";
+  return request
+    .replace(/\b(?:do not|don't|never)\s+(?:post|publish|share|send|email|attach|include|upload)(?:(?:\s*,\s*(?:(?:or|and)\s+)?|\s+(?:or|and)\s+)(?:post|publish|share|send|email|attach|include|upload))*\b(?![^.!?\r\n]{0,60}\bwithout\s+(?:the\s+|an?\s+)?(?:image|photo|picture|graphic|visual|attachment)\b)/gi, "")
+    .replace(/\bpost\s+(?:id|identifier)\b/gi, "");
+}
+
 /**
  * Select an image only when the user's request clearly connects it to an
  * external action. This runs at dispatch time so bytes and asset IDs never
@@ -133,7 +143,7 @@ export function selectRequestedImage(
   request: string,
   input: { currentCount: number; generatedCount: number; savedAssets?: readonly SavedImageCandidate[] },
 ): MediaAttachmentSelection | undefined {
-  const text = request.trim();
+  const text = actionableMediaRequestText(request.trim());
   if (!text) return undefined;
   const explicitAction = /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
     || /\b(?:create|make|draft)\b.{0,40}\b(?:post|email|message|campaign)\b/i.test(text)
@@ -243,7 +253,7 @@ export function selectRequestedImage(
  * authorization; the request still needs an explicit external media action.
  */
 export function selectRetrievedImageForAction(request: string, retrievedAssetIds: readonly string[]): MediaAttachmentSelection | undefined {
-  const text = request.trim();
+  const text = actionableMediaRequestText(request.trim());
   if (!text
     || !/\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
     || !/\b(?:it|this|that|these|those)\b/i.test(text)

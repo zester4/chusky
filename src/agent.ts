@@ -545,12 +545,20 @@ function splitAccountSelector(args: Record<string, unknown>): { account?: string
   return { account, arguments: arguments_ };
 }
 
-function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+async function composioExecute(sessionObj: any, slug: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
   const options = signal ? { signal } : undefined;
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") return abortable(sessionObj.execute(slug, args, options), signal);
   const selected = splitAccountSelector(args);
   const executeOptions = selected.account || signal ? { ...(selected.account ? { account: selected.account } : {}), ...(signal ? { signal } : {}) } : undefined;
-  return abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
+  const result = await abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
+  // Composio session.execute() returns { data, error, logId }, whereas direct
+  // tools.execute() includes `successful`. Preserve explicit failures and make
+  // the session receipt usable by every caller that checks `successful`.
+  if (result && typeof result === "object" && !Array.isArray(result)
+    && !("successful" in result) && "error" in result && "data" in result) {
+    return { ...result, successful: result.error == null };
+  }
+  return result;
 }
 
 type ComposioMediaTarget = { toolSlug: string; arguments: Record<string, unknown>; account?: string };

@@ -27,6 +27,11 @@ test("ordinary image-action wording selects an available image but leaves unrela
   assert.deepEqual(selectRequestedImage("Post the generated image from last week", { currentCount: 1, generatedCount: 0, savedAssets: [
     { id: "sent", name: "sent.png", createdAt: 30 }, { id: "generated", name: "generated.png", tags: ["generated"], createdAt: 20 },
   ] }), { source: "asset", assetId: "generated" });
+  const readOnly = "Read-only verification only. Fetch the Selithub Page post ID 123 and report whether it contains a photo attachment. Do not post, upload, send, or publish anything.";
+  assert.equal(selectRequestedImage(readOnly, { currentCount: 1, generatedCount: 0 }), undefined);
+  assert.equal(selectRetrievedImageForAction(readOnly, ["img_selected"]), undefined);
+  assert.equal(selectRequestedImage("Read-only: verify the Facebook post has a photo attachment.", { currentCount: 1, generatedCount: 0 }), undefined);
+  assert.deepEqual(selectRequestedImage("Check the account, then post this photo.", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
 });
 
 test("a single image retrieved in this run resolves a referential post request", () => {
@@ -428,7 +433,7 @@ test("owner-requested current-image transfer executes immediately and confirms t
   imageBytes.write("IEND", 16, "ascii");
   const saved: Array<{ owner: number; bytes: Buffer }> = [];
   const executed: Array<{ slug: string; args: Record<string, unknown>; account?: string }> = [];
-  let providerSuccessful = true;
+  let providerError: string | null = null;
   const mediaBridgeStorage = {
     saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => {
       saved.push({ owner, bytes: Buffer.from(bytes) });
@@ -452,7 +457,7 @@ test("owner-requested current-image transfer executes immediately and confirms t
     tools: async () => [{ type: "function", function: { name: "INSTAGRAM_CREATE_POST", description: "Create a post with image", parameters: { type: "object", properties: { caption: { type: "string" }, image_url: { type: "string", description: "Public image URL" } }, required: ["caption", "image_url"], additionalProperties: false } } }],
     execute: async (slug: string, args: Record<string, unknown>, options?: { account?: string }) => {
       executed.push({ slug, args, account: options?.account });
-      return { successful: providerSuccessful, data: { mediaId: "provider-media-456", status: "published" } };
+      return { error: providerError, logId: "log_media_bridge_test", data: { mediaId: "provider-media-456", status: "published" } };
     },
   };
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
@@ -469,7 +474,7 @@ test("owner-requested current-image transfer executes immediately and confirms t
     assert.equal(executed[0]?.slug, "INSTAGRAM_CREATE_POST");
     assert.equal(executed[0]?.account, "brand");
     assert.deepEqual(executed[0]?.args, { caption: "Launch", image_url: "https://signed.example/private-image?token=short-lived" });
-    providerSuccessful = false;
+    providerError = "Provider rejected the post";
     await assert.rejects(() => executeMediaBridgeAction(userId, session, directTools, requestArgs, runtime), /did not confirm.*succeeded/i);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
@@ -491,7 +496,7 @@ test("Gmail attachment actions receive a staged Composio file reference through 
     tools: async () => [{ type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } }],
     execute: async (slug: string, args: Record<string, unknown>) => {
       calls.push({ slug, args });
-      return { successful: true, data: { id: "gmail-message-1", status: "sent" } };
+      return { data: { id: "gmail-message-1", status: "sent" }, error: null, logId: "log_gmail_staged_file" };
     },
   };
   const mediaBridgeStorage = {
