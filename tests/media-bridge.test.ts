@@ -323,6 +323,25 @@ test("media bridge recognizes Composio file-uploadable fields and injects staged
   assert.throws(() => buildComposioFileUploadArguments(schema, { attachment: "caller-value" }, uploaded), /Do not supply attachment/i);
 });
 
+test("Gmail attachment anyOf stages one image using the current file descriptor shape", () => {
+  const file = { type: "object", file_uploadable: true, required: ["name", "mimetype", "s3key"], properties: {
+    name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" },
+  } };
+  const schema = { type: "object", properties: {
+    recipient_email: { type: "string" },
+    attachment: { description: "File(s) to attach", anyOf: [file, { type: "array", items: file }] },
+  } };
+  const staged = { name: "chusky.jpg", mimetype: "image/jpeg", s3key: "staged/opaque-key" };
+  assert.equal(hasComposioFileUploadField(schema), true);
+  assert.deepEqual(buildComposioFileUploadArguments(schema, { recipient_email: "self@example.com" }, staged, true), {
+    recipient_email: "self@example.com", attachment: staged,
+  });
+  validateToolArgumentsAgainstSchema("GMAIL_SEND_EMAIL", { recipient_email: "self@example.com", attachment: staged }, composioFileUploadValidationSchema(schema));
+  assert.deepEqual(buildComposioFileUploadArguments({ type: "object", properties: {
+    attachments: { type: "array", file_uploadable: true },
+  } }, {}, staged, true), { attachments: [staged] });
+});
+
 test("image upload selects a unique image field when an action also accepts video", () => {
   const schema = { type: "object", required: ["image_url"], properties: {
     image_url: { type: "string", file_uploadable: true },

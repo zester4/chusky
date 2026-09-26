@@ -5,6 +5,9 @@ type Schema = {
   description?: string;
   properties?: Record<string, Schema>;
   items?: Schema;
+  file_uploadable?: boolean;
+  anyOf?: Schema[];
+  oneOf?: Schema[];
 };
 
 type UrlCandidate = {
@@ -299,12 +302,11 @@ function findFileUploadCandidates(schema: Schema | undefined, prefix: string[] =
   const candidates: FileUploadCandidate[] = [];
   for (const [key, property] of Object.entries(schema.properties)) {
     const path = [...prefix, key];
-    if ((property as Schema & { file_uploadable?: boolean }).file_uploadable === true) {
-      candidates.push({ path, kind: typeIs(property, "array") ? "array" : "file", description: property.description });
-      continue;
-    }
-    if (typeIs(property, "array") && (property.items as (Schema & { file_uploadable?: boolean }) | undefined)?.file_uploadable === true) {
-      candidates.push({ path, kind: "array", description: property.items?.description ?? property.description });
+    const alternatives = [property, ...(property.anyOf ?? []), ...(property.oneOf ?? [])];
+    const acceptsFile = alternatives.some((option) => option.file_uploadable === true && !typeIs(option, "array"));
+    const acceptsArray = alternatives.some((option) => typeIs(option, "array") && (option.file_uploadable === true || option.items?.file_uploadable === true));
+    if (acceptsFile || acceptsArray) {
+      candidates.push({ path, kind: acceptsFile ? "file" : "array", description: property.description });
       continue;
     }
     if (typeIs(property, "object")) candidates.push(...findFileUploadCandidates(property, path));
