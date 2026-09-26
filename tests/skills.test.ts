@@ -12,6 +12,12 @@ test("routes sold business skills deterministically before fuzzy discovery", () 
   assert.deepEqual(routedSkillNames("Review overdue Stripe billing and hand off the churn-risk account"), ["composio-routing", "retention-pro", "billing-ops-pro"]);
 });
 
+test("routes negotiation and pricing requests to deal-closer-pro", () => {
+  for (const query of ["negotiate", "negotiation", "discount", "best price", "procurement", "close the deal", "pricing discussion", "counter offer", "renewal pricing"]) {
+    assert.ok(routedSkillNames(query).includes("deal-closer-pro"), `expected deal-closer-pro for ${query}`);
+  }
+});
+
 test("routes core engineering and growth skills deterministically", () => {
   const eng = routedSkillNames("Implement a Next.js feature with TDD and code review");
   assert.ok(eng.includes("fullstack-dev"));

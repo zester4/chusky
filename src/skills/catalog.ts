@@ -49,6 +49,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "composio-routing", triggers: ["composio", "connected app", "toolkit", "hubspot", "salesforce", "stripe", "shopify", "zendesk", "intercom"] },
   { name: "onboarding-pro", triggers: ["onboarding", "implementation", "activate customer", "customer setup"] },
   { name: "retention-pro", triggers: ["retention", "renewal", "churn", "churn risk", "customer health"] },
+  { name: "deal-closer-pro", triggers: ["negotiate", "negotiation", "discount", "best price", "procurement", "close the deal", "pricing discussion", "counter offer", "renewal pricing"] },
   { name: "billing-ops-pro", triggers: ["billing", "invoice", "collections", "payment", "subscription", "stripe"] },
   { name: "support-desk-pro", triggers: ["support", "ticket", "zendesk", "intercom", "incident", "customer issue"] },
   { name: "launch-pro", triggers: ["launch", "go to market", "release campaign", "product launch"] },
