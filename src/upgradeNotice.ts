@@ -37,10 +37,10 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",
     "Added approval-gated transfer of Daytona artifacts to Composio, and exposed all five reliability capabilities across typed SDK, single-tool MCP runs, and durable A2A task skills without bypassing policy.",
   ],
-  mediaBridge: [
-    "Added owner-scoped image transfer from the current conversation, generated images, or saved image assets into exact connected-app actions using their advertised URL or binary upload schema.",
-    "Explicitly requested image transfers run in the same turn, are validated, and use the selected owner's connected account without exposing bytes or signed URLs to the model.",
-    "Upload-only provider actions return bounded media identifiers for a separate publish/send step; direct posts or emails are reported complete only after the provider confirms that exact action succeeded.",
+  mediaAutomation: [
+    "Image posts, email attachments, and supported uploads can now be requested in ordinary conversation; Chusky attaches the clearly referenced current, generated, or saved image to the normal connected-app action.",
+    "Images are staged inside the owner-scoped Composio dispatch using the action's exact schema, with provider-specific upload and publish steps handled by bounded adapters.",
+    "Ambiguous image choices and grouped multi-action calls stop before execution, and completion is reported only after the provider confirms the final action.",
   ],
   customMcp: [
     "Accounts can add third-party MCP servers from the dashboard or SDK; Chusky supports Streamable HTTP with legacy HTTP+SSE fallback and verifies discovery before saving.",

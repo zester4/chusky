@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
+import { chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 
 test("native tool catalog has unique names", () => {
   const names = chuckTools.map((tool) => tool.function.name);
@@ -14,7 +14,7 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
-test("tool reliability diagnostics are explicit; artifact uploads stay gated and image publishing is autonomous", () => {
+test("tool reliability diagnostics are explicit and image transfer is resolved inside normal app actions", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"]) assert.equal(names.has(name), true, name);
   for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
@@ -29,6 +29,7 @@ test("tool reliability diagnostics are explicit; artifact uploads stay gated and
   assert.deepEqual(media.function.parameters.required, ["source", "toolSlug", "arguments"]);
   assert.match(media.function.description, /no separate approval step/i);
   assert.match(media.function.description, /fail closed/i);
+  assert.equal(modelFacingChuckTools.some((entry) => entry.function.name === "CHUCK_MEDIA_BRIDGE"), false);
   const qa = chuckTools.find((entry) => entry.function.name === "CHUCK_ARTIFACT_QA")!;
   assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);
 });

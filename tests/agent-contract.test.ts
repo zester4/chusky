@@ -78,6 +78,74 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
   }
 }
 
+test("ordinary conversation sends an attached image through the normal Composio email action", async () => {
+  const userId = 830071;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const emailSchema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
+    recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+    attachment: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const staged: Array<{ toolSlug: string; toolkitSlug: string; file: File }> = [];
+  const session = {
+    sessionId: "normal-image-action-session",
+    tools: async () => [{ type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } }],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      executed.push({ slug, args });
+      return { successful: true, data: { id: "gmail-sent-with-image", status: "sent" } };
+    },
+  };
+  const composio = {
+    create: async () => session,
+    sessions: { use: async () => session },
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "gmail" } }) },
+    files: { upload: async (input: { toolSlug: string; toolkitSlug: string; file: File }) => {
+      staged.push(input);
+      return { name: input.file.name, mimetype: input.file.type, s3key: "staged/run-agent-image" };
+    } },
+  };
+  const requests: Array<Record<string, any>> = [];
+  let chatIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text", "image"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return chatIndex++ === 0
+        ? toolResponse("GMAIL_SEND_EMAIL", JSON.stringify({ recipient_email: "team@example.com", subject: "Launch", body: "The photo is attached." }))
+        : chatResponse({ role: "assistant", content: "The email was sent with the photo attached." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({ composio });
+  try {
+    const result = await runAgent(userId, [
+      { type: "text", text: "Email this photo to the team with a short note." },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${imageBytes.toString("base64")}` } },
+    ], [], "test/model");
+    assert.match(result.text, /sent with the photo attached/);
+    assert.equal(staged.length, 1);
+    assert.equal(staged[0]?.toolSlug, "GMAIL_SEND_EMAIL");
+    assert.equal(staged[0]?.toolkitSlug, "gmail");
+    assert.deepEqual(executed, [{ slug: "GMAIL_SEND_EMAIL", args: {
+      recipient_email: "team@example.com", subject: "Launch", body: "The photo is attached.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/run-agent-image" },
+    } }]);
+    const offeredTools = requests[0]?.tools as Array<{ function?: { name?: string; parameters?: { required?: string[] } } }>;
+    assert.equal(offeredTools.some((tool) => tool.function?.name === "CHUCK_MEDIA_BRIDGE"), false);
+    const emailTool = offeredTools.find((tool) => tool.function?.name === "GMAIL_SEND_EMAIL");
+    assert.ok(emailTool);
+    assert.deepEqual(emailTool.function?.parameters?.required, ["recipient_email", "subject", "body"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("agent uses the selected model for a normal text response", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830001);

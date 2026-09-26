@@ -197,6 +197,10 @@ const toolReliabilityTools = [
 
 export const chuckTools = [...baseChuckTools, ...shoppingAndBrowserTools, ...toolReliabilityTools] as const;
 
+// Kept in the native catalog for existing SDK/API clients and resumed runs,
+// but image transfer is now resolved transparently at Composio dispatch.
+export const modelFacingChuckTools = chuckTools.filter((tool) => tool.function.name !== "CHUCK_MEDIA_BRIDGE");
+
 // Formula cells are explicit, bounded per-sheet inputs. The Daytona boundary
 // validates them again and LibreOffice independently recalculates them before
 // the artifact is registered.

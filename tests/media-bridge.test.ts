@@ -1,10 +1,184 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField } from "../src/mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage } from "../src/mediaBridge.js";
 import { validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
-import { executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
+import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
 const file = { name: "brand.png", contentType: "image/png", data: Buffer.from("png-bytes") } as const;
+
+test("ordinary image-action wording selects an available image but leaves unrelated messages alone", () => {
+  assert.deepEqual(selectRequestedImage("Post this photo to LinkedIn", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.deepEqual(selectRequestedImage("Post to LinkedIn: Launching our new range", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.deepEqual(selectRequestedImage("Generate a banner image and email it to the team", { currentCount: 0, generatedCount: 1 }), { source: "generated", sourceIndex: 0 });
+  assert.equal(selectRequestedImage("Email me the meeting notes", { currentCount: 1, generatedCount: 0 }), undefined);
+  assert.equal(selectRequestedImage("send it", { currentCount: 0, generatedCount: 0 }), undefined);
+  assert.equal(selectRequestedImage("send it", { currentCount: 0, generatedCount: 0, savedAssets: [] }), undefined);
+  assert.deepEqual(selectRequestedImage("send it", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.deepEqual(selectRequestedImage("Don't forget to attach this photo to the email", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.match((selectRequestedImage("send this photo", { currentCount: 0, generatedCount: 0 }) as any)?.reason ?? "", /not available in this run/);
+  assert.equal(selectRequestedImage("Post this image without attaching it", { currentCount: 1, generatedCount: 0 }), undefined);
+  assert.deepEqual(selectRequestedImage("Post it", { currentCount: 1, generatedCount: 1 }), { ambiguous: true, reason: "Both a sent image and a generated image are available. Ask which one to use before posting or sending." });
+  assert.deepEqual(selectRequestedImage("Post my latest image", { currentCount: 0, generatedCount: 0, savedAssets: [
+    { id: "older", name: "older.png", createdAt: 10 }, { id: "newer", name: "newer.png", createdAt: 20 },
+  ] }), { source: "asset", assetId: "newer" });
+  assert.deepEqual(selectRequestedImage("Post the generated image from last week", { currentCount: 1, generatedCount: 0, savedAssets: [
+    { id: "sent", name: "sent.png", createdAt: 30 }, { id: "generated", name: "generated.png", tags: ["generated"], createdAt: 20 },
+  ] }), { source: "asset", assetId: "generated" });
+});
+
+test("ordinary Composio email action automatically receives the explicitly requested current image", async () => {
+  const userId = 839100;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const emailSchema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
+    recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+    attachment: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const calls: Array<{ slug: string; args: Record<string, unknown>; account?: string }> = [];
+  const uploaded: Array<{ file: File; toolSlug: string; toolkitSlug: string }> = [];
+  const session = {
+    search: async () => ({ toolSchemas: { GMAIL_SEND_EMAIL: { toolSlug: "GMAIL_SEND_EMAIL", inputSchema: emailSchema } } }),
+    execute: async (slug: string, args: Record<string, unknown>, options?: { account?: string }) => {
+      calls.push({ slug, args, ...(options?.account ? { account: options.account } : {}) });
+      return { successful: true, data: { id: "gmail-message-auto-image", status: "sent" } };
+    },
+  };
+  const composioClient = {
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "gmail" } }) },
+    files: { upload: async (params: { file: File; toolSlug: string; toolkitSlug: string }) => {
+      uploaded.push(params);
+      return { name: params.file.name, mimetype: params.file.type, s3key: "staged/auto-image" };
+    } },
+  };
+  setAgentDependenciesForTests({
+    composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage: {
+      saveImageAsset: async () => { throw new Error("FileUploadable actions should not create an R2 transfer asset"); },
+      getImageAsset: async () => undefined,
+      readR2Object: async () => Buffer.from(imageBytes),
+      signR2Download: async () => "https://unused.example/image",
+    } as any,
+  });
+  try {
+    const selection = selectRequestedImage("Email this photo to the team with a short note", { currentCount: 1, generatedCount: 0 });
+    const result = await dispatchComposioActionWithImageContext({
+      userId,
+      sessionObj: session,
+      availableTools: [{ type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } }],
+      invokedSlug: "GMAIL_SEND_EMAIL",
+      invokedArguments: { recipient_email: "team@example.com", subject: "Launch", body: "For context." },
+      selection,
+      runtime: { currentImages: [{ data: imageBytes, mediaType: "image/png" }] },
+      allowedToolSlugs: new Set(["GMAIL_SEND_EMAIL"]),
+    });
+    assert.equal((result as any).providerActionSucceeded, true);
+    assert.equal(uploaded.length, 1);
+    assert.equal(uploaded[0]?.toolSlug, "GMAIL_SEND_EMAIL");
+    assert.equal(uploaded[0]?.toolkitSlug, "gmail");
+    assert.deepEqual(calls, [{ slug: "GMAIL_SEND_EMAIL", args: {
+      recipient_email: "team@example.com", subject: "Launch", body: "For context.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/auto-image" },
+    } }]);
+
+    const wrapped = await dispatchComposioActionWithImageContext({
+      userId,
+      sessionObj: session,
+      availableTools: [{ type: "function", function: { name: "COMPOSIO_EXECUTE_TOOL", parameters: { type: "object" } } }],
+      invokedSlug: "COMPOSIO_EXECUTE_TOOL",
+      invokedArguments: { tool_slug: "GMAIL_SEND_EMAIL", account: "work", arguments: {
+        recipient_email: "team@example.com", subject: "Launch", body: "Sent through discovered action.",
+      } },
+      selection,
+      runtime: { currentImages: [{ data: imageBytes, mediaType: "image/png" }] },
+    });
+    assert.equal((wrapped as any).providerActionSucceeded, true);
+    assert.deepEqual(calls[1], { slug: "GMAIL_SEND_EMAIL", account: "work", args: {
+      recipient_email: "team@example.com", subject: "Launch", body: "Sent through discovered action.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/auto-image" },
+    } });
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("image ambiguity does not block a preparatory read action", async () => {
+  const result = await dispatchComposioActionWithImageContext({
+    userId: 839111,
+    sessionObj: { execute: async () => { throw new Error("a search should use normal dispatch"); } },
+    availableTools: [],
+    invokedSlug: "GMAIL_SEARCH_EMAILS",
+    invokedArguments: { query: "latest messages" },
+    selection: { ambiguous: true, reason: "Ask which image to use." },
+    runtime: { currentImages: [{ data: Buffer.from("png"), mediaType: "image/png" }, { data: Buffer.from("png"), mediaType: "image/png" }] },
+  });
+  assert.equal(result, undefined);
+});
+
+test("image requests fail closed when Composio groups multiple actions", async () => {
+  const selection = selectRequestedImage("Post this image and email it to the team", { currentCount: 1, generatedCount: 0 });
+  await assert.rejects(() => dispatchComposioActionWithImageContext({
+    userId: 839109,
+    sessionObj: { execute: async () => { throw new Error("no batched provider action should run"); } },
+    availableTools: [],
+    invokedSlug: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    invokedArguments: { tools: [
+      { tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { commentary: "Launch" } },
+      { tool_slug: "GMAIL_SEND_EMAIL", arguments: { recipient_email: "team@example.com" } },
+    ] },
+    selection,
+    runtime: { currentImages: [{ data: Buffer.from("png"), mediaType: "image/png" }] },
+  }), /grouped several actions together.*no batched actions were attempted/i);
+});
+
+test("URL-based actions reuse the saved asset for a generated image", async () => {
+  const userId = 839110;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    tools: async () => [{ type: "function", function: { name: "INSTAGRAM_CREATE_POST", parameters: { type: "object", properties: {
+      caption: { type: "string" }, image_url: { type: "string", description: "Public image URL" },
+    } } } }],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      calls.push({ slug, args });
+      return { successful: true, data: { id: "ig-post-asset" } };
+    },
+  };
+  let saves = 0;
+  setAgentDependenciesForTests({
+    composio: { create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage: {
+      saveImageAsset: async () => { saves += 1; throw new Error("generated image already has an owner asset"); },
+      getImageAsset: async (owner: number, id: string) => owner === userId && id === "img_generated_1"
+        ? { id, r2Key: "images/owner/generated.png", name: "generated-launch.png", contentType: "image/png", size: imageBytes.length } as any
+        : undefined,
+      readR2Object: async () => Buffer.from(imageBytes),
+      signR2Download: async (key: string, ttl: number) => {
+        assert.equal(key, "images/owner/generated.png");
+        assert.equal(ttl, 900);
+        return "https://signed.example/generated.png";
+      },
+    } as any,
+  });
+  try {
+    const result = await dispatchComposioActionWithImageContext({
+      userId,
+      sessionObj: session,
+      availableTools: await session.tools(),
+      invokedSlug: "INSTAGRAM_CREATE_POST",
+      invokedArguments: { caption: "Launch" },
+      selection: { source: "generated", sourceIndex: 0 },
+      runtime: { generatedImages: [{ data: imageBytes, mediaType: "image/png", assetId: "img_generated_1" }] },
+    }) as Record<string, unknown>;
+    assert.equal("assetId" in result, false, "the model-facing receipt must not reveal a private image asset ID");
+    assert.equal(saves, 0);
+    assert.deepEqual(calls, [{ slug: "INSTAGRAM_CREATE_POST", args: { caption: "Launch", image_url: "https://signed.example/generated.png" } }]);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
 
 test("media bridge injects an HTTPS image URL into an exact social action", () => {
   const result = buildMediaBridgeArguments({
@@ -44,6 +218,21 @@ test("media bridge recognizes Composio file-uploadable fields and injects staged
   assert.deepEqual(args, { recipient_email: "team@example.com", attachment: uploaded });
   validateToolArgumentsAgainstSchema("GMAIL_SEND_EMAIL", args, composioFileUploadValidationSchema(schema));
   assert.throws(() => buildComposioFileUploadArguments(schema, { attachment: "caller-value" }, uploaded), /Do not supply attachment/i);
+});
+
+test("media preflight defers only the required image field while validating normal action arguments", () => {
+  const schema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
+    recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+    attachment: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const relaxed = mediaActionPreflightSchema("GMAIL_SEND_EMAIL", schema);
+  assert.deepEqual((relaxed as any).required, ["recipient_email", "subject", "body"]);
+  assert.doesNotThrow(() => validateToolArgumentsAgainstSchema("GMAIL_SEND_EMAIL", {
+    recipient_email: "team@example.com", subject: "Launch", body: "See attached.",
+  }, relaxed));
+  assert.throws(() => validateToolArgumentsAgainstSchema("GMAIL_SEND_EMAIL", {
+    recipient_email: "team@example.com", body: "See attached.",
+  }, relaxed), /subject/);
 });
 
 test("media bridge refuses ambiguous URL fields and caller-supplied media", () => {
@@ -413,21 +602,21 @@ test("LinkedIn image publishing initializes, uploads, and posts the exact return
   const postSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
     author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } },
   }, additionalProperties: false };
-  const initSchema = { type: "object", required: ["owner"], properties: { owner: { type: "string" } }, additionalProperties: false };
+  const initSchema = { type: "object", required: ["owner_urn"], properties: { owner_urn: { type: "string" } }, additionalProperties: false };
   const actions: Array<{ slug: string; args: Record<string, unknown> }> = [];
   let uploaded: { url: string; method: string; contentType: string; bytes: Buffer } | undefined;
   const session = {
     sessionId: "media-bridge-linkedin-session",
     tools: async () => [{ type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } }],
     search: async ({ query }: { query: string }) => {
-      const slug = query.match(/LINKEDIN_[A-Z_]+/)?.[0] ?? (query.includes("Initialize an image upload") ? "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" : undefined);
-      const inputSchema = slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" ? initSchema : postSchema;
+      const slug = query.match(/LINKEDIN_[A-Z_]+/)?.[0] ?? (query.includes("Register or initialize an image upload") ? "LINKEDIN_REGISTER_IMAGE_UPLOAD" : undefined);
+      const inputSchema = slug === "LINKEDIN_REGISTER_IMAGE_UPLOAD" ? initSchema : postSchema;
       return { toolSchemas: { [slug!]: { toolSlug: slug, inputSchema } } };
     },
     execute: async (slug: string, args: Record<string, unknown>) => {
       actions.push({ slug, args });
       if (slug === "COMPOSIO_GET_TOOL_SCHEMAS") return { data: { toolSchemas: { LINKEDIN_CREATE_LINKED_IN_POST: { toolSlug: slug === "COMPOSIO_GET_TOOL_SCHEMAS" ? "LINKEDIN_CREATE_LINKED_IN_POST" : slug, inputSchema: postSchema } } }, error: null };
-      if (slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") return { successful: true, data: { uploadUrl: "https://www.linkedin.com/dms-uploads/upload-token", image: "urn:li:image:abc123" } };
+      if (slug === "LINKEDIN_REGISTER_IMAGE_UPLOAD") return { successful: true, data: { upload_url: "https://www.linkedin.com/dms-uploads/upload-token", asset_urn: "urn:li:image:abc123" } };
       return { successful: true, data: { id: "urn:li:share:confirmed" } };
     },
   };
@@ -455,8 +644,8 @@ test("LinkedIn image publishing initializes, uploads, and posts the exact return
     assert.equal(uploaded?.method, "PUT");
     assert.equal(uploaded?.contentType, "image/png");
     assert.deepEqual(uploaded?.bytes, imageBytes);
-    assert.deepEqual(actions.map(({ slug }) => slug), ["LINKEDIN_INITIALIZE_IMAGE_UPLOAD", "LINKEDIN_CREATE_LINKED_IN_POST"]);
-    assert.deepEqual(actions[0]?.args, { owner: "urn:li:person:owner" });
+    assert.deepEqual(actions.map(({ slug }) => slug), ["LINKEDIN_REGISTER_IMAGE_UPLOAD", "LINKEDIN_CREATE_LINKED_IN_POST"]);
+    assert.deepEqual(actions[0]?.args, { owner_urn: "urn:li:person:owner" });
     assert.deepEqual(actions[1]?.args, { author: "urn:li:person:owner", commentary: "Hello from Chusky", images: ["urn:li:image:abc123"] });
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
@@ -523,6 +712,7 @@ test("LinkedIn image publishing upgrades a legacy ToolRouter schema to Composio'
     assert.deepEqual(uploaded, imageBytes);
     assert.deepEqual(rawLookups, [
       { slug: "LINKEDIN_CREATE_LINKED_IN_POST", options: { version: "latest" } },
+      { slug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", options: { version: "latest" } },
       { slug: "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", options: { version: "latest" } },
     ]);
     assert.deepEqual(directCalls, [

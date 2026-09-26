@@ -35,7 +35,7 @@ import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./n
 import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim } from "./autonomy/actions.js";
 import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
-import { chuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
+import { chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField } from "./mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -67,6 +67,8 @@ import type { OutcomeCheck } from "./reliability/contracts.js";
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
 type MediaBridgeStorage = Pick<typeof import("./store.js"), "saveImageAsset" | "getImageAsset"> & Pick<typeof import("./lib/storage/r2.js"), "readR2Object" | "signR2Download">;
+type GeneratedImageReference = { data: Buffer; mediaType: string; filename?: string; assetId?: string };
+type AgentMediaRuntime = { currentImages?: NativeToolRuntime["currentImages"]; generatedImages?: GeneratedImageReference[] };
 let mediaBridgeStorage: MediaBridgeStorage = { saveImageAsset, getImageAsset, readR2Object, signR2Download };
 
 /** Configure the project webhook through Composio's current v3.1 API. */
@@ -103,7 +105,7 @@ function assertNoCompensationCredentialFields(value: unknown, path = "arguments"
   }
 }
 /* native tool catalog lives in agentTools.ts */
-const LOCAL_TOOLS = chuckTools;
+const LOCAL_TOOLS = modelFacingChuckTools;
 const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
 export const VOICE_TURN_NATIVE_TOOLS = [
   "CHUCK_SEARCH_MEMORY",
@@ -551,6 +553,97 @@ function composioExecute(sessionObj: any, slug: string, args: Record<string, unk
   return abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
 }
 
+type ComposioMediaTarget = { toolSlug: string; arguments: Record<string, unknown> };
+
+function composioMediaTarget(slug: string, args: Record<string, unknown>): ComposioMediaTarget | "multi_action_batch" | undefined {
+  const asTarget = (toolSlugValue: unknown, argumentsValue: unknown): ComposioMediaTarget | undefined => {
+    const toolSlug = typeof toolSlugValue === "string" ? toolSlugValue.trim() : "";
+    if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(toolSlug) || toolSlug.startsWith("CHUCK_") || toolSlug.startsWith("COMPOSIO_") || toolSlug.startsWith("MCP_")) return undefined;
+    if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return undefined;
+    return { toolSlug, arguments: argumentsValue as Record<string, unknown> };
+  };
+
+  if (slug === "COMPOSIO_EXECUTE_TOOL") {
+    return asTarget(args.tool_slug ?? args.toolSlug ?? args.slug, args.arguments ?? args.input ?? args.tool_arguments);
+  }
+  if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+    const items = Array.isArray(args.tools) ? args.tools : Array.isArray(args.items) ? args.items : undefined;
+    if (!items?.length) return undefined;
+    if (items.length !== 1) return "multi_action_batch";
+    const item = items[0];
+    if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+    const record = item as Record<string, unknown>;
+    return asTarget(record.tool_slug ?? record.toolSlug ?? record.slug, record.arguments ?? record.input);
+  }
+  return asTarget(slug, args);
+}
+
+function isPotentialImageDestinationAction(toolSlug: string): boolean {
+  return /(?:^|_)(?:SEND|POST|PUBLISH|UPLOAD|ATTACH|SHARE|CREATE_DRAFT|CREATE_EMAIL|CREATE_MESSAGE|CREATE_MEDIA|CREATE_PHOTO|ADD_ATTACHMENT|ADD_FILE|IMPORT_FILE)(?:_|$)/.test(toolSlug);
+}
+
+/**
+ * Attach the selected in-run image at the Composio boundary. The model calls
+ * ordinary provider actions; this adapter keeps image bytes and storage IDs
+ * out of their arguments and preserves the existing provider-specific flows.
+ */
+export async function dispatchComposioActionWithImageContext(
+  input: {
+    userId: number;
+    sessionObj: any;
+    availableTools: any[];
+    invokedSlug: string;
+    invokedArguments: Record<string, unknown>;
+    selection: MediaAttachmentSelection | undefined;
+    runtime: AgentMediaRuntime;
+    allowedToolSlugs?: ReadonlySet<string>;
+    deniedToolSlugs?: ReadonlySet<string>;
+    signal?: AbortSignal;
+  },
+): Promise<unknown | undefined> {
+  if (!input.selection) return undefined;
+  const target = composioMediaTarget(input.invokedSlug, input.invokedArguments);
+  if (!target && input.invokedSlug !== "COMPOSIO_EXECUTE_TOOL" && input.invokedSlug !== "COMPOSIO_MULTI_EXECUTE_TOOL") return undefined;
+  if (target === "multi_action_batch") {
+    throw new Error("The request includes an image attachment, but the connected-app call grouped several actions together. Split the image post or email into its own action; no batched actions were attempted.");
+  }
+  if (target && !isPotentialImageDestinationAction(target.toolSlug)) return undefined;
+  if ("ambiguous" in input.selection) throw new Error(`${input.selection.reason} No connected-app action was attempted.`);
+  if (!target && (input.invokedSlug === "COMPOSIO_EXECUTE_TOOL" || input.invokedSlug === "COMPOSIO_MULTI_EXECUTE_TOOL")) {
+    throw new Error("The connected-app action could not be identified from the execution request. Ask for a direct action call before attaching the image; no provider action was attempted.");
+  }
+  if (!target) return undefined;
+  if (input.deniedToolSlugs?.has(target.toolSlug)) throw new Error(`The ${target.toolSlug} action is denied for this run; no image transfer or provider action was attempted.`);
+  if (input.allowedToolSlugs && !input.allowedToolSlugs.has(target.toolSlug) && !input.allowedToolSlugs.has(input.invokedSlug)) {
+    throw new Error(`The ${target.toolSlug} action is not granted to this run; no image transfer or provider action was attempted.`);
+  }
+
+  const targetArguments = typeof input.invokedArguments.account === "string" && input.invokedArguments.account.trim() && target.arguments.account === undefined
+    ? { ...target.arguments, account: input.invokedArguments.account }
+    : target.arguments;
+  const selected = splitAccountSelector(targetArguments);
+  const result = await executeMediaBridgeAction(
+    input.userId,
+    input.sessionObj,
+    input.availableTools,
+    {
+      source: input.selection.source,
+      ...(input.selection.source === "asset" ? { assetId: input.selection.assetId } : { sourceIndex: input.selection.sourceIndex }),
+      toolSlug: target.toolSlug,
+      arguments: selected.arguments,
+      ...(selected.account ? { account: selected.account } : {}),
+    },
+    input.runtime,
+    input.signal,
+  );
+  if (result && typeof result === "object") {
+    const safeReceipt = { ...result };
+    delete safeReceipt.assetId;
+    return safeReceipt;
+  }
+  return result;
+}
+
 function toolSchemaName(tool: any): string {
   return String(tool?.function?.name ?? tool?.name ?? "");
 }
@@ -695,8 +788,11 @@ async function executeLinkedinImageSequence(
   if (!linkedInImageArraySchema(postSchema)) {
     throw new Error("The current LinkedIn post schema does not support an images string array; no image upload was attempted.");
   }
-  const uploadTool = await getTool("LINKEDIN_INITIALIZE_IMAGE_UPLOAD");
-  const initializeArguments: Record<string, unknown> = { owner: String(actionArguments.author).trim() };
+  const uploadTool = await getLinkedInImageUploadTool(getTool);
+  const uploadProperties = uploadTool.schema.properties;
+  const ownerCandidates = ["owner_urn", "owner"].filter((key) => uploadProperties && Object.hasOwn(uploadProperties, key));
+  if (ownerCandidates.length !== 1) throw new Error("LinkedIn's current image-upload schema has no unambiguous owner field; no upload was attempted.");
+  const initializeArguments: Record<string, unknown> = { [ownerCandidates[0]!]: String(actionArguments.author).trim() };
   validateToolArgumentsAgainstSchema(uploadTool.slug, initializeArguments, uploadTool.schema);
   const initialized = await executeTool(uploadTool, initializeArguments);
   if (initialized?.successful !== true || initialized?.error) throw new Error("LinkedIn did not confirm image-upload initialization; no image bytes were uploaded.");
@@ -726,6 +822,21 @@ async function executeLinkedinImageSequence(
   const postArguments = { ...actionArguments, images: [imageUrn] };
   validateToolArgumentsAgainstSchema(postTool.slug, postArguments, postTool.schema, 36 * 1024 * 1024);
   return executeTool(postTool, postArguments);
+}
+
+async function getLinkedInImageUploadTool(getTool: (toolSlug: string) => Promise<LinkedinToolDefinition>): Promise<LinkedinToolDefinition> {
+  const failures: string[] = [];
+  for (const slug of ["LINKEDIN_REGISTER_IMAGE_UPLOAD", "LINKEDIN_INITIALIZE_IMAGE_UPLOAD"]) {
+    try {
+      const tool = await getTool(slug);
+      const ownerFields = ["owner_urn", "owner"].filter((key) => tool.schema.properties && Object.hasOwn(tool.schema.properties, key));
+      if (ownerFields.length === 1) return tool;
+      failures.push(`${slug} did not declare one unambiguous owner field`);
+    } catch (error) {
+      failures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  throw new Error(`Composio did not expose a supported LinkedIn image-upload action; no image bytes were uploaded. ${failures.slice(0, 2).join(" ")}`);
 }
 
 async function executeLatestLinkedinImagePost(
@@ -788,11 +899,18 @@ async function executeLinkedinImagePost(
   }
   if (typeof sessionObj.search !== "function") throw new Error("Composio image-upload discovery is unavailable in this session; no image upload was attempted.");
 
-  const discovery = await abortable(sessionObj.search({ query: "Initialize an image upload for a LinkedIn post", toolkits: ["linkedin"] }, signal ? { signal } : undefined), signal) as any;
-  const uploadTool = discovery?.toolSchemas?.LINKEDIN_INITIALIZE_IMAGE_UPLOAD;
+  const discovery = await abortable(sessionObj.search({ query: "Register or initialize an image upload for a LinkedIn post", toolkits: ["linkedin"] }, signal ? { signal } : undefined), signal) as any;
+  const uploadSchemas = discovery?.toolSchemas ?? discovery?.tool_schemas;
+  const uploadDefinitions = Array.isArray(uploadSchemas)
+    ? uploadSchemas
+    : uploadSchemas && typeof uploadSchemas === "object"
+      ? Object.entries(uploadSchemas).map(([slug, definition]: [string, any]) => ({ toolSlug: slug, ...definition }))
+      : [];
+  const uploadTool = uploadDefinitions.find((candidate: any) => ["LINKEDIN_REGISTER_IMAGE_UPLOAD", "LINKEDIN_INITIALIZE_IMAGE_UPLOAD"].includes(candidate?.toolSlug ?? candidate?.tool_slug));
+  const uploadSlug = uploadTool?.toolSlug ?? uploadTool?.tool_slug;
   const uploadSchema = uploadTool?.inputSchema ?? uploadTool?.input_schema;
-  if (discovery?.error || !uploadSchema || uploadTool?.toolSlug && uploadTool.toolSlug !== "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") {
-    throw new Error("Composio did not return the exact LinkedIn image-initialize action schema; no image upload was attempted.");
+  if (discovery?.error || !uploadSlug || !uploadSchema || uploadTool?.toolSlug && uploadTool.toolSlug !== uploadSlug) {
+    throw new Error("Composio did not return the exact current LinkedIn image-upload schema; no image upload was attempted.");
   }
   return {
     result: await executeLinkedinImageSequence(
@@ -800,7 +918,7 @@ async function executeLinkedinImagePost(
       actionArguments,
       file,
       async (slug) => {
-        if (slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") return { slug, version: "session", schema: uploadSchema };
+        if (slug === uploadSlug) return { slug, version: "session", schema: uploadSchema };
         return { slug: toolSlug, version: "session", schema: postSchema };
       },
       (tool, arguments_) => composioExecute(sessionObj, tool.slug, account ? { ...arguments_, account } : arguments_, signal),
@@ -1076,7 +1194,7 @@ async function uploadArtifactToConnectedTool(
 export async function prepareMediaBridgeApprovalSource(
   userId: number,
   args: Record<string, unknown>,
-  runtime: Pick<NativeToolRuntime, "currentImages" | "generatedImages">,
+  runtime: AgentMediaRuntime,
 ): Promise<Record<string, unknown>> {
   const source = args.source;
   if (source === "asset") {
@@ -1119,7 +1237,7 @@ export async function executeMediaBridgeAction(
   sessionObj: any,
   availableComposioTools: any[],
   args: Record<string, unknown>,
-  runtime: Pick<NativeToolRuntime, "currentImages" | "generatedImages">,
+  runtime: AgentMediaRuntime,
   signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   if (!sessionObj) throw new Error("Image transfers require an active connected-app session.");
@@ -1150,7 +1268,7 @@ export async function executeMediaBridgeAction(
     const contentType = asset.contentType;
     file = { data: await abortable(mediaBridgeStorage.readR2Object(asset.r2Key), signal), name: asset.name, contentType };
     assetId = asset.id;
-    mediaUrl = await mediaBridgeStorage.signR2Download(asset.r2Key, 900);
+    if (hasMediaUrlField(schema)) mediaUrl = await mediaBridgeStorage.signR2Download(asset.r2Key, 900);
   } else {
     const images = source === "generated" ? runtime.generatedImages : runtime.currentImages;
     const image = images?.[sourceIndex];
@@ -1163,15 +1281,27 @@ export async function executeMediaBridgeAction(
     // URL-only providers need an HTTPS object that they can fetch. Persisting
     // happens only because the user explicitly requested an external transfer.
     if (hasMediaUrlField(schema)) {
-      const saved = await mediaBridgeStorage.saveImageAsset(userId, {
-        name: `media-transfer-${Date.now()}`,
-        purpose: "Owner-requested connected-app image transfer",
-        description: "Image retained as the source for an explicitly requested connected-app action.",
-        tags: ["media-transfer", source],
-        contentType,
-      }, file.data);
-      assetId = saved.id;
-      mediaUrl = await mediaBridgeStorage.signR2Download(saved.r2Key, 900);
+      const generatedAssetId = source === "generated" && "assetId" in image ? image.assetId : undefined;
+      const existing = generatedAssetId
+        ? await mediaBridgeStorage.getImageAsset(userId, generatedAssetId)
+        : undefined;
+      if (existing) {
+        if (existing.contentType !== contentType || existing.size !== file.data.byteLength) {
+          throw new Error("The saved generated image no longer matches this run's image bytes; no provider action was attempted.");
+        }
+        assetId = existing.id;
+        mediaUrl = await mediaBridgeStorage.signR2Download(existing.r2Key, 900);
+      } else {
+        const saved = await mediaBridgeStorage.saveImageAsset(userId, {
+          name: `media-transfer-${Date.now()}`,
+          purpose: "Owner-requested connected-app image transfer",
+          description: "Image retained as the source for an explicitly requested connected-app action.",
+          tags: ["media-transfer", source],
+          contentType,
+        }, file.data);
+        assetId = saved.id;
+        mediaUrl = await mediaBridgeStorage.signR2Download(saved.r2Key, 900);
+      }
     }
   }
 
@@ -1560,6 +1690,12 @@ function currentImageRuntime(message: string | ContentPart[]): NativeToolRuntime
   return currentImages.length ? { currentImages } : {};
 }
 
+function userRequestText(message: string | ContentPart[]): string {
+  return typeof message === "string"
+    ? message
+    : message.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join("\n");
+}
+
 type ImageReference = { type: "image_url"; image_url: { url: string } };
 
 function imageSize(value: unknown): string {
@@ -1861,7 +1997,7 @@ export async function runAgent(
   // Keep generated media available as an in-turn reference even when the
   // user asked for Daytona-only delivery. `generatedImages` is the outward
   // delivery list, so it must not be used for this purpose directly.
-  const generatedReferenceImages: AgentResult["generatedImages"] = [];
+  const generatedReferenceImages: GeneratedImageReference[] = [];
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
@@ -1920,10 +2056,31 @@ export async function runAgent(
     await persistRun("running", "run.round_started");
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    const currentImages = currentImageRuntime(userMessage).currentImages;
+    const roundMediaSelection = selectRequestedImage(userRequestText(userMessage), {
+      currentCount: currentImages?.length ?? 0,
+      generatedCount: generatedReferenceImages.length,
+      savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
+    });
+    const modelAvailableTools = roundMediaSelection
+      ? availableTools.map((tool) => {
+        const slug = toolSchemaName(tool);
+        const schema = tool?.function?.parameters;
+        if (!slug || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_")
+          || !schema || typeof schema !== "object" || Array.isArray(schema)) return tool;
+        return {
+          ...tool,
+          function: {
+            ...tool.function,
+            parameters: mediaActionPreflightSchema(slug, schema),
+          },
+        };
+      })
+      : availableTools;
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? {
+      response = await orChat(requestModel, messages, modelAvailableTools, signal, onDelta, undefined, voiceTurn ? {
         preferredMaxLatencySeconds: 2,
         preferredMinThroughput: 50,
         fallbackModels: config.voiceFallbackModels,
@@ -1938,7 +2095,7 @@ export async function runAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, messages, availableTools, signal, onDelta, undefined, voiceTurn ? {
+        response = await orChat(requestModel, messages, modelAvailableTools, signal, onDelta, undefined, voiceTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -2074,7 +2231,16 @@ export async function runAgent(
           // Validate against every concrete schema we do receive, before any
           // provider side effect, so missing/truncated fields can be repaired
           // by the model instead of surfacing as opaque provider errors.
-          if (schema && typeof schema === "object") validateToolArgumentsAgainstSchema(slug, args, schema);
+          if (schema && typeof schema === "object") {
+            const currentImages = currentImageRuntime(userMessage).currentImages;
+            const selection = selectRequestedImage(userRequestText(userMessage), {
+              currentCount: currentImages?.length ?? 0,
+              generatedCount: generatedReferenceImages.length,
+              savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
+            });
+            const validationSchema = selection ? mediaActionPreflightSchema(slug, schema) : schema;
+            validateToolArgumentsAgainstSchema(slug, args, validationSchema);
+          }
         }
         if (options?.meetingId && isMeetingCalendarWriteTool(slug) && !meetingCalendarAvailabilityChecked) {
           throw new Error("Check real calendar availability first with a successful calendar availability or event-list action; only then create or reschedule the event.");
@@ -2167,6 +2333,7 @@ export async function runAgent(
           const destination = args.destination === "daytona" || args.destination === "both" ? args.destination : "telegram";
           const daytona = [];
           const assets: Array<{ id: string; name: string; downloadUrl: string; contentType: string }> = [];
+          const assetIdsByImage: Array<string | undefined> = [];
           // Every generated image gets a durable R2 asset reference. This
           // keeps the bytes available after the current turn and gives a
           // following tool call (for example an Instagram upload) a real
@@ -2183,6 +2350,7 @@ export async function runAgent(
                 tags: ["generated", "image"],
                 contentType: contentType as "image/jpeg" | "image/png" | "image/webp",
               }, image.data);
+              assetIdsByImage[index] = asset.id;
               assets.push({ id: asset.id, name: asset.name, downloadUrl: await signR2Download(asset.r2Key), contentType: asset.contentType });
             } catch (error) {
               // Generation and channel delivery remain usable when optional
@@ -2198,7 +2366,7 @@ export async function runAgent(
               daytona.push(await abortable(daytonaEngine.writeBinaryFile(userId, workspacePath, image.data), signal));
             }
           }
-          generatedReferenceImages.push(...images);
+          generatedReferenceImages.push(...images.map((image, index) => ({ ...image, assetId: assetIdsByImage[index] })));
           if (destination === "telegram" || destination === "both") generatedImages.push(...images);
           execResult = { imageGenerated: true, imageCount: images.length, destination, ...(assets.length ? { assets } : {}), ...(daytona.length ? { daytona } : {}), note: channelContext?.scope === "shared" ? "Images generated and delivered in this group; private image-asset persistence is disabled for shared conversations." : destination === "daytona" ? "Images saved in Daytona and as reusable image assets; they were not sent as separate Telegram images." : "Images generated, saved as reusable image assets, and delivered through the normal channel." };
           // Tool JSON is not a visual input. Add the generated bytes to the
@@ -2386,7 +2554,31 @@ export async function runAgent(
             }
           }
         } else {
-          execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
+          const mediaRuntime: AgentMediaRuntime = {
+            currentImages: currentImageRuntime(userMessage).currentImages,
+            generatedImages: generatedReferenceImages,
+          };
+          const mediaSelection = selectRequestedImage(userRequestText(userMessage), {
+            currentCount: mediaRuntime.currentImages?.length ?? 0,
+            generatedCount: mediaRuntime.generatedImages?.length ?? 0,
+            savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
+          });
+          if (mediaSelection && (channelContext?.scope === "shared" || options?.meetingId)) {
+            throw new Error("Image attachments to connected apps are unavailable in shared conversations and meeting turns. No provider action was attempted.");
+          }
+          execResult = await dispatchComposioActionWithImageContext({
+            userId,
+            sessionObj,
+            availableTools: fullComposioTools,
+            invokedSlug: slug,
+            invokedArguments: executionArgs,
+            selection: mediaSelection,
+            runtime: mediaRuntime,
+            allowedToolSlugs: allow,
+            deniedToolSlugs: deny,
+            signal,
+          });
+          if (execResult === undefined) execResult = await composioExecute(sessionObj, slug, executionArgs, signal);
         }
         if (options?.meetingId && isMeetingCalendarAvailabilityTool(slug) && isSuccessfulCalendarResult(execResult)) {
           meetingCalendarAvailabilityChecked = true;

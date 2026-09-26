@@ -58,13 +58,13 @@ test("tool reliability upgrade preset describes bounded diagnostics and approved
   assert.match(bullets[2], /typed SDK, single-tool MCP runs, and durable A2A task skills/);
 });
 
-test("media bridge upgrade preset describes direct execution, scoped assets, and provider receipts", () => {
-  const bullets = getAgentUpgradePreset("mediaBridge");
+test("media automation upgrade preset describes normal-action attachment and provider receipts", () => {
+  const bullets = getAgentUpgradePreset("mediaAutomation");
   assert.equal(bullets.length, 3);
-  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaBridge]);
-  assert.match(bullets[0], /exact connected-app actions/);
-  assert.match(bullets[1], /run in the same turn/);
-  assert.match(bullets[2], /provider confirms/);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaAutomation]);
+  assert.match(bullets[0], /ordinary conversation/);
+  assert.match(bullets[1], /exact schema/);
+  assert.match(bullets[2], /Ambiguous image choices/);
 });
 
 test("custom MCP upgrade preset describes verification, private networking controls, and agent execution", () => {
@@ -89,13 +89,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces mission compensation, outcomes, and connected-app media", async () => {
+test("current upgrade manifest announces conversational connected-app image actions", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.9.2");
-  assert.equal(notice?.version, "4.9.2");
-  assert.match(formatAgentUpgradeNotice(notice!), /live provider outcome verification/);
-  assert.match(formatAgentUpgradeNotice(notice!), /conversation, generated, or saved images/);
-  assert.match(formatAgentUpgradeNotice(notice!), /provider confirms that exact action succeeded/);
-  assert.match(formatAgentUpgradeNotice(notice!), /exact owner-approved compensation actions/);
-  assert.match(formatAgentUpgradeNotice(notice!), /fresh read-back/);
+  assert.equal(notice?.id, "release-4.10.0");
+  assert.equal(notice?.version, "4.10.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /ordinary conversation/);
+  assert.match(formatAgentUpgradeNotice(notice!), /exact schema/);
+  assert.match(formatAgentUpgradeNotice(notice!), /final action/);
 });

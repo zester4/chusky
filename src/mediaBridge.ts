@@ -18,7 +18,134 @@ type FileUploadCandidate = {
   kind: "file" | "array";
 };
 
+export type MediaAttachmentSelection =
+  | { source: "current" | "generated"; sourceIndex: number }
+  | { source: "asset"; assetId: string }
+  | { ambiguous: true; reason: string };
+
+type SavedImageCandidate = {
+  id: string;
+  name: string;
+  purpose?: string;
+  tags?: readonly string[];
+  createdAt?: number;
+};
+
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
+const BINARY_FIELD_NAMES = new Set(["file_data", "file_content", "content_bytes", "contentbytes", "base64", "data_base64", "content_base64", "bytes_base64"]);
+
+/**
+ * Select an image only when the user's request clearly connects it to an
+ * external action. This runs at dispatch time so bytes and asset IDs never
+ * become model-authored action arguments.
+ */
+export function selectRequestedImage(
+  request: string,
+  input: { currentCount: number; generatedCount: number; savedAssets?: readonly SavedImageCandidate[] },
+): MediaAttachmentSelection | undefined {
+  const text = request.trim();
+  if (!text) return undefined;
+  const explicitAction = /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
+    || /\b(?:create|make|draft)\b.{0,40}\b(?:post|email|message|campaign)\b/i.test(text)
+    || /\buse\b.{0,80}\b(?:post|email|message|campaign|instagram|linkedin|facebook|twitter|\bx\b)\b/i.test(text);
+  if (!explicitAction) return undefined;
+  if (/\b(?:without|exclude|omit|leave out)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
+    || /\b(?:don't|do not|never)\s+(?:attach|include|send|post|publish|share|upload|email)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
+    || /\b(?:image|photo|picture|graphic|visual|attachment)\b.{0,32}\b(?:not|excluded|omitted)\b/i.test(text)) return undefined;
+
+  const assets = input.savedAssets ?? [];
+  const lowered = text.toLocaleLowerCase();
+  const namesAsset = assets.some((asset) => (asset.name && lowered.includes(asset.name.toLocaleLowerCase()))
+    || (asset.id && lowered.includes(asset.id.toLocaleLowerCase())));
+  const namesMedia = /\b(?:image|photo|pic|picture|graphic|visual|artwork|attachment|logo|banner|cover)\b/i.test(text);
+  const refersToAvailableMedia = /\b(?:it|this|that|these|those)\b/i.test(text)
+    && (input.currentCount > 0 || input.generatedCount > 0 || assets.length > 0);
+  const implicitAttachedPost = input.currentCount > 0
+    && /\b(?:post|publish|share|upload)\b/i.test(text)
+    && !/\b(?:send|email)\b/i.test(text);
+  if (!namesMedia && !namesAsset && !refersToAvailableMedia && !implicitAttachedPost) return undefined;
+
+  const namedAssets = assets.filter((asset) => asset.id && asset.name
+    && (lowered.includes(asset.name.toLocaleLowerCase()) || lowered.includes(asset.id.toLocaleLowerCase())));
+  if (namedAssets.length === 1) return { source: "asset", assetId: namedAssets[0]!.id };
+  if (namedAssets.length > 1) return { ambiguous: true, reason: "The request matches more than one saved image. Ask which one to use." };
+
+  const savedCue = /\b(?:saved|previous|earlier|from before|from last time|brand|logo)\b/i.test(text);
+  const newestAsset = (): SavedImageCandidate | undefined => {
+    if (!assets.length) return undefined;
+    if (assets.length === 1) return assets[0];
+    const ranked = [...assets].sort((left, right) => (right.createdAt ?? -1) - (left.createdAt ?? -1));
+    const newest = ranked[0];
+    if (!newest || !Number.isFinite(newest.createdAt)) return undefined;
+    if (ranked[1]?.createdAt === newest.createdAt) return undefined;
+    return newest;
+  };
+  if (savedCue && assets.length) {
+    if (assets.length === 1) return { source: "asset", assetId: assets[0]!.id };
+    if (/\b(?:latest|most recent|newest|last)\b/i.test(text)) {
+      const latest = newestAsset();
+      if (latest) return { source: "asset", assetId: latest.id };
+    }
+    return { ambiguous: true, reason: "Several saved images could match. Ask which image to use before posting or sending." };
+  }
+
+  const currentCue = /\b(?:attached|uploaded|sent|provided|current|original)\b/i.test(text)
+    || /\bthis\s+(?:image|photo|picture|graphic)\b/i.test(text)
+    || /\b(?:image|photo|picture)\s+(?:i|we)\s+(?:sent|uploaded|attached)\b/i.test(text);
+  const generatedCue = /\b(?:generated|created|made|designed|edited)\b.{0,48}\b(?:image|photo|picture|graphic|it|one)\b/i.test(text)
+    || /\b(?:generate|create|make|design|edit)\b.{0,40}\b(?:image|photo|picture|graphic)\b/i.test(text);
+  const requestedIndex = (count: number): number | undefined => {
+    if (/\b(?:first|1st)\b/i.test(text)) return count > 0 ? 0 : undefined;
+    if (/\b(?:second|2nd)\b/i.test(text)) return count > 1 ? 1 : undefined;
+    if (/\b(?:third|3rd)\b/i.test(text)) return count > 2 ? 2 : undefined;
+    if (/\b(?:last|latest)\b/i.test(text)) return count > 0 ? count - 1 : undefined;
+    return undefined;
+  };
+
+  if (currentCue && generatedCue && input.currentCount > 0 && input.generatedCount > 0) {
+    return { ambiguous: true, reason: "Both a sent image and a generated image match. Ask which one to use before posting or sending." };
+  }
+  if (currentCue) {
+    const index = requestedIndex(input.currentCount);
+    if (index !== undefined) return { source: "current", sourceIndex: index };
+    if (input.currentCount === 1) return { source: "current", sourceIndex: 0 };
+    if (input.currentCount > 1) return { ambiguous: true, reason: "Several images were sent. Ask which one to use before posting or sending." };
+    return { ambiguous: true, reason: "The requested sent image is not available in this run. Ask the user to send it again." };
+  }
+  if (generatedCue) {
+    const index = requestedIndex(input.generatedCount);
+    if (index !== undefined) return { source: "generated", sourceIndex: index };
+    if (input.generatedCount === 1) return { source: "generated", sourceIndex: 0 };
+    if (input.generatedCount > 1) return { ambiguous: true, reason: "Several images were generated. Ask which one to use before posting or sending." };
+  }
+
+  const generatedAssets = assets.filter((asset) => asset.tags?.includes("generated") || /generated by chusky/i.test(asset.purpose ?? ""))
+    .sort((left, right) => (right.createdAt ?? 0) - (left.createdAt ?? 0));
+  if (generatedCue && generatedAssets.length) {
+    const latest = generatedAssets[0];
+    if (generatedAssets.length > 1 && generatedAssets[1]?.createdAt === latest?.createdAt) return { ambiguous: true, reason: "Several saved generated images could match. Ask which one to use before posting or sending." };
+    if (latest) return { source: "asset", assetId: latest.id };
+  }
+
+  if (input.currentCount > 0 && input.generatedCount > 0) {
+    return { ambiguous: true, reason: "Both a sent image and a generated image are available. Ask which one to use before posting or sending." };
+  }
+  if (input.generatedCount === 1) return { source: "generated", sourceIndex: 0 };
+  if (input.generatedCount > 1) return { ambiguous: true, reason: "Several images were generated. Ask which one to use before posting or sending." };
+  if (input.currentCount === 1) return { source: "current", sourceIndex: 0 };
+  if (input.currentCount > 1) return { ambiguous: true, reason: "Several images were sent. Ask which one to use before posting or sending." };
+
+  if (/\b(?:latest|most recent|newest|last)\b/i.test(text) && assets.length) {
+    const latest = newestAsset();
+    if (latest) return { source: "asset", assetId: latest.id };
+    return { ambiguous: true, reason: "Several saved images could match, and their order is unclear. Ask which image to use before posting or sending." };
+  }
+  if (assets.length === 1) return { source: "asset", assetId: assets[0]!.id };
+  if (assets.length > 1 && /\b(?:saved|previous|earlier|logo|brand)\b/i.test(text)) {
+    return { ambiguous: true, reason: "Several saved images could match. Ask which image to use before posting or sending." };
+  }
+  return { ambiguous: true, reason: "The requested image is not available. Ask the user to attach or select it before posting or sending." };
+}
 
 const MEDIA_URL_NAMES = new Set([
   "image_url", "imageurl", "media_url", "mediaurl", "photo_url", "photourl",
@@ -129,6 +256,57 @@ export function buildComposioFileUploadArguments(
 export function hasMediaUrlField(inputSchema: unknown): boolean {
   if (!isObject(inputSchema)) return false;
   return findMediaUrlCandidates(inputSchema as Schema).length > 0;
+}
+
+function hasBinaryPayload(schema: Schema | undefined): boolean {
+  if (!schema) return false;
+  if (isObject(schema.properties)) {
+    for (const [key, property] of Object.entries(schema.properties)) {
+      if (typeIs(property, "string") && (BINARY_FIELD_NAMES.has(key.toLowerCase()) || /\b(base64|binary|encoded file bytes)\b/i.test(property.description ?? ""))) return true;
+      if (hasBinaryPayload(property)) return true;
+    }
+  }
+  return schema.items ? hasBinaryPayload(schema.items) : false;
+}
+
+/**
+ * Let normal action arguments omit only the image field that Chusky will
+ * inject after schema resolution. Every other required field remains checked
+ * before the provider action can run.
+ */
+export function mediaActionPreflightSchema(toolSlug: string, inputSchema: unknown): unknown {
+  if (!isObject(inputSchema)) return inputSchema;
+  const schema = structuredClone(inputSchema) as Schema & { required?: string[] };
+  const paths = [
+    ...findFileUploadCandidates(schema).map((candidate) => candidate.path),
+    ...findMediaUrlCandidates(schema).map((candidate) => candidate.path),
+  ];
+  const properties = schema.properties ?? {};
+  if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST" && typeIs(properties.images, "array") && typeIs(properties.images.items, "string")) paths.push(["images"]);
+  if (toolSlug === "TWITTER_CREATION_OF_A_POST") {
+    const key = ["media_media_ids", "media_ids", "mediaIds"].find((candidate) => typeIs(properties[candidate], "array") && typeIs(properties[candidate]?.items, "string"));
+    if (key) paths.push([key]);
+  }
+  if (toolSlug === "FACEBOOK_CREATE_PHOTO_POST") {
+    const key = Object.entries(properties).find(([name, property]) => /^(photo_id|photoId|media_id|mediaId|photo|media)$/i.test(name)
+      && (typeIs(property, "string") || typeIs(property, "array") && typeIs(property.items, "string")))?.[0];
+    if (key) paths.push([key]);
+  }
+  for (const [key, property] of Object.entries(properties)) {
+    if (typeIs(property, "string") && (BINARY_FIELD_NAMES.has(key.toLowerCase()) || /\b(base64|binary|encoded file bytes)\b/i.test(property.description ?? ""))) paths.push([key]);
+    else if ((typeIs(property, "object") || typeIs(property, "array")) && hasBinaryPayload(property)) paths.push([key]);
+  }
+
+  for (const path of paths) {
+    let cursor: (Schema & { required?: string[] }) | undefined = schema;
+    for (const segment of path.slice(0, -1)) {
+      const child = cursor?.properties?.[segment];
+      if (!child || !isObject(child.properties)) { cursor = undefined; break; }
+      cursor = child as Schema & { required?: string[] };
+    }
+    if (cursor?.required) cursor.required = cursor.required.filter((key) => key !== path[path.length - 1]);
+  }
+  return schema;
 }
 
 function findAtPath(value: Record<string, unknown>, path: string[]): { parent: Record<string, unknown>; key: string; exists: boolean } {
