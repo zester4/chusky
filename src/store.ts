@@ -663,6 +663,8 @@ export interface DaytonaAppVerification {
 export interface DaytonaAppRecord {
   id: string;
   framework: DaytonaAppFramework;
+  archetype?: import("./lib/daytona/appTemplates.js").DaytonaAppArchetype;
+  style?: import("./lib/daytona/appTemplates.js").ResolvedDaytonaAppStyle;
   path: string;
   port: number;
   status: DaytonaAppStatus;

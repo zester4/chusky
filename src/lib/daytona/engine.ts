@@ -8,6 +8,7 @@ import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { guardVaultBrowserAction, guardVaultWorkspaceAccess, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
+import { buildAppTemplateFiles, DAYTONA_APP_ARCHETYPES, DAYTONA_APP_STYLES, resolveAppDesign, type DaytonaAppArchetype, type DaytonaAppStyle } from "./appTemplates.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
 import { artifactRendererImage } from "./renderer.js";
@@ -2265,6 +2266,10 @@ export class DaytonaEngine {
       if (existing) throw new DaytonaInputError(`An app named '${id}' already exists; use its project actions instead.`);
       const framework = boundedText(args.framework, "framework", 20) as DaytonaAppFramework;
       if (framework !== "vite-react" && framework !== "nextjs") throw new DaytonaInputError("framework must be vite-react or nextjs");
+      const archetype = (args.archetype ?? "saas-dashboard") as DaytonaAppArchetype;
+      const style = (args.style ?? "auto") as DaytonaAppStyle;
+      if (!DAYTONA_APP_ARCHETYPES.includes(archetype)) throw new DaytonaInputError(`archetype must be one of: ${DAYTONA_APP_ARCHETYPES.join(", ")}`);
+      if (!DAYTONA_APP_STYLES.includes(style)) throw new DaytonaInputError(`style must be one of: ${DAYTONA_APP_STYLES.join(", ")}`);
       if (sandbox.networkBlockAll === true && this.networkPolicyOverrideUnavailable) {
         throw new DaytonaInputError("This Daytona organization tier blocks outbound network access, so npm dependencies cannot be installed in this workspace. The project files are unchanged. Use a Daytona tier or organization policy that permits npm registry access, then retry scaffold.");
       }
@@ -2273,12 +2278,15 @@ export class DaytonaEngine {
       const scaffold = appScaffoldCommand(framework, id);
       const run = await this.execute(userId, scaffold, undefined, 900);
       if (run.exitCode !== 0) throw new DaytonaInputError(appScaffoldFailure(run.output));
+      const files = buildAppTemplateFiles(framework, archetype, style, id);
+      for (const [relativePath, content] of Object.entries(files)) await this.writeFile(userId, `${path}/${relativePath}`, content);
+      const resolvedStyle = resolveAppDesign(archetype, style).style;
       // Keep generated work isolated from the outset. It is local-only: remote
       // repository creation, push and deployment retain their approval gates.
       const gitSetup = await this.execute(userId, `git init -b main && git add -A && git -c user.name=Chusky -c user.email=chusky@localhost commit -m "chore: scaffold ${id}" && git checkout -b ${branch}`, path, 120);
       if (gitSetup.exitCode !== 0) throw new DaytonaInputError(`App scaffold completed but local project branch setup failed: ${gitSetup.output.slice(-800)}`);
       const app: DaytonaAppRecord = {
-        id, framework, path, branch, port: framework === "vite-react" ? 5173 : 3000,
+        id, framework, archetype, style: resolvedStyle, path, branch, port: framework === "vite-react" ? 5173 : 3000,
         status: "scaffolded", verification: { status: "pending", checks: [] }, release: { status: "not_requested" },
         createdAt: Date.now(), updatedAt: Date.now(),
       };

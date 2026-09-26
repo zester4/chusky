@@ -9,6 +9,8 @@ export const WORKER_SKILL_BINDINGS: Record<Exclude<CapabilityWorkerName, "chusky
       requiredReferences: {
         "fullstack-dev": ["references/testing-strategy.md", "references/release-checklist.md"],
         "computer-pro": ["references/01-workspace-hygiene.md"],
+        "fullstack-guardian": ["references/design-template.md"],
+        "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
       },
     },
   maya: {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
+import { clearSkillCatalogCache, listSkillFiles, readSkillFile, relevantSkillContext, routedSkillContext, routedSkillNames, searchSkills, skillContextForBinding } from "../src/skills/catalog.js";
 import { WORKER_CAPABILITIES } from "../src/subagents/capabilities.js";
 import { WORKER_SKILL_BINDINGS } from "../src/subagents/skillBindings.js";
 import { getSkillCoverage } from "../src/subagents/skillCoverage.js";
@@ -25,6 +25,15 @@ test("routes core engineering and growth skills deterministically", () => {
   assert.ok(meet.includes("meeting-pro"));
 });
 
+test("app-building requests preload product design and fullstack design guidance", async () => {
+  const routed = routedSkillNames("Scaffold a new web app dashboard in Daytona");
+  assert.ok(routed.includes("fullstack-guardian"));
+  assert.ok(routed.includes("ui-ux-pro-max"));
+  const context = await routedSkillContext("Scaffold a new web app dashboard in Daytona");
+  assert.match(context, /Reference: references\/design-template\.md/);
+  assert.match(context, /Reference: references\/pro-rules\.md/);
+});
+
 test("skillBindings preloads expanded library skills", () => {
   assert.ok(WORKER_SKILL_BINDINGS.leo.primary.includes("video-editing"));
   assert.ok(!WORKER_SKILL_BINDINGS.leo.primary.includes("openrouter-video-editing"));
@@ -34,6 +43,8 @@ test("skillBindings preloads expanded library skills", () => {
   assert.ok(WORKER_SKILL_BINDINGS.aria.primary.includes("onboarding-pro"));
   assert.ok(WORKER_SKILL_BINDINGS.aria.primary.includes("retention-pro"));
   assert.ok(WORKER_SKILL_BINDINGS.lucas.supporting.includes("ui-ux-pro-max"));
+  assert.deepEqual(WORKER_SKILL_BINDINGS.lucas.requiredReferences?.["fullstack-guardian"], ["references/design-template.md"]);
+  assert.deepEqual(WORKER_SKILL_BINDINGS.lucas.requiredReferences?.["ui-ux-pro-max"], ["references/pro-rules.md", "references/quick-reference.md"]);
   assert.ok(WORKER_SKILL_BINDINGS.lucas.supporting.includes("pdf-generation"));
   assert.ok(WORKER_SKILL_BINDINGS.ivy.supporting.includes("hiring-pipeline-pro"));
   assert.ok(WORKER_SKILL_BINDINGS.kai.supporting.includes("xlsx-generation"));

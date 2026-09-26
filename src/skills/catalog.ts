@@ -72,7 +72,8 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "frontend-design", triggers: ["frontend design", "ui design", "landing page ui"] },
   { name: "design-ui", triggers: ["design system", "component ui", "polish ui"] },
   { name: "better-ui", triggers: ["better ui", "ui polish", "interface quality"] },
-  { name: "ui-ux-pro-max", triggers: ["ui ux", "ux audit", "responsive layout", "accessibility review", "mobile layout"] },
+  { name: "ui-ux-pro-max", triggers: ["ui ux", "ux audit", "responsive layout", "accessibility review", "mobile layout", "web app", "website", "landing page", "dashboard", "waitlist page", "portfolio", "frontend", "scaffold"] },
+  { name: "fullstack-guardian", triggers: ["new web app", "web app", "website", "landing page", "scaffold", "build a dashboard", "portfolio website"] },
   { name: "supabase", triggers: ["supabase"] },
   { name: "neon", triggers: ["neon postgres", "neon database"] },
   { name: "auth", triggers: ["authentication", "auth flow", "login signup"] },
@@ -117,7 +118,14 @@ export function listRoutedSkillNames(): string[] {
 
 export async function routedSkillContext(query: string, root = DEFAULT_SKILLS_ROOT): Promise<string> {
   const names = routedSkillNames(query);
-  return skillContextForBinding({ primary: names, supporting: [] }, query, root);
+  return skillContextForBinding({
+    primary: names,
+    supporting: [],
+    requiredReferences: {
+      "fullstack-guardian": ["references/design-template.md"],
+      "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
+    },
+  }, query, root);
 }
 
 type CatalogCache = { signature: string; skills: SkillManifest[] };

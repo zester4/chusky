@@ -571,6 +571,38 @@ test("app projects create an isolated branch, verify before preview, retain evid
   assert.equal(stopped.ptySessionId, undefined);
 });
 
+test("app scaffolds write the selected task-specific design files before recording the project", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820019) as any;
+  const uploads = new Map<string, string>();
+  sandbox.fs.uploadFile = async (contents: Buffer, path: string) => { uploads.set(path, Buffer.from(contents).toString("utf8")); };
+
+  const app = await e.app(820019, {
+    action: "scaffold", id: "finance-dashboard", framework: "vite-react",
+    archetype: "fintech-dashboard", style: "auto",
+  }) as any;
+
+  assert.equal(app.archetype, "fintech-dashboard");
+  assert.equal(app.style, "ledger");
+  assert.match(uploads.get("workspace/apps/finance-dashboard/src/App.tsx") ?? "", /CASH FLOW/);
+  assert.match(uploads.get("workspace/apps/finance-dashboard/src/index.css") ?? "", /--color-primary:#167052/);
+  assert.match(uploads.get("workspace/apps/finance-dashboard/index.html") ?? "", /finance-dashboard/);
+  const workspace = await getDaytonaWorkspace(820019);
+  assert.equal(workspace?.apps?.[0]?.archetype, "fintech-dashboard");
+  assert.equal(workspace?.apps?.[0]?.style, "ledger");
+});
+
+test("app scaffolds reject unsupported design choices before running npm", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820020) as any;
+  let commands = 0;
+  sandbox.process.executeCommand = async () => { commands += 1; return { exitCode: 0, result: "unexpected" }; };
+  await assert.rejects(() => e.app(820020, {
+    action: "scaffold", id: "bad-template", framework: "vite-react", archetype: "linkedin",
+  }), /archetype must be one of/);
+  assert.equal(commands, 0);
+});
+
 test("app preview refuses a failed production verification and never starts its server", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820016) as any;
