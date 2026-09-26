@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Game Scaffold</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, sans-serif; background: #0b1220; color: #e8eef7;
+    }
+    .wrap { display: grid; gap: 8px; justify-items: center; }
+    canvas {
+      background: #111827; border: 2px solid #334155; border-radius: 8px;
+      image-rendering: pixelated; max-width: 100%;
+    }
+    .hud { font-size: 14px; opacity: 0.9; }
+    .hint { font-size: 12px; opacity: 0.6; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hud">Score: <span id="score">0</span> · <span id="status">playing</span></div>
+    <canvas id="c" width="480" height="320"></canvas>
+    <div class="hint">Arrows / WASD move · R restart · replace this loop with your genre</div>
+  </div>
+  <script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const statusEl = document.getElementById('status');
+
+  const keys = new Set();
+  addEventListener('keydown', (e) => {
+    keys.add(e.code);
+    if (e.code === 'KeyR') restart();
+    e.preventDefault();
+  });
+  addEventListener('keyup', (e) => keys.delete(e.code));
+
+  let score = 0;
+  let alive = true;
+  let player = { x: 240, y: 160, r: 12, speed: 180 };
+  let coin = { x: 100, y: 80, r: 8 };
+  let last = performance.now();
+
+  function restart() {
+    score = 0;
+    alive = true;
+    player.x = 240; player.y = 160;
+    placeCoin();
+    scoreEl.textContent = '0';
+    statusEl.textContent = 'playing';
+  }
+
+  function placeCoin() {
+    coin.x = 30 + Math.random() * (canvas.width - 60);
+    coin.y = 30 + Math.random() * (canvas.height - 60);
+  }
+
+  function update(dt) {
+    if (!alive) return;
+    let dx = 0, dy = 0;
+    if (keys.has('ArrowLeft') || keys.has('KeyA')) dx -= 1;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) dx += 1;
+    if (keys.has('ArrowUp') || keys.has('KeyW')) dy -= 1;
+    if (keys.has('ArrowDown') || keys.has('KeyS')) dy += 1;
+    if (dx || dy) {
+      const len = Math.hypot(dx, dy) || 1;
+      player.x += (dx / len) * player.speed * dt;
+      player.y += (dy / len) * player.speed * dt;
+      player.x = Math.max(player.r, Math.min(canvas.width - player.r, player.x));
+      player.y = Math.max(player.r, Math.min(canvas.height - player.r, player.y));
+    }
+    const dist = Math.hypot(player.x - coin.x, player.y - coin.y);
+    if (dist < player.r + coin.r) {
+      score += 1;
+      scoreEl.textContent = String(score);
+      placeCoin();
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#fbbf24';
+    ctx.beginPath();
+    ctx.arc(coin.x, coin.y, coin.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = alive ? '#38bdf8' : '#f87171';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  placeCoin();
+  requestAnimationFrame(frame);
+})();
+  </script>
+</body>
+</html>
