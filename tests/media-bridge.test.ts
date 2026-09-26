@@ -555,14 +555,25 @@ test("Instagram stages image_file, publishes the container, and verifies the res
   setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
   try {
     const availableTools = await session.tools();
-    const result = await executeMediaBridgeAction(userId, session, availableTools, {
-      source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "instagram-owner", caption: "A launch" },
-    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
-    assert.equal(result.mode, "composio_file");
-    assert.equal(result.providerActionSucceeded, true);
-    assert.equal(result.id, "instagram-published-1");
-    assert.equal(result.providerMediaVerified, true);
-    assert.equal(result.verifiedMediaType, "IMAGE");
+    const result = await dispatchComposioActionWithImageContext({
+      userId,
+      sessionObj: session,
+      availableTools,
+      invokedSlug: "COMPOSIO_MULTI_EXECUTE_TOOL",
+      invokedArguments: { tools: [{
+        tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA",
+        arguments: { ig_user_id: "instagram-owner", caption: "A launch" },
+      }] },
+      selection: { source: "current", sourceIndex: 0 },
+      runtime: { currentImages: [{ data: imageBytes, mediaType: "image/png" }] },
+    });
+    assert.ok(result && typeof result === "object");
+    const receipt = result as Record<string, unknown>;
+    assert.equal(receipt.mode, "composio_file");
+    assert.equal(receipt.providerActionSucceeded, true);
+    assert.equal(receipt.id, "instagram-published-1");
+    assert.equal(receipt.providerMediaVerified, true);
+    assert.equal(receipt.verifiedMediaType, "IMAGE");
     assert.equal(uploaded.length, 1);
     assert.equal(uploaded[0]?.file.name, "chusky-image-1.png");
     assert.equal(uploaded[0]?.file.type, "image/png");

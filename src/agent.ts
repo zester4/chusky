@@ -628,10 +628,12 @@ export async function dispatchComposioActionWithImageContext(
   },
 ): Promise<unknown | undefined> {
   const target = composioMediaTarget(input.invokedSlug, input.invokedArguments);
-  if (hasImageLessInstagramPost(input.invokedSlug, input.invokedArguments)) {
-    throw new Error("Instagram requires an image or video for this post, but the action has no media input. No provider action was attempted.");
+  if (!input.selection) {
+    if (hasImageLessInstagramPost(input.invokedSlug, input.invokedArguments)) {
+      throw new Error("Instagram requires an image or video for this post, but the action has no media input. No provider action was attempted.");
+    }
+    return undefined;
   }
-  if (!input.selection) return undefined;
   if (!target && input.invokedSlug !== "COMPOSIO_EXECUTE_TOOL" && input.invokedSlug !== "COMPOSIO_MULTI_EXECUTE_TOOL") return undefined;
   if (target === "multi_action_batch") {
     throw new Error("The request includes an image attachment, but the connected-app call grouped several actions together. Split the image post or email into its own action; no batched actions were attempted.");
