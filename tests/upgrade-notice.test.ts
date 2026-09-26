@@ -63,10 +63,9 @@ test("media automation upgrade preset describes normal-action attachment and pro
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaAutomation]);
   assert.match(bullets[0], /ordinary conversation/);
-  assert.match(bullets[1], /exact schema/);
-  assert.match(bullets[1], /Slack channel replies can upload generated images/);
-  assert.match(bullets[2], /Ambiguous image choices/);
-  assert.match(bullets[2], /external receipt/);
+  assert.match(bullets[0], /Instagram carousels/);
+  assert.match(bullets[1], /current Composio schema/);
+  assert.match(bullets[2], /provider read-back/);
 });
 
 test("generated image API upgrade preset documents private durable image delivery", () => {
@@ -99,11 +98,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces generated-image API delivery", async () => {
+test("current upgrade manifest announces expanded connected-app image delivery", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.12.0");
-  assert.equal(notice?.version, "4.12.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /private image store/);
-  assert.match(formatAgentUpgradeNotice(notice!), /short-lived image download URL/);
-  assert.match(formatAgentUpgradeNotice(notice!), /images:read/);
+  assert.equal(notice?.id, "release-4.13.0");
+  assert.equal(notice?.version, "4.13.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Pinterest Pins/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Instagram carousels/);
+  assert.match(formatAgentUpgradeNotice(notice!), /provider read-back/);
 });

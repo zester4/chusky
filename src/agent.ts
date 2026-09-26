@@ -613,6 +613,7 @@ function hasImageLessInstagramPost(slug: string, args: Record<string, unknown>):
 }
 
 function isPotentialImageDestinationAction(toolSlug: string): boolean {
+  if (["PINTEREST_CREATE_PIN", "YOUTUBE_UPDATE_THUMBNAIL", "SHOPIFY_GRAPH_QL_PRODUCTS", "INSTAGRAM_CREATE_CAROUSEL_CONTAINER"].includes(toolSlug)) return true;
   return /(?:^|_)(?:SEND|POST|PUBLISH|UPLOAD|ATTACH|SHARE|CREATE_DRAFT|CREATE_EMAIL|CREATE_MESSAGE|CREATE_MEDIA|CREATE_PHOTO|ADD_ATTACHMENT|ADD_FILE|IMPORT_FILE)(?:_|$)/.test(toolSlug);
 }
 
@@ -646,6 +647,7 @@ export async function dispatchComposioActionWithImageContext(
   if (target === "multi_action_batch") {
     throw new Error("The request includes an image attachment, but the connected-app call grouped several actions together. Split the image post or email into its own action; no batched actions were attempted.");
   }
+  if (target?.toolSlug === "SHOPIFY_GRAPH_QL_PRODUCTS" && target.arguments.operation !== "create_media") return undefined;
   if (target && !isPotentialImageDestinationAction(target.toolSlug)) return undefined;
   if ("ambiguous" in input.selection) throw new Error(`${input.selection.reason} No connected-app action was attempted.`);
   if (!target && (input.invokedSlug === "COMPOSIO_EXECUTE_TOOL" || input.invokedSlug === "COMPOSIO_MULTI_EXECUTE_TOOL")) {
@@ -656,11 +658,21 @@ export async function dispatchComposioActionWithImageContext(
   if (input.allowedToolSlugs && !input.allowedToolSlugs.has(target.toolSlug) && !input.allowedToolSlugs.has(input.invokedSlug)) {
     throw new Error(`The ${target.toolSlug} action is not granted to this run; no image transfer or provider action was attempted.`);
   }
+  let destination = target;
+  if (target.toolSlug === "SLACK_SEND_MESSAGE") {
+    const uploadSlug = "SLACK_UPLOAD_OR_CREATE_A_FILE_IN_SLACK";
+    if (input.deniedToolSlugs?.has(uploadSlug) || input.allowedToolSlugs && !input.allowedToolSlugs.has(uploadSlug)) throw new Error("The Slack file upload action is not granted to this run; no provider action was attempted.");
+    const original = target.arguments;
+    if (Object.keys(original).some((key) => !["channel", "markdown_text", "fallback_text", "thread_ts", "account"].includes(key)) || typeof original.channel !== "string" || !original.channel.trim()) throw new Error("Slack image messages need a channel and plain message text; no provider action was attempted.");
+    const comment = original.markdown_text ?? original.fallback_text;
+    if (comment !== undefined && typeof comment !== "string") throw new Error("Slack image message text must be a string; no provider action was attempted.");
+    destination = { ...target, toolSlug: uploadSlug, arguments: { channels: original.channel, ...(comment ? { initial_comment: comment } : {}), ...(typeof original.thread_ts === "string" ? { thread_ts: original.thread_ts } : {}), ...(typeof original.account === "string" ? { account: original.account } : {}) } };
+  }
 
-  const requestedAccount = target.account ?? (typeof input.invokedArguments.account === "string" ? input.invokedArguments.account.trim() : undefined);
-  const targetArguments = requestedAccount && target.arguments.account === undefined
-    ? { ...target.arguments, account: requestedAccount }
-    : target.arguments;
+  const requestedAccount = destination.account ?? (typeof input.invokedArguments.account === "string" ? input.invokedArguments.account.trim() : undefined);
+  const targetArguments = requestedAccount && destination.arguments.account === undefined
+    ? { ...destination.arguments, account: requestedAccount }
+    : destination.arguments;
   const selected = splitAccountSelector(targetArguments);
   const result = await executeMediaBridgeAction(
     input.userId,
@@ -668,8 +680,8 @@ export async function dispatchComposioActionWithImageContext(
     input.availableTools,
     {
       source: input.selection.source,
-      ...(input.selection.source === "asset" ? { assetId: input.selection.assetId } : { sourceIndex: input.selection.sourceIndex }),
-      toolSlug: target.toolSlug,
+      ...(input.selection.source === "asset" ? { assetId: input.selection.assetId } : "sourceIndexes" in input.selection ? { sourceIndexes: input.selection.sourceIndexes } : { sourceIndex: input.selection.sourceIndex }),
+      toolSlug: destination.toolSlug,
       arguments: selected.arguments,
       ...(selected.account ? { account: selected.account } : {}),
     },
@@ -691,7 +703,7 @@ function toolSchemaName(tool: any): string {
 async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], toolSlug: string, signal?: AbortSignal): Promise<unknown> {
   const directTool = availableTools.find((tool) => toolSchemaName(tool) === toolSlug);
   const directSchema = directTool?.function?.parameters ?? directTool?.inputSchema;
-  const preferOwnerSessionSchema = toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA";
+  const preferOwnerSessionSchema = ["INSTAGRAM_POST_IG_USER_MEDIA", "INSTAGRAM_CREATE_CAROUSEL_CONTAINER", "PINTEREST_CREATE_PIN", "YOUTUBE_UPDATE_THUMBNAIL", "SHOPIFY_GRAPH_QL_PRODUCTS", "SLACK_UPLOAD_OR_CREATE_A_FILE_IN_SLACK"].includes(toolSlug);
   if (directSchema && typeof directSchema === "object" && !preferOwnerSessionSchema) return directSchema;
 
   // Tool Router sessions expose meta-tools by default. Discover the exact
@@ -1036,6 +1048,7 @@ async function verifyInstagramImagePost(
   publishResult: any,
   account: string | undefined,
   signal?: AbortSignal,
+  expectedMediaType: "IMAGE" | "CAROUSEL_ALBUM" = "IMAGE",
 ): Promise<void> {
   const data = publishResult?.data && typeof publishResult.data === "object" ? publishResult.data : {};
   const mediaId = [data.id, data.media_id, data.mediaId]
@@ -1057,7 +1070,7 @@ async function verifyInstagramImagePost(
     throw new Error("Instagram published the post, but its current media lookup schema cannot verify the attached image. Check Instagram before retrying.");
   }
   const verifyArguments: Record<string, unknown> = { ig_media_id: mediaId };
-  if (Object.hasOwn(properties, "fields")) verifyArguments.fields = "id,media_type,media_url";
+  if (Object.hasOwn(properties, "fields")) verifyArguments.fields = expectedMediaType === "CAROUSEL_ALBUM" ? "id,media_type,children{id,media_type,media_url}" : "id,media_type,media_url";
   try {
     validateToolArgumentsAgainstSchema(verifySlug, verifyArguments, schema, 36 * 1024 * 1024);
   } catch {
@@ -1076,9 +1089,17 @@ async function verifyInstagramImagePost(
   }
 
   const media = verification.data && typeof verification.data === "object" ? verification.data : {};
-  const mediaUrl = typeof media.media_url === "string" ? media.media_url : "";
-  if (media.media_type !== "IMAGE" || !/^https:\/\//i.test(mediaUrl)) {
-    throw new Error("Instagram's published media lookup did not confirm an image URL and IMAGE media type. The post may already be live; check Instagram before retrying.");
+  if (expectedMediaType === "CAROUSEL_ALBUM") {
+    const children = media.children && typeof media.children === "object" ? media.children as Record<string, unknown> : {};
+    const items = Array.isArray(children.data) ? children.data : [];
+    if (media.media_type !== "CAROUSEL_ALBUM" || items.length < 2 || items.some((item) => !item || typeof item !== "object" || (item as Record<string, unknown>).media_type !== "IMAGE" || !/^https:\/\//i.test(String((item as Record<string, unknown>).media_url ?? "")))) {
+      throw new Error("Instagram's published media lookup did not confirm the carousel images. The post may already be live; check Instagram before retrying.");
+    }
+  } else {
+    const mediaUrl = typeof media.media_url === "string" ? media.media_url : "";
+    if (media.media_type !== "IMAGE" || !/^https:\/\//i.test(mediaUrl)) {
+      throw new Error("Instagram's published media lookup did not confirm an image URL and IMAGE media type. The post may already be live; check Instagram before retrying.");
+    }
   }
 }
 
@@ -1377,8 +1398,15 @@ export async function executeMediaBridgeAction(
     throw new Error("arguments must match the selected app action schema.");
   }
   const source = args.source === "asset" || args.source === "generated" ? args.source : "current";
-  const sourceIndex = Number.isInteger(Number(args.sourceIndex)) ? Math.max(0, Math.floor(Number(args.sourceIndex))) : 0;
+  const sourceIndex = Array.isArray(args.sourceIndexes) && Number.isInteger(args.sourceIndexes[0]) ? args.sourceIndexes[0] : Number.isInteger(Number(args.sourceIndex)) ? Math.max(0, Math.floor(Number(args.sourceIndex))) : 0;
+  const sourceIndexes = Array.isArray(args.sourceIndexes) ? args.sourceIndexes : undefined;
+  const isCarousel = toolSlug === "INSTAGRAM_CREATE_CAROUSEL_CONTAINER";
+  if (sourceIndexes && (!isCarousel || source === "asset" || sourceIndexes.length < 2 || sourceIndexes.length > 10 || sourceIndexes.some((value, index) => !Number.isInteger(value) || value < 0 || value > 9 || sourceIndexes.indexOf(value) !== index))) {
+    throw new Error("A carousel requires 2 to 10 distinct in-run image indexes; no provider action was attempted.");
+  }
+  if (isCarousel && !sourceIndexes) throw new Error("Select 2 to 10 images for the carousel; no provider action was attempted.");
   const schema = await resolveMediaBridgeSchema(sessionObj, availableComposioTools, toolSlug, signal);
+  const requiresUrl = hasMediaUrlField(schema) || ["PINTEREST_CREATE_PIN", "YOUTUBE_UPDATE_THUMBNAIL", "SHOPIFY_GRAPH_QL_PRODUCTS"].includes(toolSlug);
 
   let file: { data: Buffer; name: string; contentType: "image/jpeg" | "image/png" | "image/webp" };
   let assetId: string | undefined;
@@ -1394,7 +1422,7 @@ export async function executeMediaBridgeAction(
     const contentType = asset.contentType;
     file = { data: await abortable(mediaBridgeStorage.readR2Object(asset.r2Key), signal), name: asset.name, contentType };
     assetId = asset.id;
-    if (hasMediaUrlField(schema)) mediaUrl = await mediaBridgeStorage.signR2Download(asset.r2Key, 900);
+    if (requiresUrl) mediaUrl = await mediaBridgeStorage.signR2Download(asset.r2Key, 900);
   } else {
     const images = source === "generated" ? runtime.generatedImages : runtime.currentImages;
     const image = images?.[sourceIndex];
@@ -1406,7 +1434,7 @@ export async function executeMediaBridgeAction(
     file = { data: Buffer.from(image.data), name: image.filename || `chusky-image-${sourceIndex + 1}.${contentType.slice(6)}`, contentType };
     // URL-only providers need an HTTPS object that they can fetch. Persisting
     // happens only because the user explicitly requested an external transfer.
-    if (hasMediaUrlField(schema)) {
+    if (requiresUrl) {
       const generatedAssetId = source === "generated" && "assetId" in image ? image.assetId : undefined;
       const existing = generatedAssetId
         ? await mediaBridgeStorage.getImageAsset(userId, generatedAssetId)
@@ -1438,12 +1466,38 @@ export async function executeMediaBridgeAction(
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
   let result: any;
   let mode: "url" | "binary" | "composio_file" | "linkedin_upload" | "facebook_upload";
+  let transferredSize = file.data.byteLength;
   let instagramImageVerified = false;
-  const preferredImageUploadField = toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA" ? "image_file" : undefined;
+  const preferredImageUploadField = toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA" ? "image_file" : isCarousel ? "child_image_files" : undefined;
   if (preferredImageUploadField && !hasComposioFileUploadField(schema)) {
     throw new Error(`The current ${toolSlug} schema has no declared image upload field ${preferredImageUploadField}; no provider action was attempted.`);
   }
-  if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
+  if (toolSlug === "PINTEREST_CREATE_PIN") {
+    if (!mediaUrl || !["image/jpeg", "image/png"].includes(file.contentType)) throw new Error("Pinterest requires a saved JPEG or PNG image; no provider action was attempted.");
+    if (Object.hasOwn(actionArguments, "media_source")) throw new Error("Pinterest media_source is supplied by Chusky from the selected image; no provider action was attempted.");
+    const arguments_ = { ...actionArguments, media_source: { source_type: "image_url", url: mediaUrl } };
+    validateToolArgumentsAgainstSchema(toolSlug, arguments_, schema, 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...arguments_, account } : arguments_, signal);
+    mode = "url";
+  } else if (toolSlug === "YOUTUBE_UPDATE_THUMBNAIL") {
+    if (!mediaUrl || !["image/jpeg", "image/png"].includes(file.contentType) || file.data.byteLength > 2 * 1024 * 1024) throw new Error("YouTube requires a JPEG or PNG thumbnail under 2 MB; no provider action was attempted.");
+    if (Object.hasOwn(actionArguments, "thumbnailUrl")) throw new Error("The thumbnail URL must come from the selected image; no provider action was attempted.");
+    const arguments_ = { ...actionArguments, thumbnailUrl: mediaUrl };
+    validateToolArgumentsAgainstSchema(toolSlug, arguments_, schema, 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...arguments_, account } : arguments_, signal);
+    mode = "url";
+  } else if (toolSlug === "SHOPIFY_GRAPH_QL_PRODUCTS") {
+    const operation = (actionArguments as Record<string, unknown>).operation;
+    const variables = (actionArguments as Record<string, unknown>).variables;
+    if (operation !== "create_media" || !variables || typeof variables !== "object" || Array.isArray(variables)) throw new Error("Shopify image transfer requires create_media and product variables; no provider action was attempted.");
+    const productId = (variables as Record<string, unknown>).productId;
+    if (typeof productId !== "string" || !/^gid:\/\/shopify\/Product\/\d+$/.test(productId) || Object.keys(variables).some((key) => key !== "productId")) throw new Error("Shopify image transfer requires one product ID and no caller-supplied media; no provider action was attempted.");
+    if (!mediaUrl || !["image/jpeg", "image/png", "image/webp"].includes(file.contentType)) throw new Error("The selected product image is unavailable; no provider action was attempted.");
+    const arguments_ = { ...actionArguments, variables: { productId, media: [{ mediaContentType: "IMAGE", originalSource: mediaUrl, alt: file.name }] } };
+    validateToolArgumentsAgainstSchema(toolSlug, arguments_, schema, 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...arguments_, account } : arguments_, signal);
+    mode = "url";
+  } else if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
     const linkedIn = await executeLinkedinImagePost(userId, composioClient, sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
     mode = linkedIn.mode;
@@ -1454,6 +1508,32 @@ export async function executeMediaBridgeAction(
     const facebook = await executeFacebookPhotoPost(composioClient, sessionObj, availableComposioTools, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = facebook.result;
     mode = facebook.mode;
+  } else if (isCarousel) {
+    assertComposioImageUploadField(schema, "child_image_files");
+    if (typeof composio?.files?.upload !== "function") throw new Error("Composio staged file upload is unavailable; no carousel was attempted.");
+    const images = source === "generated" ? runtime.generatedImages : runtime.currentImages;
+    const selectedFiles = sourceIndexes!.map((index) => {
+      const image = images?.[index];
+      if (!image) throw new Error(`No ${source} image is available at index ${index}; no carousel was attempted.`);
+      const contentType = String(image.mediaType).toLowerCase().split(";", 1)[0];
+      const data = Buffer.from(image.data);
+      if (contentType !== "image/jpeg" || data.byteLength === 0 || data.byteLength > 8 * 1024 * 1024 || sniffImageMime(data) !== contentType || !hasValidImageEnvelope(data, contentType)) throw new Error("Instagram carousel images must be valid JPEGs of at most 8 MB; no carousel was attempted.");
+      return { data, contentType, name: image.filename || `chusky-carousel-${index + 1}.jpg` };
+    });
+    transferredSize = selectedFiles.reduce((total, selectedFile) => total + selectedFile.data.byteLength, 0);
+    if (Object.hasOwn(actionArguments, "child_image_files") || Object.hasOwn(actionArguments, "child_image_urls") || Object.hasOwn(actionArguments, "children") || Object.hasOwn(actionArguments, "child_video_files")) throw new Error("Carousel media must come from the selected images; no provider action was attempted.");
+    const toolkitSlug = await resolveMediaBridgeToolkitSlug(composioClient, toolSlug, signal);
+    const staged = [];
+    for (const selectedFile of selectedFiles) {
+      const upload = await abortable(composioClient.files.upload({ file: new File([new Uint8Array(selectedFile.data)], selectedFile.name, { type: selectedFile.contentType }), toolSlug, toolkitSlug }), signal);
+      const stagedFile = upload && typeof upload === "object" ? upload as Record<string, unknown> : undefined;
+      if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") throw new Error("Composio did not return a valid carousel file reference; no provider action was attempted.");
+      staged.push({ name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key });
+    }
+    const arguments_ = { ...actionArguments, child_image_files: staged };
+    validateToolArgumentsAgainstSchema(toolSlug, arguments_, composioFileUploadValidationSchema(schema), 36 * 1024 * 1024);
+    result = await composioExecute(sessionObj, toolSlug, account ? { ...arguments_, account } : arguments_, signal);
+    mode = "composio_file";
   } else if (hasComposioFileUploadField(schema)) {
     // Resolve the image field before staging bytes, so ambiguous schemas do not
     // leave unused staged files in Composio.
@@ -1501,19 +1581,25 @@ export async function executeMediaBridgeAction(
     result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
     mode = built.mode;
   }
-  if (toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA") {
+  if (toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA" || isCarousel) {
     result = await publishInstagramMedia(sessionObj, availableComposioTools, actionArguments as Record<string, unknown>, result, account, signal);
     if (result?.successful !== true || result?.error) throw new Error("Instagram did not confirm publication. Check the provider state before retrying to avoid a duplicate.");
-    await verifyInstagramImagePost(sessionObj, availableComposioTools, result, account, signal);
+    await verifyInstagramImagePost(sessionObj, availableComposioTools, result, account, signal, isCarousel ? "CAROUSEL_ALBUM" : "IMAGE");
     instagramImageVerified = true;
   }
   if (result?.successful !== true || result?.error) throw new Error("The connected app did not confirm this image action succeeded. Check the provider state before retrying to avoid a duplicate.");
   const data = result?.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
-  const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode, ...(assetId ? { assetId } : {}), size: file.data.byteLength, contentType: file.contentType };
+  if (toolSlug === "SHOPIFY_GRAPH_QL_PRODUCTS") {
+    const payload = data.productCreateMedia && typeof data.productCreateMedia === "object" ? data.productCreateMedia as Record<string, unknown> : data;
+    const errors = [...(Array.isArray(payload.userErrors) ? payload.userErrors : []), ...(Array.isArray(data.errors) ? data.errors : [])];
+    const media = Array.isArray(payload.media) ? payload.media : [];
+    if (errors.length || media.length === 0 || media.some((item) => !item || typeof item !== "object" || typeof (item as Record<string, unknown>).id !== "string" || (item as Record<string, unknown>).status === "FAILED")) throw new Error("Shopify did not confirm the product image was created. Check the product before retrying to avoid a duplicate.");
+  }
+  const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode, ...(assetId ? { assetId } : {}), size: transferredSize, contentType: file.contentType, ...(isCarousel ? { imageCount: sourceIndexes!.length } : {}) };
   if (instagramImageVerified) {
     receipt.providerMediaVerified = true;
-    receipt.verifiedMediaType = "IMAGE";
-    logger.info({ toolSlug, mode, sizeBytes: file.data.byteLength, contentType: file.contentType }, "Instagram image post verified with provider media lookup");
+    receipt.verifiedMediaType = isCarousel ? "CAROUSEL_ALBUM" : "IMAGE";
+    logger.info({ toolSlug, mode, sizeBytes: transferredSize, contentType: file.contentType }, "Instagram image post verified with provider media lookup");
   }
   for (const key of ["id", "postId", "messageId", "mediaId", "media_id", "uploadId", "status"]) {
     const value = data[key];

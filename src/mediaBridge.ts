@@ -24,6 +24,7 @@ type FileUploadCandidate = {
 
 export type MediaAttachmentSelection =
   | { source: "current" | "generated"; sourceIndex: number }
+  | { source: "current" | "generated"; sourceIndexes: number[] }
   | { source: "asset"; assetId: string }
   | { ambiguous: true; reason: string };
 
@@ -145,8 +146,12 @@ export function selectRequestedImage(
 ): MediaAttachmentSelection | undefined {
   const text = actionableMediaRequestText(request.trim());
   if (!text) return undefined;
+  if (/\b(?:do not|don't|never)\s+(?:create|make)\b.{0,40}\b(?:pin|carousel)\b|\b(?:do not|don't|never)\s+(?:set|update|change)\b.{0,40}\bthumbnail\b/i.test(text)) return undefined;
   const explicitAction = /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
     || /\b(?:create|make|draft)\b.{0,40}\b(?:post|email|message|campaign)\b/i.test(text)
+    || /\b(?:create|make)\b.{0,40}\b(?:pin|carousel)\b/i.test(text)
+    || /\b(?:set|update|change)\b.{0,40}\bthumbnail\b/i.test(text)
+    || /\b(?:add|set|update)\b.{0,50}\b(?:image|photo|picture)\b.{0,40}\bproduct\b|\b(?:add|set|update)\b.{0,40}\bproduct\b.{0,50}\b(?:image|photo|picture)\b/i.test(text)
     || /\buse\b.{0,80}\b(?:post|email|message|campaign|instagram|linkedin|facebook|twitter|\bx\b)\b/i.test(text);
   if (!explicitAction) return undefined;
   const exclusionText = text.replace(/\b(?:do not|don't|never)\s+(?:post|publish|send|share)\b[^.!?\r\n]{0,60}\bwithout\s+(?:the\s+|an?\s+)?(?:image|photo|picture|graphic|visual|attachment)\b/ig, "");
@@ -161,10 +166,20 @@ export function selectRequestedImage(
   const namesMedia = /\b(?:image|photo|pic|picture|graphic|visual|artwork|attachment|logo|banner|cover)\b/i.test(text);
   const refersToAvailableMedia = /\b(?:it|this|that|these|those)\b/i.test(text)
     && (input.currentCount > 0 || input.generatedCount > 0 || assets.length > 0);
+  const requestsCarousel = /\bcarousel\b/i.test(text);
   const implicitAttachedPost = input.currentCount > 0
     && /\b(?:post|publish|share|upload)\b/i.test(text)
     && !/\b(?:send|email)\b/i.test(text);
-  if (!namesMedia && !namesAsset && !refersToAvailableMedia && !implicitAttachedPost) return undefined;
+  const implicitAttachedVisualAction = input.currentCount > 0
+    && /\b(?:create|make)\b.{0,40}\bpin\b|\b(?:set|update|change)\b.{0,40}\bthumbnail\b/i.test(text);
+  if (!namesMedia && !namesAsset && !refersToAvailableMedia && !implicitAttachedPost && !implicitAttachedVisualAction && !requestsCarousel) return undefined;
+
+  if (requestsCarousel) {
+    if (input.currentCount > 0 && input.generatedCount > 0) return { ambiguous: true, reason: "Both sent and generated images are available for the carousel. Ask which set to use." };
+    if (input.currentCount >= 2 && input.currentCount <= 10) return { source: "current", sourceIndexes: Array.from({ length: input.currentCount }, (_, index) => index) };
+    if (input.generatedCount >= 2 && input.generatedCount <= 10) return { source: "generated", sourceIndexes: Array.from({ length: input.generatedCount }, (_, index) => index) };
+    return { ambiguous: true, reason: "A carousel requires 2 to 10 images from one selected source. Ask the user to supply or select that set." };
+  }
 
   const namedAssets = assets.filter((asset) => asset.id && asset.name
     && (lowered.includes(asset.name.toLocaleLowerCase()) || lowered.includes(asset.id.toLocaleLowerCase())));
@@ -465,6 +480,8 @@ export function mediaActionPreflightSchema(toolSlug: string, inputSchema: unknow
       && (typeIs(property, "string") || typeIs(property, "array") && typeIs(property.items, "string")))?.[0];
     if (key) paths.push([key]);
   }
+  if (toolSlug === "PINTEREST_CREATE_PIN" && properties.media_source) paths.push(["media_source"]);
+  if (toolSlug === "YOUTUBE_UPDATE_THUMBNAIL" && properties.thumbnailUrl) paths.push(["thumbnailUrl"]);
   for (const [key, property] of Object.entries(properties)) {
     if (typeIs(property, "string") && (BINARY_FIELD_NAMES.has(key.toLowerCase()) || /\b(base64|binary|encoded file bytes)\b/i.test(property.description ?? ""))) paths.push([key]);
     else if ((typeIs(property, "object") || typeIs(property, "array")) && hasBinaryPayload(property)) paths.push([key]);

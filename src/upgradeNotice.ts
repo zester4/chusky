@@ -38,9 +38,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Added approval-gated transfer of Daytona artifacts to Composio, and exposed all five reliability capabilities across typed SDK, single-tool MCP runs, and durable A2A task skills without bypassing policy.",
   ],
   mediaAutomation: [
-    "Image posts, email attachments, and supported uploads can now be requested in ordinary conversation; Chusky attaches the clearly referenced current, generated, or saved image to the normal connected-app action.",
-    "Images are staged inside the owner-scoped Composio dispatch using exact schemas; Slack channel replies can upload generated images and artifacts from the sender's private R2 namespace.",
-    "Ambiguous image choices and grouped multi-action calls stop before execution; uncertain provider deliveries stay quarantined, and completion requires an external receipt.",
+    "Image requests in ordinary conversation now cover Pinterest Pins, YouTube thumbnails, Shopify product media, Slack messages, and Instagram carousels alongside existing posts, email, and Drive uploads.",
+    "Chusky uses the selected owner image with each app's current Composio schema, staging files or issuing short-lived R2 links as the action requires.",
+    "Ambiguous selections stop before execution; Instagram carousels require 2 to 10 JPEGs and provider read-back, and uncertain writes require inspection before retrying.",
   ],
   generatedImageApi: [
     "Completed API and SDK runs now include metadata for generated images saved to the owner's private image store.",

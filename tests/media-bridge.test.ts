@@ -7,6 +7,11 @@ import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAg
 const file = { name: "brand.png", contentType: "image/png", data: Buffer.from("png-bytes") } as const;
 
 test("ordinary image-action wording selects an available image but leaves unrelated messages alone", () => {
+  assert.deepEqual(selectRequestedImage("Create a Pinterest pin with this image", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.deepEqual(selectRequestedImage("Set this video thumbnail", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+  assert.deepEqual(selectRequestedImage("Create an Instagram carousel", { currentCount: 2, generatedCount: 0 }), { source: "current", sourceIndexes: [0, 1] });
+  assert.equal(selectRequestedImage("Do not create a carousel with these images", { currentCount: 2, generatedCount: 0 }), undefined);
+  assert.match((selectRequestedImage("Create an Instagram carousel", { currentCount: 1, generatedCount: 0 }) as any)?.reason ?? "", /2 to 10 images/);
   assert.deepEqual(selectRequestedImage("Post this photo to LinkedIn", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
   assert.deepEqual(selectRequestedImage("Post to LinkedIn: Launching our new range", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
   assert.deepEqual(selectRequestedImage("Generate a banner image and email it to the team", { currentCount: 0, generatedCount: 1 }), { source: "generated", sourceIndex: 0 });
@@ -32,6 +37,128 @@ test("ordinary image-action wording selects an available image but leaves unrela
   assert.equal(selectRetrievedImageForAction(readOnly, ["img_selected"]), undefined);
   assert.equal(selectRequestedImage("Read-only: verify the Facebook post has a photo attachment.", { currentCount: 1, generatedCount: 0 }), undefined);
   assert.deepEqual(selectRequestedImage("Check the account, then post this photo.", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
+});
+
+test("Pinterest and YouTube use the selected owner image URL, not model-provided media", async () => {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+  bytes.write("IEND", 16, "ascii");
+  const schemas: Record<string, unknown> = {
+    PINTEREST_CREATE_PIN: { type: "object", required: ["board_id", "media_source"], properties: { board_id: { type: "string" }, media_source: { type: "object", properties: { source_type: { type: "string" }, url: { type: "string" } }, required: ["source_type", "url"] } } },
+    YOUTUBE_UPDATE_THUMBNAIL: { type: "object", required: ["videoId", "thumbnailUrl"], properties: { videoId: { type: "string" }, thumbnailUrl: { type: "string" } } },
+  };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    search: async ({ query }: { query: string }) => {
+      const slug = Object.keys(schemas).find((name) => query.includes(name))!;
+      return { toolSchemas: { [slug]: { toolSlug: slug, inputSchema: schemas[slug] } } };
+    },
+    execute: async (slug: string, args: Record<string, unknown>) => { calls.push({ slug, args }); return { successful: true, data: { id: "created" } }; },
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session }, mediaBridgeStorage: {
+    saveImageAsset: async () => ({ id: "owner-image", r2Key: "owner/image", contentType: "image/png", size: bytes.length }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => bytes,
+    signR2Download: async () => "https://signed.example/owner-image",
+  } as any });
+  try {
+    for (const [slug, args] of [["PINTEREST_CREATE_PIN", { board_id: "board" }], ["YOUTUBE_UPDATE_THUMBNAIL", { videoId: "video" }]] as const) {
+      await dispatchComposioActionWithImageContext({ userId: 839201, sessionObj: session, availableTools: [], invokedSlug: slug, invokedArguments: args, selection: { source: "current", sourceIndex: 0 }, runtime: { currentImages: [{ data: bytes, mediaType: "image/png" }] } });
+    }
+    assert.deepEqual(calls[0]?.args.media_source, { source_type: "image_url", url: "https://signed.example/owner-image" });
+    assert.equal(calls[1]?.args.thumbnailUrl, "https://signed.example/owner-image");
+    await assert.rejects(() => executeMediaBridgeAction(839201, session, [], { source: "current", toolSlug: "YOUTUBE_UPDATE_THUMBNAIL", arguments: { videoId: "video", thumbnailUrl: "https://other.example/image" } }, { currentImages: [{ data: bytes, mediaType: "image/png" }] }), /must come from the selected image/);
+    assert.equal(calls.length, 2);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("Slack message with an image uses its file action only when that action is granted", async () => {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+  bytes.write("IEND", 16, "ascii");
+  const uploadSlug = "SLACK_UPLOAD_OR_CREATE_A_FILE_IN_SLACK";
+  const schema = { type: "object", required: ["channels"], properties: { channels: { type: "string" }, initial_comment: { type: "string" }, file: { type: "object", file_uploadable: true } } };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let uploads = 0;
+  const session = {
+    search: async () => ({ toolSchemas: { [uploadSlug]: { toolSlug: uploadSlug, inputSchema: schema } } }),
+    execute: async (slug: string, args: Record<string, unknown>) => { calls.push({ slug, args }); return { successful: true, data: { id: "file-1" } }; },
+  };
+  setAgentDependenciesForTests({ composio: { tools: { getRawComposioToolBySlug: async () => ({ slug: uploadSlug, toolkit: { slug: "slack" } }) }, files: { upload: async () => { uploads++; return { name: "image.png", mimetype: "image/png", s3key: "staged/slack" }; } } } });
+  const input = { userId: 839202, sessionObj: session, availableTools: [], invokedSlug: "SLACK_SEND_MESSAGE", invokedArguments: { channel: "C123", markdown_text: "Launch" }, selection: { source: "current" as const, sourceIndex: 0 }, runtime: { currentImages: [{ data: bytes, mediaType: "image/png" }] } };
+  try {
+    await assert.rejects(() => dispatchComposioActionWithImageContext({ ...input, allowedToolSlugs: new Set(["SLACK_SEND_MESSAGE"]) }), /not granted/);
+    assert.equal(uploads, 0);
+    await dispatchComposioActionWithImageContext({ ...input, allowedToolSlugs: new Set(["SLACK_SEND_MESSAGE", uploadSlug]) });
+    assert.equal(uploads, 1);
+    assert.deepEqual(calls, [{ slug: uploadSlug, args: { channels: "C123", initial_comment: "Launch", file: { name: "image.png", mimetype: "image/png", s3key: "staged/slack" } } }]);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("Instagram carousel stages both selected images, publishes once, and verifies both children", async () => {
+  const jpeg = Buffer.alloc(12); jpeg[0] = 0xff; jpeg[1] = 0xd8; jpeg[2] = 0xff; jpeg[10] = 0xff; jpeg[11] = 0xd9;
+  const createSlug = "INSTAGRAM_CREATE_CAROUSEL_CONTAINER";
+  const publishSlug = "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH";
+  const verifySlug = "INSTAGRAM_GET_IG_MEDIA";
+  const schemas: Record<string, unknown> = {
+    [createSlug]: { type: "object", required: ["ig_user_id"], properties: { ig_user_id: { type: "string" }, caption: { type: "string" }, child_image_files: { type: "array", items: { type: "object", file_uploadable: true } } } },
+    [publishSlug]: { type: "object", required: ["ig_user_id", "creation_id"], properties: { ig_user_id: { type: "string" }, creation_id: { type: "string" } } },
+    [verifySlug]: { type: "object", required: ["ig_media_id"], properties: { ig_media_id: { type: "string" }, fields: { type: "string" } } },
+  };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let uploads = 0;
+  const session = {
+    search: async ({ query }: { query: string }) => { const slug = Object.keys(schemas).find((name) => query.includes(name))!; return { toolSchemas: { [slug]: { toolSlug: slug, inputSchema: schemas[slug] } } }; },
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      calls.push({ slug, args });
+      if (slug === createSlug) return { successful: true, data: { id: "container" } };
+      if (slug === verifySlug) return { successful: true, data: { media_type: "CAROUSEL_ALBUM", children: { data: [{ media_type: "IMAGE", media_url: "https://ig.example/1" }, { media_type: "IMAGE", media_url: "https://ig.example/2" }] } } };
+      return { successful: true, data: { id: "post" } };
+    },
+  };
+  setAgentDependenciesForTests({ composio: { tools: { getRawComposioToolBySlug: async () => ({ slug: createSlug, toolkit: { slug: "instagram" } }) }, files: { upload: async () => ({ name: `image-${++uploads}.jpg`, mimetype: "image/jpeg", s3key: `staged/${uploads}` }) } } });
+  try {
+    const result = await dispatchComposioActionWithImageContext({ userId: 839203, sessionObj: session, availableTools: [], invokedSlug: createSlug, invokedArguments: { ig_user_id: "owner", caption: "Launch" }, selection: { source: "current", sourceIndexes: [0, 1] }, runtime: { currentImages: [{ data: jpeg, mediaType: "image/jpeg" }, { data: jpeg, mediaType: "image/jpeg" }] } }) as Record<string, unknown>;
+    assert.equal(result.verifiedMediaType, "CAROUSEL_ALBUM");
+    assert.equal(uploads, 2);
+    assert.deepEqual(calls.map((call) => call.slug), [createSlug, publishSlug, verifySlug]);
+    assert.equal((calls[0]?.args.child_image_files as unknown[]).length, 2);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("Shopify product media uses the selected image and rejects caller-supplied media", async () => {
+  const bytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes);
+  bytes.write("IEND", 16, "ascii");
+  const slug = "SHOPIFY_GRAPH_QL_PRODUCTS";
+  const schema = { type: "object", required: ["operation", "variables"], properties: { operation: { type: "string" }, variables: { type: "object" } } };
+  const calls: Record<string, unknown>[] = [];
+  const session = {
+    search: async () => ({ toolSchemas: { [slug]: { toolSlug: slug, inputSchema: schema } } }),
+    execute: async (_slug: string, args: Record<string, unknown>) => { calls.push(args); return { successful: true, data: { productCreateMedia: { media: [{ id: "gid://shopify/MediaImage/1" }], userErrors: [] } } }; },
+  };
+  setAgentDependenciesForTests({ composio: {}, mediaBridgeStorage: {
+    saveImageAsset: async () => ({ id: "owner-image", r2Key: "owner/image", contentType: "image/png", size: bytes.length }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => bytes,
+    signR2Download: async () => "https://signed.example/product-image",
+  } as any });
+  try {
+    const basic = { source: "current", toolSlug: slug, arguments: { operation: "create_media", variables: { productId: "gid://shopify/Product/42" } } };
+    assert.equal(await dispatchComposioActionWithImageContext({ userId: 839204, sessionObj: session, availableTools: [], invokedSlug: slug, invokedArguments: { operation: "get_product", variables: { productId: "gid://shopify/Product/42" } }, selection: { source: "current", sourceIndex: 0 }, runtime: { currentImages: [{ data: bytes, mediaType: "image/png" }] } }), undefined);
+    await executeMediaBridgeAction(839204, session, [], basic, { currentImages: [{ data: bytes, mediaType: "image/png" }] });
+    assert.deepEqual((calls[0]?.variables as Record<string, unknown>).media, [{ mediaContentType: "IMAGE", originalSource: "https://signed.example/product-image", alt: "chusky-image-1.png" }]);
+    await assert.rejects(() => executeMediaBridgeAction(839204, session, [], { ...basic, arguments: { operation: "create_media", variables: { productId: "gid://shopify/Product/42", media: [{ originalSource: "https://other.example/image" }] } } }, { currentImages: [{ data: bytes, mediaType: "image/png" }] }), /no caller-supplied media/);
+    assert.equal(calls.length, 1);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
 });
 
 test("a single image retrieved in this run resolves a referential post request", () => {
