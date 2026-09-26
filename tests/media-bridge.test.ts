@@ -534,6 +534,51 @@ test("LinkedIn image publishing upgrades a legacy ToolRouter schema to Composio'
   }
 });
 
+test("LinkedIn image publishing uses the current catalog schema when a direct lookup is still legacy", async () => {
+  const userId = 839110;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const legacyPostSchema = { type: "object", properties: { author: { type: "string" }, commentary: { type: "string" } } };
+  const currentPostSchema = { type: "object", properties: { author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } } } };
+  const initSchema = { type: "object", properties: { owner: { type: "string" } } };
+  const directCalls: Array<{ slug: string; body: Record<string, unknown> }> = [];
+  const session = {
+    sessionId: "media-bridge-linkedin-catalog-session",
+    tools: async () => [{ type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: legacyPostSchema } }],
+    execute: async () => { throw new Error("legacy ToolRouter action must not execute"); },
+  };
+  const composioClient = {
+    connectedAccounts: { list: async () => [{ id: "ca_linkedin_owner", alias: "Brand Account", status: "ACTIVE", toolkit: { slug: "linkedin" } }] },
+    tools: {
+      getRawComposioToolBySlug: async (slug: string) => ({ slug, version: "20260915_00", toolkit: { slug: "linkedin" }, inputParameters: slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" ? initSchema : legacyPostSchema }),
+      getRawComposioTools: async () => [{ slug: "LINKEDIN_CREATE_LINKED_IN_POST", version: "20260915_00", toolkit: { slug: "linkedin" }, inputParameters: currentPostSchema }],
+      execute: async (slug: string, body: Record<string, unknown>) => {
+        directCalls.push({ slug, body });
+        return slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD"
+          ? { successful: true, data: { upload_url: "https://www.linkedin.com/dms-uploads/upload-token", image: "urn:li:image:catalog-123" } }
+          : { successful: true, data: { id: "urn:li:share:catalog" } };
+      },
+    },
+  };
+  setAgentDependenciesForTests({
+    composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage: { saveImageAsset: async () => ({ id: "img", r2Key: "image", name: "image.png", contentType: "image/png", size: imageBytes.byteLength }), getImageAsset: async () => undefined, readR2Object: async () => imageBytes, signR2Download: async () => "https://signed.example/image" },
+    mediaBridgeFetch: async () => new Response(null, { status: 201 }),
+  } as any);
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", account: "linkedin",
+      arguments: { author: "urn:li:person:owner", commentary: "Catalog fallback launch" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.deepEqual(directCalls.map((call) => call.body.connectedAccountId), ["ca_linkedin_owner", "ca_linkedin_owner"]);
+    assert.deepEqual(directCalls[1]?.body.arguments, { author: "urn:li:person:owner", commentary: "Catalog fallback launch", images: ["urn:li:image:catalog-123"] });
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("LinkedIn actions without an image field direct the agent to the supported image-post action", async () => {
   const userId = 839109;
   const imageBytes = Buffer.alloc(24);

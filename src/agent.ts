@@ -628,29 +628,54 @@ function linkedInRawToolSchema(tool: any): Record<string, unknown> | undefined {
   return schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : undefined;
 }
 
+function toLinkedinToolDefinition(tool: any, expectedSlug: string): LinkedinToolDefinition | undefined {
+  const slug = tool?.slug ?? tool?.toolSlug ?? tool?.tool_slug;
+  const toolkit = tool?.toolkit?.slug ?? tool?.toolkit?.name ?? tool?.toolkitSlug ?? tool?.toolkit_slug;
+  const version = tool?.version;
+  const schema = linkedInRawToolSchema(tool);
+  if (slug !== expectedSlug || String(toolkit).toLowerCase() !== "linkedin" || typeof version !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(version) || !schema) return undefined;
+  return { slug, version, schema };
+}
+
 async function getLatestLinkedinTool(composioClient: any, toolSlug: string, signal?: AbortSignal): Promise<LinkedinToolDefinition> {
   const getRawTool = composioClient?.tools?.getRawComposioToolBySlug;
   if (typeof getRawTool !== "function") {
     throw new Error("Composio cannot retrieve the current LinkedIn action definition; no image upload was attempted.");
   }
-  const tool = await abortable(getRawTool.call(composioClient.tools, toolSlug, { version: "latest" }), signal) as any;
-  const slug = tool?.slug ?? tool?.toolSlug ?? tool?.tool_slug;
-  const toolkit = tool?.toolkit?.slug ?? tool?.toolkitSlug ?? tool?.toolkit_slug;
-  const version = tool?.version;
-  const schema = linkedInRawToolSchema(tool);
-  if (slug !== toolSlug || String(toolkit).toLowerCase() !== "linkedin" || typeof version !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(version) || !schema) {
+  const direct = toLinkedinToolDefinition(await abortable(getRawTool.call(composioClient.tools, toolSlug, { version: "latest" }), signal), toolSlug);
+  if (!direct) {
     throw new Error(`Composio did not return a usable current LinkedIn definition for ${toolSlug}; no image upload was attempted.`);
   }
-  return { slug, version, schema };
+  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST" || linkedInImageArraySchema(direct.schema)) return direct;
+
+  // The single-tool endpoint can still return the base LinkedIn definition.
+  // Composio documents the catalog route with toolkit_versions=latest as the
+  // compatibility path for current LinkedIn actions, so use it only when the
+  // direct lookup has a stale text-only post schema.
+  const getRawTools = composioClient?.tools?.getRawComposioTools;
+  if (typeof getRawTools === "function") {
+    const tools = await abortable(getRawTools.call(composioClient.tools, {
+      tools: [toolSlug],
+      important: false,
+    }), signal) as unknown;
+    const fromCatalog = (Array.isArray(tools) ? tools : []).map((tool) => toLinkedinToolDefinition(tool, toolSlug)).find((tool): tool is LinkedinToolDefinition => Boolean(tool));
+    if (fromCatalog && linkedInImageArraySchema(fromCatalog.schema)) return fromCatalog;
+  }
+  throw new Error("Composio did not return a current LinkedIn image-post schema. No upload or post was attempted.");
 }
 
 async function resolveDirectLinkedinAccount(userId: number, account: string | undefined): Promise<string> {
   const accounts = (await listConnectedAccounts(userId, "linkedin"))
     .filter((candidate) => candidate.toolkit.toLowerCase() === "linkedin")
     .filter((candidate) => !/disabled|expired|inactive|error/i.test(candidate.status));
-  const selected = account
-    ? accounts.find((candidate) => candidate.id === account || candidate.alias === account)
-    : accounts.length === 1 ? accounts[0] : undefined;
+  const selector = account?.trim().toLowerCase();
+  const selectedBySelector = selector
+    ? accounts.find((candidate) => candidate.id.toLowerCase() === selector || candidate.alias?.trim().toLowerCase() === selector)
+    : undefined;
+  // Tool Router calls commonly carry the displayed toolkit name rather than
+  // its opaque connection ID. When this owner has one eligible LinkedIn
+  // account, accepting that selector is unambiguous and remains owner-scoped.
+  const selected = selectedBySelector ?? (accounts.length === 1 ? accounts[0] : undefined);
   if (!selected) {
     throw new Error(account
       ? "The requested LinkedIn account is not an active account owned by this user; no image upload was attempted."
