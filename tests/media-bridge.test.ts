@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction } from "../src/mediaBridge.js";
+import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction } from "../src/mediaBridge.js";
 import { validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
@@ -273,6 +273,28 @@ test("media bridge recognizes Composio file-uploadable fields and injects staged
   assert.throws(() => buildComposioFileUploadArguments(schema, { attachment: "caller-value" }, uploaded), /Do not supply attachment/i);
 });
 
+test("image upload selects a unique image field when an action also accepts video", () => {
+  const schema = { type: "object", required: ["image_url"], properties: {
+    image_url: { type: "string", file_uploadable: true },
+    video_url: { type: "string", file_uploadable: true },
+  } };
+  const uploaded = { name: "brand.png", mimetype: "image/png", s3key: "staged/brand" };
+  assert.doesNotThrow(() => assertComposioImageUploadField(schema));
+  assert.deepEqual(buildComposioFileUploadArguments(schema, {}, uploaded, true), { image_url: uploaded });
+  assert.throws(() => buildComposioFileUploadArguments(schema, {}, uploaded), /exactly one schema-declared file upload field/i);
+  assert.throws(() => assertComposioImageUploadField({ type: "object", properties: {
+    image_file: { type: "string", file_uploadable: true },
+    photo_file: { type: "string", file_uploadable: true },
+  } }), /unambiguous schema-declared image upload field/i);
+  assert.throws(() => assertComposioImageUploadField({ type: "object", properties: {
+    video_url: { type: "string", file_uploadable: true },
+  } }), /no schema-declared image upload field/i);
+  assert.deepEqual(buildComposioFileUploadArguments({ type: "object", properties: {
+    media_content: { type: "string", file_uploadable: true, description: "Photo upload" },
+    alternate_file: { type: "string", file_uploadable: true, description: "Video upload" },
+  } }, {}, uploaded, true), { media_content: uploaded });
+});
+
 test("media preflight defers only the required image field while validating normal action arguments", () => {
   const schema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
     recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
@@ -453,13 +475,15 @@ test("media bridge resolves an exact discovered action through Composio schema m
   }
 });
 
-test("Instagram stages image bytes then publishes the returned container using the exact discovered schema", async () => {
+test("Instagram selects the image field from an image/video schema before publishing the returned container", async () => {
   const userId = 839104;
   const imageBytes = Buffer.alloc(24);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
   imageBytes.write("IEND", 16, "ascii");
-  const actionSchema = { type: "object", required: ["image_file"], properties: {
-    caption: { type: "string" }, image_file: { type: "string", file_uploadable: true },
+  const actionSchema = { type: "object", required: ["ig_user_id", "image_url"], properties: {
+    ig_user_id: { type: "string" }, caption: { type: "string" },
+    image_url: { type: "string", file_uploadable: true },
+    video_url: { type: "string", file_uploadable: true },
   }, additionalProperties: false };
   const publishSchema = { type: "object", required: ["creation_id"], properties: { creation_id: { type: "string" } }, additionalProperties: false };
   const uploaded: Array<{ file: File; toolSlug: string; toolkitSlug: string }> = [];
@@ -500,7 +524,7 @@ test("Instagram stages image bytes then publishes the returned container using t
   setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
   try {
     const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
-      source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { caption: "A launch" },
+      source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "instagram-owner", caption: "A launch" },
     }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
     assert.equal(result.mode, "composio_file");
     assert.equal(result.providerActionSucceeded, true);
@@ -512,10 +536,42 @@ test("Instagram stages image bytes then publishes the returned container using t
     assert.equal(uploaded[0]?.toolkitSlug, "instagram");
     assert.deepEqual(executions, [
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA", args: {
-        caption: "A launch", image_file: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/instagram-image" },
+        ig_user_id: "instagram-owner", caption: "A launch", image_url: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/instagram-image" },
       } },
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", args: { creation_id: "instagram-container-1" } },
     ]);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("Instagram rejects ambiguous upload fields before staging or calling the provider", async () => {
+  const userId = 839114;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const actionSchema = { type: "object", properties: {
+    caption: { type: "string" }, first_upload: { type: "string", file_uploadable: true }, second_upload: { type: "string", file_uploadable: true },
+  } };
+  let stagedUploads = 0;
+  let providerCalls = 0;
+  const session = {
+    sessionId: "media-bridge-ambiguous-instagram-session",
+    tools: async () => [{ type: "function", function: { name: "INSTAGRAM_POST_IG_USER_MEDIA", parameters: actionSchema } }],
+    execute: async () => { providerCalls += 1; return { successful: true, data: {} }; },
+  };
+  const composioClient = {
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "instagram" } }) },
+    files: { upload: async () => { stagedUploads += 1; return { name: "image.png", mimetype: "image/png", s3key: "staged/image" }; } },
+  };
+  setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } } });
+  try {
+    const availableTools = await session.tools();
+    await assert.rejects(() => executeMediaBridgeAction(userId, session, availableTools, {
+      source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { caption: "A launch" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] }), /unambiguous schema-declared image upload field/i);
+    assert.equal(stagedUploads, 0);
+    assert.equal(providerCalls, 0);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }

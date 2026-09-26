@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
+import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -975,6 +975,7 @@ async function executeTwitterImagePost(
   const uploadSlug = "TWITTER_UPLOAD_MEDIA";
   const uploadSchema = await resolveMediaBridgeSchema(sessionObj, availableTools, uploadSlug, signal);
   if (!hasComposioFileUploadField(uploadSchema)) throw new Error("The exact X media-upload action does not expose a Composio file-upload field; no upload was attempted.");
+  assertComposioImageUploadField(uploadSchema);
   if (typeof composioClient?.files?.upload !== "function") throw new Error("Composio staged file upload is unavailable for X; no upload was attempted.");
   const toolkitSlug = await resolveMediaBridgeToolkitSlug(composioClient, uploadSlug, signal);
   const stagedFileResponse = await abortable(composioClient.files.upload({
@@ -986,7 +987,7 @@ async function executeTwitterImagePost(
   if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
     throw new Error("Composio did not return a valid staged X media reference; no X API upload was attempted.");
   }
-  const uploadArguments = buildComposioFileUploadArguments(uploadSchema, {}, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key });
+  const uploadArguments = buildComposioFileUploadArguments(uploadSchema, {}, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key }, true);
   const uploadProperties = (uploadSchema as any)?.properties;
   for (const key of (uploadSchema as any)?.required ?? []) {
     if (Object.hasOwn(uploadArguments, key)) continue;
@@ -1056,6 +1057,7 @@ async function executeFacebookPhotoPost(
   if (!hasComposioFileUploadField(uploadSchema)) {
     throw new Error("The exact Facebook photo-upload action does not expose a Composio file-upload field; no upload was attempted.");
   }
+  assertComposioImageUploadField(uploadSchema);
   if (typeof composioClient?.files?.upload !== "function") {
     throw new Error("Composio staged file upload is unavailable for Facebook; no upload was attempted.");
   }
@@ -1075,7 +1077,7 @@ async function executeFacebookPhotoPost(
     name: stagedFile.name,
     mimetype: stagedFile.mimetype,
     s3key: stagedFile.s3key,
-  });
+  }, true);
   validateToolArgumentsAgainstSchema(uploadSlug, uploadArguments, composioFileUploadValidationSchema(uploadSchema), 36 * 1024 * 1024);
   const uploaded = await composioExecute(sessionObj, uploadSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
   if (uploaded?.successful !== true || uploaded?.error) {
@@ -1324,6 +1326,9 @@ export async function executeMediaBridgeAction(
     result = facebook.result;
     mode = facebook.mode;
   } else if (hasComposioFileUploadField(schema)) {
+    // Resolve the image field before staging bytes, so ambiguous schemas do not
+    // leave unused staged files in Composio.
+    assertComposioImageUploadField(schema);
     if (typeof composio?.files?.upload !== "function") {
       throw new Error("Composio staged file upload is unavailable for this schema-declared action; no provider action was attempted.");
     }
@@ -1340,7 +1345,7 @@ export async function executeMediaBridgeAction(
     if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
       throw new Error("Composio did not return a valid staged-file reference; no provider action was attempted.");
     }
-    const uploadArguments = buildComposioFileUploadArguments(schema, actionArguments as Record<string, unknown>, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key });
+    const uploadArguments = buildComposioFileUploadArguments(schema, actionArguments as Record<string, unknown>, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key }, true);
     validateToolArgumentsAgainstSchema(toolSlug, uploadArguments, composioFileUploadValidationSchema(schema), 36 * 1024 * 1024);
     result = await composioExecute(sessionObj, toolSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
     mode = "composio_file";

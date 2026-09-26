@@ -16,6 +16,7 @@ type UrlCandidate = {
 type FileUploadCandidate = {
   path: string[];
   kind: "file" | "array";
+  description?: string;
 };
 
 export type MediaAttachmentSelection =
@@ -264,11 +265,11 @@ function findFileUploadCandidates(schema: Schema | undefined, prefix: string[] =
   for (const [key, property] of Object.entries(schema.properties)) {
     const path = [...prefix, key];
     if ((property as Schema & { file_uploadable?: boolean }).file_uploadable === true) {
-      candidates.push({ path, kind: typeIs(property, "array") ? "array" : "file" });
+      candidates.push({ path, kind: typeIs(property, "array") ? "array" : "file", description: property.description });
       continue;
     }
     if (typeIs(property, "array") && (property.items as (Schema & { file_uploadable?: boolean }) | undefined)?.file_uploadable === true) {
-      candidates.push({ path, kind: "array" });
+      candidates.push({ path, kind: "array", description: property.items?.description ?? property.description });
       continue;
     }
     if (typeIs(property, "object")) candidates.push(...findFileUploadCandidates(property, path));
@@ -278,6 +279,56 @@ function findFileUploadCandidates(schema: Schema | undefined, prefix: string[] =
 
 export function hasComposioFileUploadField(inputSchema: unknown): boolean {
   return isObject(inputSchema) && findFileUploadCandidates(inputSchema as Schema).length > 0;
+}
+
+function fileUploadCandidateLabel(candidate: FileUploadCandidate): { path: string; description: string } {
+  const normalize = (value: string): string => value.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_.-]+/g, " ");
+  return { path: normalize(candidate.path.join(" ")), description: normalize(candidate.description ?? "") };
+}
+
+function isVideoUploadCandidate(candidate: FileUploadCandidate): boolean {
+  const { path, description } = fileUploadCandidateLabel(candidate);
+  return /\b(?:videos?|movies?|clips?)\b/i.test(path) || /\b(?:videos?|movies?|clips?)\b/i.test(description);
+}
+
+function imageUploadCandidateScore(candidate: FileUploadCandidate): number {
+  const { path, description } = fileUploadCandidateLabel(candidate);
+  const imageHint = /\b(?:images?|photos?|pictures?|photographs?)\b/i;
+  const thumbnailHint = /\bthumbnails?\b/i;
+  const mediaHint = /\b(?:media|attachments?)\b/i;
+
+  // An explicit video label is never a safe target for image bytes, even if
+  // another part of the schema description mentions images generically.
+  if (isVideoUploadCandidate(candidate)) return 0;
+  if (imageHint.test(path)) return 100;
+  if (imageHint.test(description)) return 80;
+  if (thumbnailHint.test(path)) return 60;
+  if (thumbnailHint.test(description)) return 50;
+  if (mediaHint.test(path)) return 40;
+  if (mediaHint.test(description)) return 30;
+  return 0;
+}
+
+function selectFileUploadCandidate(inputSchema: unknown, forImage: boolean): FileUploadCandidate {
+  if (!isObject(inputSchema)) throw new Error("The selected app action has no usable argument schema.");
+  const candidates = findFileUploadCandidates(inputSchema as Schema);
+  if (candidates.length === 1) {
+    const only = candidates[0]!;
+    if (!forImage || !isVideoUploadCandidate(only)) return only;
+    throw new Error("The selected app action has no schema-declared image upload field.");
+  }
+  if (!forImage) throw new Error("The selected app action must expose exactly one schema-declared file upload field.");
+
+  const ranked = candidates.map((candidate) => ({ candidate, score: imageUploadCandidateScore(candidate) }));
+  const bestScore = Math.max(0, ...ranked.map((item) => item.score));
+  const best = ranked.filter((item) => item.score === bestScore && bestScore > 0);
+  if (best.length === 1) return best[0]!.candidate;
+  throw new Error("The selected app action must expose one unambiguous schema-declared image upload field.");
+}
+
+/** Validate an image upload target before staging bytes with Composio. */
+export function assertComposioImageUploadField(inputSchema: unknown): void {
+  selectFileUploadCandidate(inputSchema, true);
 }
 
 export function composioFileUploadValidationSchema(inputSchema: unknown): unknown {
@@ -306,11 +357,10 @@ export function buildComposioFileUploadArguments(
   inputSchema: unknown,
   actionArguments: Record<string, unknown>,
   uploadedFile: { name: string; mimetype: string; s3key: string },
+  forImage = false,
 ): Record<string, unknown> {
   if (!isObject(inputSchema) || !isObject(actionArguments)) throw new Error("The selected app action has no usable argument schema.");
-  const candidates = findFileUploadCandidates(inputSchema as Schema);
-  if (candidates.length !== 1) throw new Error("The selected app action must expose exactly one schema-declared file upload field.");
-  const candidate = candidates[0]!;
+  const candidate = selectFileUploadCandidate(inputSchema, forImage);
   const location = findAtPath(actionArguments, candidate.path);
   if (location.exists) throw new Error(`Do not supply ${candidate.path.join(".")}; Chusky fills it with the owner image.`);
   const result = structuredClone(actionArguments) as Record<string, unknown>;

@@ -156,7 +156,7 @@ Your focus is platform-specific social media publishing, API payload formatting,
 Operating Rules:
 1. Pre-validate post character limits (e.g. 280 for X/Twitter, platform limits for LinkedIn/Instagram) and link formats before dispatching.
 2. Format content naturally for each specific platform tone.
-3. Public posts and broadcast actions require Chusky approval before execution.`,
+3. Follow the application's approval decision. Execute an ordinary post the owner directly requested without asking for a second approval; preserve approval for actions that the central policy gates as destructive, financial, permission-changing, high-impact, or otherwise irreversible.`,
     reflectionChecklist: [
       "Is the post within the platform's character limit?",
       "Are links and media attachments formatted correctly?",

@@ -184,6 +184,8 @@ test("gives Lucas a complete private engineering loop while keeping provider too
     "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
     "LINKEDIN_CREATE_LINKED_IN_POST",
   ]);
+  assert.match(WORKER_CAPABILITIES.maya.systemPrompt, /ordinary post the owner directly requested without asking for a second approval/);
+  assert.doesNotMatch(WORKER_CAPABILITIES.maya.systemPrompt, /Public posts and broadcast actions require Chusky approval/);
   for (const slug of WORKER_CAPABILITIES.maya.starterComposioTools) assert.equal(isComposioToolAllowedForWorker("maya", slug), true);
 });
 
