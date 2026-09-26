@@ -755,6 +755,11 @@ function linkedInImageArraySchema(schema: unknown): boolean {
   return images?.type === "array" && images.items?.type === "string";
 }
 
+function linkedInImageFileArraySchema(schema: unknown): boolean {
+  const images = (schema as any)?.properties?.images;
+  return images?.type === "array" && images.items?.type === "object" && images.items.file_uploadable === true;
+}
+
 function linkedInRawToolSchema(tool: any): Record<string, unknown> | undefined {
   const schema = tool?.inputParameters ?? tool?.input_parameters ?? tool?.inputSchema ?? tool?.input_schema;
   return schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : undefined;
@@ -778,7 +783,7 @@ async function getLatestLinkedinTool(composioClient: any, toolSlug: string, sign
   if (!direct) {
     throw new Error(`Composio did not return a usable current LinkedIn definition for ${toolSlug}; no image upload was attempted.`);
   }
-  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST" || linkedInImageArraySchema(direct.schema)) return direct;
+  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST" || linkedInImageArraySchema(direct.schema) || linkedInImageFileArraySchema(direct.schema)) return direct;
 
   // The single-tool endpoint can still return the base LinkedIn definition.
   // Composio documents the catalog route with toolkit_versions=latest as the
@@ -791,7 +796,7 @@ async function getLatestLinkedinTool(composioClient: any, toolSlug: string, sign
       important: false,
     }), signal) as unknown;
     const fromCatalog = (Array.isArray(tools) ? tools : []).map((tool) => toLinkedinToolDefinition(tool, toolSlug)).find((tool): tool is LinkedinToolDefinition => Boolean(tool));
-    if (fromCatalog && linkedInImageArraySchema(fromCatalog.schema)) return fromCatalog;
+    if (fromCatalog && (linkedInImageArraySchema(fromCatalog.schema) || linkedInImageFileArraySchema(fromCatalog.schema))) return fromCatalog;
   }
   throw new Error("Composio did not return a current LinkedIn image-post schema. No upload or post was attempted.");
 }
@@ -895,8 +900,27 @@ async function executeLatestLinkedinImagePost(
     tools.set(toolSlug, current);
     return current;
   };
+  const postTool = await getTool("LINKEDIN_CREATE_LINKED_IN_POST");
+  if (linkedInImageFileArraySchema(postTool.schema)) {
+    if (typeof composioClient?.files?.upload !== "function") {
+      throw new Error("Composio staged image upload is unavailable; no LinkedIn post was attempted.");
+    }
+    const staged = await abortable(composioClient.files.upload({
+      file: new File([new Uint8Array(file.data)], file.contentType === "image/png" ? "chusky-image.png" : "chusky-image.jpg", { type: file.contentType }),
+      toolSlug: postTool.slug,
+      toolkitSlug: "linkedin",
+    }), signal) as any;
+    if (typeof staged?.name !== "string" || typeof staged?.mimetype !== "string" || typeof staged?.s3key !== "string") {
+      throw new Error("Composio did not return a usable staged image; no LinkedIn post was attempted.");
+    }
+    const postArguments = { ...actionArguments, images: [{ name: staged.name, mimetype: staged.mimetype, s3key: staged.s3key }] };
+    validateToolArgumentsAgainstSchema(postTool.slug, postArguments, composioFileUploadValidationSchema(postTool.schema), 36 * 1024 * 1024);
+    return abortable(composioClient.tools.execute(postTool.slug, {
+      userId: composioUserId(userId), connectedAccountId: accountId, version: postTool.version, arguments: postArguments,
+    }, signal ? { signal } : undefined), signal);
+  }
   return executeLinkedinImageSequence(
-    (await getTool("LINKEDIN_CREATE_LINKED_IN_POST")).schema,
+    postTool.schema,
     actionArguments,
     file,
     getTool,

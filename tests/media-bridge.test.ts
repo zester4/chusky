@@ -17,6 +17,9 @@ test("ordinary image-action wording selects an available image but leaves unrela
   assert.deepEqual(selectRequestedImage("Don't forget to attach this photo to the email", { currentCount: 1, generatedCount: 0 }), { source: "current", sourceIndex: 0 });
   assert.match((selectRequestedImage("send this photo", { currentCount: 0, generatedCount: 0 }) as any)?.reason ?? "", /not available in this run/);
   assert.equal(selectRequestedImage("Post this image without attaching it", { currentCount: 1, generatedCount: 0 }), undefined);
+  assert.deepEqual(selectRequestedImage("Post my saved image img_123. Do not publish without the image.", {
+    currentCount: 0, generatedCount: 0, savedAssets: [{ id: "img_123", name: "Chusky", createdAt: 1 }],
+  }), { source: "asset", assetId: "img_123" });
   assert.deepEqual(selectRequestedImage("Post it", { currentCount: 1, generatedCount: 1 }), { ambiguous: true, reason: "Both a sent image and a generated image are available. Ask which one to use before posting or sending." });
   assert.deepEqual(selectRequestedImage("Post my latest image", { currentCount: 0, generatedCount: 0, savedAssets: [
     { id: "older", name: "older.png", createdAt: 10 }, { id: "newer", name: "newer.png", createdAt: 20 },
@@ -964,6 +967,51 @@ test("LinkedIn image publishing uses the current catalog schema when a direct lo
     assert.equal(result.providerActionSucceeded, true);
     assert.deepEqual(directCalls.map((call) => call.body.connectedAccountId), ["ca_linkedin_owner", "ca_linkedin_owner"]);
     assert.deepEqual(directCalls[1]?.body.arguments, { author: "urn:li:person:owner", commentary: "Catalog fallback launch", images: ["urn:li:image:catalog-123"] });
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("LinkedIn current file array stages the image before creating the post", async () => {
+  const userId = 839111;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const legacySchema = { type: "object", properties: { author: { type: "string" }, commentary: { type: "string" } } };
+  const currentSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
+    author: { type: "string" }, commentary: { type: "string" },
+    images: { type: "array", items: { type: "object", file_uploadable: true, required: ["name", "mimetype", "s3key"], properties: {
+      name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" },
+    } } },
+  } };
+  const calls: Array<{ slug: string; body: Record<string, any> }> = [];
+  const session = { sessionId: "linkedin-file-array", tools: async () => [{ type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: legacySchema } }], execute: async () => { throw new Error("legacy action must not run"); } };
+  setAgentDependenciesForTests({
+    composio: {
+      create: async () => session, sessions: { use: async () => session },
+      connectedAccounts: { list: async () => [{ id: "ca_owner", status: "ACTIVE", toolkit: { slug: "linkedin" } }] },
+      files: { upload: async ({ file, toolSlug, toolkitSlug }: any) => {
+        assert.equal(toolSlug, "LINKEDIN_CREATE_LINKED_IN_POST");
+        assert.equal(toolkitSlug, "linkedin");
+        assert.deepEqual(Buffer.from(await file.arrayBuffer()), imageBytes);
+        return { name: "chusky-image.png", mimetype: "image/png", s3key: "staged/image" };
+      } },
+      tools: {
+        getRawComposioToolBySlug: async (slug: string) => ({ slug, version: "20260924_00", toolkit: { slug: "linkedin" }, inputParameters: currentSchema }),
+        execute: async (slug: string, body: Record<string, any>) => { calls.push({ slug, body }); return { successful: true, data: { id: "urn:li:share:image-post" } }; },
+      },
+    },
+    mediaBridgeStorage: { saveImageAsset: async () => ({ id: "img", r2Key: "image", name: "image.png", contentType: "image/png", size: imageBytes.byteLength }), getImageAsset: async () => undefined, readR2Object: async () => imageBytes, signR2Download: async () => "https://signed.example/image" },
+  } as any);
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { author: "urn:li:person:owner", commentary: "Chusky image post" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.deepEqual(calls, [{ slug: "LINKEDIN_CREATE_LINKED_IN_POST", body: {
+      userId: "user_839111", connectedAccountId: "ca_owner", version: "20260924_00",
+      arguments: { author: "urn:li:person:owner", commentary: "Chusky image post", images: [{ name: "chusky-image.png", mimetype: "image/png", s3key: "staged/image" }] },
+    } }]);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }

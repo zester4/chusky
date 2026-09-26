@@ -136,9 +136,10 @@ export function selectRequestedImage(
     || /\b(?:create|make|draft)\b.{0,40}\b(?:post|email|message|campaign)\b/i.test(text)
     || /\buse\b.{0,80}\b(?:post|email|message|campaign|instagram|linkedin|facebook|twitter|\bx\b)\b/i.test(text);
   if (!explicitAction) return undefined;
-  if (/\b(?:without|exclude|omit|leave out)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
-    || /\b(?:don't|do not|never)\s+(?:attach|include|send|post|publish|share|upload|email)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
-    || /\b(?:image|photo|picture|graphic|visual|attachment)\b.{0,32}\b(?:not|excluded|omitted)\b/i.test(text)) return undefined;
+  const exclusionText = text.replace(/\b(?:do not|don't|never)\s+(?:post|publish|send|share)\b[^.!?\r\n]{0,60}\bwithout\s+(?:the\s+|an?\s+)?(?:image|photo|picture|graphic|visual|attachment)\b/ig, "");
+  if (/\b(?:without|exclude|omit|leave out)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(exclusionText)
+    || /\b(?:don't|do not|never)\s+(?:attach|include|send|post|publish|share|upload|email)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(exclusionText)
+    || /\b(?:image|photo|picture|graphic|visual|attachment)\b[^.!?\r\n]{0,32}\b(?:not|excluded|omitted)\b/i.test(exclusionText)) return undefined;
 
   const assets = input.savedAssets ?? [];
   const lowered = text.toLocaleLowerCase();
