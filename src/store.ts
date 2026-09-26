@@ -536,7 +536,7 @@ export interface SdkRunRecord {
   tools?: { allow?: string[]; deny?: string[]; requireApproval?: string[] };
   skills?: string[];
   error?: { code: string; message: string };
-  events: Array<{ id: string; type: string; at: number; text?: string; toolSlug?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled"; message?: string; summary?: string; durationMs?: number }>;
+  events: Array<{ id: string; type: string; at: number; text?: string; toolSlug?: string; callId?: string; status?: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting" | "unknown"; message?: string; actionLabel?: string; summary?: string; durationMs?: number; activityId?: string; handoffId?: string; parentToolCallId?: string; worker?: string; objective?: string; kind?: "worker" | "tool"; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; toolCallId?: string; batchActions?: Array<{ id: string; toolSlug: string; actionLabel?: string; toolkitSlug?: string; toolkitName?: string; toolkitLogo?: string; status: "started" | "completed" | "failed" | "unknown" | "approval_required" | "cancelled"; summary?: string }> }>;
   createdAt: number;
   updatedAt: number;
 }

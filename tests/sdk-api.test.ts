@@ -379,6 +379,38 @@ test("cancelling a run keeps its already-recorded tool timeline", async () => {
   assert.equal(run.events.some((event) => event.id === "event_before_cancel"), true);
 });
 
+test("persisted Composio batch actions survive run reload without exposing input arguments", async () => {
+  const externalId = "run-batch-activity-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const created = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: { ...headers, "Idempotency-Key": "batch-activity-thread" }, body: JSON.stringify({}) }));
+  const thread = await created.json() as { id: string };
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({
+    id: "run_batch_activity", status: "completed", input: "Search Gmail and Notion.",
+    events: [{
+      id: "batch_activity_event", type: "run.tool_activity", at: 1, toolSlug: "COMPOSIO_MULTI_EXECUTE_TOOL", callId: "batch-call", status: "completed", message: "Carrying out 2 independent actions in parallel", actionLabel: "Carrying out 2 independent actions in parallel", summary: "Batch response returned",
+      batchActions: [
+        { id: "batch-call:0", toolSlug: "GMAIL_SEARCH_EMAILS", actionLabel: "Search messages", toolkitSlug: "gmail", toolkitName: "Gmail", toolkitLogo: "https://assets.example/gmail.svg", status: "completed", summary: "Provider confirmed this action" },
+        { id: "batch-call:1", toolSlug: "NOTION_SEARCH", actionLabel: "Search pages", toolkitSlug: "notion", toolkitName: "Notion", status: "unknown", summary: "Individual outcome unavailable" },
+      ],
+    }],
+    createdAt: 1, updatedAt: 1,
+  });
+  await saveSession(userId, session);
+
+  const response = await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_batch_activity`, { headers }));
+  assert.equal(response.status, 200);
+  const run = await response.json() as { events: Array<{ id: string; batchActions?: Array<{ toolkitName?: string; status: string; toolkitLogo?: string }> }> };
+  const activity = run.events.find((event) => event.id === "batch_activity_event");
+  assert.deepEqual(activity?.batchActions?.map(({ toolkitName, status, toolkitLogo }) => ({ toolkitName, status, toolkitLogo })), [
+    { toolkitName: "Gmail", status: "completed", toolkitLogo: "https://assets.example/gmail.svg" },
+    { toolkitName: "Notion", status: "unknown", toolkitLogo: undefined },
+  ]);
+  assert.equal(JSON.stringify(run).includes("arguments"), false);
+});
+
 test("approved run stays visible while resuming and preserves its earlier steps", async () => {
   const originalFetch = globalThis.fetch;
   const externalId = "approval-resume-timeline-owner";

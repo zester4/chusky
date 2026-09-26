@@ -28,6 +28,8 @@ import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaI
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
+import type { SubagentActivityUpdate } from "./subagents/contracts.js";
+import type { ComposioToolPresentation } from "./toolActivity.js";
 import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
@@ -92,6 +94,10 @@ export interface NativeToolRuntime {
   model?: string;
   historySummary?: string;
   onStatus?: (statusText: string) => Promise<void> | void;
+  /** Safe worker lifecycle updates forwarded to the authenticated parent run. */
+  onSubagentActivity?: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => Promise<void> | void;
+  getComposioToolPresentation?: (toolSlug: string) => ComposioToolPresentation | undefined;
+  parentToolCallId?: string;
   approvedApprovalId?: string;
   signal?: AbortSignal;
   /** Worker-owned resources can register bounded cleanup on cancellation. */
@@ -284,6 +290,8 @@ async function runDelegationWithDurableContinuation(
     : contract.context;
   const result = await executeDelegation(userId, { ...contract, context: durableContext }, {
     ...runtime,
+    onActivity: runtime.onSubagentActivity,
+    parentToolCallId: runtime.parentToolCallId,
     parentHandoffId: runtime.worker ? runtime.handoffId : undefined,
     rootHandoffId: runtime.worker ? runtime.rootHandoffId ?? runtime.handoffId : undefined,
     parentWorker: runtime.worker,

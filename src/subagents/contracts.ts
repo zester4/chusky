@@ -47,6 +47,26 @@ export type DelegationStatus =
   | "fallback_executed"
   | "cancelled";
 
+/** Safe, durable progress for rendering a specialist inside its parent chat run. */
+export interface SubagentActivityUpdate {
+  parentToolCallId: string;
+  handoffId: string;
+  worker: Exclude<CapabilityWorkerName, "chusky">;
+  objective: string;
+  activityId: string;
+  kind: "worker" | "tool";
+  status: "started" | "completed" | "failed" | "approval_required" | "cancelled" | "waiting";
+  message: string;
+  toolCallId?: string;
+  toolSlug?: string;
+  actionLabel?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  toolkitLogo?: string;
+  summary?: string;
+  durationMs?: number;
+}
+
 export interface HandoffRecord {
   id: string;
   from: "chusky" | CapabilityWorkerName;

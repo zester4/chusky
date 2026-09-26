@@ -6,6 +6,7 @@ import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
+import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
@@ -697,8 +698,9 @@ async function persistSdkRunSnapshot(
   for (const item of [...stored.events, ...run.events]) mergedEvents.set(item.id, item);
   const orderedEvents = [...mergedEvents.values()].sort((left, right) => left.at - right.at);
   const activityEvents = orderedEvents.filter((item) => item.type === "run.tool_activity").slice(-200);
-  const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity").slice(-200);
-  const events = [...activityEvents, ...otherEvents].sort((left, right) => left.at - right.at);
+  const subagentEvents = orderedEvents.filter((item) => item.type === "run.subagent_activity").slice(-300);
+  const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200);
+  const events = [...activityEvents, ...subagentEvents, ...otherEvents].sort((left, right) => left.at - right.at);
   const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
   Object.assign(stored, run, { events });
   if (preserveCancellation) {
@@ -2265,6 +2267,13 @@ export function registerSdkApi(app: Hono): void {
             thread.updatedAt = activityEvent.at;
             return persistSdkRunSnapshot(owner.userId, thread.id, run).then(() => send({ runId: run.id, ...activityEvent }));
           },
+          onSubagentActivity: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
+            const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
+            run.events.push(activityEvent);
+            run.updatedAt = activityEvent.at;
+            thread.updatedAt = activityEvent.at;
+            return persistSdkRunSnapshot(owner.userId, thread.id, run).then(() => send({ runId: run.id, ...activityEvent }));
+          },
         });
         if (abort.signal.aborted) {
           run.status = "cancelled";
@@ -2733,6 +2742,13 @@ export function registerSdkApi(app: Hono): void {
           ...await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions),
           onToolActivity: async (activity: AgentToolActivity) => {
             const activityEvent = { id: `evt_${randomUUID()}`, type: "run.tool_activity", at: Date.now(), ...activity };
+            run.events.push(activityEvent);
+            run.updatedAt = activityEvent.at;
+            thread.updatedAt = activityEvent.at;
+            await persistSdkRunSnapshot(owner.userId, thread.id, run);
+          },
+          onSubagentActivity: async (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
+            const activityEvent = { id: `evt_${randomUUID()}`, type: "run.subagent_activity", at: Date.now(), ...activity };
             run.events.push(activityEvent);
             run.updatedAt = activityEvent.at;
             thread.updatedAt = activityEvent.at;

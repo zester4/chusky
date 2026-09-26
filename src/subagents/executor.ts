@@ -12,8 +12,10 @@ import type { ApiMessage } from "../types.js";
 import type { CapabilityWorkerName } from "../memory/types.js";
 import type { ReplyTarget } from "../channels/contracts.js";
 import { skillContextForBinding } from "../skills/catalog.js";
-import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type WorkerDuration } from "./contracts.js";
+import { WORKER_DURATION_SECONDS, type DelegationContract, type DelegationResult, type DelegationStatus, type HandoffRecord, type SubagentActivityUpdate, type WorkerDuration } from "./contracts.js";
 import { CancellationError, isCancellationError, safeToolAudit, throwIfAborted } from "../cancellation.js";
+import { collectComposioToolPresentations } from "../toolActivity.js";
+import type { ComposioToolPresentation } from "../toolActivity.js";
 
 const DELEGATION_STATUS_PREVIEW_LENGTH = 160;
 const activeWorkerControllers = new Map<string, AbortController>();
@@ -62,6 +64,9 @@ export async function executeDelegation(
   options?: {
     model?: string;
     onStatus?: (statusText: string) => Promise<void> | void;
+    onActivity?: (activity: SubagentActivityUpdate) => Promise<void> | void;
+    getComposioToolPresentation?: (toolSlug: string) => ComposioToolPresentation | undefined;
+    parentToolCallId?: string;
     approvedApprovalId?: string;
     signal?: AbortSignal;
     historySummary?: string;
@@ -196,6 +201,20 @@ export async function executeDelegation(
   if (options?.resume?.workflowRunId) handoffRecord.workflowRunId = options.resume.workflowRunId;
   if (options?.resume?.resumeCount !== undefined) handoffRecord.resumeCount = options.resume.resumeCount;
   await saveHandoffRecord(userId, handoffRecord);
+  const emitActivity = async (activity: Omit<SubagentActivityUpdate, "parentToolCallId" | "handoffId" | "worker" | "objective">) => {
+    try {
+      await options?.onActivity?.({
+        parentToolCallId: options.parentToolCallId ?? "",
+        handoffId: handoffRecord.id,
+        worker: workerName,
+        objective: contract.objective.replace(/[\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 240),
+        ...activity,
+      });
+    } catch {
+      // Progress is observational; publishing errors must not interrupt a worker.
+    }
+  };
+  await emitActivity({ activityId: `worker:${handoffRecord.id}`, kind: "worker", status: "started", message: `${manifest.displayName} is working` });
 
   // Active timeout cancellation signal combined with parent signal
   const timeoutSignal = AbortSignal.timeout(contract.timeoutSeconds * 1000);
@@ -256,6 +275,8 @@ export async function executeDelegation(
     const scopedComposio = needsComposio
       ? await scopedToolsForWorker(userId, contract.allowedComposioTools, { optionalSlugs: starterComposioTools, objective: contract.objective })
       : { tools: [], missing: starterComposioTools, execute: async () => { throw new Error("No Composio action was delegated to this worker."); } };
+    const toolkitPresentations = collectComposioToolPresentations(scopedComposio.tools);
+    const toolkitMetadataFor = (slug: string) => options?.getComposioToolPresentation?.(slug) ?? toolkitPresentations.get(slug) ?? {};
     const workerTools = [...nativeWorkerTools, ...scopedComposio.tools];
     if (actionPayload) {
       // ── Explicit Tool Call Execution (Direct Action Payload) ────────────────
@@ -335,12 +356,16 @@ export async function executeDelegation(
             };
             status = "requires_approval";
             outputSummary = `Worker capability [${manifest.displayName}] proposed ${actionPayload.name}. Awaiting Chusky supervisor review.`;
+            await emitActivity({ activityId: `tool:${handoffRecord.id}:${actionPayload.name}`, kind: "tool", toolCallId: actionPayload.name, toolSlug: actionPayload.name, ...toolkitMetadataFor(actionPayload.name), status: "approval_required", message: humanToolStatus(actionPayload.name), summary: "Waiting for approval" });
 
             if (options?.onStatus) {
               await options.onStatus(`🛡️ ${manifest.displayName} requested approval for ${actionPayload.name}. Approval ID: ${approvalRecord.id}`);
             }
             await blockTask(userId, durableTask.id, outputSummary, "Awaiting Chusky supervisor review");
           } else {
+            const toolActivityId = `tool:${handoffRecord.id}:${actionPayload.name}`;
+            const toolStartedAt = Date.now();
+            await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: actionPayload.name, toolSlug: actionPayload.name, ...toolkitMetadataFor(actionPayload.name), status: "started", message: humanToolStatus(actionPayload.name) });
             if (options?.onStatus) {
               await options.onStatus(humanToolStatus(actionPayload.name));
             }
@@ -373,14 +398,19 @@ export async function executeDelegation(
                 : await scopedComposio.execute(actionPayload.name, executionArgs, activeSignal);
               logs.push(safeToolAudit({ tool: actionPayload.name, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: "completed" }));
               outputSummary = `Successfully executed ${actionPayload.name}. Result: ${JSON.stringify(toolResult).slice(0, 1000)}`;
+              await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: actionPayload.name, toolSlug: actionPayload.name, ...toolkitMetadataFor(actionPayload.name), status: "completed", message: humanToolStatus(actionPayload.name), summary: "Result returned", durationMs: Math.max(0, Date.now() - toolStartedAt) });
               await checkpointTask(userId, durableTask.id, outputSummary, "Tool execution completed");
               if (approvedForTool && isRiskyToolSlug(actionPayload.name, executionArgs)) {
                 await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
               }
             } catch (err) {
-              if (isCancellationError(err, activeSignal)) throw err;
+              if (isCancellationError(err, activeSignal)) {
+                await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: actionPayload.name, toolSlug: actionPayload.name, ...toolkitMetadataFor(actionPayload.name), status: "cancelled", message: humanToolStatus(actionPayload.name), summary: "Cancelled", durationMs: Math.max(0, Date.now() - toolStartedAt) });
+                throw err;
+              }
               const errMsg = String((err as Error)?.message ?? err);
               logs.push(safeToolAudit({ tool: actionPayload.name, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: isCancellationError(err, activeSignal) ? "cancelled" : "failed", error: errMsg }));
+              await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: actionPayload.name, toolSlug: actionPayload.name, ...toolkitMetadataFor(actionPayload.name), status: "failed", message: humanToolStatus(actionPayload.name), summary: "Could not complete this step", durationMs: Math.max(0, Date.now() - toolStartedAt) });
               outputSummary = `Execution error in ${actionPayload.name}: ${errMsg}. Reflection checklist: ${manifest.reflectionChecklist.join("; ")}`;
               status = "failed";
             }
@@ -623,6 +653,7 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             };
             status = "requires_approval";
             outputSummary = `Worker capability [${manifest.displayName}] proposed risky tool ${slug}. Awaiting Chusky supervisor review.`;
+            await emitActivity({ activityId: `tool:${handoffRecord.id}:${call.id}`, kind: "tool", toolCallId: call.id, toolSlug: slug, ...toolkitMetadataFor(slug), status: "approval_required", message: humanToolStatus(slug), summary: "Waiting for approval" });
 
             if (options?.onStatus) {
               await options.onStatus(`🛡️ ${manifest.displayName} requested approval for ${slug}. Approval ID: ${approvalRecord.id}`);
@@ -635,6 +666,9 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
           }
 
           // 3. Execute Tool in Boundary
+          const toolActivityId = `tool:${handoffRecord.id}:${call.id}`;
+          const toolStartedAt = Date.now();
+          await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: call.id, toolSlug: slug, ...toolkitMetadataFor(slug), status: "started", message: humanToolStatus(slug) });
           if (options?.onStatus) {
             await options.onStatus(humanToolStatus(slug));
           }
@@ -663,6 +697,8 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
                     approvedApprovalId: options?.approvedApprovalId,
                     deliveryTarget: options?.deliveryTarget,
                     onStatus: options?.onStatus,
+                    parentToolCallId: call.id,
+                    onSubagentActivity: options?.onActivity ? (activity) => options.onActivity!({ ...activity, parentToolCallId: call.id }) : undefined,
                     signal: activeSignal,
                     registerCancellationCleanup,
                   });
@@ -674,11 +710,16 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
             messages.push({ role: "tool", tool_call_id: call.id, content: resultStr.slice(0, 20000) });
             await checkpointTask(userId, durableTask.id, `Executed ${slug}`, "Proceed to next step");
             await checkpointRun("running", { eventType: "worker.tool_completed", tool: slug, round, checkpoint: `Executed ${slug}`, nextAction: "Proceed to next step" });
+            await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: call.id, toolSlug: slug, ...toolkitMetadataFor(slug), status: "completed", message: humanToolStatus(slug), summary: "Result returned", durationMs: Math.max(0, Date.now() - toolStartedAt) });
             if (approvedForTool && isRiskyToolSlug(slug, executionArgs)) await setApprovalStatus(userId, options!.approvedApprovalId!, "consumed");
           } catch (err) {
-            if (isCancellationError(err, activeSignal)) throw err;
+            if (isCancellationError(err, activeSignal)) {
+              await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: call.id, toolSlug: slug, ...toolkitMetadataFor(slug), status: "cancelled", message: humanToolStatus(slug), summary: "Cancelled", durationMs: Math.max(0, Date.now() - toolStartedAt) });
+              throw err;
+            }
             const errMsg = String((err as Error)?.message ?? err);
             logs.push(safeToolAudit({ tool: slug, args: executionArgs, userId, runId: handoffRecord.delegation.runId, status: isCancellationError(err, activeSignal) ? "cancelled" : "failed", error: errMsg }));
+            await emitActivity({ activityId: toolActivityId, kind: "tool", toolCallId: call.id, toolSlug: slug, ...toolkitMetadataFor(slug), status: "failed", message: humanToolStatus(slug), summary: "Could not complete this step", durationMs: Math.max(0, Date.now() - toolStartedAt) });
 
             // 1-turn reflection prompt on error
             messages.push({
@@ -786,6 +827,26 @@ ${skillContext ? `\nRelevant project skill guidance (trusted local instructions;
     handoffRecord.status = status;
     await saveHandoffRecord(userId, handoffRecord);
   }
+
+  const workerState = status === "success" ? "completed"
+    : status === "cancelled" || status === "interrupted" ? "cancelled"
+      : status === "requires_approval" ? "approval_required"
+        : status === "requires_tool_request" ? "waiting"
+          : status === "queued" ? "started" : "failed";
+  await emitActivity({
+    activityId: `worker:${handoffRecord.id}`,
+    kind: "worker",
+    status: workerState,
+    message: workerState === "completed" ? `${manifest.displayName} finished`
+      : workerState === "cancelled" ? `${manifest.displayName} was cancelled`
+        : workerState === "approval_required" ? `${manifest.displayName} is waiting for approval`
+          : workerState === "waiting" ? `${manifest.displayName} is waiting for a capability`
+            : workerState === "started" ? `${manifest.displayName} is continuing in the background`
+              : `${manifest.displayName} could not complete the task`,
+    ...(workerState === "completed" ? { summary: "Task completed" } : {}),
+    ...(workerState === "failed" ? { summary: "Task failed" } : {}),
+    durationMs: Math.max(0, Date.now() - startTime),
+  });
 
   // Reconcile the durable run after the outer continuation decision. A slice
   // may first checkpoint as queued and then become failed if scheduling is not

@@ -54,6 +54,7 @@ import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
 import { applyMeetingComposioAccountAlias, isMeetingCalendarAvailabilityTool, isMeetingCalendarWriteTool, isMeetingRepresentativeComposioTool, selectMeetingToolsForToolkit } from "./meetings/representative.js";
 import { mcpClient } from "./mcp/client.js";
 import { requiresLiveWebResearchRequest } from "./channels/groupInstructions.js";
+import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { resolveComposioRoute } from "./composioRouting.js";
 import { buildArtifactEmailArguments, type ArtifactEmailFile } from "./artifactEmail.js";
 import { buildArtifactUploadArguments } from "./artifactBridge.js";
@@ -63,6 +64,7 @@ import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonom
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, settleComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -1854,6 +1856,8 @@ export interface AgentRunOptions {
   parentRunId?: string;
   /** Report safe tool lifecycle metadata to an authenticated run stream. */
   onToolActivity?: (activity: AgentToolActivity) => void | Promise<void>;
+  /** Report safe specialist lifecycle metadata in the same durable chat run. */
+  onSubagentActivity?: (activity: SubagentActivityUpdate & { parentToolCallId: string }) => void | Promise<void>;
   /** Bind the internal task-wait tool to the task currently being executed. */
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
@@ -1866,8 +1870,14 @@ export interface AgentRunOptions {
 
 export interface AgentToolActivity {
   toolSlug: string;
+  callId?: string;
   status: "started" | "completed" | "failed" | "approval_required" | "cancelled";
   message: string;
+  actionLabel?: string;
+  toolkitSlug?: string;
+  toolkitName?: string;
+  toolkitLogo?: string;
+  batchActions?: ComposioBatchAction[];
   /** Content-free result metadata; never includes provider-returned values. */
   summary?: string;
   durationMs?: number;
@@ -1886,6 +1896,16 @@ function safeToolActivitySummary(result: unknown): string {
     if (Number.isSafeInteger(record.count) && Number(record.count) >= 0) return `${Number(record.count)} ${Number(record.count) === 1 ? "result" : "results"} returned`;
   }
   return "Result returned";
+}
+
+function toolPresentationActivityFields(presentation?: ComposioToolPresentation) {
+  if (!presentation) return {};
+  return {
+    ...(presentation.actionLabel ? { actionLabel: presentation.actionLabel } : {}),
+    ...(presentation.toolkitSlug ? { toolkitSlug: presentation.toolkitSlug } : {}),
+    ...(presentation.toolkitName ? { toolkitName: presentation.toolkitName } : {}),
+    ...(presentation.toolkitLogo ? { toolkitLogo: presentation.toolkitLogo } : {}),
+  };
 }
 
 const VOICE_HISTORY_MAX_MESSAGES = 12;
@@ -1999,6 +2019,13 @@ export async function runAgent(
       logger.debug({ err: error }, "Could not publish tool activity event");
     }
   };
+  const reportSubagentActivity = async (activity: SubagentActivityUpdate & { parentToolCallId: string }) => {
+    try {
+      await options?.onSubagentActivity?.(activity);
+    } catch (error) {
+      logger.debug({ err: error }, "Could not publish subagent activity event");
+    }
+  };
 
   if (onStatus) await onStatus(humanProgressStatus("understanding"));
 
@@ -2070,6 +2097,7 @@ export async function runAgent(
     const name = toolName(tool);
     return (!allow || allow.has(name)) && !deny.has(name);
   });
+  const composioToolPresentations = collectComposioToolPresentations(fullComposioTools);
   const structuredArtifactRequest = typeof userMessage === "string"
     && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
     && availableTools.some((tool) => ["CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(toolName(tool)));
@@ -2463,8 +2491,10 @@ export async function runAgent(
 
       if (onStatus) await onStatus(toolStatus(slug));
       const toolStartedAt = Date.now();
-      const activityMessage = toolStatus(slug).slice(0, 4000);
-      await reportToolActivity({ toolSlug: slug, status: "started", message: activityMessage });
+      let activityMessage = toolStatus(slug).slice(0, 4000);
+      let activityPresentation: ComposioToolPresentation | undefined;
+      let batchActivityActions: ComposioBatchAction[] = [];
+      await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage });
       let auditArgs: Record<string, unknown> | undefined;
       try { auditArgs = parseToolArguments(call.function.arguments); } catch { /* malformed provider args are logged by shape only */ }
       logger.debug(safeToolAudit({ tool: slug, args: auditArgs, userId, runId: options?.runId, startedAt: toolStartedAt, status: "started" }), "Tool call");
@@ -2498,6 +2528,17 @@ export async function runAgent(
           continue;
         }
         const args = parseToolArguments(call.function.arguments);
+        activityPresentation = composioToolPresentations.get(slug);
+        if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+          batchActivityActions = buildComposioBatchActions(args, call.id, composioToolPresentations);
+          if (batchActivityActions.length) {
+            activityMessage = `Carrying out ${batchActivityActions.length} independent actions in parallel`;
+            await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, actionLabel: activityMessage, batchActions: batchActivityActions });
+          }
+        } else if (activityPresentation?.actionLabel) {
+          activityMessage = activityPresentation.actionLabel;
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "started", message: activityMessage, ...toolPresentationActivityFields(activityPresentation) });
+        }
         // A malformed provider payload was never a real tool attempt. Do not
         // charge it against the user's bounded execution budget.
         if (slug.startsWith("CHUCK_")) validateNativeToolArguments(slug, args);
@@ -2781,7 +2822,7 @@ export async function runAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: fullComposioTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: fullComposioTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
@@ -2904,17 +2945,31 @@ export async function runAgent(
         result = typeof modelResult === "string"
           ? modelResult
           : JSON.stringify(modelResult) ?? "undefined";
+        if (slug === "COMPOSIO_SEARCH_TOOLS") {
+          for (const [toolSlug, presentation] of collectComposioToolPresentations(execResult)) {
+            composioToolPresentations.set(toolSlug, { ...composioToolPresentations.get(toolSlug), ...presentation });
+          }
+        }
+        if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL" && batchActivityActions.length) {
+          batchActivityActions = settleComposioBatchActions(batchActivityActions, execResult);
+        }
+        if (slug.startsWith("COMPOSIO_") && execResult && typeof execResult === "object" && !Array.isArray(execResult)
+          && (execResult as Record<string, unknown>).successful === false) {
+          toolFailed = true;
+        }
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
         if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult));
         if (isRiskyToolSlug(slug, args) && approvedApprovalId) await setApprovalStatus(userId, approvedApprovalId, "consumed");
       } catch (e) {
         if (e instanceof ApprovalRequiredError) {
-          await reportToolActivity({ toolSlug: slug, status: "approval_required", message: activityMessage, durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "approval_required", summary: "Waiting for approval before this batch can run" }));
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "approval_required", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
         }
         if (signal?.aborted) {
-          await reportToolActivity({ toolSlug: slug, status: "cancelled", message: activityMessage, durationMs: Math.max(0, Date.now() - toolStartedAt) });
+          batchActivityActions = batchActivityActions.map((action) => ({ ...action, status: "unknown", summary: "Batch was interrupted; provider outcomes may be partial" }));
+          await reportToolActivity({ toolSlug: slug, callId: call.id, status: "cancelled", message: activityMessage, ...toolPresentationActivityFields(activityPresentation), ...(batchActivityActions.length ? { batchActions: batchActivityActions } : {}), durationMs: Math.max(0, Date.now() - toolStartedAt) });
           throw e;
         }
         if (externalClaim?.state === "new") await failExternalAction(userId, externalClaim.logicalActionId, e instanceof Error ? e.message : String(e)).catch(() => undefined);
@@ -2936,8 +2991,15 @@ export async function runAgent(
 
       await reportToolActivity({
         toolSlug: slug,
+        callId: call.id,
         status: toolFailed ? "failed" : "completed",
         message: activityMessage,
+        ...toolPresentationActivityFields(activityPresentation),
+        ...(batchActivityActions.length ? {
+          batchActions: toolFailed
+            ? settleComposioBatchActions(batchActivityActions, undefined, "Batch failed; individual action outcomes were not confirmed")
+            : batchActivityActions,
+        } : {}),
         ...(!toolFailed ? { summary: safeToolActivitySummary(execResult) } : {}),
         durationMs: Math.max(0, Date.now() - toolStartedAt),
       });
