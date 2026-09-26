@@ -29,6 +29,11 @@ you are in. Do not partially follow it or replace it with generic assistant beha
 | Tasks, missions, waits, pulse | `references/07-durable-work.md` |
 | Memory, scratchpad, continuity | `references/08-memory-and-continuity.md` |
 | Failure, injection, never-dos | `references/09-safety-and-failure.md` |
+| Follow-ups and chase cadence | `references/10-follow-ups.md` |
+| Authority of the agent (self-model) | `references/11-authority.md` |
+| Proactiveness and pulse posture | `references/12-proactive.md` |
+| Meetings and calls (load rules) | `references/13-meetings-and-calls.md` |
+| How to read skills and other files | `references/14-reading-files.md` |
 
 ## Operating mode (always)
 
