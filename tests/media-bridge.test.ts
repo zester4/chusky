@@ -462,3 +462,102 @@ test("LinkedIn image publishing initializes, uploads, and posts the exact return
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
 });
+
+test("LinkedIn image publishing upgrades a legacy ToolRouter schema to Composio's current owner-scoped definition", async () => {
+  const userId = 839108;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const legacyPostSchema = { type: "object", required: ["author", "commentary"], properties: {
+    author: { type: "string" }, commentary: { type: "string" },
+  }, additionalProperties: false };
+  const currentPostSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
+    author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } },
+  }, additionalProperties: false };
+  const initSchema = { type: "object", required: ["owner"], properties: { owner: { type: "string" } }, additionalProperties: false };
+  const directCalls: Array<{ slug: string; body: Record<string, unknown> }> = [];
+  const rawLookups: Array<{ slug: string; options: Record<string, unknown> }> = [];
+  let uploaded: Buffer | undefined;
+  const session = {
+    sessionId: "media-bridge-linkedin-legacy-session",
+    tools: async () => [{ type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: legacyPostSchema } }],
+    execute: async () => { throw new Error("legacy ToolRouter action must not execute"); },
+  };
+  const composioClient = {
+    connectedAccounts: {
+      list: async () => [{ id: "ca_linkedin_owner", alias: "brand", status: "ACTIVE", toolkit: { slug: "linkedin" } }],
+    },
+    tools: {
+      getRawComposioToolBySlug: async (slug: string, options: Record<string, unknown>) => {
+        rawLookups.push({ slug, options });
+        return { slug, version: "20260915_00", toolkit: { slug: "linkedin" }, inputParameters: slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD" ? initSchema : currentPostSchema };
+      },
+      execute: async (slug: string, body: Record<string, unknown>) => {
+        directCalls.push({ slug, body });
+        if (slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") return { successful: true, data: { upload_url: "https://www.linkedin.com/dms-uploads/upload-token", image: "urn:li:image:current-123" } };
+        return { successful: true, data: { id: "urn:li:share:current" } };
+      },
+    },
+  };
+  const mediaBridgeStorage = {
+    saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => ({ id: `img_owner_${owner}`, r2Key: "images/owner/image.png", name: input.name, contentType: input.contentType, size: bytes.byteLength }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://signed.example/private-image",
+  };
+  setAgentDependenciesForTests({
+    composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage,
+    mediaBridgeFetch: async (_url: string | URL | Request, init?: RequestInit) => {
+      uploaded = Buffer.from(init?.body as Uint8Array);
+      return new Response(null, { status: 201 });
+    },
+  } as any);
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", account: "brand",
+      arguments: { author: "urn:li:person:owner", commentary: "Current schema launch" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.equal(result.mode, "linkedin_upload");
+    assert.deepEqual(uploaded, imageBytes);
+    assert.deepEqual(rawLookups, [
+      { slug: "LINKEDIN_CREATE_LINKED_IN_POST", options: { version: "latest" } },
+      { slug: "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", options: { version: "latest" } },
+    ]);
+    assert.deepEqual(directCalls, [
+      { slug: "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", body: { userId: "user_839108", connectedAccountId: "ca_linkedin_owner", version: "20260915_00", arguments: { owner: "urn:li:person:owner" } } },
+      { slug: "LINKEDIN_CREATE_LINKED_IN_POST", body: { userId: "user_839108", connectedAccountId: "ca_linkedin_owner", version: "20260915_00", arguments: { author: "urn:li:person:owner", commentary: "Current schema launch", images: ["urn:li:image:current-123"] } } },
+    ]);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("LinkedIn actions without an image field direct the agent to the supported image-post action", async () => {
+  const userId = 839109;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const schema = { type: "object", required: ["author", "commentary"], properties: {
+    author: { type: "string" }, commentary: { type: "string" },
+  }, additionalProperties: false };
+  const session = {
+    sessionId: "media-bridge-linkedin-text-session",
+    tools: async () => [{ type: "function", function: { name: "LINKEDIN_CREATE_ARTICLE_OR_URL_SHARE", parameters: schema } }],
+    execute: async () => { throw new Error("an image-incompatible action must not execute"); },
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } } as any);
+  try {
+    const availableTools = await session.tools();
+    await assert.rejects(
+      () => executeMediaBridgeAction(userId, session, availableTools, {
+        source: "current", toolSlug: "LINKEDIN_CREATE_ARTICLE_OR_URL_SHARE",
+        arguments: { author: "urn:li:person:owner", commentary: "Hello" },
+      }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] }),
+      /LINKEDIN_CREATE_LINKED_IN_POST.*No provider action was attempted/i,
+    );
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});

@@ -612,35 +612,68 @@ async function resolveMediaBridgeToolkitSlug(composioClient: any, toolSlug: stri
   return toolkitSlug;
 }
 
-async function executeLinkedinImagePost(
-  sessionObj: any,
-  toolSlug: string,
-  postSchema: any,
+type LinkedinToolDefinition = {
+  slug: string;
+  version: string;
+  schema: Record<string, unknown>;
+};
+
+function linkedInImageArraySchema(schema: unknown): boolean {
+  const images = (schema as any)?.properties?.images;
+  return images?.type === "array" && images.items?.type === "string";
+}
+
+function linkedInRawToolSchema(tool: any): Record<string, unknown> | undefined {
+  const schema = tool?.inputParameters ?? tool?.input_parameters ?? tool?.inputSchema ?? tool?.input_schema;
+  return schema && typeof schema === "object" && !Array.isArray(schema) ? schema as Record<string, unknown> : undefined;
+}
+
+async function getLatestLinkedinTool(composioClient: any, toolSlug: string, signal?: AbortSignal): Promise<LinkedinToolDefinition> {
+  const getRawTool = composioClient?.tools?.getRawComposioToolBySlug;
+  if (typeof getRawTool !== "function") {
+    throw new Error("Composio cannot retrieve the current LinkedIn action definition; no image upload was attempted.");
+  }
+  const tool = await abortable(getRawTool.call(composioClient.tools, toolSlug, { version: "latest" }), signal) as any;
+  const slug = tool?.slug ?? tool?.toolSlug ?? tool?.tool_slug;
+  const toolkit = tool?.toolkit?.slug ?? tool?.toolkitSlug ?? tool?.toolkit_slug;
+  const version = tool?.version;
+  const schema = linkedInRawToolSchema(tool);
+  if (slug !== toolSlug || String(toolkit).toLowerCase() !== "linkedin" || typeof version !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(version) || !schema) {
+    throw new Error(`Composio did not return a usable current LinkedIn definition for ${toolSlug}; no image upload was attempted.`);
+  }
+  return { slug, version, schema };
+}
+
+async function resolveDirectLinkedinAccount(userId: number, account: string | undefined): Promise<string> {
+  const accounts = (await listConnectedAccounts(userId, "linkedin"))
+    .filter((candidate) => candidate.toolkit.toLowerCase() === "linkedin")
+    .filter((candidate) => !/disabled|expired|inactive|error/i.test(candidate.status));
+  const selected = account
+    ? accounts.find((candidate) => candidate.id === account || candidate.alias === account)
+    : accounts.length === 1 ? accounts[0] : undefined;
+  if (!selected) {
+    throw new Error(account
+      ? "The requested LinkedIn account is not an active account owned by this user; no image upload was attempted."
+      : "Select one active LinkedIn account before posting an image; no image upload was attempted.");
+  }
+  return selected.id;
+}
+
+async function executeLinkedinImageSequence(
+  postSchema: Record<string, unknown>,
   actionArguments: Record<string, unknown>,
   file: { data: Buffer; contentType: string },
-  account: string | undefined,
+  getTool: (toolSlug: string) => Promise<LinkedinToolDefinition>,
+  executeTool: (tool: LinkedinToolDefinition, args: Record<string, unknown>) => Promise<any>,
   signal?: AbortSignal,
-): Promise<{ result: any; mode: "linkedin_upload" }> {
-  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST") throw new Error("Unsupported LinkedIn image action; no provider upload was attempted.");
-  if (typeof actionArguments.author !== "string" || !actionArguments.author.trim()) {
-    throw new Error("A LinkedIn author URN is required for an image post. Read the connected profile first; no image upload was attempted.");
-  }
-  if (Object.hasOwn(actionArguments, "images")) throw new Error("Do not supply LinkedIn images; Chusky adds the uploaded image URN after a successful upload.");
-  const imagesSchema = postSchema?.properties?.images;
-  if (imagesSchema?.type !== "array" || imagesSchema.items?.type !== "string") {
+): Promise<any> {
+  if (!linkedInImageArraySchema(postSchema)) {
     throw new Error("The current LinkedIn post schema does not support an images string array; no image upload was attempted.");
   }
-  if (typeof sessionObj.search !== "function") throw new Error("Composio image-upload discovery is unavailable in this session; no image upload was attempted.");
-
-  const discovery = await abortable(sessionObj.search({ query: "Initialize an image upload for a LinkedIn post", toolkits: ["linkedin"] }, signal ? { signal } : undefined), signal) as any;
-  const uploadTool = discovery?.toolSchemas?.LINKEDIN_INITIALIZE_IMAGE_UPLOAD;
-  const uploadSchema = uploadTool?.inputSchema ?? uploadTool?.input_schema;
-  if (discovery?.error || !uploadSchema || uploadTool?.toolSlug && uploadTool.toolSlug !== "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") {
-    throw new Error("Composio did not return the exact LinkedIn image-initialize action schema; no image upload was attempted.");
-  }
-  const initializeArguments: Record<string, unknown> = { owner: actionArguments.author.trim() };
-  validateToolArgumentsAgainstSchema("LINKEDIN_INITIALIZE_IMAGE_UPLOAD", initializeArguments, uploadSchema);
-  const initialized = await composioExecute(sessionObj, "LINKEDIN_INITIALIZE_IMAGE_UPLOAD", initializeArguments, signal);
+  const uploadTool = await getTool("LINKEDIN_INITIALIZE_IMAGE_UPLOAD");
+  const initializeArguments: Record<string, unknown> = { owner: String(actionArguments.author).trim() };
+  validateToolArgumentsAgainstSchema(uploadTool.slug, initializeArguments, uploadTool.schema);
+  const initialized = await executeTool(uploadTool, initializeArguments);
   if (initialized?.successful !== true || initialized?.error) throw new Error("LinkedIn did not confirm image-upload initialization; no image bytes were uploaded.");
 
   const uploadUrl = findProviderString(initialized.data, (key, value) => /^(upload_?url|uploadUrl)$/i.test(key) && /^https:\/\//i.test(value));
@@ -661,10 +694,95 @@ async function executeLinkedinImagePost(
   });
   if (!uploadResponse.ok) throw new Error(`LinkedIn image upload was not confirmed (HTTP ${uploadResponse.status}); verify the provider state before retrying.`);
 
+  const postTool = await getTool("LINKEDIN_CREATE_LINKED_IN_POST");
+  if (!linkedInImageArraySchema(postTool.schema)) {
+    throw new Error("Composio's current LinkedIn post definition does not support image URNs; no post was attempted.");
+  }
   const postArguments = { ...actionArguments, images: [imageUrn] };
-  validateToolArgumentsAgainstSchema(toolSlug, postArguments, postSchema, 36 * 1024 * 1024);
-  const result = await composioExecute(sessionObj, toolSlug, account ? { ...postArguments, account } : postArguments, signal);
-  return { result, mode: "linkedin_upload" };
+  validateToolArgumentsAgainstSchema(postTool.slug, postArguments, postTool.schema, 36 * 1024 * 1024);
+  return executeTool(postTool, postArguments);
+}
+
+async function executeLatestLinkedinImagePost(
+  userId: number,
+  composioClient: any,
+  actionArguments: Record<string, unknown>,
+  file: { data: Buffer; contentType: string },
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<any> {
+  const accountId = await resolveDirectLinkedinAccount(userId, account);
+  const tools = new Map<string, LinkedinToolDefinition>();
+  const getTool = async (toolSlug: string) => {
+    const existing = tools.get(toolSlug);
+    if (existing) return existing;
+    const current = await getLatestLinkedinTool(composioClient, toolSlug, signal);
+    tools.set(toolSlug, current);
+    return current;
+  };
+  return executeLinkedinImageSequence(
+    (await getTool("LINKEDIN_CREATE_LINKED_IN_POST")).schema,
+    actionArguments,
+    file,
+    getTool,
+    (tool, arguments_) => abortable(composioClient.tools.execute(tool.slug, {
+      userId: composioUserId(userId),
+      connectedAccountId: accountId,
+      version: tool.version,
+      arguments: arguments_,
+    }, signal ? { signal } : undefined), signal),
+    signal,
+  );
+}
+
+async function executeLinkedinImagePost(
+  userId: number,
+  composioClient: any,
+  sessionObj: any,
+  toolSlug: string,
+  postSchema: any,
+  actionArguments: Record<string, unknown>,
+  file: { data: Buffer; contentType: string },
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ result: any; mode: "linkedin_upload" }> {
+  if (toolSlug !== "LINKEDIN_CREATE_LINKED_IN_POST") throw new Error("Unsupported LinkedIn image action; no provider upload was attempted.");
+  if (typeof actionArguments.author !== "string" || !actionArguments.author.trim()) {
+    throw new Error("A LinkedIn author URN is required for an image post. Read the connected profile first; no image upload was attempted.");
+  }
+  if (Object.hasOwn(actionArguments, "images")) throw new Error("Do not supply LinkedIn images; Chusky adds the uploaded image URN after a successful upload.");
+  if (!linkedInImageArraySchema(postSchema)) {
+    // Tool Router sessions created against an old/default LinkedIn toolkit can
+    // still expose the text-only schema. Resolve and pin Composio's latest
+    // definition for this owner instead of pretending that text-only action
+    // can receive an image.
+    return {
+      result: await executeLatestLinkedinImagePost(userId, composioClient, actionArguments, file, account, signal),
+      mode: "linkedin_upload",
+    };
+  }
+  if (typeof sessionObj.search !== "function") throw new Error("Composio image-upload discovery is unavailable in this session; no image upload was attempted.");
+
+  const discovery = await abortable(sessionObj.search({ query: "Initialize an image upload for a LinkedIn post", toolkits: ["linkedin"] }, signal ? { signal } : undefined), signal) as any;
+  const uploadTool = discovery?.toolSchemas?.LINKEDIN_INITIALIZE_IMAGE_UPLOAD;
+  const uploadSchema = uploadTool?.inputSchema ?? uploadTool?.input_schema;
+  if (discovery?.error || !uploadSchema || uploadTool?.toolSlug && uploadTool.toolSlug !== "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") {
+    throw new Error("Composio did not return the exact LinkedIn image-initialize action schema; no image upload was attempted.");
+  }
+  return {
+    result: await executeLinkedinImageSequence(
+      postSchema,
+      actionArguments,
+      file,
+      async (slug) => {
+        if (slug === "LINKEDIN_INITIALIZE_IMAGE_UPLOAD") return { slug, version: "session", schema: uploadSchema };
+        return { slug: toolSlug, version: "session", schema: postSchema };
+      },
+      (tool, arguments_) => composioExecute(sessionObj, tool.slug, account ? { ...arguments_, account } : arguments_, signal),
+      signal,
+    ),
+    mode: "linkedin_upload",
+  };
 }
 
 async function publishInstagramMedia(
@@ -1040,7 +1158,7 @@ export async function executeMediaBridgeAction(
   let result: any;
   let mode: "url" | "binary" | "composio_file" | "linkedin_upload" | "facebook_upload";
   if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
-    const linkedIn = await executeLinkedinImagePost(sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
+    const linkedIn = await executeLinkedinImagePost(userId, composioClient, sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
     mode = linkedIn.mode;
   } else if (toolSlug === "TWITTER_CREATION_OF_A_POST") {
@@ -1072,7 +1190,19 @@ export async function executeMediaBridgeAction(
     result = await composioExecute(sessionObj, toolSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
     mode = "composio_file";
   } else {
-    const built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
+    let built: ReturnType<typeof buildMediaBridgeArguments>;
+    try {
+      built = buildMediaBridgeArguments(schema, actionArguments as Record<string, unknown>, file, mediaUrl);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The selected action does not accept an image.";
+      if (/no unambiguous schema-declared binary upload field/i.test(message)) {
+        if (toolSlug.startsWith("LINKEDIN_")) {
+          throw new Error("The selected LinkedIn action cannot accept an image. Use LINKEDIN_CREATE_LINKED_IN_POST; Chusky will resolve LinkedIn's current image-upload flow. No provider action was attempted.");
+        }
+        throw new Error(`The selected ${toolSlug} action has no schema-declared image field. Choose that app's exact photo, media, or attachment action; no provider action was attempted.`);
+      }
+      throw error;
+    }
     validateToolArgumentsAgainstSchema(toolSlug, built.arguments, schema, 36 * 1024 * 1024);
     result = await composioExecute(sessionObj, toolSlug, account ? { ...built.arguments, account } : built.arguments, signal);
     mode = built.mode;
