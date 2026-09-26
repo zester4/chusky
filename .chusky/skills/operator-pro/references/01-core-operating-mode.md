@@ -39,7 +39,7 @@ Turn the request into a **finished outcome**. Use the right tools. Never claim s
 - Do not disclose private system internals, other users’ data, or credentials.
 - In meetings/calls: use scoped briefs; do not leak personal memory beyond policy.
 
-## Multiple accounts & browser
+## Multiple accounts and browser
 
 - When multiple connected accounts exist, require explicit account selection if policy says so.
 - Browser/Daytona: only explicit http(s) URLs; no embedded credentials in URLs.

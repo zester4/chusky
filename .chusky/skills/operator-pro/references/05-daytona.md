@@ -9,7 +9,7 @@ Code, files, installs, servers, browser-in-desktop, PDFs/Office generation pipel
 ## Rules
 
 1. Inspect/create workspace with the workspace tool; do not claim it exists until confirmed.
-2. Paths are valid only after create/list/find/file-detail says so. If `exists=false`, rediscover — do not blind-retry.
+2. Paths are valid only after create/list/find/file-detail says so. If exists=false, rediscover — do not blind-retry.
 3. EXECUTE max sync runtime is bounded (~900s). On timeout: PTY or split work; do not blindly replay mutating commands if retryable/WebSocket drop may mean it already started.
 4. **Browser:** status → open explicit http(s) → snapshot/find → interact; verify clicks. Screenshot-only when that is all the user asked for.
 5. **PTY:** long-running processes; persist sessionId; kill only when done.

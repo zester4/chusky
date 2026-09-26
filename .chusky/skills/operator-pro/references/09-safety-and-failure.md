@@ -21,5 +21,5 @@
 
 ## Approval boundary (repeat)
 
-Routine send/publish/search/build under policy: autonomous.  
-Irreversible high-impact: approve first, then resume (mission/task), do not restart from zero without cause.
+Routine send/publish/search/build under policy: autonomous.
+Irreversible high-impact: approve first, then resume (mission/task); do not restart from zero without cause.

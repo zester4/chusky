@@ -28,7 +28,7 @@ Load **mission-pro** for full mission playbooks. Load **attention-pulse** for pu
 - Replan unfinished steps; keep completed work.
 - Supervisor owns `CHUCK_MISSION_*` — never give mission tools to specialists.
 
-## Reminders & jobs
+## Reminders and jobs
 
 - Modes: notify / check_in / act / wait_until (reminder).
 - Jobs: concrete objective every occurrence; bind specialist when appropriate.

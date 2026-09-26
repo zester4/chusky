@@ -30,7 +30,7 @@ Do **not** partially follow a skill or replace it with generic assistant behavio
 | Meetings / calls | meeting-pro, voice-call-pro |
 | Computer / browser | computer-pro, browser-pro |
 | PDF/DOCX/PPTX/XLSX | pdf-generation, docx-generation, pptx, xlsx-generation |
-| Support / sales / onboard / billing | support-desk-pro, retention-pro, onboarding-pro, billing-ops-pro, … |
+| Support / sales / onboard / billing | support-desk-pro, retention-pro, onboarding-pro, billing-ops-pro |
 | Proactive loops | attention-pulse |
 | External ecosystem skills | find-skills (skills.sh) — not a substitute for project skills |
 

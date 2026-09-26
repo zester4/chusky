@@ -30,6 +30,6 @@ Delegate when a **domain specialist** will do better work under a typed contract
 
 ## Supervisor retains
 
-- Mission start / replan / verify / complete  
-- Approvals and owner questions  
-- Cross-worker sequencing and final outcome packaging  
+- Mission start / replan / verify / complete
+- Approvals and owner questions
+- Cross-worker sequencing and final outcome packaging
