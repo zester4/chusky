@@ -13,9 +13,10 @@ test("recognizes materially risky tools", () => {
 });
 
 test("allows routine autonomous communication and content actions", () => {
-  for (const slug of ["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "X_PUBLISH_POST", "NEWSLETTER_SEND_CAMPAIGN"]) {
+  for (const slug of ["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "X_PUBLISH_POST", "INSTAGRAM_POST_IG_USER_MEDIA", "NEWSLETTER_SEND_CAMPAIGN"]) {
     assert.equal(isRiskyToolSlug(slug), false, slug);
   }
+  assert.equal(isRiskyToolSlug("INSTAGRAM_DELETE_MEDIA"), true, "destructive Instagram actions still need approval");
 });
 
 test("allows ordinary reversible provider writes without an approval prompt", () => {
@@ -72,6 +73,7 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   }
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_LIST_MESSAGES", arguments: {} }] }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: {} }] }), false);
+  assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "owned-account" } }] }), false);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: {} }] }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ unexpected: true }] }), true);
   assert.equal(isRiskyToolSlug("COMPOSIO_EXECUTE_TOOL", { tool_slug: "UNKNOWN_PROVIDER_UPDATE_RECORD" }), true);
