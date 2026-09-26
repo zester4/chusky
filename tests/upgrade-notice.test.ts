@@ -68,6 +68,14 @@ test("media automation upgrade preset describes normal-action attachment and pro
   assert.match(bullets[2], /provider read-back/);
 });
 
+test("Daytona image upgrade preset describes private two-way transfers", () => {
+  const bullets = getAgentUpgradePreset("daytonaImages");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /created inside Daytona/);
+  assert.match(bullets[1], /Current chat images/);
+  assert.match(bullets[2], /explicitly asks/);
+});
+
 test("generated image API upgrade preset documents private durable image delivery", () => {
   const bullets = getAgentUpgradePreset("generatedImageApi");
   assert.equal(bullets.length, 3);
@@ -98,11 +106,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces expanded connected-app image delivery", async () => {
+test("current upgrade manifest announces Daytona image transfers", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.13.0");
-  assert.equal(notice?.version, "4.13.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Pinterest Pins/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Instagram carousels/);
-  assert.match(formatAgentUpgradeNotice(notice!), /provider read-back/);
+  assert.equal(notice?.id, "release-4.14.0");
+  assert.equal(notice?.version, "4.14.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /created inside Daytona/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Current chat images/);
+  assert.match(formatAgentUpgradeNotice(notice!), /explicitly asks/);
 });

@@ -163,7 +163,7 @@ export function selectRequestedImage(
   const lowered = text.toLocaleLowerCase();
   const namesAsset = assets.some((asset) => (asset.name && lowered.includes(asset.name.toLocaleLowerCase()))
     || (asset.id && lowered.includes(asset.id.toLocaleLowerCase())));
-  const namesMedia = /\b(?:image|photo|pic|picture|graphic|visual|artwork|attachment|logo|banner|cover)\b/i.test(text);
+  const namesMedia = /\b(?:image|photo|pic|picture|graphic|visual|artwork|attachment|logo|banner|cover|screenshot|screen capture)\b/i.test(text);
   const refersToAvailableMedia = /\b(?:it|this|that|these|those)\b/i.test(text)
     && (input.currentCount > 0 || input.generatedCount > 0 || assets.length > 0);
   const requestsCarousel = /\bcarousel\b/i.test(text);
@@ -269,9 +269,10 @@ export function selectRequestedImage(
  */
 export function selectRetrievedImageForAction(request: string, retrievedAssetIds: readonly string[]): MediaAttachmentSelection | undefined {
   const text = actionableMediaRequestText(request.trim());
+  const daytonaImageReference = /\bdaytona\b/i.test(text) && /\b(?:image|photo|picture|graphic|visual|screenshot)\b/i.test(text);
   if (!text
     || !/\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
-    || !/\b(?:it|this|that|these|those)\b/i.test(text)
+    || !/\b(?:it|this|that|these|those)\b/i.test(text) && !daytonaImageReference
     || /\b(?:without|exclude|omit|leave out)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
     || /\b(?:don't|do not|never)\s+(?:attach|include|send|post|publish|share|upload|email)\b/i.test(text)) return undefined;
 

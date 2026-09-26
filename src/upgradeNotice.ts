@@ -42,6 +42,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Chusky uses the selected owner image with each app's current Composio schema, staging files or issuing short-lived R2 links as the action requires.",
     "Ambiguous selections stop before execution; Instagram carousels require 2 to 10 JPEGs and provider read-back, and uncertain writes require inspection before retrying.",
   ],
+  daytonaImages: [
+    "Images created inside Daytona can be imported into the owner's private image library and then used by connected-app posts and uploads in the same conversation.",
+    "Current chat images, generated images, and saved images can be copied into the owner's Daytona workspace with unique filenames and a returned file path.",
+    "A Daytona screenshot becomes available for a connected-app action only when the owner explicitly asks to send or publish that screenshot.",
+  ],
   generatedImageApi: [
     "Completed API and SDK runs now include metadata for generated images saved to the owner's private image store.",
     "The SDK refreshes a short-lived image download URL through an owner-scoped endpoint; image bytes, storage keys, and signed URLs are not persisted in run records.",

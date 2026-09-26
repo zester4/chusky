@@ -2135,6 +2135,12 @@ export async function runAgent(
           ? { ambiguous: true, reason: "Several images were attached for this post. Ask which one to use before publishing." }
           : savedImageRetry.selection;
     }
+    if (/\bdaytona\b/i.test(mediaActionRequestText) && /\b(?:image|photo|picture|graphic|visual|screenshot)\b/i.test(mediaActionRequestText)
+      && /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(mediaActionRequestText)) {
+      const imported = selectRetrievedImageForAction(mediaActionRequestText, [...retrievedImageAssetIds]);
+      if (imported) return imported;
+      if (generatedCount === 0) return { ambiguous: true, reason: "The Daytona image has not been imported into this private run. Import the exact workspace file before posting or sending." };
+    }
     const selection = selectRequestedImage(mediaActionRequestText, {
       currentCount: currentImagesForMediaAction.length,
       generatedCount,
@@ -2824,7 +2830,30 @@ export async function runAgent(
           }
           if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
-            generatedImages.push({ data: Buffer.from(screenshot.base64, "base64"), mediaType: screenshot.mediaType });
+            const screenshotBytes = Buffer.from(screenshot.base64, "base64");
+            generatedImages.push({ data: screenshotBytes, mediaType: screenshot.mediaType });
+            const requestedScreenshotTransfer = !channelContext || channelContext.scope !== "shared"
+              ? !options?.meetingId && /\b(?:screenshot|screen capture)\b/i.test(mediaActionRequestText)
+                && /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(mediaActionRequestText)
+              : false;
+            const screenshotType = String(screenshot.mediaType).toLowerCase().split(";", 1)[0];
+            if (requestedScreenshotTransfer && ["image/jpeg", "image/png", "image/webp"].includes(screenshotType)
+              && screenshotBytes.length > 0 && screenshotBytes.length <= MAX_IMAGE_TRANSFER_BYTES
+              && sniffImageMime(screenshotBytes) === screenshotType && hasValidImageEnvelope(screenshotBytes, screenshotType)) {
+              let assetId: string | undefined;
+              try {
+                const saved = await mediaBridgeStorage.saveImageAsset(userId, {
+                  name: `daytona-screenshot-${Date.now()}`,
+                  purpose: "Owner-requested Daytona screenshot transfer",
+                  tags: ["daytona", "screenshot"],
+                  contentType: screenshotType as "image/jpeg" | "image/png" | "image/webp",
+                }, screenshotBytes);
+                assetId = saved.id;
+              } catch (error) {
+                logger.warn({ err: error, userId }, "Daytona screenshot could not be saved as a reusable image asset");
+              }
+              generatedReferenceImages.push({ data: screenshotBytes, mediaType: screenshotType, filename: `daytona-screenshot.${screenshotType === "image/jpeg" ? "jpg" : screenshotType.slice(6)}`, ...(assetId ? { assetId } : {}) });
+            }
             if (slug === "CHUCK_DAYTONA_APP") {
               // An app-QA screenshot must be visible to the model too so the
               // following review is based on the rendered UI, not tool JSON.
@@ -2866,9 +2895,15 @@ export async function runAgent(
         if (options?.meetingId && isMeetingCalendarAvailabilityTool(slug) && isSuccessfulCalendarResult(execResult)) {
           meetingCalendarAvailabilityChecked = true;
         }
-        result = typeof execResult === "string"
-          ? execResult
-          : JSON.stringify(execResult) ?? "undefined";
+        const modelResult = execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult
+          ? (() => {
+            const asset = execResult as Record<string, unknown>;
+            return { imageAssetReady: true, id: asset.id, name: asset.name, contentType: asset.contentType, size: asset.size };
+          })()
+          : execResult;
+        result = typeof modelResult === "string"
+          ? modelResult
+          : JSON.stringify(modelResult) ?? "undefined";
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
         if (externalClaim?.state === "new") await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult));

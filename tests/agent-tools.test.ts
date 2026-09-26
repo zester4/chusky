@@ -14,6 +14,14 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
+test("Daytona image transfer exposes owner-scoped import and export without binary model input", () => {
+  const tool = chuckTools.find((entry) => entry.function.name === "CHUCK_DAYTONA_IMAGE")!;
+  assert.deepEqual(tool.function.parameters.properties.action.enum, ["import", "export"]);
+  assert.deepEqual(tool.function.parameters.required, ["action"]);
+  assert.equal(tool.function.parameters.additionalProperties, false);
+  assert.equal("data" in tool.function.parameters.properties, false);
+});
+
 test("tool reliability diagnostics are explicit and image transfer is resolved inside normal app actions", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE", "CHUCK_TOOL_RECOVERY"]) assert.equal(names.has(name), true, name);

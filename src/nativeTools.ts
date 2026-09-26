@@ -16,7 +16,7 @@ import {
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  type AttentionEntityKind, type DeliveryPreferenceRecord,
+  type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset,
   type TaskStatus, type MissionStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -24,6 +24,7 @@ import {
   searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
+import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
@@ -60,6 +61,10 @@ import { diagnoseMissionRepair } from "./reliability/repair.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
+function modelVisibleImageAsset(asset: ImageAsset): Omit<ImageAsset, "userId" | "r2Key"> {
+  const { id, name, purpose, description, tags, contentType, size, createdAt, updatedAt } = asset;
+  return { id, name, purpose, description, tags, contentType, size, createdAt, updatedAt };
+}
 // Mission lifecycle changes belong to the Chusky supervisor.  They are useful
 // while coordinating a specialist, but must never become delegated authority.
 // A model can occasionally include them in a worker contract while trying to
@@ -945,13 +950,18 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const contentType = image.mediaType.toLowerCase();
       if (contentType !== "image/jpeg" && contentType !== "image/png" && contentType !== "image/webp") throw new Error("Only JPEG, PNG, and WebP images can be saved");
       const tags = Array.isArray(args.tags) ? args.tags.filter((tag): tag is string => typeof tag === "string") : [];
-      return { imageAssetSaved: true, asset: await saveImageAsset(userId, { name: text(args.name), purpose: text(args.purpose), description: args.description ? text(args.description) : undefined, tags, contentType }, image.data) };
+      const asset = await saveImageAsset(userId, { name: text(args.name), purpose: text(args.purpose), description: args.description ? text(args.description) : undefined, tags, contentType }, image.data);
+      return { imageAssetSaved: true, asset: modelVisibleImageAsset(asset) };
     }
-    case "CHUCK_SEARCH_IMAGE_ASSETS": return searchImageAssets(userId, args.query ? text(args.query) : undefined, args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_SEARCH_IMAGE_ASSETS": return (await searchImageAssets(userId, args.query ? text(args.query) : undefined, args.limit === undefined ? 5 : Number(args.limit))).map(modelVisibleImageAsset);
     case "CHUCK_GET_IMAGE_ASSET": {
       const asset = await getImageAsset(userId, text(args.id));
       if (!asset) return { found: false };
       return { __chuskyImageAsset: true, ...asset };
+    }
+    case "CHUCK_DAYTONA_IMAGE": {
+      if (runtime.sharedConversation || runtime.meetingId) throw new Error("Daytona image transfer is available only in a private owner conversation.");
+      return daytonaCall(runtime, () => transferDaytonaImage(userId, args as DaytonaImageTransferInput, runtime));
     }
     case "CHUCK_FORGET_IMAGE_ASSET": return { forgotten: await forgetImageAsset(userId, text(args.id)) };
     case "CHUCK_FORGET_MEMORY": return { forgotten: await forgetMemory(userId, text(args.key)) };

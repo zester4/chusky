@@ -477,6 +477,9 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
     ]);
     assert.equal(executed.some(({ args }) => "assetId" in args), false, "private image asset IDs stay out of LinkedIn action arguments");
     assert.equal(requests.length, 4, "search, retrieval, image post, and truthful completion each use a separate model round");
+    const serializedRequests = JSON.stringify(requests);
+    assert.equal(serializedRequests.includes(selectedAsset.r2Key), false, "private R2 keys stay out of model tool results");
+    assert.equal(serializedRequests.includes("https://signed.example/private-image"), false, "signed image URLs stay out of model tool results");
   } finally {
     globalThis.fetch = originalFetch;
     config.r2AccountId = originalR2.accountId;

@@ -2071,6 +2071,19 @@ export class DaytonaEngine {
     return { path: normalizedPath, bytes: content.length };
   }
 
+  async readBinaryFile(userId: number, path: string, maxBytes = 25 * 1024 * 1024): Promise<Buffer> {
+    const normalizedPath = safeDaytonaPath(path);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > DAYTONA_MAX_ARTIFACT_BYTES) throw new DaytonaInputError("Invalid binary file size limit");
+    const sandbox = await this.getOrCreateWorkspace(userId);
+    await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
+    const details = await sandbox.fs.getFileDetails(normalizedPath) as { size?: number; isDir?: boolean };
+    const size = Number(details.size);
+    if (details.isDir || !Number.isSafeInteger(size) || size < 1 || size > maxBytes) throw new DaytonaInputError("Image file is empty, a directory, or exceeds the transfer size limit");
+    const bytes = await sandbox.fs.downloadFile(normalizedPath);
+    if (bytes.length < 1 || bytes.length > maxBytes || bytes.length !== size) throw new DaytonaInputError("The Daytona image changed or exceeds the transfer size limit");
+    return bytes;
+  }
+
   async replaceFiles(userId: number, files: unknown, pattern: unknown, newValue: unknown): Promise<unknown> {
     if (!Array.isArray(files) || files.length < 1 || files.length > 100) throw new DaytonaInputError("files must contain 1-100 paths");
     const paths = files.map((file) => safeDaytonaPath(file, "file"));

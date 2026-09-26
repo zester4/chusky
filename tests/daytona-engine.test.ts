@@ -317,6 +317,19 @@ test("writes generated binary media into the user's workspace", async () => {
   assert.deepEqual(result, { path: "generated/images/hero.png", bytes: 3 });
 });
 
+test("reads only a bounded owner workspace binary file", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820022) as any;
+  let downloads = 0;
+  sandbox.fs.getFileDetails = async () => ({ size: 3, isDir: false });
+  sandbox.fs.downloadFile = async () => { downloads++; return Buffer.from([1, 2, 3]); };
+  assert.deepEqual(await e.readBinaryFile(820022, "workspace/generated/hero.png", 3), Buffer.from([1, 2, 3]));
+  sandbox.fs.getFileDetails = async () => ({ size: 4, isDir: false });
+  await assert.rejects(() => e.readBinaryFile(820022, "workspace/generated/hero.png", 3), /exceeds the transfer size limit/);
+  assert.equal(downloads, 1, "oversized files stop before download");
+  await assert.rejects(() => e.readBinaryFile(820022, "../other-user/hero.png", 3), /workspace-relative path/);
+});
+
 test("reconnects after pause and refreshes activity", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820002);
