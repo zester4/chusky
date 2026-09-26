@@ -304,6 +304,12 @@ test("image upload selects a unique image field when an action also accepts vide
     image_file: { type: "string", file_uploadable: true },
     photo_file: { type: "string", file_uploadable: true },
   } }), /unambiguous schema-declared image upload field/i);
+  const instagramSchema = { type: "object", properties: {
+    image_file: { type: "string", file_uploadable: true },
+    alternate_image_file: { type: "string", file_uploadable: true },
+  } };
+  assert.deepEqual(buildComposioFileUploadArguments(instagramSchema, {}, uploaded, true, "image_file"), { image_file: uploaded });
+  assert.throws(() => assertComposioImageUploadField(instagramSchema, "missing_image_file"), /does not expose the required image upload field/i);
   assert.throws(() => assertComposioImageUploadField({ type: "object", properties: {
     video_url: { type: "string", file_uploadable: true },
   } }), /no schema-declared image upload field/i);
@@ -493,7 +499,7 @@ test("media bridge resolves an exact discovered action through Composio schema m
   }
 });
 
-test("Instagram stages image_file, publishes the container, and verifies the resulting image", async () => {
+test("Instagram uses the current owner schema to stage image_file, publish, and verify the image", async () => {
   const userId = 839104;
   const imageBytes = Buffer.alloc(24);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
@@ -509,6 +515,10 @@ test("Instagram stages image_file, publishes the container, and verifies the res
       name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" },
     } },
   }, additionalProperties: false };
+  const staleActionSchema = { type: "object", required: ["ig_user_id"], properties: {
+    ig_user_id: { type: "string" }, caption: { type: "string" },
+    first_file: { type: "object", file_uploadable: true }, second_file: { type: "object", file_uploadable: true },
+  }, additionalProperties: false };
   const publishSchema = { type: "object", required: ["creation_id"], properties: { creation_id: { type: "string" } }, additionalProperties: false };
   const verifySchema = { type: "object", required: ["ig_media_id"], properties: {
     ig_media_id: { type: "string" }, fields: { type: "string" },
@@ -519,7 +529,7 @@ test("Instagram stages image_file, publishes the container, and verifies the res
   const session = {
     sessionId: "media-bridge-staged-session",
     tools: async () => [
-      { type: "function", function: { name: "INSTAGRAM_POST_IG_USER_MEDIA", parameters: actionSchema } },
+      { type: "function", function: { name: "INSTAGRAM_POST_IG_USER_MEDIA", parameters: staleActionSchema } },
       { type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } },
     ],
     search: async ({ query }: { query: string }) => {
@@ -555,6 +565,7 @@ test("Instagram stages image_file, publishes the container, and verifies the res
   setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
   try {
     const availableTools = await session.tools();
+    assert.throws(() => assertComposioImageUploadField(staleActionSchema), /unambiguous schema-declared image upload field/i);
     const result = await dispatchComposioActionWithImageContext({
       userId,
       sessionObj: session,
@@ -620,7 +631,7 @@ test("Instagram rejects ambiguous upload fields before staging or calling the pr
     const availableTools = await session.tools();
     await assert.rejects(() => executeMediaBridgeAction(userId, session, availableTools, {
       source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { caption: "A launch" },
-    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] }), /unambiguous schema-declared image upload field/i);
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] }), /does not expose the required image upload field/i);
     assert.equal(stagedUploads, 0);
     assert.equal(providerCalls, 0);
   } finally {

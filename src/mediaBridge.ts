@@ -309,9 +309,14 @@ function imageUploadCandidateScore(candidate: FileUploadCandidate): number {
   return 0;
 }
 
-function selectFileUploadCandidate(inputSchema: unknown, forImage: boolean): FileUploadCandidate {
+function selectFileUploadCandidate(inputSchema: unknown, forImage: boolean, preferredFieldPath?: string): FileUploadCandidate {
   if (!isObject(inputSchema)) throw new Error("The selected app action has no usable argument schema.");
   const candidates = findFileUploadCandidates(inputSchema as Schema);
+  if (forImage && preferredFieldPath) {
+    const preferred = candidates.filter((candidate) => candidate.path.join(".") === preferredFieldPath);
+    if (preferred.length === 1) return preferred[0]!;
+    throw new Error(`The selected app action does not expose the required image upload field ${preferredFieldPath}.`);
+  }
   if (candidates.length === 1) {
     const only = candidates[0]!;
     if (!forImage || !isVideoUploadCandidate(only)) return only;
@@ -327,8 +332,8 @@ function selectFileUploadCandidate(inputSchema: unknown, forImage: boolean): Fil
 }
 
 /** Validate an image upload target before staging bytes with Composio. */
-export function assertComposioImageUploadField(inputSchema: unknown): void {
-  selectFileUploadCandidate(inputSchema, true);
+export function assertComposioImageUploadField(inputSchema: unknown, preferredFieldPath?: string): void {
+  selectFileUploadCandidate(inputSchema, true, preferredFieldPath);
 }
 
 export function composioFileUploadValidationSchema(inputSchema: unknown): unknown {
@@ -358,9 +363,10 @@ export function buildComposioFileUploadArguments(
   actionArguments: Record<string, unknown>,
   uploadedFile: { name: string; mimetype: string; s3key: string },
   forImage = false,
+  preferredFieldPath?: string,
 ): Record<string, unknown> {
   if (!isObject(inputSchema) || !isObject(actionArguments)) throw new Error("The selected app action has no usable argument schema.");
-  const candidate = selectFileUploadCandidate(inputSchema, forImage);
+  const candidate = selectFileUploadCandidate(inputSchema, forImage, preferredFieldPath);
   const location = findAtPath(actionArguments, candidate.path);
   if (location.exists) throw new Error(`Do not supply ${candidate.path.join(".")}; Chusky fills it with the owner image.`);
   const result = structuredClone(actionArguments) as Record<string, unknown>;

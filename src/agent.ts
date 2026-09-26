@@ -682,30 +682,38 @@ function toolSchemaName(tool: any): string {
 async function resolveMediaBridgeSchema(sessionObj: any, availableTools: any[], toolSlug: string, signal?: AbortSignal): Promise<unknown> {
   const directTool = availableTools.find((tool) => toolSchemaName(tool) === toolSlug);
   const directSchema = directTool?.function?.parameters ?? directTool?.inputSchema;
-  if (directSchema && typeof directSchema === "object") return directSchema;
+  const preferOwnerSessionSchema = toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA";
+  if (directSchema && typeof directSchema === "object" && !preferOwnerSessionSchema) return directSchema;
 
   // Tool Router sessions expose meta-tools by default. Discover the exact
   // requested action into this session before asking for its schema or running
-  // it; a globally known slug is not proof it is available to this owner.
+  // it; a globally known slug is not proof it is available to this owner. The
+  // Instagram post action always prefers this current owner-scoped schema over
+  // any model-visible copy, which may be stale or transformed.
   let discoveredSchema: any;
   if (typeof sessionObj?.search === "function") {
-    const search: any = await abortable(sessionObj.search(
-      { query: `Find the exact Composio action ${toolSlug} for the requested connected-app operation.` },
-      signal ? { signal } : undefined,
-    ), signal);
-    const schemas = search?.toolSchemas ?? search?.tool_schemas;
-    const entry = Array.isArray(schemas)
-      ? schemas.find((candidate: any) => (candidate?.toolSlug ?? candidate?.tool_slug) === toolSlug)
-      : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
-    const returnedSlug = entry?.toolSlug ?? entry?.tool_slug ?? (entry ? toolSlug : undefined);
-    if (returnedSlug !== toolSlug) {
-      throw new Error(`Composio search did not discover the exact action ${toolSlug} in this owner's session; no image transfer was attempted.`);
+    try {
+      const search: any = await abortable(sessionObj.search(
+        { query: `Find the exact Composio action ${toolSlug} for the requested connected-app operation.` },
+        signal ? { signal } : undefined,
+      ), signal);
+      const schemas = search?.toolSchemas ?? search?.tool_schemas;
+      const entry = Array.isArray(schemas)
+        ? schemas.find((candidate: any) => (candidate?.toolSlug ?? candidate?.tool_slug) === toolSlug)
+        : schemas && typeof schemas === "object" ? schemas[toolSlug] : undefined;
+      const returnedSlug = entry?.toolSlug ?? entry?.tool_slug ?? (entry ? toolSlug : undefined);
+      if (returnedSlug !== toolSlug && !directSchema) {
+        throw new Error(`Composio search did not discover the exact action ${toolSlug} in this owner's session; no image transfer was attempted.`);
+      }
+      discoveredSchema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
+    } catch (error) {
+      if (!directSchema) throw error;
     }
-    discoveredSchema = entry?.inputSchema ?? entry?.input_schema ?? entry?.function?.parameters;
   } else if (!availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
-    throw new Error(`The exact action ${toolSlug} has no schema in this owner's current Composio session; no image transfer was attempted.`);
+    if (!directSchema) throw new Error(`The exact action ${toolSlug} has no schema in this owner's current Composio session; no image transfer was attempted.`);
   }
   if (discoveredSchema && typeof discoveredSchema === "object" && !Array.isArray(discoveredSchema)) return discoveredSchema;
+  if (directSchema && typeof directSchema === "object") return directSchema;
 
   if (availableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_GET_TOOL_SCHEMAS")) {
     const response = await composioExecute(sessionObj, "COMPOSIO_GET_TOOL_SCHEMAS", { tool_slugs: [toolSlug] }, signal);
@@ -1398,6 +1406,10 @@ export async function executeMediaBridgeAction(
   let result: any;
   let mode: "url" | "binary" | "composio_file" | "linkedin_upload" | "facebook_upload";
   let instagramImageVerified = false;
+  const preferredImageUploadField = toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA" ? "image_file" : undefined;
+  if (preferredImageUploadField && !hasComposioFileUploadField(schema)) {
+    throw new Error(`The current ${toolSlug} schema has no declared image upload field ${preferredImageUploadField}; no provider action was attempted.`);
+  }
   if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
     const linkedIn = await executeLinkedinImagePost(userId, composioClient, sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
@@ -1412,7 +1424,12 @@ export async function executeMediaBridgeAction(
   } else if (hasComposioFileUploadField(schema)) {
     // Resolve the image field before staging bytes, so ambiguous schemas do not
     // leave unused staged files in Composio.
-    assertComposioImageUploadField(schema);
+    try {
+      assertComposioImageUploadField(schema, preferredImageUploadField);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "the upload schema is ambiguous";
+      throw new Error(`The selected ${toolSlug} action cannot safely accept this image: ${reason}`);
+    }
     if (typeof composio?.files?.upload !== "function") {
       throw new Error("Composio staged file upload is unavailable for this schema-declared action; no provider action was attempted.");
     }
@@ -1429,7 +1446,7 @@ export async function executeMediaBridgeAction(
     if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
       throw new Error("Composio did not return a valid staged-file reference; no provider action was attempted.");
     }
-    const uploadArguments = buildComposioFileUploadArguments(schema, actionArguments as Record<string, unknown>, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key }, true);
+    const uploadArguments = buildComposioFileUploadArguments(schema, actionArguments as Record<string, unknown>, { name: stagedFile.name, mimetype: stagedFile.mimetype, s3key: stagedFile.s3key }, true, preferredImageUploadField);
     validateToolArgumentsAgainstSchema(toolSlug, uploadArguments, composioFileUploadValidationSchema(schema), 36 * 1024 * 1024);
     result = await composioExecute(sessionObj, toolSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
     mode = "composio_file";
