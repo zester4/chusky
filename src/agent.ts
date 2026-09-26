@@ -731,6 +731,92 @@ async function executeTwitterImagePost(
   return composioExecute(sessionObj, "TWITTER_CREATION_OF_A_POST", account ? { ...finalArguments, account } : finalArguments, signal);
 }
 
+function projectMediaStepArguments(actionName: string, schema: any, source: Record<string, unknown>, injectedKeys: ReadonlySet<string> = new Set()): Record<string, unknown> {
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    throw new Error(`The exact ${actionName} action did not expose a usable input schema; no provider action was attempted.`);
+  }
+  const projected: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (Object.hasOwn(properties, key)) projected[key] = value;
+  }
+  for (const required of Array.isArray(schema.required) ? schema.required : []) {
+    const requiredSchema = properties[required];
+    if (!Object.hasOwn(projected, required) && requiredSchema?.file_uploadable !== true && !injectedKeys.has(required)) {
+      throw new Error(`${actionName} requires ${required}, which was not supplied; no provider action was attempted.`);
+    }
+  }
+  return projected;
+}
+
+async function executeFacebookPhotoPost(
+  composioClient: any,
+  sessionObj: any,
+  availableTools: any[],
+  postSchema: any,
+  postArguments: Record<string, unknown>,
+  file: { data: Buffer; name: string; contentType: string },
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<{ result: any; mode: "facebook_upload" }> {
+  const postProperties = postSchema?.properties;
+  if (!postProperties || typeof postProperties !== "object" || Array.isArray(postProperties)) {
+    throw new Error("The current Facebook photo-post schema is unavailable; no image upload was attempted.");
+  }
+  const photoIdCandidates = Object.entries(postProperties)
+    .filter(([key, property]: [string, any]) => /^(photo_id|photoId|media_id|mediaId|photo|media)$/i.test(key)
+      && (property?.type === "string" || (property?.type === "array" && property?.items?.type === "string")))
+    .map(([key]) => key);
+  if (photoIdCandidates.length !== 1) {
+    throw new Error("The current Facebook photo-post schema has no unambiguous uploaded-photo field; no image upload was attempted.");
+  }
+  const photoIdKey = photoIdCandidates[0]!;
+  if (Object.hasOwn(postArguments, photoIdKey)) {
+    throw new Error(`Do not supply ${photoIdKey}; Chusky adds the provider-confirmed Facebook photo ID.`);
+  }
+
+  const uploadSlug = "FACEBOOK_UPLOAD_PHOTO";
+  const uploadSchema = await resolveMediaBridgeSchema(sessionObj, availableTools, uploadSlug, signal);
+  if (!hasComposioFileUploadField(uploadSchema)) {
+    throw new Error("The exact Facebook photo-upload action does not expose a Composio file-upload field; no upload was attempted.");
+  }
+  if (typeof composioClient?.files?.upload !== "function") {
+    throw new Error("Composio staged file upload is unavailable for Facebook; no upload was attempted.");
+  }
+  const toolkitSlug = await resolveMediaBridgeToolkitSlug(composioClient, uploadSlug, signal);
+  const stagedResponse = await abortable(composioClient.files.upload({
+    file: new File([new Uint8Array(file.data)], file.name, { type: file.contentType }),
+    toolSlug: uploadSlug,
+    toolkitSlug,
+  }), signal);
+  const stagedFile = stagedResponse && typeof stagedResponse === "object" ? stagedResponse as Record<string, unknown> : undefined;
+  if (!stagedFile || typeof stagedFile.name !== "string" || typeof stagedFile.mimetype !== "string" || typeof stagedFile.s3key !== "string") {
+    throw new Error("Composio did not return a valid staged Facebook photo reference; no Facebook API upload was attempted.");
+  }
+
+  const uploadBaseArguments = projectMediaStepArguments(uploadSlug, uploadSchema, postArguments);
+  const uploadArguments = buildComposioFileUploadArguments(uploadSchema, uploadBaseArguments, {
+    name: stagedFile.name,
+    mimetype: stagedFile.mimetype,
+    s3key: stagedFile.s3key,
+  });
+  validateToolArgumentsAgainstSchema(uploadSlug, uploadArguments, composioFileUploadValidationSchema(uploadSchema), 36 * 1024 * 1024);
+  const uploaded = await composioExecute(sessionObj, uploadSlug, account ? { ...uploadArguments, account } : uploadArguments, signal);
+  if (uploaded?.successful !== true || uploaded?.error) {
+    throw new Error("Facebook did not confirm photo upload; post creation was not attempted.");
+  }
+  const uploadedData = uploaded.data ?? uploaded;
+  const photoId = findProviderString(uploadedData, (key, value) => /^(photo_id|photoId|media_id|mediaId)$/i.test(key) && Boolean(value.trim()))
+    ?? findProviderString(uploadedData, (key, value) => key === "id" && Boolean(value.trim()));
+  if (!photoId) throw new Error("Facebook returned no photo ID; post creation was not attempted.");
+
+  const finalArguments = projectMediaStepArguments("FACEBOOK_CREATE_PHOTO_POST", postSchema, postArguments, new Set([photoIdKey]));
+  finalArguments[photoIdKey] = postProperties[photoIdKey]?.type === "array" ? [photoId] : photoId;
+  validateToolArgumentsAgainstSchema("FACEBOOK_CREATE_PHOTO_POST", finalArguments, postSchema, 36 * 1024 * 1024);
+  const result = await composioExecute(sessionObj, "FACEBOOK_CREATE_PHOTO_POST", account ? { ...finalArguments, account } : finalArguments, signal);
+  return { result, mode: "facebook_upload" };
+}
+
 function findProviderString(
   value: unknown,
   matches: (key: string, value: string) => boolean,
@@ -937,7 +1023,7 @@ export async function executeMediaBridgeAction(
 
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
   let result: any;
-  let mode: "url" | "binary" | "composio_file" | "linkedin_upload";
+  let mode: "url" | "binary" | "composio_file" | "linkedin_upload" | "facebook_upload";
   if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
     const linkedIn = await executeLinkedinImagePost(sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
@@ -945,6 +1031,10 @@ export async function executeMediaBridgeAction(
   } else if (toolSlug === "TWITTER_CREATION_OF_A_POST") {
     result = await executeTwitterImagePost(composioClient, sessionObj, availableComposioTools, schema, actionArguments as Record<string, unknown>, file, account, signal);
     mode = "composio_file";
+  } else if (toolSlug === "FACEBOOK_CREATE_PHOTO_POST" && !hasComposioFileUploadField(schema) && !hasMediaUrlField(schema)) {
+    const facebook = await executeFacebookPhotoPost(composioClient, sessionObj, availableComposioTools, schema, actionArguments as Record<string, unknown>, file, account, signal);
+    result = facebook.result;
+    mode = facebook.mode;
   } else if (hasComposioFileUploadField(schema)) {
     if (typeof composio?.files?.upload !== "function") {
       throw new Error("Composio staged file upload is unavailable for this schema-declared action; no provider action was attempted.");

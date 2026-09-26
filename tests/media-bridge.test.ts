@@ -120,6 +120,58 @@ test("owner-requested current-image transfer executes immediately and confirms t
   }
 });
 
+test("Gmail attachment actions receive a staged Composio file reference through the bridge", async () => {
+  const userId = 839106;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const emailSchema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
+    recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+    attachment: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    sessionId: "media-bridge-gmail-session",
+    tools: async () => [{ type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } }],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      calls.push({ slug, args });
+      return { successful: true, data: { id: "gmail-message-1", status: "sent" } };
+    },
+  };
+  const mediaBridgeStorage = {
+    saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => ({ id: `img_owner_${owner}`, r2Key: "images/owner/image.png", name: input.name, contentType: input.contentType, size: bytes.byteLength }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://signed.example/private-image",
+  };
+  const uploaded: Array<{ file: File; toolSlug: string; toolkitSlug: string }> = [];
+  const composioClient = {
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "gmail" } }) },
+    files: { upload: async (params: { file: File; toolSlug: string; toolkitSlug: string }) => {
+      uploaded.push(params);
+      return { name: params.file.name, mimetype: params.file.type, s3key: "staged/gmail-image" };
+    } },
+  };
+  setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "GMAIL_SEND_EMAIL", arguments: {
+        recipient_email: "team@example.com", subject: "Launch", body: "See attached image.",
+      },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.equal(result.mode, "composio_file");
+    assert.equal(uploaded.length, 1);
+    assert.equal(uploaded[0]?.toolkitSlug, "gmail");
+    assert.deepEqual(calls, [{ slug: "GMAIL_SEND_EMAIL", args: {
+      recipient_email: "team@example.com", subject: "Launch", body: "See attached image.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/gmail-image" },
+    } }]);
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("media bridge resolves an exact discovered action through Composio schema meta-tools", async () => {
   const userId = 839102;
   const imageBytes = Buffer.alloc(24);
@@ -288,6 +340,66 @@ test("X image publishing stages media through the exact upload action before cre
       media_category: "tweet_image",
     });
     assert.deepEqual(calls[1]?.args, { text: "A launch", media_media_ids: ["x-media-123"] });
+  } finally {
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("Facebook Page photo publishing discovers the exact upload action before creating the post", async () => {
+  const userId = 839107;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const postSchema = { type: "object", required: ["page_id", "message", "photo_id"], properties: {
+    page_id: { type: "string" }, message: { type: "string" }, photo_id: { type: "string" },
+  }, additionalProperties: false };
+  const uploadSchema = { type: "object", required: ["page_id", "photo"], properties: {
+    page_id: { type: "string" }, photo: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const calls: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    sessionId: "media-bridge-facebook-session",
+    tools: async () => [
+      { type: "function", function: { name: "FACEBOOK_CREATE_PHOTO_POST", parameters: postSchema } },
+      { type: "function", function: { name: "COMPOSIO_GET_TOOL_SCHEMAS", parameters: { type: "object" } } },
+    ],
+    search: async ({ query }: { query: string }) => {
+      assert.match(query, /FACEBOOK_UPLOAD_PHOTO/);
+      return { toolSchemas: { FACEBOOK_UPLOAD_PHOTO: { toolSlug: "FACEBOOK_UPLOAD_PHOTO", inputSchema: uploadSchema } } };
+    },
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      calls.push({ slug, args });
+      if (slug === "FACEBOOK_UPLOAD_PHOTO") return { successful: true, data: { id: "facebook-photo-1" } };
+      return { successful: true, data: { id: "facebook-post-1" } };
+    },
+  };
+  const mediaBridgeStorage = {
+    saveImageAsset: async (owner: number, input: any, bytes: Uint8Array) => ({ id: `img_owner_${owner}`, r2Key: "images/owner/image.png", name: input.name, contentType: input.contentType, size: bytes.byteLength }) as any,
+    getImageAsset: async () => undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://signed.example/private-image",
+  };
+  const uploaded: Array<{ file: File; toolSlug: string; toolkitSlug: string }> = [];
+  const composioClient = {
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "facebook" } }) },
+    files: { upload: async (params: { file: File; toolSlug: string; toolkitSlug: string }) => {
+      uploaded.push(params);
+      return { name: params.file.name, mimetype: params.file.type, s3key: "staged/facebook-image" };
+    } },
+  };
+  setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
+  try {
+    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+      source: "current", toolSlug: "FACEBOOK_CREATE_PHOTO_POST", arguments: { page_id: "page-1", message: "Launch" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
+    assert.equal(result.providerActionSucceeded, true);
+    assert.equal(result.mode, "facebook_upload");
+    assert.equal(result.id, "facebook-post-1");
+    assert.equal(uploaded[0]?.toolkitSlug, "facebook");
+    assert.deepEqual(calls, [
+      { slug: "FACEBOOK_UPLOAD_PHOTO", args: { page_id: "page-1", photo: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/facebook-image" } } },
+      { slug: "FACEBOOK_CREATE_PHOTO_POST", args: { page_id: "page-1", message: "Launch", photo_id: "facebook-photo-1" } },
+    ]);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
