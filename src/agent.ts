@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
+import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -1998,13 +1998,23 @@ export async function runAgent(
   const imageRetryRequest = channelContext?.scope === "shared" || options?.meetingId
     ? undefined
     : findPendingImageRetryRequest(history, currentRequestText, currentImagesForMediaAction.length);
-  const mediaActionRequestText = imageRetryRequest ?? currentRequestText;
+  const savedImageRetry = imageRetryRequest || channelContext?.scope === "shared" || options?.meetingId
+    ? undefined
+    : findPendingSavedImagePostRetry(history, currentRequestText, durable.imageAssets);
+  const mediaActionRequestText = imageRetryRequest ?? savedImageRetry?.request ?? currentRequestText;
   const selectMediaForAction = (generatedCount: number): MediaAttachmentSelection | undefined => {
     const savedAssets = channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets;
     if (imageRetryRequest && currentImagesForMediaAction.length > 0) {
       return currentImagesForMediaAction.length === 1
         ? { source: "current", sourceIndex: 0 }
         : { ambiguous: true, reason: "Several images were reattached for the pending post. Ask which one to use before publishing." };
+    }
+    if (savedImageRetry) {
+      return currentImagesForMediaAction.length === 1
+        ? { source: "current", sourceIndex: 0 }
+        : currentImagesForMediaAction.length > 1
+          ? { ambiguous: true, reason: "Several images were attached for this post. Ask which one to use before publishing." }
+          : savedImageRetry.selection;
     }
     const selection = selectRequestedImage(mediaActionRequestText, {
       currentCount: currentImagesForMediaAction.length,
@@ -2022,7 +2032,9 @@ export async function runAgent(
   };
   const imageRetryContext = imageRetryRequest
     ? "\n\nIMAGE ACTION RETRY: The user has responded to your request to reattach the image for their earlier explicit post/send request. Continue that same requested action using the reattached image. Do not publish or send a text-only version. If the image-aware action fails, stop and report that it was not completed; do not claim success or fall back to a text-only action."
-    : "";
+    : savedImageRetry
+      ? "\n\nIMAGE POST RETRY: The user asked to retry their earlier explicit image post after a confirmed failed attempt. The owner's earlier attached image is available as a private saved asset for this action. Continue with the selected connected account and verify the final image post. If it fails, report the failure without a text-only fallback."
+      : "";
   let pendingUpgrade: AgentUpgradeNotice | undefined;
   if (!options?.ephemeral && !voiceTurn) {
     try {

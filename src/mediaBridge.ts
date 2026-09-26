@@ -26,6 +26,40 @@ export type MediaAttachmentSelection =
 
 type ImageRetryHistoryMessage = { role: "user" | "assistant"; content: string };
 
+/** Continue a failed image post from the owner's saved inbound attachment. */
+export function findPendingSavedImagePostRetry(
+  history: readonly (ImageRetryHistoryMessage & { createdAt?: number })[],
+  currentText: string,
+  assets: readonly (SavedImageCandidate & { createdAt?: number })[],
+): { request: string; selection: MediaAttachmentSelection } | undefined {
+  const current = currentText.trim();
+  if (current.length > 160 || isCancelledImageRetry(current)
+    || !/\b(?:try|retry|attempt)\b.{0,70}\b(?:again|post|publish|instagram)\b|\b(?:try|retry)\s+(?:it|again|now|instagram)\b/i.test(current)) return undefined;
+  const last = history.at(-1);
+  if (last?.role !== "assistant"
+    || !/\b(?:image|photo|picture|upload|attachment)\b/i.test(last.content)
+    || /\b(?:may already|might already|could not verify|couldn't verify|uncertain|text-only post)\b/i.test(last.content)
+    || !/\b(?:no (?:new )?post (?:was )?(?:made|created|published|from this attempt)|nothing (?:new )?was published)\b/i.test(last.content)) return undefined;
+
+  for (const message of [...history.slice(0, -1)].reverse()) {
+    if (message.role !== "user") continue;
+    if (/(?:\[Image attached\]|\bAttached:)/i.test(message.content)
+      && /\b(?:post|publish|share|upload)\b/i.test(message.content)
+      && selectRequestedImage(message.content, { currentCount: 1, generatedCount: 0 })) {
+      const at = message.createdAt;
+      if (!Number.isFinite(at) || Date.now() - Number(at) > 24 * 60 * 60 * 1000) return undefined;
+      const matching = assets.filter((asset) => asset.tags?.includes("uploaded-image")
+        && Number.isFinite(asset.createdAt)
+        && Math.abs(Number(asset.createdAt) - Number(at)) <= 10 * 60 * 1000);
+      if (matching.length === 1) return { request: message.content, selection: { source: "asset", assetId: matching[0]!.id } };
+      if (matching.length > 1) return { request: message.content, selection: { ambiguous: true, reason: "Several saved images match the earlier post. Ask which image to use before publishing." } };
+      return undefined;
+    }
+    if (!/\b(?:try|retry|attempt)\b.{0,70}\b(?:again|post|publish|instagram)\b|\b(?:try|retry)\s+(?:it|again|now|instagram)\b|\b(?:explain|what happened|why (?:did|was)|how (?:did|were) you)\b/i.test(message.content)) return undefined;
+  }
+  return undefined;
+}
+
 /**
  * Carry an explicitly requested image action across the narrow retry where
  * the assistant asked the owner to reattach a missing image. This is not an

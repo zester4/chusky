@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction } from "../src/mediaBridge.js";
+import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction } from "../src/mediaBridge.js";
 import { validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
@@ -95,6 +95,35 @@ test("an image reattached after a failed requested post resumes only that pendin
     { role: "user", content: originalRequest },
     { role: "assistant", content: "The image was posted successfully." },
   ], attachedPrompt, 1), undefined, "a completed action does not create a retry continuation");
+});
+
+test("a retry after a failed image post selects the matching private inbound asset", () => {
+  const at = Date.now() - 5 * 60_000;
+  const attached = { role: "user" as const, content: "[Image attached] I am sending you the image use different text and post it", createdAt: at };
+  const failed = { role: "assistant" as const, content: "Instagram did not receive the image. No post was made.", createdAt: at + 1000 };
+  const assets = [
+    { id: "older", name: "older.jpg", tags: ["telegram", "uploaded-image"], createdAt: at - 60 * 60_000 },
+    { id: "attached", name: "telegram-photo.jpg", tags: ["telegram", "uploaded-image"], createdAt: at + 3000 },
+    { id: "generated", name: "generated.png", tags: ["generated"], createdAt: at + 5000 },
+  ];
+  assert.deepEqual(findPendingSavedImagePostRetry([attached, failed], "Tried to fix, try again", assets), {
+    request: attached.content, selection: { source: "asset", assetId: "attached" },
+  });
+  assert.deepEqual(findPendingSavedImagePostRetry([attached, failed,
+    { role: "user", content: "I tried the fix one more time so try again", createdAt: at + 2000 },
+    { role: "assistant", content: "The upload failed. No post was created.", createdAt: at + 3000 },
+  ], "Try again", assets)?.selection, { source: "asset", assetId: "attached" });
+  assert.equal(findPendingSavedImagePostRetry([attached, failed], "What happened?", assets), undefined);
+  assert.equal(findPendingSavedImagePostRetry([attached,
+    { role: "assistant", content: "The post may already be live. Check Instagram before retrying.", createdAt: at + 1000 },
+  ], "Try again", assets), undefined);
+  assert.equal(findPendingSavedImagePostRetry([attached, failed,
+    { role: "user", content: "Show me the weather", createdAt: at + 2000 },
+    failed,
+  ], "Try again", assets), undefined);
+  assert.deepEqual(findPendingSavedImagePostRetry([attached, failed], "Try again", [assets[1]!,
+    { id: "another", name: "another.jpg", tags: ["uploaded-image"], createdAt: at + 2000 },
+  ])?.selection, { ambiguous: true, reason: "Several saved images match the earlier post. Ask which image to use before publishing." });
 });
 
 test("ordinary Composio email action automatically receives the explicitly requested current image", async () => {

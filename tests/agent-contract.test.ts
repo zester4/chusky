@@ -222,6 +222,76 @@ test("a reattached image resumes the pending Composio email through multi-execut
   }
 });
 
+test("a later Instagram retry stages the original saved attachment before publishing", async () => {
+  const userId = 830075;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const at = Date.now() - 5 * 60_000;
+  const asset = { id: "img_attached_retry", userId, name: "telegram-photo.jpg", purpose: "Image uploaded from Telegram", description: "Post it", tags: ["telegram", "uploaded-image"], r2Key: "images/owner/attached.jpg", contentType: "image/png" as const, size: imageBytes.length, createdAt: at + 3000, updatedAt: at + 3000 };
+  const durable = await getSession(userId);
+  durable.imageAssets = [asset];
+  await saveSession(userId, durable);
+  const postSchema = { type: "object", required: ["ig_user_id"], properties: {
+    ig_user_id: { type: "string" }, caption: { type: "string" },
+    image_file: { type: "object", file_uploadable: true, required: ["name", "mimetype", "s3key"], properties: { name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" } } },
+    video_file: { type: "object", file_uploadable: true },
+  } };
+  const publishSchema = { type: "object", properties: { creation_id: { type: "string" } } };
+  const readSchema = { type: "object", properties: { ig_media_id: { type: "string" }, fields: { type: "string" } } };
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const session = {
+    sessionId: "saved-image-instagram-retry",
+    tools: async () => [{ type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } }],
+    search: async ({ query }: { query: string }) => {
+      const slug = query.match(/INSTAGRAM_[A-Z_]+/)?.[0] ?? "INSTAGRAM_GET_IG_MEDIA";
+      return { toolSchemas: { [slug]: { toolSlug: slug, inputSchema: slug === "INSTAGRAM_POST_IG_USER_MEDIA" ? postSchema : slug === "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH" ? publishSchema : readSchema } } };
+    },
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") throw new Error("A text-only batch must not reach Composio");
+      executed.push({ slug, args });
+      if (slug === "INSTAGRAM_POST_IG_USER_MEDIA") return { successful: true, data: { id: "container-1" } };
+      if (slug === "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") return { successful: true, data: { id: "published-1" } };
+      return { successful: true, data: { id: "published-1", media_type: "IMAGE", media_url: "https://instagram.example/published.jpg" } };
+    },
+  };
+  const composio = {
+    create: async () => session, sessions: { use: async () => session },
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "instagram" } }) },
+    files: { upload: async () => ({ name: "telegram-photo.jpg", mimetype: "image/png", s3key: "staged/original" }) },
+  };
+  let chatIndex = 0;
+  globalThis.fetch = (async (input) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) return chatIndex++ === 0
+      ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "owner", caption: "New caption" } }] }))
+      : chatResponse({ role: "assistant", content: "The image post was published and verified." });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({ composio, mediaBridgeStorage: {
+    getImageAsset: async (owner, id) => owner === userId && id === asset.id ? { ...asset, downloadUrl: "https://private.example/image" } : undefined,
+    readR2Object: async () => Buffer.from(imageBytes),
+    signR2Download: async () => "https://private.example/image",
+    saveImageAsset: async () => { throw new Error("The saved image must be reused"); },
+  } });
+  try {
+    const result = await runAgent(userId, "Tried to fix, try again", [
+      { role: "user", content: "[Image attached] I am sending you the image use different text and post it", createdAt: at },
+      { role: "assistant", content: "The image did not reach Instagram. No post was made.", createdAt: at + 1000 },
+    ], "test/model");
+    assert.match(result.text, /published and verified/);
+    assert.deepEqual(executed.map((call) => call.slug), ["INSTAGRAM_POST_IG_USER_MEDIA", "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", "INSTAGRAM_GET_IG_MEDIA"]);
+    assert.deepEqual(executed[0]?.args.image_file, { name: "telegram-photo.jpg", mimetype: "image/png", s3key: "staged/original" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("a reattached image is uploaded before a pending LinkedIn multi-execute post", async () => {
   const userId = 830074;
   await initStore({ memoryOnly: true });
