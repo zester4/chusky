@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage } from "../src/mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage } from "../src/mediaBridge.js";
 import { validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
@@ -24,6 +24,44 @@ test("ordinary image-action wording selects an available image but leaves unrela
   assert.deepEqual(selectRequestedImage("Post the generated image from last week", { currentCount: 1, generatedCount: 0, savedAssets: [
     { id: "sent", name: "sent.png", createdAt: 30 }, { id: "generated", name: "generated.png", tags: ["generated"], createdAt: 20 },
   ] }), { source: "asset", assetId: "generated" });
+});
+
+test("an image reattached after a failed requested post resumes only that pending image action", () => {
+  const originalRequest = "Publish my gratitude caption to LinkedIn with the generated image.";
+  const assistantRetry = "I couldn't post it because the image wasn't available. Please reattach the image here and I can try again with it.";
+  const attachedPrompt = "Inspect the attached image and respond helpfully to the user.";
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: assistantRetry },
+  ], attachedPrompt, 1), originalRequest);
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: "I couldn't post it because the image is unavailable. Please attach the image so I can continue the LinkedIn post." },
+  ], attachedPrompt, 1), originalRequest, "a clear missing-image continuation does not depend on the exact phrase 'try again'");
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: "Please attach an image and I can describe it for you." },
+  ], attachedPrompt, 1), undefined, "an image request for description is not a posting retry");
+
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: assistantRetry },
+    { role: "user", content: "[Attachment]\nAttached: image" },
+    { role: "assistant", content: assistantRetry },
+  ], attachedPrompt, 1), originalRequest, "a repeated attachment failure keeps the original user request as the retry intent");
+
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: assistantRetry },
+  ], "Don't post it; just describe the image.", 1), undefined, "a cancellation overrides the previous request");
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: assistantRetry },
+  ], "What is the weather today?", 0), undefined, "an unrelated follow-up does not inherit the post request");
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: "The image was posted successfully." },
+  ], attachedPrompt, 1), undefined, "a completed action does not create a retry continuation");
 });
 
 test("ordinary Composio email action automatically receives the explicitly requested current image", async () => {

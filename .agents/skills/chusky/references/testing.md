@@ -93,6 +93,8 @@ Maintain fixtures for:
 18. `CHUCK_FILE_BRIDGE` uses only the authenticated owner's artifact and exact current Composio-session action schema, requires the normal approval, rejects ambiguous binary fields and caller-supplied file bytes, and never retries an ambiguous upload.
 19. `CHUCK_TOOL_RECOVERY` reads persisted results only for the owner, recommends verification for ambiguous/legacy failures, and never dispatches a retry.
 20. A normal Composio post/email action automatically receives only the explicitly requested current, generated, or saved image through its exact schema; ambiguous image selection or multi-action batches stop before provider execution, and bytes, signed URLs, and asset IDs stay out of model arguments.
+21. If an image-aware action asks the owner to reattach its missing image, the next attachment resumes that exact still-authorized user request through the image-aware adapter; cancellation or unrelated follow-up breaks the continuation, and text-only fallback never executes.
+22. A generated image whose private asset save fails remains available during the current run, but the tool result clearly reports that it cannot be reused in a later turn.
 
 ## Test command
 

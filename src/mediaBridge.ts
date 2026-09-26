@@ -23,6 +23,58 @@ export type MediaAttachmentSelection =
   | { source: "asset"; assetId: string }
   | { ambiguous: true; reason: string };
 
+type ImageRetryHistoryMessage = { role: "user" | "assistant"; content: string };
+
+/**
+ * Carry an explicitly requested image action across the narrow retry where
+ * the assistant asked the owner to reattach a missing image. This is not an
+ * authorization source: the earlier user message must still contain the
+ * image action, and unrelated/cancelled follow-ups end the continuation.
+ */
+export function findPendingImageRetryRequest(
+  history: readonly ImageRetryHistoryMessage[],
+  currentText: string,
+  currentImageCount: number,
+): string | undefined {
+  const latest = history.at(-1);
+  if (latest?.role !== "assistant" || !assistantRequestedImageRetry(latest.content)) return undefined;
+
+  const current = currentText.trim();
+  if (isCancelledImageRetry(current)) return undefined;
+  if (currentImageCount <= 0 && !/\b(?:retry|try again|re-?attach|here it is|here you go|use (?:it|that image|the image))\b/i.test(current)) return undefined;
+
+  for (const message of [...history.slice(0, -1)].reverse()) {
+    if (message.role !== "user") continue;
+    const candidate = selectRequestedImage(message.content, { currentCount: 1, generatedCount: 0 });
+    if (candidate) return message.content;
+    if (isImageRetryAcknowledgement(message.content)) continue;
+    return undefined;
+  }
+  return undefined;
+}
+
+function assistantRequestedImageRetry(text: string): boolean {
+  const requestsImage = /\b(?:re-?attach|attach|send|upload)\b.{0,120}\b(?:image|photo|picture|graphic|visual)\b/i.test(text);
+  const retryWording = /\b(?:re-?attach|again|retry|try again|re-?attempt|unavailable|not available|missing|could(?:n't| not)|failed|failure)\b/i.test(text);
+  const continueAction = /\b(?:so|then|once|after)\b.{0,100}\b(?:continue|proceed|finish|complete|post|publish|send|email|share|upload)\b/i.test(text)
+    || /\b(?:and I can|and I'll|and I will)\b.{0,80}\b(?:continue|proceed|finish|complete|post|publish|send|email|share|upload)\b/i.test(text);
+  return requestsImage && (retryWording || continueAction);
+}
+
+function isCancelledImageRetry(text: string): boolean {
+  return /^\s*(?:cancel|stop|never mind|nevermind|no thanks)\b/i.test(text)
+    || /\b(?:do not|don't|never)\s+(?:post|publish|send|email|share|upload|retry|reattach)\b/i.test(text)
+    || /\b(?:instead|forget it)\b/i.test(text);
+}
+
+function isImageRetryAcknowledgement(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return true;
+  return /^\s*(?:\[attachment\]\s*)?(?:attached:\s*)?(?:image|photo|picture|graphic|visual)(?:\s+attached)?\s*$/i.test(normalized)
+    || /\b(?:retry|try again|re-?attach|here it is|here you go|use (?:it|that image|the image))\b/i.test(normalized)
+    || /^\s*inspect the attached image and respond helpfully to the user\.?\s*(?:attached:.*)?$/i.test(normalized);
+}
+
 type SavedImageCandidate = {
   id: string;
   name: string;

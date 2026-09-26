@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, type MediaAttachmentSelection } from "./mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -1878,6 +1878,32 @@ export async function runAgent(
 
   // Build message array for OpenRouter
   const durable = options?.ephemeral ? { summaries: [], imageAssets: [] } : await getSession(userId);
+  const currentImagesForMediaAction = currentImageRuntime(userMessage).currentImages ?? [];
+  const currentRequestText = userRequestText(userMessage);
+  const imageRetryRequest = channelContext?.scope === "shared" || options?.meetingId
+    ? undefined
+    : findPendingImageRetryRequest(history, currentRequestText, currentImagesForMediaAction.length);
+  const mediaActionRequestText = imageRetryRequest ?? currentRequestText;
+  const selectMediaForAction = (generatedCount: number): MediaAttachmentSelection | undefined => {
+    const savedAssets = channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets;
+    if (imageRetryRequest && currentImagesForMediaAction.length > 0) {
+      return currentImagesForMediaAction.length === 1
+        ? { source: "current", sourceIndex: 0 }
+        : { ambiguous: true, reason: "Several images were reattached for the pending post. Ask which one to use before publishing." };
+    }
+    const selection = selectRequestedImage(mediaActionRequestText, {
+      currentCount: currentImagesForMediaAction.length,
+      generatedCount,
+      savedAssets,
+    });
+    if (imageRetryRequest && !selection) {
+      return { ambiguous: true, reason: "The image for the pending post is still unavailable. Ask the user to reattach or select it before publishing." };
+    }
+    return selection;
+  };
+  const imageRetryContext = imageRetryRequest
+    ? "\n\nIMAGE ACTION RETRY: The user has responded to your request to reattach the image for their earlier explicit post/send request. Continue that same requested action using the reattached image. Do not publish or send a text-only version. If the image-aware action fails, stop and report that it was not completed; do not claim success or fall back to a text-only action."
+    : "";
   let pendingUpgrade: AgentUpgradeNotice | undefined;
   if (!options?.ephemeral && !voiceTurn) {
     try {
@@ -1980,7 +2006,7 @@ export async function runAgent(
       : [],
     developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
   });
-  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}`;
+  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`;
   const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
   const messages: ApiMessage[] = [
     { role: "system", content: staticSystemPrompt },
@@ -2056,12 +2082,7 @@ export async function runAgent(
     await persistRun("running", "run.round_started");
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const currentImages = currentImageRuntime(userMessage).currentImages;
-    const roundMediaSelection = selectRequestedImage(userRequestText(userMessage), {
-      currentCount: currentImages?.length ?? 0,
-      generatedCount: generatedReferenceImages.length,
-      savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
-    });
+    const roundMediaSelection = selectMediaForAction(generatedReferenceImages.length);
     const modelAvailableTools = roundMediaSelection
       ? availableTools.map((tool) => {
         const slug = toolSchemaName(tool);
@@ -2232,12 +2253,7 @@ export async function runAgent(
           // provider side effect, so missing/truncated fields can be repaired
           // by the model instead of surfacing as opaque provider errors.
           if (schema && typeof schema === "object") {
-            const currentImages = currentImageRuntime(userMessage).currentImages;
-            const selection = selectRequestedImage(userRequestText(userMessage), {
-              currentCount: currentImages?.length ?? 0,
-              generatedCount: generatedReferenceImages.length,
-              savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
-            });
+            const selection = selectMediaForAction(generatedReferenceImages.length);
             const validationSchema = selection ? mediaActionPreflightSchema(slug, schema) : schema;
             validateToolArgumentsAgainstSchema(slug, args, validationSchema);
           }
@@ -2334,6 +2350,7 @@ export async function runAgent(
           const daytona = [];
           const assets: Array<{ id: string; name: string; downloadUrl: string; contentType: string }> = [];
           const assetIdsByImage: Array<string | undefined> = [];
+          let persistedImageCount = 0;
           // Every generated image gets a durable R2 asset reference. This
           // keeps the bytes available after the current turn and gives a
           // following tool call (for example an Instagram upload) a real
@@ -2343,7 +2360,7 @@ export async function runAgent(
             try {
               const contentType = image.mediaType.toLowerCase().split(";", 1)[0];
               if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) continue;
-              const asset = await saveImageAsset(userId, {
+              const asset = await mediaBridgeStorage.saveImageAsset(userId, {
                 name: `generated-${Date.now()}-${index + 1}`,
                 purpose: "Image generated by Chusky",
                 description: String(args.prompt ?? "").slice(0, 4000),
@@ -2351,7 +2368,8 @@ export async function runAgent(
                 contentType: contentType as "image/jpeg" | "image/png" | "image/webp",
               }, image.data);
               assetIdsByImage[index] = asset.id;
-              assets.push({ id: asset.id, name: asset.name, downloadUrl: await signR2Download(asset.r2Key), contentType: asset.contentType });
+              persistedImageCount++;
+              assets.push({ id: asset.id, name: asset.name, downloadUrl: await mediaBridgeStorage.signR2Download(asset.r2Key), contentType: asset.contentType });
             } catch (error) {
               // Generation and channel delivery remain usable when optional
               // R2 persistence is unavailable; the failure is observable in
@@ -2368,7 +2386,26 @@ export async function runAgent(
           }
           generatedReferenceImages.push(...images.map((image, index) => ({ ...image, assetId: assetIdsByImage[index] })));
           if (destination === "telegram" || destination === "both") generatedImages.push(...images);
-          execResult = { imageGenerated: true, imageCount: images.length, destination, ...(assets.length ? { assets } : {}), ...(daytona.length ? { daytona } : {}), note: channelContext?.scope === "shared" ? "Images generated and delivered in this group; private image-asset persistence is disabled for shared conversations." : destination === "daytona" ? "Images saved in Daytona and as reusable image assets; they were not sent as separate Telegram images." : "Images generated, saved as reusable image assets, and delivered through the normal channel." };
+          const deliveryNote = channelContext?.scope === "shared"
+            ? "Images generated and delivered in this group."
+            : destination === "daytona"
+              ? "Images saved in Daytona; they were not sent as separate Telegram images."
+              : "Images generated and delivered through the normal channel.";
+          const reuseNote = channelContext?.scope === "shared"
+            ? "Private reusable-image saving is disabled in shared conversations."
+            : persistedImageCount === images.length
+              ? "All generated images were saved as private reusable assets."
+              : `Only ${persistedImageCount} of ${images.length} generated image${images.length === 1 ? " was" : "s were"} saved as private reusable assets. Any unsaved image is available only during this agent turn and cannot be used in a later turn.`;
+          execResult = {
+            imageGenerated: true,
+            imageCount: images.length,
+            reusableImageCount: persistedImageCount,
+            imagePersistence: channelContext?.scope === "shared" ? "disabled_shared_conversation" : persistedImageCount === images.length ? "saved" : persistedImageCount > 0 ? "partial" : "unavailable",
+            destination,
+            ...(assets.length ? { assets } : {}),
+            ...(daytona.length ? { daytona } : {}),
+            note: `${deliveryNote} ${reuseNote}`,
+          };
           // Tool JSON is not a visual input. Add the generated bytes to the
           // conversation so the next model round can actually see and reason
           // about the image it just created (edit, compare, caption, publish).
@@ -2555,14 +2592,10 @@ export async function runAgent(
           }
         } else {
           const mediaRuntime: AgentMediaRuntime = {
-            currentImages: currentImageRuntime(userMessage).currentImages,
+            currentImages: currentImagesForMediaAction,
             generatedImages: generatedReferenceImages,
           };
-          const mediaSelection = selectRequestedImage(userRequestText(userMessage), {
-            currentCount: mediaRuntime.currentImages?.length ?? 0,
-            generatedCount: mediaRuntime.generatedImages?.length ?? 0,
-            savedAssets: channelContext?.scope === "shared" || options?.meetingId ? [] : durable.imageAssets,
-          });
+          const mediaSelection = selectMediaForAction(mediaRuntime.generatedImages?.length ?? 0);
           if (mediaSelection && (channelContext?.scope === "shared" || options?.meetingId)) {
             throw new Error("Image attachments to connected apps are unavailable in shared conversations and meeting turns. No provider action was attempted.");
           }

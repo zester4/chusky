@@ -146,6 +146,202 @@ test("ordinary conversation sends an attached image through the normal Composio 
   }
 });
 
+test("a reattached image resumes the pending Composio email through multi-execute with the image staged", async () => {
+  const userId = 830072;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const emailSchema = { type: "object", required: ["recipient_email", "subject", "body", "attachment"], properties: {
+    recipient_email: { type: "string" }, subject: { type: "string" }, body: { type: "string" },
+    attachment: { type: "string", file_uploadable: true },
+  }, additionalProperties: false };
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const staged: Array<{ toolSlug: string; toolkitSlug: string; file: File }> = [];
+  const session = {
+    sessionId: "reattached-image-retry-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } },
+    ],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") throw new Error("image retry must not use the text-only Composio batch path");
+      executed.push({ slug, args });
+      return { successful: true, data: { id: "gmail-retry-with-image", status: "sent" } };
+    },
+  };
+  const composio = {
+    create: async () => session,
+    sessions: { use: async () => session },
+    tools: { getRawComposioToolBySlug: async (slug: string) => ({ slug, toolkit: { slug: "gmail" } }) },
+    files: { upload: async (input: { toolSlug: string; toolkitSlug: string; file: File }) => {
+      staged.push(input);
+      return { name: input.file.name, mimetype: input.file.type, s3key: "staged/reattached-image" };
+    } },
+  };
+  const requests: Array<Record<string, any>> = [];
+  let chatIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text", "image"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return chatIndex++ === 0
+        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
+          tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { recipient_email: "team@example.com", subject: "Gratitude", body: "We don't walk alone." } }],
+          current_step: "SENDING_EMAIL", current_step_metric: "0/1 emails", session_id: "reattached-image-retry-session",
+          sync_response_to_workbench: false, thought: "Send the requested image with the email.",
+        }))
+        : chatResponse({ role: "assistant", content: "The email was sent with the reattached image." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({ composio });
+  try {
+    const result = await runAgent(userId, [
+      { type: "text", text: "Inspect the attached image and respond helpfully to the user." },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${imageBytes.toString("base64")}` } },
+    ], [
+      { role: "user", content: "Send this generated gratitude image to team@example.com with a short note." },
+      { role: "assistant", content: "I couldn't send it because the image wasn't available. Please reattach the image here and I can try again with it." },
+    ], "test/model");
+    assert.match(result.text, /sent with the reattached image/i);
+    assert.equal(staged.length, 1);
+    assert.equal(staged[0]?.toolSlug, "GMAIL_SEND_EMAIL");
+    assert.equal(staged[0]?.toolkitSlug, "gmail");
+    assert.deepEqual(executed, [{ slug: "GMAIL_SEND_EMAIL", args: {
+      recipient_email: "team@example.com", subject: "Gratitude", body: "We don't walk alone.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/reattached-image" },
+    } }]);
+    assert.match(JSON.stringify(requests[0]?.messages), /IMAGE ACTION RETRY/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("a reattached image is uploaded before a pending LinkedIn multi-execute post", async () => {
+  const userId = 830074;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const postSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
+    author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } },
+  }, additionalProperties: false };
+  const uploadSchema = { type: "object", required: ["owner_urn"], properties: { owner_urn: { type: "string" } }, additionalProperties: false };
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let uploaded: Buffer | undefined;
+  const session = {
+    sessionId: "reattached-linkedin-retry-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: postSchema } },
+    ],
+    search: async () => ({ toolSchemas: { LINKEDIN_REGISTER_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", inputSchema: uploadSchema } } }),
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") throw new Error("LinkedIn post must not bypass the image upload adapter");
+      executed.push({ slug, args });
+      if (slug === "LINKEDIN_REGISTER_IMAGE_UPLOAD") return { successful: true, data: { upload_url: "https://www.linkedin.com/dms-uploads/reattached-image", asset_urn: "urn:li:image:reattached" } };
+      return { successful: true, data: { id: "urn:li:share:reattached" } };
+    },
+  };
+  const requests: Array<Record<string, any>> = [];
+  let chatIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text", "image"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return chatIndex++ === 0
+        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
+          tools: [{ tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { author: "urn:li:person:owner", commentary: "Grateful for everyone who guides us." } }],
+          current_step: "PUBLISHING_POST", current_step_metric: "0/1 posts", session_id: "reattached-linkedin-retry-session",
+          sync_response_to_workbench: false, thought: "Publish the requested post with its attached image.",
+        }))
+        : chatResponse({ role: "assistant", content: "The LinkedIn post was published with the reattached image." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({
+    composio: { create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeFetch: async (_url: string | URL | Request, init?: RequestInit) => {
+      uploaded = Buffer.from(init?.body as Uint8Array);
+      return new Response(null, { status: 201 });
+    },
+  });
+  try {
+    const result = await runAgent(userId, [
+      { type: "text", text: "Inspect the attached image and respond helpfully to the user." },
+      { type: "image_url", image_url: { url: `data:image/png;base64,${imageBytes.toString("base64")}` } },
+    ], [
+      { role: "user", content: "Publish my gratitude caption to LinkedIn with the generated image." },
+      { role: "assistant", content: "I couldn't post it because the image wasn't available. Please reattach the image here and I can try again with it." },
+    ], "test/model");
+    assert.match(result.text, /published with the reattached image/i);
+    assert.deepEqual(uploaded, imageBytes);
+    assert.deepEqual(executed, [
+      { slug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", args: { owner_urn: "urn:li:person:owner" } },
+      { slug: "LINKEDIN_CREATE_LINKED_IN_POST", args: { author: "urn:li:person:owner", commentary: "Grateful for everyone who guides us.", images: ["urn:li:image:reattached"] } },
+    ]);
+    assert.match(JSON.stringify(requests[0]?.messages), /IMAGE ACTION RETRY/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("image generation reports when the image could not be saved for reuse in later turns", async () => {
+  const userId = 830073;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const generatedBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(generatedBytes);
+  generatedBytes.write("IEND", 16, "ascii");
+  const imageModel = config.imageModel;
+  const chatRequests: Array<Record<string, any>> = [];
+  let chatIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/images")) return new Response(JSON.stringify({ data: [{ b64_json: generatedBytes.toString("base64"), media_type: "image/png" }] }), { status: 200, headers: { "content-type": "application/json" } });
+    if (url.includes("/chat/completions")) {
+      chatRequests.push(JSON.parse(String(init?.body)));
+      return chatIndex++ === 0
+        ? toolResponse("CHUCK_GENERATE_IMAGE", JSON.stringify({ prompt: "A warm gratitude image", destination: "telegram" }))
+        : chatResponse({ role: "assistant", content: "The image was created for this turn." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({
+    composio: { create: async () => ({ sessionId: "generated-image-save-failure", tools: async () => [], execute: async () => undefined }) },
+    mediaBridgeStorage: {
+      saveImageAsset: async () => { throw new Error("R2 persistence unavailable"); },
+      getImageAsset: async () => undefined,
+      readR2Object: async () => generatedBytes,
+      signR2Download: async () => "https://unused.example/image.png",
+    } as any,
+  });
+  try {
+    config.imageModel = "meta/muse-image";
+    const result = await runAgent(userId, "Create a warm gratitude image.", [], "test/model");
+    assert.equal(result.generatedImages?.length, 1);
+    const toolResult = chatRequests[1]?.messages.find((message: any) => message.role === "tool")?.content as string;
+    assert.match(toolResult, /"imagePersistence":"unavailable"/);
+    assert.match(toolResult, /available only during this agent turn/i);
+    assert.doesNotMatch(toolResult, /All generated images were saved/);
+  } finally {
+    config.imageModel = imageModel;
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("agent uses the selected model for a normal text response", async () => {
   await initStore({ memoryOnly: true });
   invalidateSession(830001);
