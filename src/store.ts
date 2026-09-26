@@ -24,6 +24,7 @@ import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
 import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
 import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
+import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 
 export interface Message {
@@ -501,6 +502,14 @@ export interface SdkRunArtifact {
   size: number;
 }
 
+export interface SdkRunImage {
+  /** Owner-scoped durable image asset ID; bytes and storage keys stay private. */
+  id: string;
+  name: string;
+  contentType: ImageAsset["contentType"];
+  size: number;
+}
+
 export interface SdkRunRecord {
   id: string;
   /** Set only for runs submitted through a project key; used for company-level status reporting. */
@@ -516,6 +525,8 @@ export interface SdkRunRecord {
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   /** Generated artifacts made available by this run. Only safe metadata is persisted. */
   artifacts?: SdkRunArtifact[];
+  /** Persisted generated images made available by this run. Only safe metadata is persisted. */
+  images?: SdkRunImage[];
   output?: string;
   cost?: number;
   approvalId?: string;
@@ -3990,7 +4001,11 @@ export async function listProviderProofs(now = Date.now()): Promise<ProviderProo
 
 export async function saveProviderProof(proof: ProviderProof): Promise<ProviderProof> {
   if (!/^[a-z0-9_-]{1,40}$/i.test(proof.surface) || !/^[A-Za-z0-9_-]{1,160}$/.test(proof.correlationId)) throw new Error("Provider proof identity is invalid.");
-  if (!Array.isArray(proof.checks)) throw new Error("Provider proof checks are invalid.");
+  const now = Date.now();
+  const checks = normalizeProviderSmokeChecks(proof.checks, now, proof.verifiedAt);
+  const capabilities = new Set(checks?.map((check) => check.capability) ?? []);
+  if (!checks || capabilities.size !== PROVIDER_SMOKE_CAPABILITIES.length || proof.inboundText !== capabilities.has("inbound_text") || proof.inboundImage !== capabilities.has("inbound_image") || proof.outboundText !== capabilities.has("outbound_text") || proof.outboundImage !== capabilities.has("outbound_image")) throw new Error("Provider proof checks are incomplete or inconsistent.");
+  if (!Number.isSafeInteger(proof.verifiedAt) || proof.verifiedAt > now + 30_000 || proof.verifiedAt < now - 15 * 60_000 || !Number.isSafeInteger(proof.expiresAt) || proof.expiresAt <= now || proof.expiresAt > proof.verifiedAt + 7 * 24 * 60 * 60_000) throw new Error("Provider proof timestamps are invalid or stale.");
   const normalized: ProviderProof = {
     surface: proof.surface.toLowerCase().slice(0, 40),
     inboundText: proof.inboundText === true,
@@ -4000,7 +4015,7 @@ export async function saveProviderProof(proof: ProviderProof): Promise<ProviderP
     verifiedAt: Number.isFinite(proof.verifiedAt) ? proof.verifiedAt : Date.now(),
     expiresAt: Number.isFinite(proof.expiresAt) ? proof.expiresAt : Date.now() + 24 * 60 * 60_000,
     correlationId: proof.correlationId.slice(0, 160),
-    checks: proof.checks.slice(0, 20).map((check) => ({ name: String(check.name).slice(0, 120), status: check.status === "passed" ? "passed" : "failed", ...(check.detail ? { detail: String(check.detail).slice(0, 500) } : {}) })),
+    checks,
   };
   await mutateSession(0, (control) => {
     control.providerProofs = [...(control.providerProofs ?? []).filter((item) => item.surface !== normalized.surface), normalized].slice(-100);
@@ -5045,8 +5060,8 @@ export async function getTask(userId: number, id: string): Promise<TaskRecord | 
 
 const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
 
-function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string): MissionEventRecord {
-  return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, ...(stepId ? { stepId } : {}) };
+function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string, metadata?: MissionEventRecord["metadata"]): MissionEventRecord {
+  return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, ...(stepId ? { stepId } : {}), ...(metadata ? { metadata } : {}) };
 }
 
 function normalizeMission(mission: MissionRecord): MissionRecord {
@@ -5122,6 +5137,13 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
 
 export async function createMission(userId: number, input: MissionCreateInput): Promise<MissionRecord> {
   if (input.id !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(input.id)) throw new Error("Mission ID is invalid");
+  const requiredEvidence = [...new Set((input.requiredEvidence ?? [])
+    .map((item) => typeof item === "string" ? item.trim().slice(0, 500) : "")
+    .filter(Boolean))].slice(0, 50);
+  const verificationMode = input.verificationMode ?? (requiredEvidence.length > 0 ? "strict" : "legacy");
+  if (verificationMode === "strict" && requiredEvidence.length === 0) {
+    throw new Error("Strict mission verification requires at least one non-empty required evidence criterion.");
+  }
   const idempotencyKey = input.idempotencyKey?.slice(0, 200);
   const missions = (await backend.getMissions(userId)).map(normalizeMission);
   if (idempotencyKey) {
@@ -5172,7 +5194,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     updatedAt: now,
     events: [missionEvent("created", "Mission created", now)],
     evidence: [],
-    verification: { mode: input.verificationMode ?? ((input.requiredEvidence?.length ?? 0) > 0 ? "strict" : "legacy"), requiredEvidence: (input.requiredEvidence ?? []).slice(0, 50), verified: false, unresolved: (input.requiredEvidence ?? []).slice(0, 50) },
+    verification: { mode: verificationMode, requiredEvidence, verified: false, unresolved: requiredEvidence },
     ...(typeof input.a2aContextId === "string" && input.a2aContextId.trim() ? { a2aContextId: input.a2aContextId.trim().slice(0, 200) } : {}),
     version: 0,
   });
@@ -5336,6 +5358,7 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
     };
     const unresolved = [
       ...(allStepsComplete ? [] : ["All mission steps must be completed."]),
+      ...(mission.verification?.mode === "strict" && required.length === 0 ? ["Strict verification has no required evidence criteria."] : []),
       ...required.filter((requirement) => !selected.some((item) => acceptable(item, requirement))),
     ];
     const verified = unresolved.length === 0;
@@ -5474,13 +5497,20 @@ export async function resumeMissionFromApproval(userId: number, id: string, appr
       error: undefined,
       waiting: undefined,
       nextAction: "Continue from the saved mission checkpoint after the approved action.",
-      events: [...mission.events, missionEvent("resumed", `Approval ${approvalId} granted; mission resumed from its checkpoint.`)],
+      events: [...mission.events, missionEvent("approval_resumed", `Approval ${approvalId} granted; mission resumed from its checkpoint.`, Date.now(), mission.waiting.stepId, { approvalId })],
     };
   });
 }
 
 export async function waitMission(userId: number, id: string, waiting: MissionRecord["waiting"], checkpoint?: string, nextAction?: string): Promise<MissionRecord | undefined> {
-  return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "waiting", waiting, checkpoint: checkpoint ?? mission.checkpoint, nextAction: nextAction ?? mission.nextAction, events: [...mission.events, missionEvent("waiting", nextAction ?? "Mission is waiting for an external event.")] });
+  return mutateMission(userId, id, (mission) => {
+    if (!["running", "waiting"].includes(mission.status)) return undefined;
+    const message = nextAction ?? "Mission is waiting for an external event.";
+    const event = waiting?.kind === "approval" && typeof waiting.key === "string" && waiting.key.length > 0
+      ? missionEvent("approval_waiting", message, Date.now(), waiting.stepId, { approvalId: waiting.key })
+      : missionEvent("waiting", message, Date.now(), waiting?.stepId);
+    return { status: "waiting", waiting, checkpoint: checkpoint ?? mission.checkpoint, nextAction: message, events: [...mission.events, event] };
+  });
 }
 
 /** Resume exactly once for a matching provider event. Replayed events are harmless. */

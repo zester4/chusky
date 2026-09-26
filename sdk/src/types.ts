@@ -253,6 +253,9 @@ export interface RunArtifact {
   size: number;
 }
 
+export interface RunImage { id: string; name: string; contentType: "image/jpeg" | "image/png" | "image/webp"; size: number; }
+export interface ImageDownload extends RunImage { downloadUrl: string; expiresAt: string; }
+
 export interface Run {
   id: string;
   threadId: string;
@@ -264,6 +267,8 @@ export interface Run {
   attachments?: Array<{ id: string; name: string; contentType: string; size: number }>;
   /** Generated file metadata. Download through the artifacts resource using this id. */
   artifacts?: RunArtifact[];
+  /** Generated images saved to private object storage; request a fresh URL with `client.images.get(id)`. */
+  images?: RunImage[];
   output?: string;
   cost?: number;
   taskId?: string;

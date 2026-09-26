@@ -1555,7 +1555,7 @@ export interface AgentResult {
   /** Exact tool slugs whose execution returned successfully; unlike toolsUsed, excludes failed attempts. */
   toolsSucceeded: string[];
   cost?: number;
-  generatedImages?: { data: Buffer; mediaType: string; cost?: number }[];
+  generatedImages?: { data: Buffer; mediaType: string; cost?: number; assetId?: string }[];
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
@@ -2390,7 +2390,7 @@ export async function runAgent(
             }
           }
           generatedReferenceImages.push(...images.map((image, index) => ({ ...image, assetId: assetIdsByImage[index] })));
-          if (destination === "telegram" || destination === "both") generatedImages.push(...images);
+          if (destination === "telegram" || destination === "both") generatedImages.push(...images.map((image, index) => ({ ...image, assetId: assetIdsByImage[index] })));
           const deliveryNote = channelContext?.scope === "shared"
             ? "Images generated and delivered in this group."
             : destination === "daytona"

@@ -139,8 +139,10 @@ export function replayMission(mission: MissionRecord): ReplayReport {
   const events: ReplayEvent[] = (mission.events ?? []).map((event) => {
     const type = event.type === "started" ? "mission.started"
       : event.type === "checkpointed" ? "mission.checkpoint"
-      : event.type === "waiting" || event.type === "approval_waiting" ? "mission.waiting"
-      : event.type === "approval_resumed" || event.type === "resumed" ? "mission.resumed"
+      : event.type === "waiting" ? "mission.waiting"
+      : event.type === "approval_waiting" ? "approval.waiting"
+      : event.type === "approval_resumed" ? "approval.resumed"
+      : event.type === "resumed" ? "mission.resumed"
       : event.type === "paused" ? "mission.paused"
       : event.type === "step_started" && event.stepId ? "step.started"
       : event.type === "step_completed" ? "step.completed"
@@ -151,7 +153,13 @@ export function replayMission(mission: MissionRecord): ReplayReport {
       : event.type === "cancelled" ? "mission.cancelled"
       : event.type === "provider_event" ? "mission.resumed" : "noop";
     const stepId = event.stepId ?? (/^step ([^ ]+) completed\b/i.exec(event.message)?.[1]);
-    return { at: event.at, type, eventId: event.id, id: type === "step.completed" || type === "step.started" ? stepId : event.id, data: { ...(event.metadata ?? {}), ...(event.type === "checkpointed" ? { checkpoint: event.message } : {}), ...(event.type === "provider_event" ? { stepId: event.stepId } : {}) } };
+    const approvalId = typeof event.metadata?.approvalId === "string" ? event.metadata.approvalId : undefined;
+    const id = type === "step.completed" || type === "step.started"
+      ? stepId
+      : type === "approval.waiting" || type === "approval.resumed"
+        ? approvalId
+        : event.id;
+    return { at: event.at, type, eventId: event.id, ...(id ? { id } : {}), data: { ...(event.metadata ?? {}), ...(event.type === "checkpointed" ? { checkpoint: event.message } : {}), ...(event.type === "provider_event" ? { stepId: event.stepId } : {}) } };
   });
   const terminal = mission.status === "completed" || mission.status === "blocked" || mission.status === "failed" || mission.status === "cancelled";
   const terminalStatus = terminal ? mission.status as "completed" | "blocked" | "failed" | "cancelled" : "blocked";
@@ -159,6 +167,9 @@ export function replayMission(mission: MissionRecord): ReplayReport {
   const violations = [...report.violations];
   if (!terminal) violations.push("mission_is_not_in_a_terminal_state");
   if (mission.status === "completed") {
+    if (mission.events.some((event) => event.type === "waiting" && /^Approve or deny .+ \([^)]+\) before the mission can continue\.$/i.test(event.message))) {
+      violations.push("legacy_approval_wait_missing_structured_lifecycle");
+    }
     if (!mission.result?.trim()) violations.push("completed_mission_missing_result");
     if (mission.steps.some((step) => step.status !== "completed")) violations.push("completed_mission_has_incomplete_steps");
     if (mission.steps.some((step) => step.dependsOn.some((dependency) => !mission.steps.some((candidate) => candidate.id === dependency && candidate.status === "completed")))) violations.push("completed_mission_has_unmet_dependencies");

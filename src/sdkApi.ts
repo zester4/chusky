@@ -11,7 +11,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { listJobOccurrences } from "./store.js";
@@ -61,12 +61,13 @@ import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { appendReliabilitySample, compensationView, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
 import { replayMission, replayScenario } from "./reliability/replay.js";
-import { executeOutcomeVerification } from "./reliability/outcomeEngine.js";
+import { executeOutcomeVerification, verifiedOutcomeEvidenceSummary } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck, ProviderProof, ReplayScenario } from "./reliability/contracts.js";
 import { compileAutonomyPolicy } from "./reliability/policy.js";
 import { detectMemoryConflicts } from "./memory/conflicts.js";
 import { chooseReliableRoute } from "./reliability/routing.js";
 import { PROVIDER_SURFACES, providerMatrixWithProofs } from "./reliability/providerMatrix.js";
+import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import { buildReadinessReport } from "./reliability/readiness.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
@@ -726,6 +727,15 @@ export function sdkRunArtifacts(generatedFiles: NonNullable<Awaited<ReturnType<t
     size: data.byteLength,
   }));
 }
+/** Expose only generated images durably saved in the owner's private asset store. */
+export function sdkRunImages(generatedImages: NonNullable<Awaited<ReturnType<typeof runAgent>>["generatedImages"]> | undefined): SdkRunImage[] | undefined {
+  const images = generatedImages?.flatMap((image) => {
+    const contentType = image.mediaType.toLowerCase().split(";", 1)[0];
+    if (!image.assetId || !["image/jpeg", "image/png", "image/webp"].includes(contentType) || image.data.byteLength < 1) return [];
+    return [{ id: image.assetId, name: `generated-image.${contentType === "image/jpeg" ? "jpg" : contentType.slice("image/".length)}`, contentType: contentType as SdkRunImage["contentType"], size: image.data.byteLength }];
+  }).slice(0, 10);
+  return images?.length ? images : undefined;
+}
 function companyRunRecord(run: SdkRunRecord): CompanyRunSummary {
   return {
     id: run.id, status: run.status,
@@ -1226,6 +1236,13 @@ export function registerSdkApi(app: Hono): void {
       if (principal.organizationId) await companyAudit(principal.projectId, `${c.req.method} ${new URL(c.req.url).pathname}`, requestId, c.res.status);
       else if ((c.get as (key: string) => unknown)("webAuthUserId")) await auditDashboardProjectWrite(c, requestId);
     }
+  });
+
+  app.get("/v1/images/:imageId", async (c) => {
+    const image = await getImageAsset(sdkUser(c)!.userId, c.req.param("imageId"));
+    if (!image) return apiError(c, 404, "not_found", "Image asset not found.");
+    c.header("Cache-Control", "private, no-store");
+    return c.json({ id: image.id, name: image.name, contentType: image.contentType, size: image.size, downloadUrl: image.downloadUrl, expiresAt: new Date(Date.now() + 300_000).toISOString() });
   });
 
   app.get("/v1/ops/health", async (c) => {
@@ -2197,7 +2214,7 @@ export function registerSdkApi(app: Hono): void {
         if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly."); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
       } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
     }
-    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
+    try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); } else { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); } }
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : run.status === "requires_approval" ? "uncertain" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, `run.${run.status}`, { threadId: thread.id, runId: run.id, status: run.status }); return c.json(response, 201);
     } finally { await releaseUserLock(owner.userId, lockToken); }
@@ -2254,7 +2271,7 @@ export function registerSdkApi(app: Hono): void {
           run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved."));
           send({ type: "run.cancelled", run: runView(thread.id, run) });
         } else {
-          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
+          run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); send({ type: "run.completed", run: runView(thread.id, run) });
         }
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required")); const approval = await getApproval(owner.userId, error.approvalId); send({ type: "run.approval_required", run: runView(thread.id, run), approval }); }
@@ -2288,7 +2305,7 @@ export function registerSdkApi(app: Hono): void {
     if (!thread || !prior) return apiError(c, 404, "not_found", "Run not found.");
     if (!["failed", "cancelled", "requires_approval"].includes(prior.status)) return apiError(c, 409, "run_not_resumable", "Only failed, cancelled, or approval-paused runs can be resumed.");
     const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
-     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
+     try { const resolved = await resolveRunInput(session, { input: prior.input, attachments: prior.attachments?.map((file) => file.id) }); const result = await runAgent(owner.userId, resolved.message, thread.history, run.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions({ budget: prior.budget, tools: prior.tools, skills: prior.skills }, run.id, thread.id, prior.agentInstructions)); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); thread.history.push({ role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}` }, { role: "assistant", content: result.text }); }
     catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
@@ -2410,6 +2427,7 @@ export function registerSdkApi(app: Hono): void {
       return [{ id: typeof step.id === "string" ? step.id : undefined, title: step.title, objective: step.objective, dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), input: step.input && typeof step.input === "object" ? step.input as Record<string, unknown> : undefined, outputSchema: step.outputSchema && typeof step.outputSchema === "object" ? step.outputSchema as Record<string, unknown> : undefined, evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined, retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds), parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined }];
     }) : undefined;
     if (!title || !objective || !definitionOfDone || title.length > 240 || objective.length > 8000 || definitionOfDone.length > 4000) return apiError(c, 400, "invalid_mission", "title, objective, and definitionOfDone are required and must be within their size limits.");
+    if (body.verificationMode !== undefined && body.verificationMode !== "legacy" && body.verificationMode !== "strict") return apiError(c, 400, "invalid_mission", "verificationMode must be either legacy or strict.");
     const idempotencyKey = (c.req.header("Idempotency-Key") ?? (typeof body.idempotencyKey === "string" ? body.idempotencyKey : "")).trim().slice(0, 200) || undefined;
     try {
       const requiredEvidence = Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined;
@@ -2574,15 +2592,11 @@ export function registerSdkApi(app: Hono): void {
     const verifiedAt = typeof value.verifiedAt === "number" ? value.verifiedAt : Number.NaN;
     const expiresAt = typeof value.expiresAt === "number" ? value.expiresAt : Number.NaN;
     const now = Date.now();
-    const checks = Array.isArray(value.checks) ? value.checks : [];
-    const normalizedChecks = checks.slice(0, 20).flatMap((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const check = item as Record<string, unknown>;
-      if (typeof check.name !== "string" || !check.name.trim() || check.name.length > 120 || check.status !== "passed" || (check.detail !== undefined && (typeof check.detail !== "string" || check.detail.length > 500))) return [];
-      return [{ name: check.name.trim(), status: "passed" as const, ...(typeof check.detail === "string" ? { detail: check.detail } : {}) }];
-    });
-    const valid = surfaces.has(surface) && /^[A-Za-z0-9_-]{1,160}$/.test(correlationId) && Number.isFinite(verifiedAt) && Number.isFinite(expiresAt) && verifiedAt <= now + 30_000 && verifiedAt >= now - 15 * 60_000 && expiresAt > now && expiresAt <= verifiedAt + 7 * 24 * 60 * 60_000 && value.inboundText === true && value.inboundImage === true && value.outboundText === true && value.outboundImage === true && normalizedChecks.length === checks.length && normalizedChecks.length > 0;
-    if (!valid) return apiError(c, 400, "invalid_provider_proof", "Provider proof must contain fresh, complete, passed text and image round-trip evidence.");
+    const checks = Array.isArray(value.checks) ? value.checks : undefined;
+    const normalizedChecks = normalizeProviderSmokeChecks(checks, now, verifiedAt);
+    const capabilities = new Set(normalizedChecks?.map((check) => check.capability) ?? []);
+    const valid = surfaces.has(surface) && /^[A-Za-z0-9_-]{1,160}$/.test(correlationId) && Number.isFinite(verifiedAt) && Number.isFinite(expiresAt) && verifiedAt <= now + 30_000 && verifiedAt >= now - 15 * 60_000 && expiresAt > now && expiresAt <= verifiedAt + 7 * 24 * 60 * 60_000 && value.inboundText === capabilities.has(PROVIDER_SMOKE_CAPABILITIES[0]!) && value.inboundImage === capabilities.has(PROVIDER_SMOKE_CAPABILITIES[1]!) && value.outboundText === capabilities.has(PROVIDER_SMOKE_CAPABILITIES[2]!) && value.outboundImage === capabilities.has(PROVIDER_SMOKE_CAPABILITIES[3]!) && capabilities.size === PROVIDER_SMOKE_CAPABILITIES.length && Boolean(normalizedChecks);
+    if (!valid || !normalizedChecks) return apiError(c, 400, "invalid_provider_proof", "Provider proof must contain fresh, complete, passed text and image round-trip evidence.");
     try {
       const saved = await saveProviderProof({ surface: surface as ProviderProof["surface"], inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, verifiedAt, expiresAt, correlationId, checks: normalizedChecks });
       return c.json(saved, 201);
@@ -2610,7 +2624,7 @@ export function registerSdkApi(app: Hono): void {
       const evidence = verification.results.flatMap((result) => {
         if (result.status !== "passed" || !result.provider || !result.evidenceRef) return [];
         const check = checks.find((candidate) => candidate.id === result.checkId);
-        return check?.kind === "provider_read" ? [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: `Provider state verified: ${check.description}`, source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }] : [];
+        return check?.kind === "provider_read" ? [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: verifiedOutcomeEvidenceSummary(check), source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }] : [];
       });
       if (evidence.length) await recordTrustedMissionEvidence(owner.userId, missionId, evidence);
       await verifyMission(owner.userId, missionId, { verifiedBy: "agent" });
@@ -2726,7 +2740,7 @@ export function registerSdkApi(app: Hono): void {
           },
         });
         if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
-        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text }); }
+        else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; run.events.push(event("run.completed")); thread.history.push({ role: "user", content: approval.request }, { role: "assistant", content: result.text }); }
       } catch (error) {
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required", "Another action needs your approval.")); }
         else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }

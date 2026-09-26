@@ -623,7 +623,7 @@ The channel gateway keeps the internal account identity (`account_<telegram-user
 
 Enable the adapters only after their public HTTPS webhook endpoints are reachable. Slack uses `/slack/events`, `/slack/interactions`, `/slack/install`, and `/slack/oauth/callback`; WhatsApp Cloud API uses `GET/POST /whatsapp/webhook`. Requests are signature-checked against the raw body, stale Slack requests are rejected, duplicate provider events are claimed in Redis, and Slack events are acknowledged before agent work begins. Provider replies are written to the durable outbox with a stable idempotency key and a reclaimable delivery lease. WhatsApp also supports explicit approved-template delivery through the outbound contract: set `template.name`, `template.languageCode`, and optional Meta `components`; the adapter sends `type: "template"`. Normal replies remain text messages with WhatsApp formatting, and templates are never selected implicitly.
 
-Slack setup requires an app Signing Secret, `chat:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
+Slack setup requires an app Signing Secret, `chat:write`, `files:read`, and `files:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. Reauthorize existing Slack installations after adding `files:write` so Chusky can upload generated images and artifacts. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
 
 ### XChat channel
 
@@ -996,8 +996,23 @@ The remaining gates are deployment evidence rather than unbounded feature claims
   live provider certification.
 - Configure `PROVIDER_SMOKE_SIGNING_SECRET` and have a deployment-side smoke runner
   submit its complete, fresh results to the root-only `POST /v1/operator/provider-proof`
-  endpoint. The attestation is HMAC-bound and expires; unsigned or partial reports are
-  rejected and never change readiness.
+  endpoint. Each report must include separate inbound-text, inbound-image,
+  outbound-text, and outbound-image checks, each with a fresh observation time and
+  a SHA-256 hash of its provider event or delivery receipt ID. Raw provider IDs and
+  payloads are never stored. The attestation is HMAC-bound and expires; missing,
+  duplicated, stale, or incomplete evidence is rejected and never changes readiness.
+- For a non-mutating signed-webhook boundary check against an explicitly allowlisted
+  staging deployment, run `npm run provider:webhook-smoke` with
+  `CHUSKY_PROVIDER_SMOKE_TARGET_STAGE=staging`,
+  `CHUSKY_PROVIDER_SMOKE_BASE_URL`, and
+  `CHUSKY_PROVIDER_SMOKE_ALLOWED_ORIGINS`. Add only the staging callback secrets for
+  providers to check (`SLACK_SIGNING_SECRET`, `WHATSAPP_VERIFY_TOKEN` plus
+  `WHATSAPP_APP_SECRET`, `SENDBLUE_WEBHOOK_SECRET`, `TWILIO_AUTH_TOKEN`, and/or
+  `X_CONSUMER_SECRET`). The runner only submits synthetic signed verification/status
+  callbacks with random unknown receipt IDs; it never calls provider send APIs, creates
+  provider proof, or changes readiness. This is not a real provider, inbound-message,
+  agent, media, or outbound-delivery test. If Twilio uses a configured status callback
+  URL, set `TWILIO_SMS_STATUS_CALLBACK_URL` to the exact staging route.
 - Run the real-provider matrix, Redis/QStash outage tests, duplicate-webhook tests,
   and long-running worker tests against the deployed services before declaring that
   deployment production-certified.

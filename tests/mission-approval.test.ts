@@ -50,7 +50,13 @@ test("approved mission resumes its queued delayed task immediately", async () =>
   assert.equal(published?.userId, userId);
   assert.equal(published?.taskId, task.id);
   assert.ok((published?.runAt ?? Infinity) <= Date.now());
-  assert.equal((await getMission(userId, mission.id))?.status, "running");
+  const resumedMission = await getMission(userId, mission.id);
+  assert.equal(resumedMission?.status, "running");
+  const approvalEvents = resumedMission?.events.filter((event) => event.type === "approval_waiting" || event.type === "approval_resumed");
+  assert.deepEqual(approvalEvents?.map(({ type, metadata }) => ({ type, approvalId: metadata?.approvalId })), [
+    { type: "approval_waiting", approvalId },
+    { type: "approval_resumed", approvalId },
+  ]);
   const resumedTask = await getTask(userId, task.id);
   assert.equal(resumedTask?.status, "queued");
   assert.equal(resumedTask?.approvedApprovalId, approvalId);

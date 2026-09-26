@@ -53,7 +53,7 @@ import { validateNativeToolArguments } from "./agentTools.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
-import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
+import { executeOutcomeVerification, verifiedOutcomeEvidenceSummary, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import { appendTraceEvent, compensationView, executeCompensation, listCompensations } from "./reliability/persistence.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
@@ -1290,7 +1290,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         const trustedReadEvidence = verification.results.flatMap((result) => {
           if (result.status !== "passed" || !result.provider || !result.evidenceRef) return [];
           const check = checks.find((candidate) => candidate.id === result.checkId);
-          return check?.kind === "provider_read" ? [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: `Provider state verified: ${check.description}`, source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }] : [];
+          if (check?.kind !== "provider_read") return [];
+          return [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: verifiedOutcomeEvidenceSummary(check), source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }];
         });
         if (trustedReadEvidence.length) await recordTrustedMissionEvidence(userId, missionId, trustedReadEvidence);
       }

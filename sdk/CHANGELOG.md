@@ -2,6 +2,19 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.6.4 - 2026-09-26
+
+- Return durable generated-image metadata on completed runs when the image was
+  saved to the owner's private image store.
+- Add `client.images.get(id)` to refresh a short-lived, owner-scoped download URL.
+- Keep image bytes, R2 keys, and signed URLs out of persisted run records.
+
+## 1.6.3 - 2026-09-26
+
+- Tighten root-only provider-proof attestations to require four distinct,
+  fresh capability observations with hashed receipt/event identifiers.
+- Reject expired legacy proof records that do not contain the new evidence shape.
+
 ## 1.6.2 - 2026-09-26
 
 - Expose the exact provider action, durable Chusky receipt ID, and persisted

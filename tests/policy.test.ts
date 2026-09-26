@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { humanProgressStatus, humanToolStatus, isRiskyToolSlug, requiresToolApproval, toolApprovalPolicy } from "../src/policy.js";
+import { humanProgressStatus, humanToolStatus, isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, toolApprovalPolicy } from "../src/policy.js";
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 
 test("recognizes materially risky tools", () => {
@@ -27,6 +27,15 @@ test("allows ordinary reversible provider writes without an approval prompt", ()
 test("does not gate read-only tools", () => {
   for (const slug of ["GITHUB_GET_REPOSITORY", "GMAIL_LIST_MESSAGES", "NOTION_SEARCH_PAGES", "COMPOSIO_SEARCH_TOOL"]) {
     assert.equal(isRiskyToolSlug(slug), false, slug);
+  }
+});
+
+test("provider read classification rejects action names that mix reads with mutations", () => {
+  for (const slug of ["GMAIL_GET_AND_SEND_EMAIL", "HUBSPOT_SEARCH_THEN_UPDATE_CONTACT", "GITHUB_LOOKUP_AND_DELETE_REPOSITORY", "GMAIL_GET_AND_MARK_AS_READ"]) {
+    assert.equal(isReadOnlyToolSlug(slug), false, slug);
+  }
+  for (const slug of ["GMAIL_GET_MESSAGE", "NOTION_SEARCH_PAGES", "GITHUB_LIST_REPOSITORIES", "CHUCK_TASK_GET"]) {
+    assert.equal(isReadOnlyToolSlug(slug), true, slug);
   }
 });
 

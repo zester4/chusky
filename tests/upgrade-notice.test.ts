@@ -64,7 +64,17 @@ test("media automation upgrade preset describes normal-action attachment and pro
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mediaAutomation]);
   assert.match(bullets[0], /ordinary conversation/);
   assert.match(bullets[1], /exact schema/);
+  assert.match(bullets[1], /Slack channel replies can upload generated images/);
   assert.match(bullets[2], /Ambiguous image choices/);
+  assert.match(bullets[2], /external receipt/);
+});
+
+test("generated image API upgrade preset documents private durable image delivery", () => {
+  const bullets = getAgentUpgradePreset("generatedImageApi");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /private image store/);
+  assert.match(bullets[1], /short-lived image download URL/);
+  assert.match(bullets[2], /images:read/);
 });
 
 test("custom MCP upgrade preset describes verification, private networking controls, and agent execution", () => {
@@ -89,11 +99,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces conversational connected-app image actions", async () => {
+test("current upgrade manifest announces generated-image API delivery", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.10.0");
-  assert.equal(notice?.version, "4.10.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /ordinary conversation/);
-  assert.match(formatAgentUpgradeNotice(notice!), /exact schema/);
-  assert.match(formatAgentUpgradeNotice(notice!), /final action/);
+  assert.equal(notice?.id, "release-4.12.0");
+  assert.equal(notice?.version, "4.12.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /private image store/);
+  assert.match(formatAgentUpgradeNotice(notice!), /short-lived image download URL/);
+  assert.match(formatAgentUpgradeNotice(notice!), /images:read/);
 });

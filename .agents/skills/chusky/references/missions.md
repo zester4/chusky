@@ -99,6 +99,13 @@ Use `CHUCK_MISSION_START` or `POST /v1/missions` with:
 5. An idempotency key when the request may be retried by an SDK, MCP client,
    webhook, or UI.
 6. `verificationMode: "strict"` and `requiredEvidence` for high-value work.
+   Strict mode requires at least one non-empty criterion. A strict mission with
+   no evidence criteria is rejected at creation and existing malformed records
+   fail closed during verification; do not use a model-authored completion
+   statement as outcome evidence.
+   A `provider_read` check must declare non-empty expected fields, and its
+   current read-only provider response must match them. The model-authored
+   check description is never trusted evidence.
 
 Example shape:
 
@@ -262,6 +269,11 @@ production deployment, remote Git pushes, and other irreversible/high-impact
 actions retain their approval boundary. An approval pause must be represented in
 mission `waiting.kind = "approval"`, linked to the exact tool/arguments, and
 resume the same durable task after one matching approval is consumed.
+Persist approval lifecycle events as `approval_waiting` and `approval_resumed`,
+each carrying the exact opaque `approvalId` in event metadata. Mission replay must
+pair those IDs and reject a terminal completion with an unmatched wait. Older
+completed histories that encode an approval only in display text are not strong
+enough to certify and must be reported as unverifiable.
 
 Compensation records are recovery proposals, not executed rollbacks. Inspecting
 one is read-only. Execution names one exact provider tool and argument object

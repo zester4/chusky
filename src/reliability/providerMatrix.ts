@@ -1,3 +1,6 @@
+import type { ProviderProof } from "./contracts.js";
+import { normalizeProviderSmokeChecks } from "./providerSmoke.js";
+
 export type ProviderSurface = "telegram" | "slack" | "whatsapp" | "imessage" | "web" | "cli" | "sdk" | "xchat" | "meetings";
 export interface ProviderMatrixEntry { surface: ProviderSurface; inboundText: boolean; inboundImage: boolean; outboundText: boolean; outboundImage: boolean; liveProof: "verified" | "configured_unverified" | "not_configured"; proofExpiresAt?: number; proofCorrelationId?: string; missing?: string; }
 
@@ -14,10 +17,14 @@ export function providerMatrix(env: NodeJS.ProcessEnv = process.env): ProviderMa
 /** Merge real, persisted smoke evidence into the capability matrix. No proof
  * is inferred from configuration: every capability must be exercised and the
  * evidence must still be within its TTL. */
-export function providerMatrixWithProofs(env: NodeJS.ProcessEnv = process.env, proofs: Array<{ surface: string; inboundText: boolean; inboundImage: boolean; outboundText: boolean; outboundImage: boolean; verifiedAt: number; expiresAt: number; correlationId: string }> = [], now = Date.now()): ProviderMatrixEntry[] {
+export function providerMatrixWithProofs(env: NodeJS.ProcessEnv = process.env, proofs: ProviderProof[] = [], now = Date.now()): ProviderMatrixEntry[] {
   const base = providerMatrix(env);
   return base.map((entry) => {
-    const proof = proofs.find((candidate) => candidate.surface === entry.surface && candidate.expiresAt > now && candidate.verifiedAt <= now + 30_000 && candidate.inboundText && candidate.inboundImage && candidate.outboundText && candidate.outboundImage);
+    const proof = proofs.find((candidate) => {
+      if (candidate.surface !== entry.surface || candidate.expiresAt <= now || candidate.verifiedAt > now + 30_000 || !candidate.inboundText || !candidate.inboundImage || !candidate.outboundText || !candidate.outboundImage) return false;
+      const checks = normalizeProviderSmokeChecks(candidate.checks, now, candidate.verifiedAt);
+      return checks?.length === 4;
+    });
     if (!proof) return entry;
     return { ...entry, liveProof: "verified", proofExpiresAt: proof.expiresAt, proofCorrelationId: proof.correlationId, missing: undefined };
   });

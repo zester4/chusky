@@ -13,6 +13,13 @@ import { createXchatCrcResponse, XchatAdapter } from "./xchat.js";
 import { ChannelDebouncer } from "./debounce.js";
 import { logger } from "../logger.js";
 
+export const SLACK_BOT_SCOPES = [
+  "app_mentions:read", "channels:history", "channels:read", "chat:write",
+  "groups:history", "groups:read", "im:history", "im:read",
+  "mpim:history", "mpim:read", "reactions:read", "reactions:write",
+  "users:read", "files:read", "files:write",
+] as const;
+
 interface ChannelRouteOptions {
   gateway: ChannelGateway;
   slack?: { adapter: SlackAdapter; signingSecret: string };
@@ -40,8 +47,7 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
       if (!claim) return c.json({ ok: false, error: "Invalid or expired Slack link code" }, 401);
       const state = randomBytes(24).toString("base64url");
       await createChannelOAuthState(claim.userId, hashCliSecret(state));
-      const scopes = ["app_mentions:read", "channels:history", "channels:read", "chat:write", "groups:history", "groups:read", "im:history", "im:read", "mpim:history", "mpim:read", "reactions:read", "reactions:write", "users:read", "files:read"];
-      const params = new URLSearchParams({ client_id: config.slackClientId, redirect_uri: config.slackRedirectUri, state, scope: scopes.join(",") });
+      const params = new URLSearchParams({ client_id: config.slackClientId, redirect_uri: config.slackRedirectUri, state, scope: SLACK_BOT_SCOPES.join(",") });
       return c.redirect(`https://slack.com/oauth/v2/authorize?${params.toString()}`);
     });
 

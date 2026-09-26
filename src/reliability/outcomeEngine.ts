@@ -7,6 +7,17 @@ export interface OutcomeReadAdapter {
   read: (input: { toolSlug: string; provider?: string; check: OutcomeCheck }) => Promise<{ observed?: Record<string, unknown>; evidenceRef?: string; provider?: string; observedAt?: number }>;
 }
 
+/** Trusted mission evidence must describe verified fields, never model-authored check prose. */
+export function verifiedOutcomeEvidenceSummary(check: OutcomeCheck): string {
+  const fields = Object.keys(check.expected ?? {})
+    .filter((key) => !/token|secret|password|credential|cookie|authorization|private.?key/i.test(key))
+    .map((key) => key.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 80))
+    .filter(Boolean)
+    .sort()
+    .slice(0, 20);
+  return `Provider state verified by ${check.toolSlug ?? "read-only action"}; expected fields matched: ${fields.join(", ")}.`;
+}
+
 /** Execute provider-backed checks through a read-only adapter and persist the proof. */
 export async function executeOutcomeVerification(input: {
   ownerId: number;
@@ -30,6 +41,10 @@ export async function executeOutcomeVerification(input: {
     }
     if (!check.toolSlug || !isReadOnlyToolSlug(check.toolSlug)) {
       results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: "Provider outcome checks must use a known read-only tool." });
+      continue;
+    }
+    if (!check.expected || typeof check.expected !== "object" || Array.isArray(check.expected) || Object.keys(check.expected).length === 0) {
+      results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: "Provider outcome checks must declare non-empty expected state fields; a read alone does not prove the outcome." });
       continue;
     }
     if (!input.adapter) {

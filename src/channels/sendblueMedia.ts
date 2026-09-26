@@ -56,3 +56,7 @@ export async function persistSendblueMedia(userId: number, images: GeneratedMedi
 export async function persistWhatsAppMedia(userId: number, images: GeneratedMedia[] = [], files: GeneratedMedia[] = []): Promise<ChannelAttachment[]> {
   return persistGeneratedMedia(userId, images, files, "whatsapp");
 }
+
+export async function persistSlackMedia(userId: number, images: GeneratedMedia[] = [], files: GeneratedMedia[] = []): Promise<ChannelAttachment[]> {
+  return persistGeneratedMedia(userId, images, files, "slack");
+}

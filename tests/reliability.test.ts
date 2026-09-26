@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { assessReliability, makeQuotaDecision, verifyOutcome } from "../src/reliability/evaluator.js";
 import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
@@ -15,6 +16,7 @@ import { verifyMeetingFollowThrough } from "../src/meetings/followThroughVerific
 import { detectBusinessOpportunities } from "../src/autonomy/opportunityDetectors.js";
 import { providerMatrixWithProofs } from "../src/reliability/providerMatrix.js";
 import { runProviderSmokeSuite } from "../src/reliability/providerSmoke.js";
+import type { ProviderProof, ProviderSmokeCapability } from "../src/reliability/contracts.js";
 import { buildReadinessReport } from "../src/reliability/readiness.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability/quotas.js";
 
@@ -22,7 +24,7 @@ test("outcome verification rejects stale or missing provider evidence and accept
   const now = 1_000_000;
   const verified = verifyOutcome({ ownerId: 10, missionId: "mis_1", now, checks: [{ id: "crm", kind: "provider_read", description: "Lead exists", freshnessMs: 60_000, expected: { status: "qualified" } }], results: [{ checkId: "crm", status: "passed", observed: { status: "qualified" }, observedAt: now - 10_000, evidenceRef: "crm:lead_1" }] });
   assert.equal(verified.status, "verified");
-  const stale = verifyOutcome({ ownerId: 10, now, checks: [{ id: "crm", kind: "provider_read", description: "Lead exists", freshnessMs: 60_000 }], results: [{ checkId: "crm", status: "passed", observedAt: now - 61_000 }] });
+  const stale = verifyOutcome({ ownerId: 10, now, checks: [{ id: "crm", kind: "provider_read", description: "Lead exists", freshnessMs: 60_000, expected: { status: "qualified" } }], results: [{ checkId: "crm", status: "passed", observedAt: now - 61_000 }] });
   assert.equal(stale.status, "failed");
   assert.match(stale.unresolved[0]!, /stale/);
 });
@@ -172,7 +174,7 @@ test("memory conflict detection preserves competing evidence and marks review qu
 
 test("provider outcome engine only executes read-only checks and persists proof", async () => {
   await initStore({ memoryOnly: true });
-  const result = await executeOutcomeVerification({ ownerId: 21, missionId: "mis_engine", checks: [{ id: "read", kind: "provider_read", description: "record is qualified", toolSlug: "CRM_GET_RECORD", expected: { status: "qualified" } }, { id: "write", kind: "provider_read", description: "must never execute", toolSlug: "CRM_UPDATE_RECORD" }], adapter: { read: async ({ toolSlug }) => { assert.equal(toolSlug, "CRM_GET_RECORD"); return { observed: { status: "qualified" }, evidenceRef: "crm:1", observedAt: Date.now() }; } } });
+  const result = await executeOutcomeVerification({ ownerId: 21, missionId: "mis_engine", checks: [{ id: "read", kind: "provider_read", description: "record is qualified", toolSlug: "CRM_GET_RECORD", expected: { status: "qualified" } }, { id: "write", kind: "provider_read", description: "must never execute", toolSlug: "CRM_UPDATE_RECORD", expected: { status: "qualified" } }], adapter: { read: async ({ toolSlug }) => { assert.equal(toolSlug, "CRM_GET_RECORD"); return { observed: { status: "qualified" }, evidenceRef: "crm:1", observedAt: Date.now() }; } } });
   assert.equal(result.status, "uncertain");
   assert.ok(result.unresolved.some((item) => item.includes("read-only")));
 });
@@ -184,13 +186,15 @@ test("Composio outcome reads execute only exact available read tools and bound t
     now: () => 1234,
     execute: async (slug, args) => { executed.push(`${slug}:${String(args.message_id)}`); return { data: { status: "sent", nested: [{ password: "private", label: "ok" }] } }; },
   });
-  const observed = await adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "mail", kind: "provider_read", description: "Message was sent", arguments: { message_id: "m1" } } });
+  const observed = await adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "mail", kind: "provider_read", description: "Message was sent", arguments: { message_id: "m1" }, expected: { status: "sent" } } });
   assert.deepEqual(executed, ["GMAIL_GET_MESSAGE:m1"]);
   assert.equal(observed.provider, "gmail");
   assert.equal(observed.observedAt, 1234);
   await assert.rejects(() => adapter.read({ toolSlug: "GMAIL_SEND_EMAIL", check: { id: "write", kind: "provider_read", description: "write", arguments: {} } }), /read-only/);
   const restricted = createComposioOutcomeReadAdapter({ availableToolSlugs: ["CRM_GET_LEAD"], allowedToolSlugs: ["GMAIL_GET_MESSAGE"], execute: async () => ({}) });
   await assert.rejects(() => restricted.read({ toolSlug: "CRM_GET_LEAD", check: { id: "policy", kind: "provider_read", description: "not granted", arguments: {} } }), /active tool policy/);
+  const mixedAction = createComposioOutcomeReadAdapter({ availableToolSlugs: ["GMAIL_GET_AND_SEND_EMAIL"], execute: async () => { throw new Error("mixed read/write action must not execute"); } });
+  await assert.rejects(() => mixedAction.read({ toolSlug: "GMAIL_GET_AND_SEND_EMAIL", check: { id: "mixed", kind: "provider_read", description: "must fail closed", arguments: {} } }), /read-only/);
   await assert.rejects(() => adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "secret", kind: "provider_read", description: "read", arguments: { password: "never" } } }), /not allowed/);
   assert.equal(executed.length, 1);
 });
@@ -206,6 +210,19 @@ test("outcome engine ignores model-supplied provider pass results without a prov
   assert.match(result.unresolved[0]!, /No provider read adapter/);
 });
 
+test("provider reads without explicit expected state cannot certify a mission outcome", async () => {
+  let reads = 0;
+  const result = await executeOutcomeVerification({
+    ownerId: 212,
+    missionId: "mis_unbounded_read",
+    checks: [{ id: "any_read", kind: "provider_read", description: "Lead source URLs are verified", toolSlug: "CRM_GET_LEAD" }],
+    adapter: { read: async () => { reads += 1; return { observed: { status: "qualified" }, provider: "crm", evidenceRef: "real-read", observedAt: Date.now() }; } },
+  });
+  assert.equal(reads, 0);
+  assert.equal(result.status, "uncertain");
+  assert.match(result.unresolved.join(" "), /no expected state fields/i);
+});
+
 test("persisted outcome observations redact sensitive fields recursively and omit read arguments", () => {
   const result = verifyOutcome({ ownerId: 211, checks: [{ id: "read", kind: "provider_read", description: "Read", toolSlug: "GMAIL_GET_MESSAGE", arguments: { message_id: "private-id" } }], results: [{ checkId: "read", status: "passed", provider: "gmail", evidenceRef: "proof", observedAt: 100, observed: { nested: [{ password: "hidden", label: "visible" }] } }], now: 100 });
   assert.equal("arguments" in result.checks[0]!, false);
@@ -217,6 +234,36 @@ test("mission replay and operator timeline are deterministic", () => {
   assert.equal(replayMission(mission).status, "passed");
   const timeline = buildOperatorTimeline({ mission, trace: [], approvals: [] });
   assert.equal(timeline.at(-1)?.type, "mission.completed");
+});
+
+test("persisted mission replay pairs exact approval lifecycle IDs and rejects incomplete history", () => {
+  const mission = { id: "mis_approval_replay", userId: 1, title: "x", objective: "x", definitionOfDone: "x", status: "completed" as const, result: "done", steps: [], budget: { maxDurationSeconds: 1, maxSteps: 1, maxToolCalls: 1, maxCost: 1 }, consumedSteps: 0, toolCalls: 0, cost: 0, createdAt: 1, updatedAt: 7, events: [
+    { id: "e1", type: "started" as const, message: "started", at: 1 },
+    { id: "e2", type: "checkpointed" as const, message: "before approval", at: 2 },
+    { id: "e3", type: "approval_waiting" as const, message: "Approve action", at: 3, metadata: { approvalId: "appr_exact" } },
+    { id: "e4", type: "approval_resumed" as const, message: "Approved", at: 4, metadata: { approvalId: "appr_exact" } },
+    { id: "e5", type: "checkpointed" as const, message: "after approval", at: 5 },
+    { id: "e6", type: "completed" as const, message: "done", at: 6 },
+  ], version: 1 };
+  assert.equal(replayMission(mission).status, "passed");
+
+  const pending = { ...mission, events: mission.events.filter((event) => event.id !== "e4") };
+  assert.ok(replayMission(pending).violations.includes("pending_approval_at_terminal_state"));
+
+  const mismatched = { ...mission, events: mission.events.map((event) => event.id === "e4" ? { ...event, metadata: { approvalId: "appr_other" } } : event) };
+  assert.ok(replayMission(mismatched).violations.includes("approval_resumed_without_matching_wait"));
+
+  const missingId = { ...mission, events: mission.events.map((event) => event.id === "e3" ? { ...event, metadata: undefined } : event) };
+  assert.ok(replayMission(missingId).violations.includes("approval_waiting_without_id"));
+
+  const legacy = { ...mission, events: [
+    { id: "l1", type: "started" as const, message: "started", at: 1 },
+    { id: "l2", type: "checkpointed" as const, message: "checkpoint", at: 2 },
+    { id: "l3", type: "waiting" as const, message: "Approve or deny TOOL (appr_legacy) before the mission can continue.", at: 3 },
+    { id: "l4", type: "resumed" as const, message: "Approval appr_legacy granted; mission resumed from its checkpoint.", at: 4 },
+    { id: "l5", type: "completed" as const, message: "done", at: 5 },
+  ] };
+  assert.ok(replayMission(legacy).violations.includes("legacy_approval_wait_missing_structured_lifecycle"));
 });
 
 test("approval escalation claims once and fails closed without a provider adapter", async () => {
@@ -245,15 +292,21 @@ test("meeting follow-through and opportunity detection fail closed on missing re
 });
 
 test("provider certification requires fresh proof for every modality", async () => {
+  const capabilities: ProviderSmokeCapability[] = ["inbound_text", "inbound_image", "outbound_text", "outbound_image"];
   const proofs = await runProviderSmokeSuite([{ surface: "web", run: async () => [
-    { name: "inbound text", status: "passed", inboundText: true },
-    { name: "inbound image", status: "passed", inboundImage: true },
-    { name: "outbound text", status: "passed", outboundText: true },
-    { name: "outbound image", status: "passed", outboundImage: true },
+    ...capabilities.map((capability) => ({ capability, status: "passed" as const, observedAt: 9_000, evidenceHash: createHash("sha256").update(capability).digest("hex") })),
   ] }], 10_000, 60_000);
   assert.equal(proofs.length, 1);
   assert.equal(providerMatrixWithProofs({}, proofs, 10_001).find((entry) => entry.surface === "web")?.liveProof, "verified");
   assert.equal(providerMatrixWithProofs({}, proofs, 70_001).find((entry) => entry.surface === "web")?.liveProof, "configured_unverified");
+
+  const missingCapability = await runProviderSmokeSuite([{ surface: "web", run: async () => capabilities.slice(0, 3).map((capability) => ({ capability, status: "passed" as const, observedAt: 9_000, evidenceHash: createHash("sha256").update(capability).digest("hex") })) }], 10_000);
+  assert.equal(missingCapability.length, 0);
+  const repeatedEvidence = await runProviderSmokeSuite([{ surface: "web", run: async () => capabilities.map((capability) => ({ capability, status: "passed" as const, observedAt: 9_000, evidenceHash: "a".repeat(64) })) }], 10_000);
+  assert.equal(repeatedEvidence.length, 0);
+
+  const legacyProof = { ...proofs[0]!, checks: [{ name: "one generic check", status: "passed" }] } as unknown as ProviderProof;
+  assert.equal(providerMatrixWithProofs({}, [legacyProof], 10_001).find((entry) => entry.surface === "web")?.liveProof, "configured_unverified");
 });
 
 test("readiness blocks ephemeral persistence and reports unverified providers", () => {

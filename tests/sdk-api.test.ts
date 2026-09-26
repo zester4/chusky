@@ -4,7 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -133,11 +133,16 @@ test("operator outcome verification reads current provider state instead of trus
   const updatedMission = await getMission(ownerId, mission.id);
   assert.equal(updatedMission?.verification?.verified, true);
   assert.equal(updatedMission?.evidence?.[0]?.verifiedBy, "system");
+  assert.match(updatedMission?.evidence?.[0]?.summary ?? "", /CRM_GET_LEAD.*status/i);
+  assert.doesNotMatch(updatedMission?.evidence?.[0]?.summary ?? "", /Lead is qualified/);
 });
 
 test("root provider smoke attestation persists only a signed, complete proof", async () => {
   const api = app();
-  const proof = { surface: "web", inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, verifiedAt: Date.now(), expiresAt: Date.now() + 60 * 60_000, correlationId: "smoke_web_1", checks: [{ name: "web round trip", status: "passed" }] };
+  const verifiedAt = Date.now();
+  const proof = { surface: "web", inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, verifiedAt, expiresAt: verifiedAt + 60 * 60_000, correlationId: "smoke_web_1", checks: [
+    ...["inbound_text", "inbound_image", "outbound_text", "outbound_image"].map((capability) => ({ capability, status: "passed", observedAt: verifiedAt - 1_000, evidenceHash: createHash("sha256").update(`${capability}:receipt`).digest("hex") })),
+  ] };
   const signature = createHmac("sha256", "provider-smoke-secret").update(JSON.stringify(proof)).digest("base64url");
   const response = await api.fetch(new Request("http://local/v1/operator/provider-proof", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-Provider-Proof-Signature": signature, "Content-Type": "application/json" }, body: JSON.stringify({ proof }) }));
   assert.equal(response.status, 201);
@@ -145,6 +150,11 @@ test("root provider smoke attestation persists only a signed, complete proof", a
   const matrix = await api.fetch(new Request("http://local/v1/operator/provider-matrix", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "smoke-owner" } }));
   const web = ((await matrix.json()) as { data: Array<{ surface: string; liveProof: string; proofCorrelationId?: string }> }).data.find((entry) => entry.surface === "web");
   assert.deepEqual(web, { surface: "web", inboundText: true, inboundImage: true, outboundText: true, outboundImage: true, liveProof: "verified", proofExpiresAt: proof.expiresAt, proofCorrelationId: "smoke_web_1" });
+
+  const incompleteProof = { ...proof, checks: proof.checks.slice(0, 1) };
+  const incompleteSignature = createHmac("sha256", "provider-smoke-secret").update(JSON.stringify(incompleteProof)).digest("base64url");
+  const incomplete = await api.fetch(new Request("http://local/v1/operator/provider-proof", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-Provider-Proof-Signature": incompleteSignature, "Content-Type": "application/json" }, body: JSON.stringify({ proof: incompleteProof }) }));
+  assert.equal(incomplete.status, 400, "one generic passed check cannot attest four separate capabilities");
 
   const invalid = await api.fetch(new Request("http://local/v1/operator/provider-proof", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-Provider-Proof-Signature": "invalid", "Content-Type": "application/json" }, body: JSON.stringify({ proof }) }));
   assert.equal(invalid.status, 401);
@@ -212,6 +222,41 @@ test("SDK run artifacts expose downloadable metadata without workspace paths or 
   assert.deepEqual(artifacts, [{ id: "artifact_pdf_1", name: "proposal.pdf", type: "pdf", contentType: "application/pdf", size: 9 }]);
   assert.equal("data" in (artifacts?.[0] ?? {}), false);
   assert.equal("path" in (artifacts?.[0] ?? {}), false);
+});
+
+test("SDK run images expose only persisted owner-asset metadata", () => {
+  const images = sdkRunImages([
+    { assetId: "img_saved_1", mediaType: "image/png", data: Buffer.from("image-bytes") },
+    { mediaType: "image/png", data: Buffer.from("ephemeral") },
+    { assetId: "img_bad_type", mediaType: "image/svg+xml", data: Buffer.from("svg") },
+  ]);
+  assert.deepEqual(images, [{ id: "img_saved_1", name: "generated-image.png", contentType: "image/png", size: 11 }]);
+  assert.equal("data" in (images?.[0] ?? {}), false);
+  assert.equal("downloadUrl" in (images?.[0] ?? {}), false);
+});
+
+test("SDK generated image downloads are fresh, private, and owner-scoped", async () => {
+  const externalId = "generated-image-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const session = await getSession(userId);
+  session.imageAssets.push({ id: "img_saved_1", userId, name: "generated-image.png", purpose: "generated", description: "", tags: [], r2Key: `images/${userId}/private-image.png`, contentType: "image/png", size: 11, createdAt: Date.now(), updatedAt: Date.now() });
+  await saveSession(userId, session);
+  const original = { account: config.r2AccountId, keyId: config.r2AccessKeyId, secret: config.r2SecretAccessKey, bucket: config.r2Bucket };
+  Object.assign(config, { r2AccountId: "0123456789abcdef0123456789abcdef", r2AccessKeyId: "test-access-key", r2SecretAccessKey: "test-secret-key", r2Bucket: "test-private-bucket" });
+  try {
+    const api = app();
+    const response = await api.fetch(new Request("http://local/v1/images/img_saved_1", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId } }));
+    assert.equal(response.status, 200);
+    const result = await response.json() as { id: string; downloadUrl: string; expiresAt: string; [key: string]: unknown };
+    assert.equal(result.id, "img_saved_1");
+    assert.match(result.downloadUrl, /^https:\/\/test-private-bucket\.0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\//);
+    assert.ok(Date.parse(result.expiresAt) > Date.now());
+    assert.equal("r2Key" in result, false);
+    const foreign = await api.fetch(new Request("http://local/v1/images/img_saved_1", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "generated-image-other" } }));
+    assert.equal(foreign.status, 404);
+  } finally {
+    Object.assign(config, { r2AccountId: original.account, r2AccessKeyId: original.keyId, r2SecretAccessKey: original.secret, r2Bucket: original.bucket });
+  }
 });
 
 test("SDK artifact download returns the owner-scoped binary with download headers", async () => {
@@ -452,6 +497,12 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-mission-test");
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "mission-owner", "Content-Type": "application/json", "Idempotency-Key": "mission-request-1" };
+  const unverifiable = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Strict mission", objective: "Do the task.", definitionOfDone: "The result is verified.", verificationMode: "strict" }) }));
+  assert.equal(unverifiable.status, 400);
+  assert.match(await unverifiable.text(), /required evidence criterion/i);
+  const invalidMode = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Invalid mode", objective: "Do the task.", definitionOfDone: "The result is verified.", verificationMode: "strcit", requiredEvidence: ["kind:tool_receipt"] }) }));
+  assert.equal(invalidMode.status, 400);
+  assert.match(await invalidMode.text(), /verificationMode must be either legacy or strict/i);
   const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
   const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(first.status, 201);
@@ -705,6 +756,20 @@ test("project scopes are enforced at the v1 boundary", async () => {
   const response = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }));
   assert.equal(response.status, 403);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "insufficient_scope");
+});
+
+test("image downloads require the dedicated images:read project scope", async () => {
+  const api = app(); const root = { Authorization: "Bearer sdk-test-key", "Content-Type": "application/json" };
+  const provision = await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "Image reader", scopes: ["images:read"] }) }));
+  const project = await provision.json() as { key: string };
+  const response = await api.fetch(new Request("http://local/v1/images/no-such-image", { headers: { Authorization: `Bearer ${project.key}`, "X-Chusky-User-Id": "customer" } }));
+  assert.equal(response.status, 404); // Scope passed; this owner's asset does not exist.
+
+  const deniedProvision = await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "No image scope", scopes: ["threads:read"] }) }));
+  const deniedProject = await deniedProvision.json() as { key: string };
+  const denied = await api.fetch(new Request("http://local/v1/images/no-such-image", { headers: { Authorization: `Bearer ${deniedProject.key}`, "X-Chusky-User-Id": "customer" } }));
+  assert.equal(denied.status, 403);
+  assert.match((await denied.json() as { error: { message: string } }).error.message, /images:read/);
 });
 
 test("verified dashboard users can only manage their own bounded project keys", async () => {

@@ -15,6 +15,7 @@
     "sdk:version": "node scripts/bump-sdk-version.mjs",
     "sdk:publish": "node scripts/publish-sdk.mjs",
     "agent:upgrade": "tsx scripts/record-agent-upgrade.ts",
+    "provider:webhook-smoke": "tsx scripts/provider-webhook-smoke.ts",
     "start": "node dist/index.js",
     "cli": "tsx src/cli.ts",
     "chat": "tsx src/cli.ts chat",

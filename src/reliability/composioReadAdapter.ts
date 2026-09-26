@@ -62,6 +62,7 @@ export function createComposioOutcomeReadAdapter(input: {
       if (!isReadOnlyToolSlug(toolSlug) || isRiskyToolSlug(toolSlug)) throw new Error("Provider outcome checks must use an exact read-only tool.");
       const args = check.arguments ?? {};
       validateReadArguments(args);
+      validateReadArguments(check.expected, "expected");
       const result = await input.execute(toolSlug, args);
       const observedAt = (input.now ?? Date.now)();
       const argumentsHash = createHash("sha256").update(JSON.stringify(args)).digest("hex").slice(0, 24);

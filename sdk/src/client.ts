@@ -1,6 +1,7 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
 import { readNdjson } from "./stream.js";
 import type { A2AMessageInput } from "./types.js";
+import type { ImageDownload } from "./types.js";
 import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
@@ -13,6 +14,7 @@ export class Chusky {
   readonly tasks: TasksResource;
   readonly approvals: ApprovalsResource;
   readonly files: FilesResource;
+  readonly images: ImagesResource;
   readonly audit: AuditResource;
   readonly webhooks: WebhooksResource;
   readonly usage: UsageResource;
@@ -67,6 +69,7 @@ export class Chusky {
     this.tasks = new TasksResource(this);
     this.approvals = new ApprovalsResource(this);
     this.files = new FilesResource(this);
+    this.images = new ImagesResource(this);
     this.audit = new AuditResource(this);
     this.webhooks = new WebhooksResource(this);
     this.usage = new UsageResource(this);
@@ -340,6 +343,11 @@ export class FilesResource {
     if (!response.ok) throw new ChuskyError(`Upload failed with HTTP ${response.status}`, { code: "upload_failed", status: response.status });
     return this.complete(intent.id, options?.idempotencyKey ? { ...options, idempotencyKey: `${options.idempotencyKey}:complete` } : options);
   }
+}
+export class ImagesResource {
+  constructor(private readonly client: Chusky) {}
+  /** Get a fresh, short-lived download URL for an image owned by this account. */
+  get(imageId: string, options?: RequestOptions): Promise<ImageDownload> { return this.client.request(`/images/${encodeURIComponent(imageId)}`, {}, options); }
 }
 export class AuditResource {
   constructor(private readonly client: Chusky) {}

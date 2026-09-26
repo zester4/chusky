@@ -20,6 +20,10 @@ code must not parse provider payloads directly.
    signatures use `X-Hub-Signature-256`; webhook verification failures are non-200.
 6. Media is bounded by MIME type, size, and download timeout. Raw provider event
    payloads are not persisted.
+7. Slack generated images and files are first written to the owner's R2
+   namespace, then uploaded with Slack's external-file upload APIs using the
+   files:write scope. A stale or uncertain upload remains ambiguous for
+   operator review; it is never replayed automatically.
 
 ## Adding a provider
 
@@ -28,4 +32,3 @@ provider module. Register its routes in `routes.ts`, and keep the route limited 
 verification, normalization, acknowledgement, and dispatch to the gateway. Put
 provider-specific rendering in the adapter; do not add provider branches to
 `agent.ts` or `store.ts` beyond the normalized contracts.
-

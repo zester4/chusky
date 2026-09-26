@@ -17,7 +17,7 @@ import { normalizeInboundImages } from "../src/channels/imageMedia.js";
 import { channelAgentRunOptions, createAgentChannelHandler } from "../src/channels/agentHandler.js";
 import { SHARED_CHANNEL_TOOL_DENY } from "../src/sharedChannelPolicy.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { registerChannelRoutes } from "../src/channels/routes.js";
+import { registerChannelRoutes, SLACK_BOT_SCOPES } from "../src/channels/routes.js";
 import { Hono } from "hono";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "../src/telegramWebhook.js";
 import { acquireUserLock, appendChannelConversationMessages, claimChannelInboundEvent, createChannelInboundEvent, createChannelLinkCode, createSendblueGroupLinkCode, getChannelConversation, getOutbox, getSendblueGroupAuthorization, initStore, listOutbox, releaseUserLock, renewUserLock, setChannelConversationModel, updateChannelInboundEvent } from "../src/store.js";
@@ -644,6 +644,74 @@ test("provider adapters use channel-specific delivery APIs", async () => {
   assert.equal(requests[1].url.includes("/P1/messages"), true);
   assert.equal(requests[2].url.endsWith("/send-message"), true);
   assert.equal(requests[2].body.from_number, "+15550002");
+});
+
+test("Slack's OAuth installation requests the file-write scope used by generated-media delivery", () => {
+  assert.ok(SLACK_BOT_SCOPES.includes("files:write"));
+  assert.ok(SLACK_BOT_SCOPES.includes("chat:write"));
+});
+
+test("Slack uploads owner-scoped R2 media with the current external-file API and shares it in the same thread", async () => {
+  const calls: Array<{ url: string; init?: RequestInit; body?: any }> = [];
+  const bytes = Buffer.from("verified-image-bytes");
+  const fetcher = (async (url: string | URL, init?: RequestInit) => {
+    const address = String(url);
+    if (address === "https://files.slack.com/upload/v1/one-time-upload") {
+      calls.push({ url: address, init });
+      assert.equal(init?.redirect, "error");
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/octet-stream");
+      assert.deepEqual(Buffer.from(init?.body as Uint8Array), bytes);
+      return new Response("OK", { status: 200 });
+    }
+    const body = JSON.parse(String(init?.body));
+    calls.push({ url: address, init, body });
+    if (address.endsWith("/files.getUploadURLExternal")) {
+      assert.equal(body.filename, "proposal.png");
+      assert.equal(body.length, bytes.length);
+      assert.equal(body.alt_text, "proposal.png");
+      return new Response(JSON.stringify({ ok: true, file_id: "F-UPLOAD-1", upload_url: "https://files.slack.com/upload/v1/one-time-upload" }), { status: 200 });
+    }
+    assert.equal(address.endsWith("/files.completeUploadExternal"), true);
+    assert.deepEqual(body.files, [{ id: "F-UPLOAD-1", title: "proposal.png" }]);
+    assert.equal(body.channel_id, "C-1");
+    assert.equal(body.thread_ts, "1710000000.000100");
+    assert.equal(body.initial_comment, "Here is the image");
+    return new Response(JSON.stringify({ ok: true, files: [{ id: "F-UPLOAD-1" }] }), { status: 200 });
+  }) as typeof fetch;
+  const loadedKeys: string[] = [];
+  const adapter = new SlackAdapter("xoxb-token", fetcher, async (key) => {
+    loadedKeys.push(key);
+    return bytes;
+  });
+  const receipt = await adapter.send({
+    accountId: "account_7", userId: 7,
+    target: { provider: "slack", conversationId: "C-1", workspaceId: "T-1", threadId: "1710000000.000100" },
+    text: "Here is the image", attachments: [{ id: "slack/7/proposal.png", kind: "image", mimeType: "image/png", filename: "proposal.png" }],
+    idempotencyKey: "slack-image-1",
+  });
+  assert.deepEqual(loadedKeys, ["slack/7/proposal.png"]);
+  assert.equal(calls.length, 3);
+  assert.equal(receipt.providerMessageId, "F-UPLOAD-1");
+  assert.deepEqual(receipt.metadata, { channelId: "C-1", fileCount: "1" });
+});
+
+test("Slack outbound media rejects cross-owner R2 keys and untrusted upload URLs", async () => {
+  let requests = 0;
+  const fetcher = (async () => {
+    requests++;
+    return new Response(JSON.stringify({ ok: true, file_id: "F-1", upload_url: "https://files.evil.example/upload" }), { status: 200 });
+  }) as typeof fetch;
+  const adapter = new SlackAdapter("xoxb-token", fetcher, async () => Buffer.from("bytes"));
+  const base = {
+    accountId: "account_7", userId: 7,
+    target: { provider: "slack" as const, conversationId: "C-1", workspaceId: "T-1" },
+    attachments: [{ id: "slack/8/secret.png", kind: "image" as const, mimeType: "image/png", filename: "secret.png" }],
+    idempotencyKey: "slack-owner-boundary",
+  };
+  await assert.rejects(() => adapter.send(base), /sender's private R2 namespace/);
+  assert.equal(requests, 0);
+  await assert.rejects(() => adapter.send({ ...base, attachments: [{ ...base.attachments[0]!, id: "slack/7/safe.png" }] }), /untrusted external upload URL/);
+  assert.equal(requests, 1);
 });
 
 test("WhatsApp sends approved templates with Meta's documented payload", async () => {

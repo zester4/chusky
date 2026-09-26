@@ -16,6 +16,7 @@ import {
   resumeMission,
   startMission,
   updateMission,
+  verifyMission,
   waitMission,
   type MissionRecord,
 } from "../src/store.js";
@@ -155,6 +156,28 @@ test("strict server-side closeout blocks honestly until evidence verifies", asyn
   const blocked = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
   assert.equal(blocked?.status, "blocked");
   assert.match(blocked?.nextAction ?? "", /evidence|verify/i);
+});
+
+test("strict missions cannot be created or verified without evidence criteria", async () => {
+  const userId = 951011;
+  await assert.rejects(
+    () => createMission(userId, input({ idempotencyKey: "strict-without-evidence", verificationMode: "strict" })),
+    /requires at least one non-empty required evidence criterion/i,
+  );
+  await assert.rejects(
+    () => createMission(userId, input({ idempotencyKey: "strict-blank-evidence", verificationMode: "strict", requiredEvidence: ["  "] })),
+    /requires at least one non-empty required evidence criterion/i,
+  );
+
+  // Fail closed for strict records created by older code or migrated data.
+  const legacy = await createMission(userId, input({ idempotencyKey: "persisted-strict-without-evidence" }));
+  const started = await startMission(userId, legacy.id);
+  await completeMissionStep(userId, legacy.id, started!.currentStepId!, "A model-authored completion claim.");
+  await updateMission(userId, legacy.id, { verification: { mode: "strict", requiredEvidence: [], verified: false, unresolved: [] } });
+  const verified = await verifyMission(userId, legacy.id);
+  assert.equal(verified?.verification?.verified, false);
+  assert.match(verified?.verification?.unresolved.join(" ") ?? "", /no required evidence criteria/i);
+  assert.equal(await completeMission(userId, legacy.id, "Do not complete without evidence."), undefined);
 });
 
 test("mission replanning preserves verified steps and selects the next dependency-ready step", async () => {

@@ -52,7 +52,17 @@ const completed = await chusky.runs.wait(thread.id, run.id, {
 
 console.log(completed.status);
 console.log(completed.output ?? "The run did not produce text output.");
+
+// Generated image bytes are kept in the owner's private image store. Runs
+// include metadata only; refresh a short-lived download URL when needed.
+for (const image of completed.images ?? []) {
+  const download = await chusky.images.get(image.id);
+  console.log(download.contentType, download.downloadUrl, download.expiresAt);
+}
 ```
+
+Project-scoped API keys need the `images:read` scope to call `images.get()`.
+Treat its signed URL as a temporary secret and do not persist or publicly log it.
 
 For a reliability operation, `chusky.tools.list({ source: "native" })` and
 `chusky.tools.get(slug)` return the native JSON input schema. The SDK helper

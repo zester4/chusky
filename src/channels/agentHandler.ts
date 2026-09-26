@@ -16,7 +16,7 @@ import type { ChannelMessageHandler } from "./gateway.js";
 import type { ChannelMediaError, ChuskyConversation, InboundMessage, OutboundMessage } from "./contracts.js";
 import type { ContentPart } from "../types.js";
 import { notifyTriggerApproval } from "../triggerWorkflow.js";
-import { persistSendblueMedia, persistWhatsAppMedia } from "./sendblueMedia.js";
+import { persistSendblueMedia, persistSlackMedia, persistWhatsAppMedia } from "./sendblueMedia.js";
 import { transcodeSendblueCafToOgg } from "./sendblueAudio.js";
 import { putR2Object, r2Configured } from "../lib/storage/r2.js";
 import { sharedGroupInstructions } from "./groupInstructions.js";
@@ -217,7 +217,7 @@ async function handleApproval(message: InboundMessage, conversation: ChuskyConve
     await saveConversation(approvalConversation, message, approval.request, result.text);
     if (result.cost) await addUsage(conversation.userId, result.cost);
     const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
-    const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
+    const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "slack" ? await persistSlackMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
     return reply(conversation, result.text, message.providerEventId, { kind: "approval", correlationId: approvalId, ...(attachments.length ? { attachments } : {}) });
   } catch (error) {
     return reply(conversation, `I approved the action, but it failed before completion: ${error instanceof Error ? error.message : String(error)}`.slice(0, 4000), message.providerEventId, { kind: "approval", correlationId: approvalId });
@@ -244,7 +244,7 @@ export function createAgentChannelHandler(): ChannelMessageHandler {
       await saveConversation(conversation, normalizedMessage, prepared.historyLabel, result.text);
       if (result.cost) await addUsage(conversation.userId, result.cost);
       const outboundImages = [...(result.generatedImages ?? []), ...(result.retrievedImages ?? [])];
-      const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
+      const attachments = conversation.provider === "sendblue" ? await persistSendblueMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "whatsapp" ? await persistWhatsAppMedia(conversation.userId, outboundImages, result.generatedFiles) : conversation.provider === "slack" ? await persistSlackMedia(conversation.userId, outboundImages, result.generatedFiles) : [];
       return reply(conversation, withPrivateLinks(result.text, result.privateLinks), message.providerEventId, { kind: "message", ...(attachments.length ? { attachments } : {}) });
     } catch (error) {
       if (error instanceof ApprovalRequiredError) {

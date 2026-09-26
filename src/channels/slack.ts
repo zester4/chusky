@@ -1,12 +1,16 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { basename } from "node:path";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage, ReplyTarget } from "./contracts.js";
+import { readR2Object } from "../lib/storage/r2.js";
 
 const SLACK_MAX_AGE_SECONDS = 5 * 60;
 const SLACK_MAX_FILE_BYTES = 25 * 1024 * 1024;
+const SLACK_MAX_OUTBOUND_FILES = 10;
 const SLACK_TRUSTED_HOSTS = new Set(["files.slack.com", "slack-files.com"]);
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
+type MediaLoader = (key: string) => Promise<Buffer>;
 
 function header(headers: Headers | Record<string, string | undefined>, name: string): string {
   if (headers instanceof Headers) return headers.get(name) ?? headers.get(name.toLowerCase()) ?? "";
@@ -122,7 +126,11 @@ export class SlackAdapter implements ChannelAdapter {
   readonly capabilities = CHANNEL_CAPABILITIES.slack;
   private readonly fetchImpl: FetchLike;
 
-  constructor(private readonly token: string | ((workspaceId?: string) => Promise<string | undefined>), fetchImpl: FetchLike = fetch) {
+  constructor(
+    private readonly token: string | ((workspaceId?: string) => Promise<string | undefined>),
+    fetchImpl: FetchLike = fetch,
+    private readonly loadMedia: MediaLoader = readR2Object,
+  ) {
     this.fetchImpl = fetchImpl;
   }
 
@@ -136,8 +144,50 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async send(message: OutboundMessage): Promise<DeliveryReceipt> {
+    const attachments = message.attachments ?? [];
+    if (attachments.length > SLACK_MAX_OUTBOUND_FILES) throw new Error("Slack supports at most 10 files in one delivery");
+    if (attachments.length) {
+      if (message.blocks?.length || message.interactive || message.template) throw new Error("Slack file uploads cannot be combined with interactive, block, or template messages");
+      const files: Array<{ id: string; title: string }> = [];
+      for (const attachment of attachments) files.push(await this.uploadAttachment(message, attachment));
+      const response = await this.api<any>("files.completeUploadExternal", {
+        files,
+        channel_id: message.target.conversationId,
+        ...(message.target.threadId ? { thread_ts: message.target.threadId } : {}),
+        ...(message.text?.trim() ? { initial_comment: message.text.slice(0, this.capabilities.maxTextLength) } : {}),
+      }, message.target.workspaceId);
+      const postedIds = Array.isArray(response.files) ? response.files.map((file: any) => file?.id).filter((id: unknown): id is string => typeof id === "string" && Boolean(id)) : [];
+      if (postedIds.length !== files.length || files.some((file) => !postedIds.includes(file.id))) throw new Error("Slack completed the upload without returning a receipt for every file");
+      const fileId = postedIds[0];
+      return { providerMessageId: fileId, deliveredAt: Date.now(), metadata: { channelId: message.target.conversationId, fileCount: String(files.length) } };
+    }
     const response = await this.api<any>("chat.postMessage", { channel: message.target.conversationId, text: message.text ?? "", ...(message.target.threadId ? { thread_ts: message.target.threadId } : {}), ...(message.blocks?.length ? { blocks: message.blocks } : {}) }, message.target.workspaceId);
     return { providerMessageId: String(response.ts ?? ""), deliveredAt: Date.now(), metadata: { channelId: String(response.channel ?? message.target.conversationId) } };
+  }
+
+  private async uploadAttachment(message: OutboundMessage, attachment: ChannelAttachment): Promise<{ id: string; title: string }> {
+    const ownerPrefix = "slack/" + message.userId + "/";
+    if (!attachment.id.startsWith(ownerPrefix) || attachment.id.split("/").some((part) => part === ".." || part === ".")) {
+      throw new Error("Slack outbound media must reference a verified file in the sender's private R2 namespace");
+    }
+    const bytes = await this.loadMedia(attachment.id);
+    if (!bytes.length || bytes.length > SLACK_MAX_FILE_BYTES) throw new Error("Slack outbound file is empty or exceeds the 25 MB limit");
+    const title = basename(attachment.filename || attachment.id).replace(/[\u0000-\u001f\u007f/\\]/g, "_").trim().slice(0, 200) || "chusky-file";
+    const details = await this.api<any>("files.getUploadURLExternal", { filename: title, length: bytes.length, ...(attachment.kind === "image" ? { alt_text: title } : {}) }, message.target.workspaceId);
+    if (typeof details.file_id !== "string" || !details.file_id || typeof details.upload_url !== "string") throw new Error("Slack did not return a valid external upload target");
+    const uploadUrl = new URL(details.upload_url);
+    if (uploadUrl.protocol !== "https:" || uploadUrl.hostname !== "files.slack.com" || uploadUrl.username || uploadUrl.password) {
+      throw new Error("Slack returned an untrusted external upload URL");
+    }
+    const uploaded = await this.fetchImpl(uploadUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: bytes as unknown as RequestInit["body"],
+      redirect: "error",
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!uploaded.ok) throw new Error("Slack external file upload failed (" + uploaded.status + ")");
+    return { id: details.file_id, title };
   }
 
   async edit(target: ReplyTarget, providerMessageId: string, text: string, blocks?: unknown[]): Promise<DeliveryReceipt> {

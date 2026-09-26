@@ -39,8 +39,13 @@ export const AGENT_UPGRADE_PRESETS = {
   ],
   mediaAutomation: [
     "Image posts, email attachments, and supported uploads can now be requested in ordinary conversation; Chusky attaches the clearly referenced current, generated, or saved image to the normal connected-app action.",
-    "Images are staged inside the owner-scoped Composio dispatch using the action's exact schema, with provider-specific upload and publish steps handled by bounded adapters.",
-    "Ambiguous image choices and grouped multi-action calls stop before execution, and completion is reported only after the provider confirms the final action.",
+    "Images are staged inside the owner-scoped Composio dispatch using exact schemas; Slack channel replies can upload generated images and artifacts from the sender's private R2 namespace.",
+    "Ambiguous image choices and grouped multi-action calls stop before execution; uncertain provider deliveries stay quarantined, and completion requires an external receipt.",
+  ],
+  generatedImageApi: [
+    "Completed API and SDK runs now include metadata for generated images saved to the owner's private image store.",
+    "The SDK refreshes a short-lived image download URL through an owner-scoped endpoint; image bytes, storage keys, and signed URLs are not persisted in run records.",
+    "The dashboard renders generated image previews, and project API keys require the dedicated images:read permission.",
   ],
   customMcp: [
     "Accounts can add third-party MCP servers from the dashboard or SDK; Chusky supports Streamable HTTP with legacy HTTP+SSE fallback and verifies discovery before saving.",

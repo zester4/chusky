@@ -30,6 +30,8 @@ const mission = await chusky.missions.create({
 
 The create call starts durable execution. Use an idempotency key for retries after a network timeout; reusing it with a different body is rejected.
 
+Strict verification must include at least one non-empty `requiredEvidence` criterion. A strict mission without criteria is rejected instead of being treated as proven merely because its steps finished. Omit `verificationMode` (or use `legacy`) only when step completion—not independently evidenced outcomes—is the intended contract.
+
 ## Observe proof, not just status
 
 ```ts
@@ -42,7 +44,9 @@ const events = await chusky.missions.events(missionId);
 
 ## Evidence and verification
 
-Agents and supervising applications can attach source receipts, tool receipts, artifacts, before/after checks, assertions, or human confirmations. Verification does not invent evidence: strict missions remain unverified until every step is complete and required evidence is satisfied.
+Agents and supervising applications can attach source receipts, tool receipts, artifacts, before/after checks, assertions, or human confirmations. An agent-supplied `verified: true` is not trusted as system verification; provider receipts and read-back checks must be recorded by trusted server paths. Strict missions remain unverified until every step is complete and required evidence is satisfied.
+
+For a `provider_read` outcome check, include a non-empty `expected` object. Chusky executes only an exact currently available read-only provider tool and marks the check passed only when the fresh response matches those expected fields. The check's prose description is not proof and is not copied into trusted mission evidence.
 
 ```ts
 await chusky.missions.evidence(missionId, {

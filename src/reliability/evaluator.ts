@@ -20,6 +20,10 @@ function hasEvidence(result: OutcomeCheckResult, kind: OutcomeCheck["kind"]): bo
   return typeof result.evidenceRef === "string" && result.evidenceRef.trim().length > 0;
 }
 
+function hasExpectedProviderState(check: OutcomeCheck): boolean {
+  return Boolean(check.expected && typeof check.expected === "object" && !Array.isArray(check.expected) && Object.keys(check.expected).length > 0);
+}
+
 function safeValue(value: unknown, depth = 0): unknown {
   if (typeof value === "string") return value.slice(0, 500);
   if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
@@ -61,9 +65,10 @@ export function verifyOutcome(input: {
       continue;
     }
     const missingTimestamp = check.kind === "provider_read" && check.freshnessMs !== undefined && result.observedAt === undefined;
+    const missingExpected = check.kind === "provider_read" && !hasExpectedProviderState(check);
     const stale = check.freshnessMs !== undefined && result.observedAt !== undefined && (result.observedAt > now + 30_000 || now - result.observedAt > check.freshnessMs);
-    if (hasEvidence(result, check.kind) && !missingTimestamp && !stale && sameExpected(result.observed, check.expected)) passed += check.required === false ? 0 : 1;
-    else if (check.required !== false) unresolved.push(`${check.id}: ${missingTimestamp ? "evidence timestamp is missing" : stale ? "evidence is stale or from the future" : result.reason || result.status || "failed"}`);
+    if (hasEvidence(result, check.kind) && !missingTimestamp && !missingExpected && !stale && sameExpected(result.observed, check.expected)) passed += check.required === false ? 0 : 1;
+    else if (check.required !== false) unresolved.push(`${check.id}: ${missingExpected ? "provider read has no expected state fields" : missingTimestamp ? "evidence timestamp is missing" : stale ? "evidence is stale or from the future" : result.reason || result.status || "failed"}`);
   }
   const status = unresolved.length === 0 && passed >= required ? "verified" : input.results.some((r) => r.status === "uncertain") ? "uncertain" : "failed";
   return {

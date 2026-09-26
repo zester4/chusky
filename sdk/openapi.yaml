@@ -179,6 +179,8 @@ paths:
     delete: { summary: Delete an owned R2 object and its file record, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /files/{fileId}/complete:
     post: { summary: Verify an uploaded R2 object before it becomes downloadable, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: Verified file } } }
+  /images/{imageId}:
+    get: { summary: Get a fresh short-lived download URL for an owned image asset, parameters: [{ name: imageId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Owner-scoped image metadata and temporary URL }, '404': { description: Image asset not found for this owner } } }
   /audit-events:
     get: { summary: List bounded SDK audit events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /company/runs:
@@ -395,15 +397,16 @@ paths:
                     correlationId: { type: string, maxLength: 160 }
                     checks:
                       type: array
-                      minItems: 1
-                      maxItems: 20
+                      minItems: 4
+                      maxItems: 4
                       items:
                         type: object
-                        required: [name, status]
+                        required: [capability, status, observedAt, evidenceHash]
                         properties:
-                          name: { type: string, maxLength: 120 }
+                          capability: { type: string, enum: [inbound_text, inbound_image, outbound_text, outbound_image] }
                           status: { type: string, const: passed }
-                          detail: { type: string, maxLength: 500 }
+                          observedAt: { type: integer, description: "Provider event or delivery receipt observation time; must be fresh at attestation." }
+                          evidenceHash: { type: string, pattern: '^[a-f0-9]{64}$', description: "SHA-256 digest of the provider event or receipt identifier. Never submit raw provider IDs or payloads." }
       responses:
         '201': { description: Persisted provider proof }
         '400': { description: Invalid or stale proof }

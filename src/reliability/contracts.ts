@@ -163,6 +163,16 @@ export interface ReliabilityHealth {
 }
 
 /** A bounded, persisted proof that a real transport smoke test completed. */
+export type ProviderSmokeCapability = "inbound_text" | "inbound_image" | "outbound_text" | "outbound_image";
+
+export interface ProviderSmokeCheck {
+  capability: ProviderSmokeCapability;
+  status: "passed";
+  observedAt: number;
+  /** SHA-256 digest of the provider event or receipt identifier; raw IDs are never persisted. */
+  evidenceHash: string;
+}
+
 export interface ProviderProof {
   surface: string;
   inboundText: boolean;
@@ -172,7 +182,7 @@ export interface ProviderProof {
   verifiedAt: number;
   expiresAt: number;
   correlationId: string;
-  checks: Array<{ name: string; status: "passed" | "failed"; detail?: string }>;
+  checks: ProviderSmokeCheck[];
 }
 
 export interface CompiledAutonomyPolicy {

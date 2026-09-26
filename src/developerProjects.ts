@@ -5,7 +5,7 @@ import { getSession, saveSession, type SdkProjectRecord } from "./store.js";
 export const SELF_SERVICE_PROJECT_SCOPES = [
   "*", "threads:read", "threads:write", "tasks:read", "tasks:write", "workflows:read", "workflows:write",
   "agents:read", "agents:write",
-  "approvals:read", "approvals:write", "files:read", "files:write",
+  "approvals:read", "approvals:write", "files:read", "files:write", "images:read",
   "webhooks:read", "webhooks:write", "audit-events:read", "usage:read", "company:read",
   "tools:read", "skills:read", "artifacts:read", "artifacts:write",
   "videos:read", "videos:write", "workers:read", "workers:write",

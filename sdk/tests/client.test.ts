@@ -257,6 +257,18 @@ test("SDK upload helper completes a presigned upload with a distinct idempotency
   assert.equal(calls[2]?.url, "https://example.test/v1/files/file_1/complete");
 });
 
+test("SDK image resource refreshes an owner-scoped generated-image download URL", async () => {
+  const calls: string[] = [];
+  const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ id: "img_1", name: "generated-image.png", contentType: "image/png", size: 123, downloadUrl: "https://private.example/image?sig=short-lived", expiresAt: "2026-09-26T12:05:00.000Z" }), { status: 200 });
+  }) });
+  const image = await sdk.images.get("img_1");
+  assert.equal(calls[0], "https://example.test/v1/images/img_1");
+  assert.equal(image.contentType, "image/png");
+  assert.match(image.downloadUrl, /^https:\/\//);
+});
+
 test("SDK media-bridge helper accepts verified image attachments and carries them into the durable run", async () => {
   const calls: Array<{ url: string; body: string }> = [];
   const sdk = new Chusky({ apiKey: "key", userId: "customer", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
