@@ -578,6 +578,32 @@ function composioMediaTarget(slug: string, args: Record<string, unknown>): Compo
   return asTarget(slug, args);
 }
 
+function instagramPostHasMedia(arguments_: Record<string, unknown>): boolean {
+  const url = (value: unknown): boolean => typeof value === "string" && /^https?:\/\//i.test(value.trim());
+  const stagedFile = (value: unknown): boolean => Boolean(value && typeof value === "object" && !Array.isArray(value)
+    && ["name", "mimetype", "s3key"].every((key) => typeof (value as Record<string, unknown>)[key] === "string" && String((value as Record<string, unknown>)[key]).trim()));
+  const children = arguments_.children;
+  return url(arguments_.image_url) || stagedFile(arguments_.image_file)
+    || url(arguments_.video_url) || stagedFile(arguments_.video_file)
+    || Array.isArray(children) && children.length > 0;
+}
+
+function hasImageLessInstagramPost(slug: string, args: Record<string, unknown>): boolean {
+  const target = composioMediaTarget(slug, args);
+  if (target && typeof target === "object") return target.toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA" && !instagramPostHasMedia(target.arguments);
+  if (slug !== "COMPOSIO_MULTI_EXECUTE_TOOL") return false;
+  const items = Array.isArray(args.tools) ? args.tools : Array.isArray(args.items) ? args.items : [];
+  return items.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    const toolSlug = record.tool_slug ?? record.toolSlug ?? record.slug;
+    const arguments_ = record.arguments ?? record.input;
+    return toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA"
+      && arguments_ && typeof arguments_ === "object" && !Array.isArray(arguments_)
+      && !instagramPostHasMedia(arguments_ as Record<string, unknown>);
+  });
+}
+
 function isPotentialImageDestinationAction(toolSlug: string): boolean {
   return /(?:^|_)(?:SEND|POST|PUBLISH|UPLOAD|ATTACH|SHARE|CREATE_DRAFT|CREATE_EMAIL|CREATE_MESSAGE|CREATE_MEDIA|CREATE_PHOTO|ADD_ATTACHMENT|ADD_FILE|IMPORT_FILE)(?:_|$)/.test(toolSlug);
 }
@@ -601,8 +627,11 @@ export async function dispatchComposioActionWithImageContext(
     signal?: AbortSignal;
   },
 ): Promise<unknown | undefined> {
-  if (!input.selection) return undefined;
   const target = composioMediaTarget(input.invokedSlug, input.invokedArguments);
+  if (hasImageLessInstagramPost(input.invokedSlug, input.invokedArguments)) {
+    throw new Error("Instagram requires an image or video for this post, but the action has no media input. No provider action was attempted.");
+  }
+  if (!input.selection) return undefined;
   if (!target && input.invokedSlug !== "COMPOSIO_EXECUTE_TOOL" && input.invokedSlug !== "COMPOSIO_MULTI_EXECUTE_TOOL") return undefined;
   if (target === "multi_action_batch") {
     throw new Error("The request includes an image attachment, but the connected-app call grouped several actions together. Split the image post or email into its own action; no batched actions were attempted.");
@@ -956,6 +985,58 @@ async function publishInstagramMedia(
   }
   validateToolArgumentsAgainstSchema(publishSlug, publishArguments, schema, 36 * 1024 * 1024);
   return composioExecute(sessionObj, publishSlug, account ? { ...publishArguments, account } : publishArguments, signal);
+}
+
+async function verifyInstagramImagePost(
+  sessionObj: any,
+  availableTools: any[],
+  publishResult: any,
+  account: string | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  const data = publishResult?.data && typeof publishResult.data === "object" ? publishResult.data : {};
+  const mediaId = [data.id, data.media_id, data.mediaId]
+    .find((value) => typeof value === "string" && value.trim());
+  if (typeof mediaId !== "string") {
+    throw new Error("Instagram returned a publish response without a media ID, so Chusky could not verify the image. The post may already be live; check Instagram before retrying.");
+  }
+
+  const verifySlug = "INSTAGRAM_GET_IG_MEDIA";
+  let schema: any;
+  try {
+    schema = await resolveMediaBridgeSchema(sessionObj, availableTools, verifySlug, signal) as any;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new Error("Instagram may have published the post, but Chusky could not load its media lookup schema. Check Instagram before retrying.");
+  }
+  const properties = schema?.properties;
+  if (!properties || typeof properties !== "object" || !Object.hasOwn(properties, "ig_media_id")) {
+    throw new Error("Instagram published the post, but its current media lookup schema cannot verify the attached image. Check Instagram before retrying.");
+  }
+  const verifyArguments: Record<string, unknown> = { ig_media_id: mediaId };
+  if (Object.hasOwn(properties, "fields")) verifyArguments.fields = "id,media_type,media_url";
+  try {
+    validateToolArgumentsAgainstSchema(verifySlug, verifyArguments, schema, 36 * 1024 * 1024);
+  } catch {
+    throw new Error("Instagram may have published the post, but Chusky could not validate its media lookup request. Check Instagram before retrying.");
+  }
+
+  let verification: any;
+  try {
+    verification = await composioExecute(sessionObj, verifySlug, account ? { ...verifyArguments, account } : verifyArguments, signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    throw new Error("Instagram may have published the post, but Chusky could not verify that it contains an image. Check Instagram before retrying.");
+  }
+  if (verification?.successful !== true || verification?.error) {
+    throw new Error("Instagram may have published the post, but its media lookup did not confirm an image. Check Instagram before retrying.");
+  }
+
+  const media = verification.data && typeof verification.data === "object" ? verification.data : {};
+  const mediaUrl = typeof media.media_url === "string" ? media.media_url : "";
+  if (media.media_type !== "IMAGE" || !/^https:\/\//i.test(mediaUrl)) {
+    throw new Error("Instagram's published media lookup did not confirm an image URL and IMAGE media type. The post may already be live; check Instagram before retrying.");
+  }
 }
 
 async function executeTwitterImagePost(
@@ -1314,6 +1395,7 @@ export async function executeMediaBridgeAction(
   const account = typeof args.account === "string" && args.account.trim() ? args.account.trim() : undefined;
   let result: any;
   let mode: "url" | "binary" | "composio_file" | "linkedin_upload" | "facebook_upload";
+  let instagramImageVerified = false;
   if (toolSlug === "LINKEDIN_CREATE_LINKED_IN_POST") {
     const linkedIn = await executeLinkedinImagePost(userId, composioClient, sessionObj, toolSlug, schema, actionArguments as Record<string, unknown>, file, account, signal);
     result = linkedIn.result;
@@ -1369,10 +1451,18 @@ export async function executeMediaBridgeAction(
   }
   if (toolSlug === "INSTAGRAM_POST_IG_USER_MEDIA") {
     result = await publishInstagramMedia(sessionObj, availableComposioTools, actionArguments as Record<string, unknown>, result, account, signal);
+    if (result?.successful !== true || result?.error) throw new Error("Instagram did not confirm publication. Check the provider state before retrying to avoid a duplicate.");
+    await verifyInstagramImagePost(sessionObj, availableComposioTools, result, account, signal);
+    instagramImageVerified = true;
   }
   if (result?.successful !== true || result?.error) throw new Error("The connected app did not confirm this image action succeeded. Check the provider state before retrying to avoid a duplicate.");
   const data = result?.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
   const receipt: Record<string, unknown> = { providerActionSucceeded: true, mediaTransferred: true, toolSlug, source, mode, ...(assetId ? { assetId } : {}), size: file.data.byteLength, contentType: file.contentType };
+  if (instagramImageVerified) {
+    receipt.providerMediaVerified = true;
+    receipt.verifiedMediaType = "IMAGE";
+    logger.info({ toolSlug, mode, sizeBytes: file.data.byteLength, contentType: file.contentType }, "Instagram image post verified with provider media lookup");
+  }
   for (const key of ["id", "postId", "messageId", "mediaId", "media_id", "uploadId", "status"]) {
     const value = data[key];
     if (typeof value === "string" || typeof value === "number") receipt[key] = typeof value === "string" ? value.slice(0, 200) : value;

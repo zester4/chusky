@@ -37,6 +37,24 @@ test("a single image retrieved in this run resolves a referential post request",
   assert.equal(selectRetrievedImageForAction("Post it without the image", ["img_selected"]), undefined);
 });
 
+test("caption-only Instagram image actions cannot fall through when image selection is missing", async () => {
+  let providerCalls = 0;
+  const input = {
+    userId: 839099,
+    sessionObj: { execute: async () => { providerCalls++; return { successful: true }; } },
+    availableTools: [],
+    invokedSlug: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    invokedArguments: { tools: [{
+      tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA",
+      arguments: { ig_user_id: "owner", caption: "Grateful for today." },
+    }] },
+    selection: undefined,
+    runtime: {},
+  };
+  await assert.rejects(() => dispatchComposioActionWithImageContext(input), /requires an image or video.*no provider action was attempted/i);
+  assert.equal(providerCalls, 0);
+});
+
 test("an image reattached after a failed requested post resumes only that pending image action", () => {
   const originalRequest = "Publish my gratitude caption to LinkedIn with the generated image.";
   const assistantRetry = "I couldn't post it because the image wasn't available. Please reattach the image here and I can try again with it.";
@@ -475,19 +493,29 @@ test("media bridge resolves an exact discovered action through Composio schema m
   }
 });
 
-test("Instagram selects the image field from an image/video schema before publishing the returned container", async () => {
+test("Instagram stages image_file, publishes the container, and verifies the resulting image", async () => {
   const userId = 839104;
   const imageBytes = Buffer.alloc(24);
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
   imageBytes.write("IEND", 16, "ascii");
-  const actionSchema = { type: "object", required: ["ig_user_id", "image_url"], properties: {
+  const actionSchema = { type: "object", required: ["ig_user_id"], properties: {
     ig_user_id: { type: "string" }, caption: { type: "string" },
-    image_url: { type: "string", file_uploadable: true },
-    video_url: { type: "string", file_uploadable: true },
+    image_url: { type: "string", pattern: "^https?://" },
+    video_url: { type: "string", pattern: "^https?://" },
+    image_file: { type: "object", required: ["name", "mimetype", "s3key"], file_uploadable: true, properties: {
+      name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" },
+    } },
+    video_file: { type: "object", required: ["name", "mimetype", "s3key"], file_uploadable: true, properties: {
+      name: { type: "string" }, mimetype: { type: "string" }, s3key: { type: "string" },
+    } },
   }, additionalProperties: false };
   const publishSchema = { type: "object", required: ["creation_id"], properties: { creation_id: { type: "string" } }, additionalProperties: false };
+  const verifySchema = { type: "object", required: ["ig_media_id"], properties: {
+    ig_media_id: { type: "string" }, fields: { type: "string" },
+  }, additionalProperties: true };
   const uploaded: Array<{ file: File; toolSlug: string; toolkitSlug: string }> = [];
   const executions: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let publishedMediaType = "IMAGE";
   const session = {
     sessionId: "media-bridge-staged-session",
     tools: async () => [
@@ -496,7 +524,9 @@ test("Instagram selects the image field from an image/video schema before publis
     ],
     search: async ({ query }: { query: string }) => {
       const slug = query.match(/INSTAGRAM_[A-Z_]+/)?.[0];
-      const inputSchema = slug === "INSTAGRAM_POST_IG_USER_MEDIA" ? actionSchema : publishSchema;
+      const inputSchema = slug === "INSTAGRAM_POST_IG_USER_MEDIA" ? actionSchema
+        : slug === "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH" ? publishSchema
+          : verifySchema;
       return { toolSchemas: { [slug!]: { toolSlug: slug, inputSchema } } };
     },
     execute: async (slug: string, args: Record<string, unknown>) => {
@@ -505,6 +535,7 @@ test("Instagram selects the image field from an image/video schema before publis
         INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH: { toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", inputSchema: publishSchema },
       } }, error: null };
       if (slug === "INSTAGRAM_POST_IG_USER_MEDIA") return { successful: true, data: { id: "instagram-container-1" } };
+      if (slug === "INSTAGRAM_GET_IG_MEDIA") return { successful: true, data: { id: "instagram-published-1", media_type: publishedMediaType, media_url: "https://instagram.example/image.jpg" } };
       return { successful: true, data: { id: "instagram-published-1" } };
     },
   };
@@ -523,12 +554,15 @@ test("Instagram selects the image field from an image/video schema before publis
   };
   setAgentDependenciesForTests({ composio: { ...composioClient, create: async () => session, sessions: { use: async () => session } }, mediaBridgeStorage });
   try {
-    const result = await executeMediaBridgeAction(userId, session, await session.tools(), {
+    const availableTools = await session.tools();
+    const result = await executeMediaBridgeAction(userId, session, availableTools, {
       source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "instagram-owner", caption: "A launch" },
     }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] });
     assert.equal(result.mode, "composio_file");
     assert.equal(result.providerActionSucceeded, true);
     assert.equal(result.id, "instagram-published-1");
+    assert.equal(result.providerMediaVerified, true);
+    assert.equal(result.verifiedMediaType, "IMAGE");
     assert.equal(uploaded.length, 1);
     assert.equal(uploaded[0]?.file.name, "chusky-image-1.png");
     assert.equal(uploaded[0]?.file.type, "image/png");
@@ -536,10 +570,16 @@ test("Instagram selects the image field from an image/video schema before publis
     assert.equal(uploaded[0]?.toolkitSlug, "instagram");
     assert.deepEqual(executions, [
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA", args: {
-        ig_user_id: "instagram-owner", caption: "A launch", image_url: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/instagram-image" },
+        ig_user_id: "instagram-owner", caption: "A launch", image_file: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/instagram-image" },
       } },
       { slug: "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", args: { creation_id: "instagram-container-1" } },
+      { slug: "INSTAGRAM_GET_IG_MEDIA", args: { ig_media_id: "instagram-published-1", fields: "id,media_type,media_url" } },
     ]);
+
+    publishedMediaType = "VIDEO";
+    await assert.rejects(() => executeMediaBridgeAction(userId, session, availableTools, {
+      source: "current", toolSlug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "instagram-owner", caption: "A launch" },
+    }, { currentImages: [{ data: imageBytes, mediaType: "image/png" }] }), /may already be live; check Instagram before retrying/i);
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
