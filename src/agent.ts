@@ -553,18 +553,18 @@ function composioExecute(sessionObj: any, slug: string, args: Record<string, unk
   return abortable(sessionObj.execute(slug, selected.arguments, executeOptions), signal);
 }
 
-type ComposioMediaTarget = { toolSlug: string; arguments: Record<string, unknown> };
+type ComposioMediaTarget = { toolSlug: string; arguments: Record<string, unknown>; account?: string };
 
 function composioMediaTarget(slug: string, args: Record<string, unknown>): ComposioMediaTarget | "multi_action_batch" | undefined {
-  const asTarget = (toolSlugValue: unknown, argumentsValue: unknown): ComposioMediaTarget | undefined => {
+  const asTarget = (toolSlugValue: unknown, argumentsValue: unknown, accountValue?: unknown): ComposioMediaTarget | undefined => {
     const toolSlug = typeof toolSlugValue === "string" ? toolSlugValue.trim() : "";
     if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(toolSlug) || toolSlug.startsWith("CHUCK_") || toolSlug.startsWith("COMPOSIO_") || toolSlug.startsWith("MCP_")) return undefined;
     if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return undefined;
-    return { toolSlug, arguments: argumentsValue as Record<string, unknown> };
+    return { toolSlug, arguments: argumentsValue as Record<string, unknown>, ...(typeof accountValue === "string" && accountValue.trim() ? { account: accountValue.trim() } : {}) };
   };
 
   if (slug === "COMPOSIO_EXECUTE_TOOL") {
-    return asTarget(args.tool_slug ?? args.toolSlug ?? args.slug, args.arguments ?? args.input ?? args.tool_arguments);
+    return asTarget(args.tool_slug ?? args.toolSlug ?? args.slug, args.arguments ?? args.input ?? args.tool_arguments, args.account);
   }
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     const items = Array.isArray(args.tools) ? args.tools : Array.isArray(args.items) ? args.items : undefined;
@@ -573,7 +573,7 @@ function composioMediaTarget(slug: string, args: Record<string, unknown>): Compo
     const item = items[0];
     if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
     const record = item as Record<string, unknown>;
-    return asTarget(record.tool_slug ?? record.toolSlug ?? record.slug, record.arguments ?? record.input);
+    return asTarget(record.tool_slug ?? record.toolSlug ?? record.slug, record.arguments ?? record.input, record.account);
   }
   return asTarget(slug, args);
 }
@@ -649,8 +649,9 @@ export async function dispatchComposioActionWithImageContext(
     throw new Error(`The ${target.toolSlug} action is not granted to this run; no image transfer or provider action was attempted.`);
   }
 
-  const targetArguments = typeof input.invokedArguments.account === "string" && input.invokedArguments.account.trim() && target.arguments.account === undefined
-    ? { ...target.arguments, account: input.invokedArguments.account }
+  const requestedAccount = target.account ?? (typeof input.invokedArguments.account === "string" ? input.invokedArguments.account.trim() : undefined);
+  const targetArguments = requestedAccount && target.arguments.account === undefined
+    ? { ...target.arguments, account: requestedAccount }
     : target.arguments;
   const selected = splitAccountSelector(targetArguments);
   const result = await executeMediaBridgeAction(

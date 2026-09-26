@@ -200,6 +200,23 @@ test("ordinary Composio email action automatically receives the explicitly reque
       recipient_email: "team@example.com", subject: "Launch", body: "Sent through discovered action.",
       attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/auto-image" },
     } });
+
+    const multiWrapped = await dispatchComposioActionWithImageContext({
+      userId,
+      sessionObj: session,
+      availableTools: [{ type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } }],
+      invokedSlug: "COMPOSIO_MULTI_EXECUTE_TOOL",
+      invokedArguments: { tools: [{ tool_slug: "GMAIL_SEND_EMAIL", account: "assistant-workspace", arguments: {
+        recipient_email: "self@example.com", subject: "Self-test", body: "Image attached.",
+      } }] },
+      selection,
+      runtime: { currentImages: [{ data: imageBytes, mediaType: "image/png" }] },
+    });
+    assert.equal((multiWrapped as any).providerActionSucceeded, true);
+    assert.deepEqual(calls[2], { slug: "GMAIL_SEND_EMAIL", account: "assistant-workspace", args: {
+      recipient_email: "self@example.com", subject: "Self-test", body: "Image attached.",
+      attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/auto-image" },
+    } });
   } finally {
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "media-test-reset", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
