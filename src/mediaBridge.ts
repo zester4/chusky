@@ -55,7 +55,7 @@ export function findPendingImageRetryRequest(
 
 function assistantRequestedImageRetry(text: string): boolean {
   const requestsImage = /\b(?:re-?attach|attach|send|upload)\b.{0,120}\b(?:image|photo|picture|graphic|visual)\b/i.test(text);
-  const retryWording = /\b(?:re-?attach|again|retry|try again|re-?attempt|unavailable|not available|missing|could(?:n't| not)|failed|failure)\b/i.test(text);
+  const retryWording = /\b(?:re-?attach|again|once more|one more time|retry|try again|re-?attempt|unavailable|not available|missing|could(?:n't| not)|failed|failure)\b/i.test(text);
   const continueAction = /\b(?:so|then|once|after)\b.{0,100}\b(?:continue|proceed|finish|complete|post|publish|send|email|share|upload)\b/i.test(text)
     || /\b(?:and I can|and I'll|and I will)\b.{0,80}\b(?:continue|proceed|finish|complete|post|publish|send|email|share|upload)\b/i.test(text);
   return requestsImage && (retryWording || continueAction);
@@ -197,6 +197,24 @@ export function selectRequestedImage(
     return { ambiguous: true, reason: "Several saved images could match. Ask which image to use before posting or sending." };
   }
   return { ambiguous: true, reason: "The requested image is not available. Ask the user to attach or select it before posting or sending." };
+}
+
+/** Resolve a simple image reference against an image fetched by an owner-scoped
+ * native tool earlier in this same run. This is selection context, not action
+ * authorization; the request still needs an explicit external media action.
+ */
+export function selectRetrievedImageForAction(request: string, retrievedAssetIds: readonly string[]): MediaAttachmentSelection | undefined {
+  const text = request.trim();
+  if (!text
+    || !/\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(text)
+    || !/\b(?:it|this|that|these|those)\b/i.test(text)
+    || /\b(?:without|exclude|omit|leave out)\b.{0,48}\b(?:image|photo|picture|graphic|visual|attachment|it|that)\b/i.test(text)
+    || /\b(?:don't|do not|never)\s+(?:attach|include|send|post|publish|share|upload|email)\b/i.test(text)) return undefined;
+
+  const assetIds = [...new Set(retrievedAssetIds.map((id) => id.trim()).filter((id) => id.length > 0 && id.length <= 200))];
+  if (assetIds.length === 1) return { source: "asset", assetId: assetIds[0]! };
+  if (assetIds.length > 1) return { ambiguous: true, reason: "More than one saved image was retrieved for this action. Ask which one to use before posting or sending." };
+  return undefined;
 }
 
 const MEDIA_URL_NAMES = new Set([

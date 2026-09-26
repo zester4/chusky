@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, getSession, initStore, listAgentRuns, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, getSession, initStore, listAgentRuns, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -291,6 +291,128 @@ test("a reattached image is uploaded before a pending LinkedIn multi-execute pos
     assert.match(JSON.stringify(requests[0]?.messages), /IMAGE ACTION RETRY/);
   } finally {
     globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("an image fetched from saved assets is uploaded on a referential LinkedIn post request", async () => {
+  const userId = 830075;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const originalR2 = {
+    accountId: config.r2AccountId,
+    accessKeyId: config.r2AccessKeyId,
+    secretAccessKey: config.r2SecretAccessKey,
+    bucket: config.r2Bucket,
+  };
+  config.r2AccountId = "test-account";
+  config.r2AccessKeyId = "test-access-key";
+  config.r2SecretAccessKey = "test-secret-key";
+  config.r2Bucket = "test-images";
+
+  const imageBytes = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
+  imageBytes.write("IEND", 16, "ascii");
+  const now = Date.now();
+  const selectedAsset = {
+    id: "img_saved_prayer",
+    userId,
+    name: "prayer-elder.png",
+    purpose: "Generated gratitude image",
+    description: "A young man kneeling in prayer with an elder behind him.",
+    tags: ["generated", "prayer"],
+    r2Key: `images/${userId}/prayer-elder.png`,
+    contentType: "image/png" as const,
+    size: imageBytes.byteLength,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const otherAsset = {
+    ...selectedAsset,
+    id: "img_saved_landscape",
+    name: "coastal-landscape.png",
+    purpose: "A coastal landscape",
+    description: "A quiet coastline at sunset.",
+    tags: ["landscape"],
+    r2Key: `images/${userId}/coastal-landscape.png`,
+    createdAt: now - 1000,
+  };
+  const storedSession = await getSession(userId);
+  storedSession.imageAssets = [selectedAsset, otherAsset];
+  await saveSession(userId, storedSession);
+
+  const postSchema = { type: "object", required: ["author", "commentary", "images"], properties: {
+    author: { type: "string" }, commentary: { type: "string" }, images: { type: "array", items: { type: "string" } },
+  }, additionalProperties: false };
+  const uploadSchema = { type: "object", required: ["owner_urn"], properties: { owner_urn: { type: "string" } }, additionalProperties: false };
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  let uploaded: Buffer | undefined;
+  const session = {
+    sessionId: "saved-image-linkedin-session",
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: postSchema } },
+    ],
+    search: async () => ({ toolSchemas: { LINKEDIN_REGISTER_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", inputSchema: uploadSchema } } }),
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") throw new Error("LinkedIn post must not bypass the image upload adapter");
+      executed.push({ slug, args });
+      if (slug === "LINKEDIN_REGISTER_IMAGE_UPLOAD") return { successful: true, data: { upload_url: "https://www.linkedin.com/dms-uploads/saved-prayer-image", asset_urn: "urn:li:image:saved-prayer" } };
+      return { successful: true, data: { id: "urn:li:share:saved-prayer" } };
+    },
+  };
+  const requests: Array<Record<string, any>> = [];
+  let chatIndex = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text", "image"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      const index = chatIndex++;
+      if (index === 0) return toolResponse("CHUCK_SEARCH_IMAGE_ASSETS", JSON.stringify({ query: "prayer elder" }), "search-images");
+      if (index === 1) return toolResponse("CHUCK_GET_IMAGE_ASSET", JSON.stringify({ id: selectedAsset.id }), "get-prayer-image");
+      if (index === 2) return toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
+        tools: [{ tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { author: "urn:li:person:owner", commentary: "Grateful for the people whose prayers guide us." } }],
+        current_step: "PUBLISHING_POST", current_step_metric: "0/1 posts", session_id: "saved-image-linkedin-session",
+        sync_response_to_workbench: false, thought: "Publish the requested gratitude post with the image just retrieved.",
+      }), "publish-prayer-post");
+      return chatResponse({ role: "assistant", content: "The LinkedIn post was published with the saved prayer image." });
+    }
+    return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  setAgentDependenciesForTests({
+    composio: { create: async () => session, sessions: { use: async () => session } },
+    mediaBridgeStorage: {
+      saveImageAsset: async () => { throw new Error("A saved asset should be reused without creating another asset"); },
+      getImageAsset: async (_owner: number, id: string) => {
+        const asset = [selectedAsset, otherAsset].find((candidate) => candidate.id === id);
+        return asset ? { ...asset, downloadUrl: "https://signed.example/private-image" } : undefined;
+      },
+      readR2Object: async (key: string) => key === selectedAsset.r2Key ? imageBytes : Buffer.alloc(0),
+      signR2Download: async () => "https://signed.example/private-image",
+    },
+    mediaBridgeFetch: async (_url: string | URL | Request, init?: RequestInit) => {
+      uploaded = Buffer.from(init?.body as Uint8Array);
+      return new Response(null, { status: 201 });
+    },
+  });
+  try {
+    const result = await runAgent(userId, "Post it now", [], "test/model");
+    assert.match(result.text, /published with the saved prayer image/i);
+    assert.deepEqual(uploaded, imageBytes, "the retrieved private image bytes reach LinkedIn's upload flow");
+    assert.deepEqual(executed, [
+      { slug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", args: { owner_urn: "urn:li:person:owner" } },
+      { slug: "LINKEDIN_CREATE_LINKED_IN_POST", args: { author: "urn:li:person:owner", commentary: "Grateful for the people whose prayers guide us.", images: ["urn:li:image:saved-prayer"] } },
+    ]);
+    assert.equal(executed.some(({ args }) => "assetId" in args), false, "private image asset IDs stay out of LinkedIn action arguments");
+    assert.equal(requests.length, 4, "search, retrieval, image post, and truthful completion each use a separate model round");
+  } finally {
+    globalThis.fetch = originalFetch;
+    config.r2AccountId = originalR2.accountId;
+    config.r2AccessKeyId = originalR2.accessKeyId;
+    config.r2SecretAccessKey = originalR2.secretAccessKey;
+    config.r2Bucket = originalR2.bucket;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
   }
 });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage } from "../src/mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction } from "../src/mediaBridge.js";
 import { validateToolArgumentsAgainstSchema } from "../src/agentTools.js";
 import { dispatchComposioActionWithImageContext, executeMediaBridgeAction, setAgentDependenciesForTests } from "../src/agent.js";
 
@@ -26,6 +26,17 @@ test("ordinary image-action wording selects an available image but leaves unrela
   ] }), { source: "asset", assetId: "generated" });
 });
 
+test("a single image retrieved in this run resolves a referential post request", () => {
+  assert.deepEqual(selectRetrievedImageForAction("Post it now", ["img_selected"]), { source: "asset", assetId: "img_selected" });
+  assert.deepEqual(selectRetrievedImageForAction("Share that image", ["img_selected"]), { source: "asset", assetId: "img_selected" });
+  assert.deepEqual(selectRetrievedImageForAction("Post it now", ["img_selected", "img_other"]), {
+    ambiguous: true,
+    reason: "More than one saved image was retrieved for this action. Ask which one to use before posting or sending.",
+  });
+  assert.equal(selectRetrievedImageForAction("What does it show?", ["img_selected"]), undefined);
+  assert.equal(selectRetrievedImageForAction("Post it without the image", ["img_selected"]), undefined);
+});
+
 test("an image reattached after a failed requested post resumes only that pending image action", () => {
   const originalRequest = "Publish my gratitude caption to LinkedIn with the generated image.";
   const assistantRetry = "I couldn't post it because the image wasn't available. Please reattach the image here and I can try again with it.";
@@ -38,6 +49,10 @@ test("an image reattached after a failed requested post resumes only that pendin
     { role: "user", content: originalRequest },
     { role: "assistant", content: "I couldn't post it because the image is unavailable. Please attach the image so I can continue the LinkedIn post." },
   ], attachedPrompt, 1), originalRequest, "a clear missing-image continuation does not depend on the exact phrase 'try again'");
+  assert.equal(findPendingImageRetryRequest([
+    { role: "user", content: originalRequest },
+    { role: "assistant", content: "I couldn’t post it: LinkedIn’s image-upload flow didn’t recognize the saved image, and no LinkedIn action was attempted. Nothing new was published. Please attach the image here once more, and I’ll use it with a fresh gratitude caption." },
+  ], attachedPrompt, 1), originalRequest, "the screenshot's exact 'once more' wording resumes the still-pending post");
   assert.equal(findPendingImageRetryRequest([
     { role: "user", content: originalRequest },
     { role: "assistant", content: "Please attach an image and I can describe it for you." },

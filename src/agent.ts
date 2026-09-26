@@ -44,7 +44,7 @@ import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestina
 import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
-import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, type MediaAttachmentSelection } from "./mediaBridge.js";
+import { buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { routedSkillContext } from "./skills/catalog.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -1878,6 +1878,7 @@ export async function runAgent(
 
   // Build message array for OpenRouter
   const durable = options?.ephemeral ? { summaries: [], imageAssets: [] } : await getSession(userId);
+  const retrievedImageAssetIds = new Set<string>();
   const currentImagesForMediaAction = currentImageRuntime(userMessage).currentImages ?? [];
   const currentRequestText = userRequestText(userMessage);
   const imageRetryRequest = channelContext?.scope === "shared" || options?.meetingId
@@ -1898,6 +1899,10 @@ export async function runAgent(
     });
     if (imageRetryRequest && !selection) {
       return { ambiguous: true, reason: "The image for the pending post is still unavailable. Ask the user to reattach or select it before publishing." };
+    }
+    const retrievedSelection = selectRetrievedImageForAction(mediaActionRequestText, [...retrievedImageAssetIds]);
+    if (retrievedSelection && (!selection || ("ambiguous" in selection && /requested (?:sent )?image (?:is )?not available/i.test(selection.reason)))) {
+      return retrievedSelection;
     }
     return selection;
   };
@@ -2667,15 +2672,16 @@ export async function runAgent(
       await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed, ...(toolFailureMeta ?? {}) });
       if (taskWaitRequest || missionWaitRequest) break;
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
-        const asset = execResult as { r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
+        const asset = execResult as { id?: unknown; r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
           // Read the private object server-side. A presigned URL is useful for
           // clients, but relying on an external model/provider to fetch R2
           // often fails because private buckets and egress policies vary.
-          const bytes = await readR2Object(asset.r2Key);
+          const bytes = await mediaBridgeStorage.readR2Object(asset.r2Key);
           const mediaType = typeof asset.contentType === "string" ? asset.contentType.toLowerCase().split(";", 1)[0] : "";
           if (!["image/jpeg", "image/png", "image/webp"].includes(mediaType)) throw new Error("Saved image has an unsupported format");
           if (!bytes.length || bytes.length > 12 * 1024 * 1024) throw new Error("Saved image is empty or too large to deliver");
+          if (typeof asset.id === "string" && asset.id.length > 0 && asset.id.length <= 200) retrievedImageAssetIds.add(asset.id);
           retrievedImages.push({ data: bytes, mediaType, name: typeof asset.name === "string" ? asset.name : undefined });
           messages.push({ role: "user", content: [{ type: "text", text: `Retrieved saved image asset ${String(asset.name ?? "image")}. Inspect it as visual reference for the current task.` }, { type: "image_url", image_url: { url: `data:${mediaType};base64,${bytes.toString("base64")}` } }] });
         }
