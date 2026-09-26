@@ -70,6 +70,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "code-review", triggers: ["code review", "review this pr", "review the diff"] },
   { name: "tdd", triggers: ["tdd", "test driven", "write tests first"] },
   { name: "frontend-design", triggers: ["frontend design", "ui design", "landing page ui"] },
+  { name: "game-scaffold", triggers: ["game", "make a game", "scaffold game", "platformer", "snake", "tetris", "racing", "fps", "canvas game", "three.js game"] },
   { name: "design-ui", triggers: ["design system", "component ui", "polish ui"] },
   { name: "better-ui", triggers: ["better ui", "ui polish", "interface quality"] },
   { name: "ui-ux-pro-max", triggers: ["ui ux", "ux audit", "responsive layout", "accessibility review", "mobile layout", "web app", "website", "landing page", "dashboard", "waitlist page", "portfolio", "frontend", "scaffold"] },

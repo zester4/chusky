@@ -25,6 +25,12 @@ test("routes core engineering and growth skills deterministically", () => {
   assert.ok(meet.includes("meeting-pro"));
 });
 
+test("routes game requests to game-scaffold", () => {
+  for (const query of ["game", "make a game", "scaffold game", "platformer", "snake", "tetris", "racing", "fps", "canvas game", "three.js game"]) {
+    assert.ok(routedSkillNames(query).includes("game-scaffold"), `expected game-scaffold for ${query}`);
+  }
+});
+
 test("app-building requests preload product design and fullstack design guidance", async () => {
   const routed = routedSkillNames("Scaffold a new web app dashboard in Daytona");
   assert.ok(routed.includes("fullstack-guardian"));
