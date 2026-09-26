@@ -59,7 +59,7 @@ import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/
 import { scheduleMissionSteps } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
-import { appendReliabilitySample, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
+import { appendReliabilitySample, compensationView, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
 import { replayMission, replayScenario } from "./reliability/replay.js";
 import { executeOutcomeVerification } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck, ProviderProof, ReplayScenario } from "./reliability/contracts.js";
@@ -2551,7 +2551,7 @@ export function registerSdkApi(app: Hono): void {
       })),
     }) });
   });
-  app.get("/v1/operator/compensations", async (c) => { const owner = sdkUser(c)!; const status = c.req.query("status"); return c.json({ data: await listCompensations(owner.userId, status ? [status as never] : undefined) }); });
+  app.get("/v1/operator/compensations", async (c) => { const owner = sdkUser(c)!; const status = c.req.query("status"); return c.json({ data: (await listCompensations(owner.userId, status ? [status as never] : undefined)).map(compensationView) }); });
   app.get("/v1/operator/verifications", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listOutcomeVerifications(owner.userId, c.req.query("mission_id")) }); });
   app.get("/v1/operator/reliability", async (c) => { const owner = sdkUser(c)!; const operation = String(c.req.query("operation") ?? "agent").slice(0, 160); return c.json({ data: await reliabilityHealth(owner.userId, operation, Date.now(), Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(c.req.query("window_ms") ?? 3_600_000) || 3_600_000))) }); });
   app.get("/v1/operator/escalations", async (c) => { const owner = sdkUser(c)!; return c.json({ data: await listApprovalEscalations(owner.userId) }); });

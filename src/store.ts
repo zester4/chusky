@@ -949,6 +949,7 @@ export interface ExternalActionReceipt {
   providerId?: string;
   /** How the external effect was proven. A response is not the same as a read-back. */
   receiptVerification?: "provider_response" | "provider_read" | "manual" | "missing";
+  receiptEvidenceRef?: string;
   verifiedAt?: number;
   error?: string;
   createdAt: number;
@@ -5948,6 +5949,7 @@ export async function updateExternalAction(userId: number, logicalActionId: stri
   return mutateSession(userId, (session) => {
     const current = (session.externalActions ?? []).find((action) => action.logicalActionId === logicalActionId);
     if (!current) return undefined;
+    if (current.status === "succeeded" && patch.status && patch.status !== "succeeded") return current;
     const next = { ...current, ...patch, id: current.id, userId, logicalActionId, updatedAt: Date.now() };
     session.externalActions = [...(session.externalActions ?? []).filter((action) => action.logicalActionId !== logicalActionId), next].slice(-400);
     return next;

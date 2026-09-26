@@ -347,7 +347,19 @@ paths:
   /operator/reliability:
     get: { summary: Read measured reliability health for an operation, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Reliability health } } }
   /operator/compensations:
-    get: { summary: List owner-scoped compensation records, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Compensation queue } } }
+    get:
+      summary: List owner-scoped compensation records with exact execution action and provider receipt when completed
+      parameters: [{ $ref: '#/components/parameters/UserId' }]
+      responses:
+        '200':
+          description: Compensation queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Compensation' } }
   /operator/verifications:
     get: { summary: List persisted outcome verifications, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Outcome verification records } } }
   /operator/replay:
@@ -450,6 +462,30 @@ paths:
 components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
+  schemas:
+    Compensation:
+      type: object
+      required: [id, ownerId, originalActionId, provider, objective, status, attempts, maxAttempts, idempotencyKey, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        ownerId: { type: integer }
+        originalActionId: { type: string }
+        provider: { type: string }
+        objective: { type: string }
+        status: { type: string, enum: [pending, running, succeeded, failed, blocked, cancelled] }
+        attempts: { type: integer, minimum: 0 }
+        maxAttempts: { type: integer, minimum: 1 }
+        idempotencyKey: { type: string }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+        missionId: { type: string }
+        missionStepId: { type: string }
+        error: { type: string }
+        resultSummary: { type: string }
+        executionToolSlug: { type: string, description: Exact connected-app action used for this recovery, when attempted. }
+        externalReceiptId: { type: string, description: Durable Chusky external-action receipt ID for confirmed execution. }
+        providerReceiptId: { type: string, description: Provider-generated receipt ID when returned by the provider. }
+        verificationId: { type: string, description: Persisted fresh provider read-back verification that proves the compensation's expected state. }
   parameters:
     UserId: { name: X-Chusky-User-Id, in: header, required: true, schema: { type: string, maxLength: 200 } }
     IdempotencyKey: { name: Idempotency-Key, in: header, required: false, schema: { type: string, maxLength: 255 } }

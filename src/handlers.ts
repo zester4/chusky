@@ -128,11 +128,37 @@ async function editCard(ctx: Context, messageId: number, card: TelegramCard): Pr
   if (!richEdited) await ctx.api.editMessageText(ctx.chat!.id, messageId, telegramCardFallbackHtml(card), { parse_mode: "HTML", ...(replyMarkup ? { reply_markup: replyMarkup } : {}) });
 }
 
-function approvalCard(toolSlug: string, approvalId: string): TelegramCard {
+function approvalCard(toolSlug: string, approvalId: string, args?: Record<string, unknown>): TelegramCard {
+  const compensationPreview = toolSlug === "CHUCK_MISSION_COMPENSATE" && args?.action === "execute"
+    ? (() => {
+      const providerTool = typeof args.toolSlug === "string" ? args.toolSlug.slice(0, 200) : "unknown provider action";
+      const rawArguments = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments) ? args.arguments as Record<string, unknown> : {};
+      const redact = (value: unknown, depth = 0): unknown => {
+        if (depth > 4) return "[nested value omitted]";
+        if (Array.isArray(value)) return value.slice(0, 20).map((item) => redact(item, depth + 1));
+        if (!value || typeof value !== "object") return typeof value === "string" ? value.slice(0, 300) : value;
+        return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 30).map(([key, nested]) => [key, /secret|token|password|authorization|credential|api[_-]?key/i.test(key) ? "[redacted]" : redact(nested, depth + 1)]));
+      };
+      const serialized = JSON.stringify(redact(rawArguments));
+      const compensationId = typeof args.compensationId === "string" ? args.compensationId.slice(0, 160) : "unknown";
+      const verification = args.verification && typeof args.verification === "object" && !Array.isArray(args.verification) ? args.verification as Record<string, unknown> : {};
+      const verificationTool = typeof verification.toolSlug === "string" ? verification.toolSlug.slice(0, 200) : "missing read-back";
+      const verificationArguments = verification.arguments && typeof verification.arguments === "object" && !Array.isArray(verification.arguments) ? verification.arguments : {};
+      const expectedState = verification.expected && typeof verification.expected === "object" && !Array.isArray(verification.expected) ? verification.expected : {};
+      const serializedVerification = JSON.stringify({ arguments: redact(verificationArguments), expected: redact(expectedState) });
+      return [
+        `Compensation: ${compensationId}`,
+        `Recovery action: ${providerTool}`,
+        `Arguments: ${serialized.length > 900 ? `${serialized.slice(0, 900)}…` : serialized}`,
+        `Read-back: ${verificationTool}`,
+        `Expected state: ${serializedVerification.length > 700 ? `${serializedVerification.slice(0, 700)}…` : serializedVerification}`,
+      ];
+    })()
+    : [];
   return {
     title: "⚠️ Approval required",
-    body: ["Chusky prepared an external action that needs your review.", `Requested capability: ${toolSlug}`],
-    detail: "Approve executes the exact action reviewed by Chusky. Deny leaves everything unchanged.",
+    body: ["Chusky prepared an external action that needs your review.", `Requested capability: ${toolSlug}`, ...compensationPreview],
+    detail: compensationPreview.length ? "Review the provider action and arguments above. Approval executes only this exact recovery action; provider success is recorded only after a durable receipt." : "Approve executes the exact action reviewed by Chusky. Deny leaves everything unchanged.",
     buttons: [[
       { text: "✅ Approve", callbackData: `appr:approve:${approvalId}`, style: "success" },
       { text: "🛑 Deny", callbackData: `appr:deny:${approvalId}`, style: "danger" },
@@ -2589,7 +2615,7 @@ export function registerHandlers(bot: Bot): void {
       await ctx.editMessageText("⚠️ This approval has expired or was already handled.");
       return;
     }
-    await editCard(ctx, ctx.callbackQuery.message!.message_id, approvalCard(approval.toolSlug, approval.id));
+    await editCard(ctx, ctx.callbackQuery.message!.message_id, approvalCard(approval.toolSlug, approval.id, approval.args));
   });
 
   bot.callbackQuery(/^appr:(approve|deny):(.+)$/, async (ctx) => {
@@ -2708,7 +2734,7 @@ export function registerHandlers(bot: Bot): void {
     } catch (e) {
       if (e instanceof ApprovalRequiredError) {
         await ctx.reply("The resumed request reached another action that needs your review:");
-        await replyCard(ctx, approvalCard(e.toolSlug, e.approvalId));
+        await replyCard(ctx, approvalCard(e.toolSlug, e.approvalId, e.args));
         return;
       }
       await ctx.reply(`❌ Approval execution failed: ${String(e).slice(0, 400)}`);
@@ -2839,7 +2865,7 @@ export function registerHandlers(bot: Bot): void {
     } catch (e) {
       clearInterval(typingInterval);
       if (e instanceof ApprovalRequiredError) {
-        const card = approvalCard(e.toolSlug, e.approvalId);
+        const card = approvalCard(e.toolSlug, e.approvalId, e.args);
         if (isTelegramShared(ctx)) {
           // Never expose tool names, arguments, or approval controls to the
           // rest of a group. Delivery is owner-only or safely falls back to

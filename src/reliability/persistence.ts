@@ -71,6 +71,15 @@ export async function listCompensations(ownerId: number, statuses?: Compensation
   return ((await getSession(ownerId)).compensations ?? []).filter((item) => !statuses?.length || statuses.includes(item.status)).slice(-500);
 }
 
+export function compensationView(record: CompensationRecord): Omit<CompensationRecord, "approvalId" | "executionArgumentsHash" | "executionLeaseId" | "executionLeaseUntil"> {
+  const view = { ...record };
+  delete view.approvalId;
+  delete view.executionArgumentsHash;
+  delete view.executionLeaseId;
+  delete view.executionLeaseUntil;
+  return view;
+}
+
 export async function updateCompensation(ownerId: number, id: string, patch: Partial<CompensationRecord>): Promise<CompensationRecord | undefined> {
   return mutateSession(ownerId, (session) => {
     const current = (session.compensations ?? []).find((item) => item.id === id && item.ownerId === ownerId);
@@ -85,22 +94,69 @@ export async function updateCompensation(ownerId: number, id: string, patch: Par
 export async function executeCompensation(input: {
   ownerId: number;
   id: string;
-  approved: boolean;
-  execute: (record: CompensationRecord) => Promise<{ summary: string }>;
+  approvalId: string;
+  toolSlug: string;
+  argumentsHash: string;
+  execute: (record: CompensationRecord) => Promise<{ summary: string; externalReceiptId: string; providerReceiptId?: string; verificationId: string }>;
 }): Promise<CompensationRecord | undefined> {
-  const record = (await getSession(input.ownerId)).compensations?.find((item) => item.id === input.id && item.ownerId === input.ownerId);
-  if (!record) return undefined;
-  if (["succeeded", "cancelled"].includes(record.status)) return record;
-  if (!input.approved) return updateCompensation(input.ownerId, record.id, { status: "blocked", error: "Owner approval is required before compensation can run." });
-  if (record.attempts >= record.maxAttempts) return updateCompensation(input.ownerId, record.id, { status: "blocked", error: "Compensation retry budget exhausted; operator review is required." });
-  const running = await updateCompensation(input.ownerId, record.id, { status: "running", attempts: record.attempts + 1, startedAt: Date.now(), error: undefined });
-  if (!running) return undefined;
+  const now = Date.now();
+  const leaseId = randomUUID();
+  const running = await mutateSession(input.ownerId, (session) => {
+    const record = (session.compensations ?? []).find((item) => item.id === input.id && item.ownerId === input.ownerId);
+    if (!record) return undefined;
+    if (["succeeded", "cancelled"].includes(record.status)) return record;
+    if (record.status === "running" && (record.executionLeaseUntil ?? Number.POSITIVE_INFINITY) > now) return record;
+    if (record.attempts >= record.maxAttempts) {
+      const blocked = { ...record, status: "blocked" as const, error: "Compensation retry budget exhausted; operator review is required.", updatedAt: now };
+      session.compensations = (session.compensations ?? []).map((item) => item.id === record.id ? blocked : item);
+      return blocked;
+    }
+    if (record.executionToolSlug && (record.executionToolSlug !== input.toolSlug || record.executionArgumentsHash !== input.argumentsHash)) {
+      const blocked = { ...record, status: "blocked" as const, error: "The approved compensation action differs from the action already attempted; inspect provider state before creating a new recovery plan.", updatedAt: now };
+      session.compensations = (session.compensations ?? []).map((item) => item.id === record.id ? blocked : item);
+      return blocked;
+    }
+    const next: CompensationRecord = {
+      ...record,
+      status: "running",
+      attempts: record.attempts + 1,
+      startedAt: now,
+      executionLeaseUntil: now + 5 * 60_000,
+      executionLeaseId: leaseId,
+      executionToolSlug: input.toolSlug,
+      executionArgumentsHash: input.argumentsHash,
+      approvalId: input.approvalId,
+      error: undefined,
+      updatedAt: now,
+    };
+    session.compensations = (session.compensations ?? []).map((item) => item.id === record.id ? next : item);
+    return next;
+  });
+  if (!running || running.status !== "running" || running.approvalId !== input.approvalId) return running;
+  // A live lease owned by another execution must not dispatch the side effect.
+  if (running.executionLeaseId !== leaseId) return running;
   try {
     const result = await input.execute(running);
-    return updateCompensation(input.ownerId, running.id, { status: "succeeded", completedAt: Date.now(), resultSummary: bounded(result.summary, 4000) });
+    if (!result.externalReceiptId) throw new Error("Provider execution returned no durable external-action receipt ID.");
+    return updateCompensation(input.ownerId, running.id, {
+      status: "succeeded",
+      completedAt: Date.now(),
+      executionLeaseUntil: undefined,
+      executionLeaseId: undefined,
+      externalReceiptId: bounded(result.externalReceiptId, 240),
+      ...(result.providerReceiptId ? { providerReceiptId: bounded(result.providerReceiptId, 240) } : {}),
+        verificationId: bounded(result.verificationId, 160),
+      resultSummary: bounded(result.summary, 4000),
+      error: undefined,
+    });
   } catch (error) {
     const message = bounded(error instanceof Error ? error.message : error, 1000);
-    return updateCompensation(input.ownerId, running.id, { status: running.attempts >= running.maxAttempts ? "blocked" : "failed", error: message });
+    return updateCompensation(input.ownerId, running.id, {
+      status: "blocked",
+      executionLeaseUntil: undefined,
+      executionLeaseId: undefined,
+      error: `Provider outcome requires reconciliation before retry: ${message}`,
+    });
   }
 }
 

@@ -3,7 +3,8 @@ import test from "node:test";
 import { assessReliability, makeQuotaDecision, verifyOutcome } from "../src/reliability/evaluator.js";
 import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
-import { executeCompensation, listCompensations, queueCompensation } from "../src/reliability/persistence.js";
+import { compensationView, executeCompensation, listCompensations, queueCompensation, updateCompensation } from "../src/reliability/persistence.js";
+import { nativeTool } from "../src/nativeTools.js";
 import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, type MissionRecord } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
@@ -106,11 +107,56 @@ test("compensation records are durable, approval-gated, and idempotent", async (
   const first = await queueCompensation({ ownerId: 12, originalActionId: "act_1", provider: "composio", objective: "Undo the duplicate CRM update" });
   const same = await queueCompensation({ ownerId: 12, originalActionId: "act_1", provider: "composio", objective: "Undo the duplicate CRM update" });
   assert.equal(same.id, first.id);
-  const blocked = await executeCompensation({ ownerId: 12, id: first.id, approved: false, execute: async () => ({ summary: "must not run" }) });
-  assert.equal(blocked?.status, "blocked");
-  const done = await executeCompensation({ ownerId: 12, id: first.id, approved: true, execute: async () => ({ summary: "provider receipt" }) });
+  const done = await executeCompensation({ ownerId: 12, id: first.id, approvalId: "approval_1", toolSlug: "CRM_RESTORE_RECORD", argumentsHash: "args_hash_1", execute: async () => ({ summary: "provider state verified", externalReceiptId: "receipt_1", verificationId: "verify_1" }) });
   assert.equal(done?.status, "succeeded");
+  assert.equal(done?.externalReceiptId, "receipt_1");
+  const view = compensationView({ ...done!, approvalId: "internal_approval", executionArgumentsHash: "private_hash", executionLeaseId: "internal_lease" });
+  assert.equal("approvalId" in view, false);
+  assert.equal("executionArgumentsHash" in view, false);
+  assert.equal("executionLeaseId" in view, false);
   assert.equal((await listCompensations(12)).length, 1);
+});
+
+test("compensation execution is single-claim and cannot silently change its approved provider action", async () => {
+  await initStore({ memoryOnly: true });
+  const record = await queueCompensation({ ownerId: 13, originalActionId: "act_race", provider: "composio", objective: "Restore the prior CRM value" });
+  let release!: () => void;
+  const blockedProvider = new Promise<void>((resolve) => { release = resolve; });
+  let dispatches = 0;
+  const input = { ownerId: 13, id: record.id, approvalId: "approval_race", toolSlug: "CRM_UPDATE_RECORD", argumentsHash: "stable_args", execute: async () => { dispatches += 1; await blockedProvider; return { summary: "restored", externalReceiptId: "receipt_race", verificationId: "verify_race" }; } };
+  const first = executeCompensation(input);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const concurrent = await executeCompensation(input);
+  assert.equal(concurrent?.status, "running");
+  assert.equal(dispatches, 1);
+  release();
+  assert.equal((await first)?.status, "succeeded");
+  const changed = await executeCompensation({ ...input, toolSlug: "CRM_DELETE_RECORD", argumentsHash: "different_args" });
+  assert.equal(changed?.status, "succeeded", "completed compensation is immutable and idempotently returned");
+  assert.equal(dispatches, 1);
+
+  const stale = await queueCompensation({ ownerId: 13, originalActionId: "act_stale", provider: "composio", objective: "Restore the prior CRM value" });
+  await updateCompensation(13, stale.id, { status: "running", attempts: 1, executionToolSlug: "CRM_UPDATE_RECORD", executionArgumentsHash: "approved_args", executionLeaseUntil: Date.now() - 1 });
+  const changedRetry = await executeCompensation({ ...input, id: stale.id, toolSlug: "CRM_DELETE_RECORD", argumentsHash: "different_args" });
+  assert.equal(changedRetry?.status, "blocked");
+  assert.match(changedRetry?.error ?? "", /differs from the action already attempted/);
+  const reconciled = await executeCompensation({ ...input, id: stale.id, approvalId: "approval_reconcile", toolSlug: "CRM_UPDATE_RECORD", argumentsHash: "approved_args", execute: async () => ({ summary: "reconciled receipt", externalReceiptId: "receipt_reconcile", verificationId: "verify_reconcile" }) });
+  assert.equal(reconciled?.status, "succeeded", "the exact originally approved action can reconcile a blocked record without changing the proposal");
+});
+
+test("native compensation execution requires approval and records only an injected durable receipt", async () => {
+  await initStore({ memoryOnly: true });
+  const compensation = await queueCompensation({ ownerId: 14, originalActionId: "act_native", provider: "composio", objective: "Restore the previous value" });
+  const proposal = { compensationId: compensation.id, action: "execute", toolSlug: "CRM_UPDATE_RECORD", arguments: { id: "c1" }, verification: { toolSlug: "CRM_GET_RECORD", arguments: { id: "c1" }, expected: { status: "restored" } } };
+  await assert.rejects(nativeTool(14, "CHUCK_MISSION_COMPENSATE", proposal), /exact owner approval/);
+  let executions = 0;
+  const result = await nativeTool(14, "CHUCK_MISSION_COMPENSATE", proposal, {
+    approvedApprovalId: "approval_native",
+    executeMissionCompensation: async (input) => { executions += 1; assert.equal(input.verification.expected.status, "restored"); return { receiptId: "external_receipt_native", verificationId: "verify_native", summary: "provider state verified" }; },
+  }) as { status: string; externalReceiptId?: string };
+  assert.equal(result.status, "succeeded");
+  assert.equal(result.externalReceiptId, "external_receipt_native");
+  assert.equal(executions, 1);
 });
 
 test("memory conflict detection preserves competing evidence and marks review quality", () => {

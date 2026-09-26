@@ -89,11 +89,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the mission and connected-app media bridge release", async () => {
+test("current upgrade manifest announces mission compensation, outcomes, and connected-app media", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.9.0");
-  assert.equal(notice?.version, "4.9.0");
+  assert.equal(notice?.id, "release-4.9.2");
+  assert.equal(notice?.version, "4.9.2");
   assert.match(formatAgentUpgradeNotice(notice!), /live provider outcome verification/);
   assert.match(formatAgentUpgradeNotice(notice!), /conversation, generated, or saved images/);
   assert.match(formatAgentUpgradeNotice(notice!), /provider confirms that exact action succeeded/);
+  assert.match(formatAgentUpgradeNotice(notice!), /exact owner-approved compensation actions/);
+  assert.match(formatAgentUpgradeNotice(notice!), /fresh read-back/);
 });

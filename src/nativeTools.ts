@@ -50,10 +50,11 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { validateNativeToolArguments } from "./agentTools.js";
+import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
-import { appendTraceEvent, listCompensations, updateCompensation } from "./reliability/persistence.js";
+import { appendTraceEvent, compensationView, executeCompensation, listCompensations } from "./reliability/persistence.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
 
@@ -114,6 +115,8 @@ export interface NativeToolRuntime {
   currentRunId?: string;
   /** Executes provider outcome checks only through an active, exact read-only tool grant. */
   outcomeReadAdapter?: OutcomeReadAdapter;
+  /** Executes a compensation action only after the agent boundary verified the exact owner approval and live tool grant. */
+  executeMissionCompensation?: (input: { compensationId: string; missionId?: string; missionStepId?: string; toolSlug: string; arguments: Record<string, unknown>; verification: { toolSlug: string; arguments: Record<string, unknown>; expected: Record<string, unknown> }; approvedArguments: Record<string, unknown>; approvalId: string }) => Promise<{ receiptId: string; providerReceiptId?: string; verificationId: string; summary: string }>;
   /** Set by the internal task-wait tool; the workflow settles the run after the agent turn ends. */
   requestTaskWait?: (request: TaskWaitRequest) => void;
   /** Set by the mission event-wait tool; the workflow parks the durable slice. */
@@ -1300,13 +1303,46 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const records = await listCompensations(userId);
       const record = records.find((item) => item.id === id);
       if (!record) throw new Error("Compensation record not found or not owned by you");
-      // The provider adapter is deliberately injected by the supervisor. This
-      // tool can inspect and approve the durable record, but cannot invent a
-      // provider-side undo operation from model text.
-      if (args.action === "inspect") return record;
-      if (args.action !== "approve") throw new Error("Compensation requires action=inspect or action=approve");
-      const approved = await updateCompensation(userId, id, { status: "pending", approvalId: `approved_${Date.now()}` });
-      return { ...approved, message: "Compensation is approved for the provider-specific supervisor; no provider action is claimed until that adapter returns a receipt." };
+      if (args.action === "inspect") return compensationView(record);
+      if (args.action !== "execute") throw new Error("Compensation requires action=inspect or action=execute");
+      if (typeof args.toolSlug !== "string" || !args.toolSlug.trim() || !args.arguments || typeof args.arguments !== "object" || Array.isArray(args.arguments)
+        || !args.verification || typeof args.verification !== "object" || Array.isArray(args.verification)) {
+        throw new Error("Compensation execution requires an exact provider tool, arguments, and read-back verification plan.");
+      }
+      if (!runtime.approvedApprovalId || !runtime.executeMissionCompensation) throw new Error("An exact owner approval and active connected-app execution context are required before compensation can run.");
+      const toolSlug = args.toolSlug.trim();
+      const providerArguments = args.arguments as Record<string, unknown>;
+      const verification = args.verification as { toolSlug?: unknown; arguments?: unknown; expected?: unknown };
+      if (typeof verification.toolSlug !== "string" || !verification.arguments || typeof verification.arguments !== "object" || Array.isArray(verification.arguments)
+        || !verification.expected || typeof verification.expected !== "object" || Array.isArray(verification.expected)) {
+        throw new Error("Compensation read-back requires a provider tool, arguments object, and expected state object.");
+      }
+      const verificationPlan = { toolSlug: verification.toolSlug.trim(), arguments: verification.arguments as Record<string, unknown>, expected: verification.expected as Record<string, unknown> };
+      const result = await executeCompensation({
+        ownerId: userId,
+        id,
+        approvalId: runtime.approvedApprovalId,
+        toolSlug,
+        argumentsHash: externalArgumentsHash({ toolSlug, arguments: providerArguments, verification: verificationPlan }),
+        execute: async (claimedRecord) => {
+          const executed = await runtime.executeMissionCompensation!({
+            compensationId: claimedRecord.id,
+            ...(claimedRecord.missionId ? { missionId: claimedRecord.missionId } : {}),
+            ...(claimedRecord.missionStepId ? { missionStepId: claimedRecord.missionStepId } : {}),
+            toolSlug,
+            arguments: providerArguments,
+            verification: verificationPlan,
+            approvedArguments: args,
+            approvalId: runtime.approvedApprovalId!,
+          });
+          return { summary: executed.summary, externalReceiptId: executed.receiptId, verificationId: executed.verificationId, ...(executed.providerReceiptId ? { providerReceiptId: executed.providerReceiptId } : {}) };
+        },
+      });
+      if (!result) throw new Error("Compensation record not found or not owned by you");
+      if (result.status === "running") return { ...compensationView(result), message: "Another approved compensation attempt currently holds the execution lease. No duplicate provider action was sent." };
+      if (result.status !== "succeeded") return { ...compensationView(result), message: result.error ?? "Compensation did not complete; verify provider state before continuing." };
+      await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "mission.compensation.succeeded", at: Date.now(), correlationId: result.id, summary: `Compensation completed through ${result.executionToolSlug ?? "provider action"} with a durable external-action receipt.`, metadata: { missionId: result.missionId ?? null, receiptId: result.externalReceiptId ?? null, providerReceiptId: result.providerReceiptId ?? null } });
+      return compensationView(result);
     }
     case "CHUCK_MISSION_REPAIR": {
       const missionId = text(args.id);

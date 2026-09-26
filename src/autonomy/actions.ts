@@ -111,6 +111,7 @@ export async function failExternalAction(userId: number, logicalActionId: string
     status: "ambiguous",
     error: `The provider outcome is uncertain; verify the provider state before manually retrying. ${error}`.slice(0, 1_000),
   });
+  if (receipt?.status === "succeeded") return;
   await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "uncertain", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
   await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.ambiguous", at: Date.now(), correlationId: logicalActionId, status: "uncertain", summary: "External provider outcome is uncertain and has been quarantined.", metadata: { tool: receipt?.tool ?? "unknown" } }).catch(() => undefined);
   if (receipt?.sourceKind === "mission" && receipt.sourceId && receipt.missionStepId) {
@@ -121,4 +122,35 @@ export async function failExternalAction(userId: number, logicalActionId: string
     }
   }
   await completeDelivery(`autonomy:external-action:${userId}:${createHash("sha256").update(logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
+}
+
+/** Promote an ambiguous provider write only when a fresh read-back proves its expected state. */
+export async function reconcileExternalActionByRead(input: { userId: number; logicalActionId: string; evidenceRef: string; summary: string; verifiedAt: number }): Promise<ExternalActionReceipt | undefined> {
+  const current = await getExternalAction(input.userId, input.logicalActionId);
+  if (!current || !["started", "ambiguous", "succeeded"].includes(current.status) || !input.evidenceRef.trim()) return undefined;
+  const reconciled = await updateExternalAction(input.userId, input.logicalActionId, {
+    status: "succeeded",
+    resultSummary: input.summary.slice(0, 8_000),
+    receiptVerification: "provider_read",
+    receiptEvidenceRef: input.evidenceRef.slice(0, 500),
+    verifiedAt: input.verifiedAt,
+    error: undefined,
+  });
+  if (!reconciled) return undefined;
+  await appendReliabilitySample({ ownerId: input.userId, operation: reconciled.tool, status: "success", at: input.verifiedAt, provider: reconciled.provider });
+  await appendTraceEvent({ ownerId: input.userId, kind: "receipt", type: "external_action.reconciled", at: input.verifiedAt, correlationId: input.logicalActionId, status: "verified", summary: `${reconciled.tool} state was confirmed by a fresh provider read.`, metadata: { provider: reconciled.provider, evidenceRef: input.evidenceRef.slice(0, 500) } });
+  if (reconciled.sourceKind === "mission" && reconciled.sourceId) {
+    await recordTrustedMissionEvidence(input.userId, reconciled.sourceId, [{
+      id: `evidence_reconcile_${reconciled.id}_${createHash("sha256").update(input.evidenceRef).digest("hex").slice(0, 20)}`,
+      kind: "before_after",
+      summary: input.summary.slice(0, 2_000),
+      source: reconciled.tool,
+      ref: input.evidenceRef.slice(0, 500),
+      hash: reconciled.argumentsHash,
+      verified: true,
+      verifiedBy: "system",
+    }], reconciled.missionStepId);
+  }
+  await completeDelivery(`autonomy:external-action:${input.userId}:${createHash("sha256").update(input.logicalActionId).digest("hex")}`, 365 * 24 * 60 * 60);
+  return reconciled;
 }

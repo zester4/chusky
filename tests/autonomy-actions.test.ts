@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool } from "../src/autonomy/actions.js";
-import { completeMissionStep, createMission, getMission, initStore, startMission } from "../src/store.js";
+import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead } from "../src/autonomy/actions.js";
+import { completeMissionStep, createMission, getExternalAction, getMission, initStore, startMission } from "../src/store.js";
 
 test("autonomous external action receipts make successful provider writes idempotent", async () => {
   await initStore({ memoryOnly: true });
@@ -24,6 +24,20 @@ test("an uncertain external-write failure is quarantined instead of replayed", a
   assert.equal(retry.state, "ambiguous");
   assert.match(retry.receipt?.error ?? "", /verify.*provider|provider.*verify/i);
 });
+
+test("an ambiguous external action is promoted only by fresh read-back and cannot be downgraded", async () => {
+  await initStore({ memoryOnly: true });
+  const input = { userId: 950004, provider: "composio" as const, tool: "HUBSPOT_UPDATE_CONTACT", args: { id: "contact_1", status: "qualified" }, runId: "run-readback", source: { kind: "job", id: "job_readback", occurrenceId: "occ_1" } };
+  const claim = await beginExternalAction(input);
+  await failExternalAction(input.userId, claim.logicalActionId, "response timed out after dispatch");
+  const verified = await reconcileExternalActionByRead({ userId: input.userId, logicalActionId: claim.logicalActionId, evidenceRef: "composio-read:HUBSPOT_GET_CONTACT:hash:1000", summary: "Contact status is qualified.", verifiedAt: 1000 });
+  assert.equal(verified?.status, "succeeded");
+  assert.equal(verified?.receiptVerification, "provider_read");
+  assert.match(verified?.receiptEvidenceRef ?? "", /^composio-read:/);
+  await failExternalAction(input.userId, claim.logicalActionId, "a late timeout report cannot erase read-back proof");
+  assert.equal((await getExternalAction(input.userId, claim.logicalActionId))?.status, "succeeded");
+});
+
 test("external write classification leaves reads and checkpoints replay-safe", () => {
   assert.equal(isExternalWriteTool("GMAIL_SEND_EMAIL"), true);
   assert.equal(isExternalWriteTool("GMAIL_GET_MESSAGE"), false);

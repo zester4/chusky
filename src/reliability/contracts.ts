@@ -66,6 +66,13 @@ export interface CompensationRecord {
   resultSummary?: string;
   error?: string;
   approvalId?: string;
+  executionToolSlug?: string;
+  executionArgumentsHash?: string;
+  executionLeaseId?: string;
+  executionLeaseUntil?: number;
+  providerReceiptId?: string;
+  externalReceiptId?: string;
+  verificationId?: string;
 }
 
 export type TraceEventKind =

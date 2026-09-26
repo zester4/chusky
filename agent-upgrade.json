@@ -1,11 +1,11 @@
 {
-  "id": "release-4.9.0",
-  "version": "4.9.0",
+  "id": "release-4.9.2",
+  "version": "4.9.2",
   "title": "Chusky has been upgraded",
   "bullets": [
     "Added durable autonomous missions for concrete outcomes, with dependency-aware steps, bounded budgets, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",
     "Owner-scoped image transfers work from conversation, generated, or saved images through exact connected-app actions; publish/send completion is reported only after the provider confirms that exact action succeeded.",
-    "Missions can fan out, sleep, resume on exact events or approvals, pause, repair, and replan; mission status and proof span Telegram, CLI, SDK/API, dashboard, and MCP."
+    "Missions execute exact owner-approved compensation actions, verify expected provider state by fresh read-back, and persist linked receipts across Telegram, CLI, SDK/API, dashboard, and MCP."
   ],
-  "createdAt": "2026-09-25T21:02:26.020Z"
+  "createdAt": "2026-09-26T00:54:55.564Z"
 }

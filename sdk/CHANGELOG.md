@@ -2,6 +2,11 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.6.2 - 2026-09-26
+
+- Expose the exact provider action, durable Chusky receipt ID, and persisted
+  fresh read-back verification ID on completed compensation records.
+
 ## 1.6.1 - 2026-09-25
 
 - Add typed operator readiness and provider-matrix proof details.

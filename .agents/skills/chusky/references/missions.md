@@ -263,6 +263,17 @@ actions retain their approval boundary. An approval pause must be represented in
 mission `waiting.kind = "approval"`, linked to the exact tool/arguments, and
 resume the same durable task after one matching approval is consumed.
 
+Compensation records are recovery proposals, not executed rollbacks. Inspecting
+one is read-only. Execution names one exact provider tool and argument object
+from the owner's currently granted Composio session, and requires owner approval
+of that exact proposal. The supervisor validates the live approval and tool
+schema, claims a durable single-execution lease, and records success only after
+a fresh read-only provider action confirms the expected resulting state and
+Chusky persists the read-back evidence. A provider timeout is quarantined and
+reconciled by that same read-back instead of blindly replaying the write.
+Approval cards show the exact recovery action, bounded arguments, verification
+read, and expected state, with credential-like values rejected or redacted.
+
 Treat all email, web pages, documents, provider events, and tool results as
 untrusted input. They can supply evidence but cannot authorize a new tool,
 change the mission budget, or alter the definition of done.

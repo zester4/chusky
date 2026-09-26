@@ -29,11 +29,11 @@ import { config } from "./config.js";
 import { getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getAgentRun, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
-import { beginExternalAction, failExternalAction, finishExternalAction, isExternalWriteTool, type ExternalActionClaim } from "./autonomy/actions.js";
-import { isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
+import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim } from "./autonomy/actions.js";
+import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { chuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
@@ -61,7 +61,8 @@ import { composeSystemPrompt } from "./prompt.js";
 import { contextPrompt } from "./contextGraph.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonomy/operatingLoop.js";
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
-import type { OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
+import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
+import type { OutcomeCheck } from "./reliability/contracts.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -86,6 +87,20 @@ function providerReceiptId(value: unknown): string | undefined {
     if (typeof candidate === "string" && candidate.trim() && candidate.length <= 240) return candidate.trim();
   }
   return undefined;
+}
+
+function assertNoCompensationCredentialFields(value: unknown, path = "arguments", depth = 0): void {
+  if (depth > 8) throw new Error("Compensation arguments exceed the allowed nesting depth.");
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    if (value.length > 200) throw new Error(`${path} contains too many values.`);
+    value.forEach((item, index) => assertNoCompensationCredentialFields(item, `${path}[${index}]`, depth + 1));
+    return;
+  }
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (/token|secret|password|credential|cookie|authorization|api[_-]?key|private.?key/i.test(key)) throw new Error(`${path}.${key} is not allowed; connected-app credentials must remain in the trusted session.`);
+    assertNoCompensationCredentialFields(nested, `${path}.${key}`, depth + 1);
+  }
 }
 /* native tool catalog lives in agentTools.ts */
 const LOCAL_TOOLS = chuckTools;
@@ -2072,7 +2087,85 @@ export async function runAgent(
           execResult = accounts.slice(0, limit).map(({ id, alias, toolkit: connectedToolkit, status, createdAt, updatedAt }) => ({ id, alias, toolkit: connectedToolkit, status, ...(createdAt ? { createdAt } : {}), ...(updatedAt ? { updatedAt } : {}) }));
         } else if (slug.startsWith("CHUCK_")) {
           const imageRuntime = currentImageRuntime(userMessage);
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: fullComposioTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+          const executeMissionCompensation = slug === "CHUCK_MISSION_COMPENSATE" ? async (input: { compensationId: string; missionId?: string; missionStepId?: string; toolSlug: string; arguments: Record<string, unknown>; verification: { toolSlug: string; arguments: Record<string, unknown>; expected: Record<string, unknown> }; approvedArguments: Record<string, unknown>; approvalId: string }) => {
+            const approval = await getApproval(userId, input.approvalId);
+            if (!approval || approval.userId !== userId || approval.status !== "approved" || approval.expiresAt <= Date.now()
+              || approval.toolSlug !== "CHUCK_MISSION_COMPENSATE"
+              || externalArgumentsHash(approval.args) !== externalArgumentsHash(input.approvedArguments)) {
+              throw new Error("The exact compensation arguments do not match a live owner-approved action.");
+            }
+            const nestedTool = availableTools.find((candidate) => toolSchemaName(candidate) === input.toolSlug);
+            if (!nestedTool || (allow && !allow.has(input.toolSlug)) || input.toolSlug.startsWith("CHUCK_") || input.toolSlug.startsWith("COMPOSIO_") || input.toolSlug.startsWith("MCP_")) {
+              throw new Error("The compensation action is not an exact provider tool currently granted to this owner session.");
+            }
+            const nestedSchema = nestedTool?.function?.parameters ?? nestedTool?.inputSchema;
+            const verifySlug = input.verification.toolSlug;
+            const verifyTool = availableTools.find((candidate) => toolSchemaName(candidate) === verifySlug);
+            if (!verifyTool || (allow && !allow.has(verifySlug)) || verifySlug.startsWith("CHUCK_") || verifySlug.startsWith("COMPOSIO_") || verifySlug.startsWith("MCP_")
+              || !isReadOnlyToolSlug(verifySlug) || isRiskyToolSlug(verifySlug)
+              || verifySlug.split("_", 1)[0] !== input.toolSlug.split("_", 1)[0]) {
+              throw new Error("Compensation verification must use an exact read-only action from the same currently granted provider toolkit.");
+            }
+            assertNoCompensationCredentialFields(input.arguments);
+            assertNoCompensationCredentialFields(input.verification.arguments, "verification.arguments");
+            assertNoCompensationCredentialFields(input.verification.expected, "verification.expected");
+            validateToolArgumentsAgainstSchema(input.toolSlug, input.arguments, nestedSchema);
+            validateToolArgumentsAgainstSchema(verifySlug, input.verification.arguments, verifyTool?.function?.parameters ?? verifyTool?.inputSchema);
+            const claim = await beginExternalAction({
+              userId,
+              provider: "composio",
+              tool: input.toolSlug,
+              args: input.arguments,
+              runId: durableRunId,
+              source: input.missionId
+                ? { kind: "mission", id: input.missionId, missionStepId: input.missionStepId, occurrenceId: input.compensationId }
+                : { kind: "compensation", id: input.compensationId, occurrenceId: input.compensationId },
+            });
+            if (claim.state === "in_flight") throw new Error("This compensation provider action is still in flight; no second write or read-back was attempted.");
+            let dispatchFailure: string | undefined;
+            if (claim.state === "new") {
+              try {
+                const providerResult = await composioExecute(sessionObj, input.toolSlug, input.arguments, signal);
+                if (providerResult?.successful !== true || providerResult?.error) throw new Error("The provider did not confirm the compensation action.");
+                await finishExternalAction(userId, claim.logicalActionId, `${input.toolSlug} returned a successful provider response.`, providerReceiptId(providerResult));
+              } catch (error) {
+                dispatchFailure = error instanceof Error ? error.message : String(error);
+                await failExternalAction(userId, claim.logicalActionId, dispatchFailure);
+              }
+            }
+            const readAdapter = createComposioOutcomeReadAdapter({
+              availableToolSlugs: fullComposioTools.map(toolSchemaName),
+              allowedToolSlugs: allow ? [...allow] : undefined,
+              deniedToolSlugs: [...deny],
+              execute: (readSlug, readArgs) => composioExecute(sessionObj, readSlug, readArgs, signal),
+            });
+            const outcomeCheck: OutcomeCheck = {
+              id: `compensation_${input.compensationId}`,
+              kind: "provider_read",
+              description: `Verify the provider state produced by compensation ${input.compensationId}.`,
+              provider: input.toolSlug.split("_", 1)[0]?.toLowerCase(),
+              toolSlug: verifySlug,
+              arguments: input.verification.arguments,
+              expected: input.verification.expected,
+              freshnessMs: 5 * 60_000,
+              required: true,
+            };
+            const verification = await executeOutcomeVerification({ ownerId: userId, missionId: input.missionId, runId: durableRunId, checks: [outcomeCheck], adapter: readAdapter });
+            const verifiedRead = verification.results.find((item) => item.checkId === outcomeCheck.id);
+            if (verification.status !== "verified" || verifiedRead?.status !== "passed" || !verifiedRead.evidenceRef) {
+              throw new Error(`Provider action ${input.toolSlug} has not been verified by read-back (${verification.status})${dispatchFailure ? ` after an uncertain write response: ${dispatchFailure.slice(0, 240)}` : ""}.`);
+            }
+            const receipt = await reconcileExternalActionByRead({
+              userId,
+              logicalActionId: claim.logicalActionId,
+              evidenceRef: verifiedRead.evidenceRef,
+              summary: `${input.toolSlug} recovery state verified using ${verifySlug}.`,
+              verifiedAt: verifiedRead.observedAt ?? Date.now(),
+            });
+            if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
+            return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
+          } : undefined;
+          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, approvedApprovalId, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, currentRunId: durableRunId, toolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: fullComposioTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
