@@ -7,6 +7,7 @@ import { linkChannelIdentity } from "../src/channels/identity.js";
 import { ChannelOutbox } from "../src/channels/outbox.js";
 import { ChannelDebouncer } from "../src/channels/debounce.js";
 import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSignature } from "../src/channels/slack.js";
+import { formatSlackText } from "../src/channels/slackFormatting.js";
 import { normalizeWhatsAppPayload, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "../src/channels/whatsapp.js";
 import { normalizeSendblueMessage, SendblueAdapter, verifySendblueSignature } from "../src/channels/sendblue.js";
 import { sendblueFileExtensionForMime } from "../src/channels/sendblueMedia.js";
@@ -273,6 +274,24 @@ test("Sendblue converts Markdown into readable iMessage text", () => {
 test("WhatsApp converts Markdown into native rich text", () => {
   const result = formatWhatsAppText("# Today\n\n**Important** and *quickly*\n\n- Check [the dashboard](https://example.com)\n- `npm test`\n\n~~old plan~~");
   assert.equal(result, "*Today*\n\n*Important* and _quickly_\n\n• Check the dashboard: https://example.com\n• ```npm test```\n\n~old plan~");
+});
+
+test("Slack converts agent Markdown to mrkdwn while preserving code and escaping plain text", () => {
+  const result = formatSlackText("# Update\n\n**Ready** and *quickly*; ~~old~~.\n\n- [Open docs](https://example.com/docs?a=1&b=2)\n- `a < b`\n\n> Keep <safe>\n\n```ts\nconst value = a < b;\n```");
+  assert.match(result, /^\*Update\*/);
+  assert.match(result, /\*Ready\* and _quickly_; ~old~/);
+  assert.match(result, /• <https:\/\/example\.com\/docs\?a=1&b=2\|Open docs>/);
+  assert.match(result, /`a &lt; b`/);
+  assert.match(result, /> Keep &lt;safe&gt;/);
+  assert.match(result, /```\nconst value = a &lt; b;\n```/);
+  assert.doesNotMatch(result, /\*\*|\[Open docs\]/);
+});
+
+test("Slack renders Markdown tables as aligned readable code blocks and rejects unsafe link targets", () => {
+  const result = formatSlackText("| Name | Status |\n| --- | --- |\n| Chusky | ready |\n\n[bad](javascript:alert(1))");
+  assert.match(result, /```\nName\s+Status\nChusky\s+ready\n```/);
+  assert.match(result, /bad/);
+  assert.doesNotMatch(result, /<javascript:/i);
 });
 
 test("WhatsApp preserves code blocks while formatting surrounding text", () => {
@@ -639,13 +658,18 @@ test("provider adapters use channel-specific delivery APIs", async () => {
     requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
     return new Response(JSON.stringify({ ok: true, ts: "3.4", channel: "D1", messages: [{ id: "wamid.2" }] }), { status: 200 });
   }) as typeof fetch;
-  await new SlackAdapter("xoxb-token", fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "slack", conversationId: "D1", workspaceId: "T1" }, text: "hi", idempotencyKey: "s1" });
+  const slack = new SlackAdapter("xoxb-token", fakeFetch);
+  await slack.send({ accountId: "account_1", userId: 1, target: { provider: "slack", conversationId: "D1", workspaceId: "T1" }, text: "**hi**", idempotencyKey: "s1" });
   await new WhatsAppAdapter("token", "P1", "v23.0", fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "whatsapp", conversationId: "1555" }, text: "hi", idempotencyKey: "w1" });
   await new SendblueAdapter("key", "secret", "+15550002", undefined, fakeFetch).send({ accountId: "account_1", userId: 1, target: { provider: "sendblue", conversationId: "+15550001", metadata: { messageHandle: "sb-in-1" } }, text: "hi", idempotencyKey: "b1" });
   assert.equal(requests[0].url.endsWith("/chat.postMessage"), true);
+  assert.equal(requests[0].body.text, "*hi*");
   assert.equal(requests[1].url.includes("/P1/messages"), true);
   assert.equal(requests[2].url.endsWith("/send-message"), true);
   assert.equal(requests[2].body.from_number, "+15550002");
+  await slack.edit({ provider: "slack", conversationId: "D1", workspaceId: "T1" }, "3.4", "## Updated\n\n[View](https://example.com)");
+  assert.equal(requests[3].url.endsWith("/chat.update"), true);
+  assert.equal(requests[3].body.text, "*Updated*\n\n<https://example.com/|View>");
 });
 
 test("Slack's OAuth installation requests the file-write scope used by generated-media delivery", () => {
@@ -677,7 +701,7 @@ test("Slack uploads owner-scoped R2 media with the current external-file API and
     assert.deepEqual(body.files, [{ id: "F-UPLOAD-1", title: "proposal.png" }]);
     assert.equal(body.channel_id, "C-1");
     assert.equal(body.thread_ts, "1710000000.000100");
-    assert.equal(body.initial_comment, "Here is the image");
+    assert.equal(body.initial_comment, "*Here* is the image");
     return new Response(JSON.stringify({ ok: true, files: [{ id: "F-UPLOAD-1" }] }), { status: 200 });
   }) as typeof fetch;
   const loadedKeys: string[] = [];
@@ -688,7 +712,7 @@ test("Slack uploads owner-scoped R2 media with the current external-file API and
   const receipt = await adapter.send({
     accountId: "account_7", userId: 7,
     target: { provider: "slack", conversationId: "C-1", workspaceId: "T-1", threadId: "1710000000.000100" },
-    text: "Here is the image", attachments: [{ id: "slack/7/proposal.png", kind: "image", mimeType: "image/png", filename: "proposal.png" }],
+    text: "**Here** is the image", attachments: [{ id: "slack/7/proposal.png", kind: "image", mimeType: "image/png", filename: "proposal.png" }],
     idempotencyKey: "slack-image-1",
   });
   assert.deepEqual(loadedKeys, ["slack/7/proposal.png"]);

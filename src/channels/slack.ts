@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { basename } from "node:path";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
+import { formatSlackText } from "./slackFormatting.js";
 import { ChannelVerificationError } from "./contracts.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage, ReplyTarget } from "./contracts.js";
 import { readR2Object } from "../lib/storage/r2.js";
@@ -154,14 +155,14 @@ export class SlackAdapter implements ChannelAdapter {
         files,
         channel_id: message.target.conversationId,
         ...(message.target.threadId ? { thread_ts: message.target.threadId } : {}),
-        ...(message.text?.trim() ? { initial_comment: message.text.slice(0, this.capabilities.maxTextLength) } : {}),
+        ...(message.text?.trim() ? { initial_comment: formatSlackText(message.text).slice(0, this.capabilities.maxTextLength) } : {}),
       }, message.target.workspaceId);
       const postedIds = Array.isArray(response.files) ? response.files.map((file: any) => file?.id).filter((id: unknown): id is string => typeof id === "string" && Boolean(id)) : [];
       if (postedIds.length !== files.length || files.some((file) => !postedIds.includes(file.id))) throw new Error("Slack completed the upload without returning a receipt for every file");
       const fileId = postedIds[0];
       return { providerMessageId: fileId, deliveredAt: Date.now(), metadata: { channelId: message.target.conversationId, fileCount: String(files.length) } };
     }
-    const response = await this.api<any>("chat.postMessage", { channel: message.target.conversationId, text: message.text ?? "", ...(message.target.threadId ? { thread_ts: message.target.threadId } : {}), ...(message.blocks?.length ? { blocks: message.blocks } : {}) }, message.target.workspaceId);
+    const response = await this.api<any>("chat.postMessage", { channel: message.target.conversationId, text: formatSlackText(message.text ?? ""), ...(message.target.threadId ? { thread_ts: message.target.threadId } : {}), ...(message.blocks?.length ? { blocks: message.blocks } : {}) }, message.target.workspaceId);
     return { providerMessageId: String(response.ts ?? ""), deliveredAt: Date.now(), metadata: { channelId: String(response.channel ?? message.target.conversationId) } };
   }
 
@@ -191,7 +192,7 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async edit(target: ReplyTarget, providerMessageId: string, text: string, blocks?: unknown[]): Promise<DeliveryReceipt> {
-    const response = await this.api<any>("chat.update", { channel: target.conversationId, ts: providerMessageId, text, ...(blocks?.length ? { blocks } : {}) }, target.workspaceId);
+    const response = await this.api<any>("chat.update", { channel: target.conversationId, ts: providerMessageId, text: formatSlackText(text), ...(blocks?.length ? { blocks } : {}) }, target.workspaceId);
     return { providerMessageId: String(response.ts ?? providerMessageId), deliveredAt: Date.now() };
   }
 
