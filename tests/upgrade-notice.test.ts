@@ -116,11 +116,21 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces owner-private autonomy", async () => {
+test("current upgrade manifest announces regular X Direct Messages", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.15.0");
-  assert.equal(notice?.version, "4.15.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /owner history and context/);
-  assert.match(formatAgentUpgradeNotice(notice!), /personal and business/);
-  assert.match(formatAgentUpgradeNotice(notice!), /shared rooms/);
+  assert.equal(notice?.id, "release-4.16.0");
+  assert.equal(notice?.version, "4.16.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /regular X Direct Messages channel/);
+  assert.match(formatAgentUpgradeNotice(notice!), /separate encrypted XChat/);
+  assert.match(formatAgentUpgradeNotice(notice!), /inbound DM images yet/);
+});
+
+test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {
+  const bullets = getAgentUpgradePreset("xDirectMessages");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.xDirectMessages]);
+  assert.match(bullets[0], /regular X Direct Messages channel alongside separate encrypted XChat/);
+  assert.match(bullets[1], /official adapter/);
+  assert.match(bullets[2], /unsolicited X notifications stay off/);
+  assert.match(bullets[2], /does not expose inbound DM images yet/);
 });

@@ -10,12 +10,13 @@ export interface StagingWebhookSmokeConfig {
   sendblueWebhookSecret?: string;
   twilioAuthToken?: string;
   twilioStatusCallbackUrl?: string;
+  xConsumerSecret?: string;
   xchatConsumerSecret?: string;
 }
 
 export interface StagingWebhookSmokeReport {
   scope: "staging_webhook_boundaries_only";
-  results: Array<{ provider: "slack" | "whatsapp" | "sendblue" | "twilio" | "xchat"; checks: string[]; status: "passed" }>;
+  results: Array<{ provider: "slack" | "whatsapp" | "sendblue" | "twilio" | "x" | "xchat"; checks: string[]; status: "passed" }>;
   outboundMessagesSent: 0;
   fullProviderProofCreated: false;
   readinessChanged: false;
@@ -61,6 +62,7 @@ function configuredProviders(config: StagingWebhookSmokeConfig): Provider[] {
   }
   if (config.sendblueWebhookSecret) configured.push("sendblue");
   if (config.twilioAuthToken) configured.push("twilio");
+  if (config.xConsumerSecret) configured.push("x");
   if (config.xchatConsumerSecret) configured.push("xchat");
   if (!configured.length) throw new Error("Configure at least one staging webhook secret to run provider smoke checks.");
   return configured;
@@ -171,14 +173,16 @@ export async function runStagingWebhookSmoke(
       continue;
     }
 
+    const consumerSecret = provider === "x" ? config.xConsumerSecret! : config.xchatConsumerSecret!;
+    const path = provider === "x" ? "/x/webhook" : "/xchat/webhook";
     const crcToken = `chusky-smoke-${randomUUID()}`;
-    const expectedToken = `sha256=${hmac("sha256", config.xchatConsumerSecret!, crcToken, "base64")}`;
-    const crcUrl = new URL("/xchat/webhook", base);
+    const expectedToken = `sha256=${hmac("sha256", consumerSecret, crcToken, "base64")}`;
+    const crcUrl = new URL(path, base);
     crcUrl.searchParams.set("crc_token", crcToken);
     const response = await request(provider, `${crcUrl.pathname}${crcUrl.search}`, { method: "GET" });
     requireOk(provider, response);
     const payload = JSON.parse(await responseText(response)) as { response_token?: unknown };
-    if (typeof payload.response_token !== "string" || !secureEqual(payload.response_token, expectedToken)) throw new Error("XChat staging webhook returned an invalid CRC response.");
+    if (typeof payload.response_token !== "string" || !secureEqual(payload.response_token, expectedToken)) throw new Error(`${provider === "x" ? "X" : "XChat"} staging webhook returned an invalid CRC response.`);
     results.push({ provider, checks: ["crc_challenge"], status: "passed" });
   }
 

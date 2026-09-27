@@ -37,7 +37,9 @@ export async function linkChannelIdentity(userId: number, input: { provider: Cha
     verifiedAt: now,
     createdAt: now,
     updatedAt: now,
-    proactiveOptIn: input.provider === "whatsapp" ? false : true,
+    // Linking an X account authorizes replies to its DMs, not unsolicited
+    // proactive DMs. Owners can opt in explicitly with /channel notify x on.
+    proactiveOptIn: input.provider === "whatsapp" || input.provider === "x" ? false : true,
   };
   const existing = await getChannelIdentity(record.provider, record.externalUserId, record.workspaceId);
   if (existing && existing.userId !== userId) throw new Error("That channel identity is already linked to another Chusky account");

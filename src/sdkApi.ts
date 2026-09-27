@@ -1253,6 +1253,7 @@ export function registerSdkApi(app: Hono): void {
     const twilioConfigured = !config.twilioVoiceEnabled || Boolean(config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret);
     const twilioSmsConfigured = !config.twilioSmsEnabled || Boolean(config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid));
     const twilioInboundConfigured = !config.twilioInboundEnabled || Boolean(config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers);
+    const xConfigured = !config.xEnabled || Boolean(config.xConsumerSecret && (config.xUserAccessToken || (config.xClientId && config.xRefreshToken)) && Boolean(config.xClientId) === Boolean(config.xRefreshToken) && (process.env.NODE_ENV !== "production" || !(config.xClientId && config.xRefreshToken) || config.xEncryptionKey));
     const xchatConfigured = !config.xchatEnabled || Boolean(config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin);
     const redis = isDurableStore();
     const production = process.env.NODE_ENV === "production";
@@ -1264,6 +1265,7 @@ export function registerSdkApi(app: Hono): void {
       twilio: config.twilioVoiceEnabled ? (twilioConfigured ? "configured" : "misconfigured") : "disabled",
       twilioSms: config.twilioSmsEnabled ? (twilioSmsConfigured ? "configured" : "misconfigured") : "disabled",
       twilioInbound: config.twilioInboundEnabled ? (twilioInboundConfigured ? "configured" : "misconfigured") : "disabled",
+      x: config.xEnabled ? (xConfigured ? "configured" : "misconfigured") : "disabled",
       xchat: config.xchatEnabled ? (xchatConfigured ? "configured" : "misconfigured") : "disabled",
       telegram: "configured",
     } as const;
@@ -1280,7 +1282,7 @@ export function registerSdkApi(app: Hono): void {
       const providerMatrix = providerMatrixWithProofs(process.env);
       readiness = { status: "blocked", generatedAt: Date.now(), durableStore: redis, checks: [{ id: "readiness_store", status: "failed", detail: "Readiness evidence could not be loaded from the configured store." }], providerMatrix, blocking: ["readiness_store"], warnings: [] };
     }
-    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring, readiness });
+    return c.json({ ok: ok && vectorCheck !== "degraded", status: ok && vectorCheck !== "degraded" ? "operational" : "degraded", persistence: redis ? "redis" : "memory", checks: { ...checks, vector: vectorCheck }, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring, readiness });
   });
 
   app.get("/v1/account/overview", async (c) => {
@@ -2350,7 +2352,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/channels/link-code", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { provider?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
-    if (provider !== "slack" && provider !== "whatsapp" && provider !== "sendblue") return apiError(c, 400, "invalid_channel_provider", "Channel linking is available for Slack, WhatsApp, and Sendblue.");
+    if (provider !== "slack" && provider !== "whatsapp" && provider !== "sendblue" && provider !== "x") return apiError(c, 400, "invalid_channel_provider", "Channel linking is available for Slack, WhatsApp, Sendblue, and X direct messages.");
     const code = await createLinkCode(sdkUser(c)!.userId, provider);
     if (provider === "slack") {
       let installUrl: string | undefined;

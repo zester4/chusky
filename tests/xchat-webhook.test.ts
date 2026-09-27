@@ -1,34 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
 import { Hono } from "hono";
 import { ChannelGateway } from "../src/channels/gateway.js";
 import { registerChannelRoutes } from "../src/channels/routes.js";
 import { XchatAdapter } from "../src/channels/xchat.js";
-import { createXchatCrcResponse } from "../src/channels/xchat.js";
+import { XAdapter } from "../src/channels/x.js";
 
-test("XChat CRC response uses the consumer secret and token", () => {
-  const token = "crc-test-token";
-  const secret = "consumer-secret";
-  const expected = createHmac("sha256", secret).update(token).digest("base64");
-  assert.deepEqual(createXchatCrcResponse(token, secret), { response_token: `sha256=${expected}` });
-});
-
-test("XChat CRC response rejects missing inputs", () => {
-  assert.throws(() => createXchatCrcResponse("", "secret"), /requires/);
-  assert.throws(() => createXchatCrcResponse("token", ""), /requires/);
-});
-
-test("XChat webhook answers CRC without initializing the provider SDK", async () => {
+test("X regular and XChat webhooks delegate GET challenges and POST events to their official adapters", async () => {
   const app = new Hono();
-  const adapter = new XchatAdapter({ accessToken: "test-token", consumerSecret: "test-secret", processInbound: async () => undefined });
-  registerChannelRoutes(app, { gateway: new ChannelGateway(async () => undefined), xchat: { adapter, consumerSecret: "test-secret" } });
+  const x = new XAdapter({ userAccessToken: "token", consumerSecret: "secret", processInbound: async () => undefined });
+  const xchat = new XchatAdapter({ accessToken: "token", consumerSecret: "secret", processInbound: async () => undefined });
+  const received: Array<{ provider: string; method: string; path: string }> = [];
+  x.handleWebhook = async (request) => {
+    received.push({ provider: "x", method: request.method, path: new URL(request.url).pathname });
+    return new Response("x adapter");
+  };
+  xchat.handleWebhook = async (request) => {
+    received.push({ provider: "xchat", method: request.method, path: new URL(request.url).pathname });
+    return new Response("xchat adapter");
+  };
+  registerChannelRoutes(app, { gateway: new ChannelGateway(async () => undefined), x: { adapter: x }, xchat: { adapter: xchat } });
 
-  const token = "route-crc-token";
-  const response = await app.request(`http://localhost/xchat/webhook?crc_token=${encodeURIComponent(token)}`);
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), createXchatCrcResponse(token, "test-secret"));
-
-  const missing = await app.request("http://localhost/xchat/webhook");
-  assert.equal(missing.status, 400);
+  for (const path of ["/x/webhook", "/xchat/webhook"]) {
+    for (const method of ["GET", "POST"] as const) {
+      const response = await app.request(`http://localhost${path}`, { method });
+      assert.equal(response.status, 200);
+      assert.match(await response.text(), /adapter/);
+    }
+  }
+  assert.deepEqual(received, [
+    { provider: "x", method: "GET", path: "/x/webhook" },
+    { provider: "x", method: "POST", path: "/x/webhook" },
+    { provider: "xchat", method: "GET", path: "/xchat/webhook" },
+    { provider: "xchat", method: "POST", path: "/xchat/webhook" },
+  ]);
 });

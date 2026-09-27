@@ -29,7 +29,7 @@ export function sendblueFileExtensionForMime(mimeType: string): string {
  * bounded, provider-readable URL without putting binary data in Redis or in
  * the Sendblue request body.
  */
-export async function persistGeneratedMedia(userId: number, images: GeneratedMedia[] = [], files: GeneratedMedia[] = [], prefix = "sendblue"): Promise<ChannelAttachment[]> {
+export async function persistGeneratedMedia(userId: number, images: GeneratedMedia[] = [], files: GeneratedMedia[] = [], prefix = "sendblue", includeDownloadUrl = true): Promise<ChannelAttachment[]> {
   if (!r2Configured()) return [];
   const attachments: ChannelAttachment[] = [];
   for (const item of [...images, ...files].slice(0, 10)) {
@@ -44,7 +44,7 @@ export async function persistGeneratedMedia(userId: number, images: GeneratedMed
     const extension = sendblueFileExtensionForMime(mimeType);
     const key = `${prefix}/${userId}/${randomUUID()}.${extension}`;
     await putR2Object(key, item.data, mimeType);
-    attachments.push({ id: key, kind: mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : "document", mimeType, filename: item.name, sizeBytes: item.data.length, url: await signR2Download(key) });
+    attachments.push({ id: key, kind: mimeType.startsWith("image/") ? "image" : mimeType.startsWith("audio/") ? "audio" : mimeType.startsWith("video/") ? "video" : "document", mimeType, filename: item.name, sizeBytes: item.data.length, ...(includeDownloadUrl ? { url: await signR2Download(key) } : {}) });
   }
   return attachments;
 }
@@ -59,4 +59,15 @@ export async function persistWhatsAppMedia(userId: number, images: GeneratedMedi
 
 export async function persistSlackMedia(userId: number, images: GeneratedMedia[] = [], files: GeneratedMedia[] = []): Promise<ChannelAttachment[]> {
   return persistGeneratedMedia(userId, images, files, "slack");
+}
+
+export async function persistXMedia(userId: number, images: GeneratedMedia[] = []): Promise<ChannelAttachment[]> {
+  // The X adapter reads this owner-scoped object server-side and uploads the
+  // bytes through the official adapter. It does not need a signed public URL.
+  const allSupported = images.length <= 4 && images.every((item) => {
+    const mimeType = (item.mediaType ?? item.contentType ?? "").toLowerCase().split(";", 1)[0];
+    return ["image/png", "image/jpeg", "image/webp"].includes(mimeType) && item.data?.length > 0 && item.data.length <= 12 * 1024 * 1024;
+  });
+  if (!allSupported) return [];
+  return persistGeneratedMedia(userId, images, [], "x", false);
 }

@@ -6445,7 +6445,7 @@ const attentionPrefixes: Record<AttentionEntityKind, string> = {
   observation: "obs", open_loop: "loop", attention_candidate: "cand", standing_order: "order",
   autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj",
 };
-const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "xchat", "voice", "cli", "webhook"];
+const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook"];
 
 function attentionText(value: unknown, field: string, max = 4000, required = false): string | undefined {
   if (value === undefined || value === null || value === "") {

@@ -610,7 +610,7 @@ function channelLinkKeyboard(userId: number): InlineKeyboard {
     .text("✉️ Telegram", `chlink:t:${userId}`).row()
     .text("⌨️ CLI", `chlink:cli:${userId}`).row()
     .text("💬 SMS", `chlink:p:sms:${userId}`)
-    .text("𝕏 XChat", `chlink:p:xchat:${userId}`).row()
+    .text("𝕏 X DMs", `chlink:p:x:${userId}`).row()
     .text("👥 Link an iMessage group", `chlink:g:sendblue:${userId}`);
 }
 
@@ -622,7 +622,7 @@ async function sendCliLink(ctx: Context): Promise<void> {
   await ctx.reply(`🔐 <b>Terminal pairing code</b>\n\n<code>${code}</code>\n\nThis code expires in 10 minutes and can be used once. In your terminal run:\n\n<code>chusky auth link${serverHint}</code>`, { parse_mode: "HTML" });
 }
 
-async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "xchat"): Promise<void> {
+async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsapp" | "sendblue" | "sms" | "x" | "xchat"): Promise<void> {
   const code = await createLinkCode(ctx.from!.id, provider);
   if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
     const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
@@ -632,7 +632,7 @@ async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsap
     });
     return;
   }
-  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "sms" ? "SMS/Twilio" : provider === "xchat" ? "XChat" : provider;
+  const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "sms" ? "SMS/Twilio" : provider === "x" ? "X direct messages" : provider === "xchat" ? "encrypted XChat" : provider;
   await replyHtml(ctx, `<b>Link ${label}</b>\n\nOne-time code: <code>${code}</code>\n\nSend <code>/link ${code}</code> from the ${label} account you want to link. It expires in 10 minutes.`);
 }
 
@@ -1420,7 +1420,7 @@ export function registerHandlers(bot: Bot): void {
     const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
     const action = parts[0]?.toLowerCase();
     const rawProvider = parts[1]?.toLowerCase();
-    const provider = rawProvider === "imessage" ? "sendblue" : rawProvider === "x" ? "xchat" : rawProvider;
+    const provider = rawProvider === "imessage" ? "sendblue" : rawProvider;
     if (!action || (action === "link" && !provider)) {
       await ctx.reply("Choose the channel to link:", { reply_markup: channelLinkKeyboard(ctx.from!.id) });
       return;
@@ -1429,7 +1429,7 @@ export function registerHandlers(bot: Bot): void {
       await sendGroupChannelLink(ctx);
       return;
     }
-    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "sms" || provider === "xchat")) {
+    if (action === "link" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "sms" || provider === "x" || provider === "xchat")) {
       await sendPrivateChannelLink(ctx, provider);
       return;
     }
@@ -1438,7 +1438,7 @@ export function registerHandlers(bot: Bot): void {
       await replyHtml(ctx, linked.length ? `<b>Linked channels</b>\n\n${linked.map((item) => `• ${item.provider} — <code>${item.externalUserId}</code>${item.workspaceId ? ` (${item.workspaceId})` : ""}`).join("\n")}` : "No external channels are linked yet.");
       return;
     }
-    if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue")) {
+    if (action === "notify" && (provider === "slack" || provider === "whatsapp" || provider === "sendblue" || provider === "x")) {
       const enabled = String((ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean)[2] ?? "").toLowerCase() === "on";
       const count = await setProactivePreference(ctx.from!.id, provider, enabled);
       await ctx.reply(count ? `✅ Proactive ${provider} notifications are ${enabled ? "on" : "off"}.` : `No linked ${provider} channel was found. Link it first with /channel link ${provider}.`);
@@ -2141,7 +2141,7 @@ export function registerHandlers(bot: Bot): void {
         await sendCliLink(ctx);
         return;
       }
-      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "xchat")) {
+      if (kind === "p" && (target === "slack" || target === "whatsapp" || target === "sendblue" || target === "sms" || target === "x" || target === "xchat")) {
         await sendPrivateChannelLink(ctx, target);
         return;
       }

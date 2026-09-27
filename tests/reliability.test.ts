@@ -14,7 +14,7 @@ import { buildOperatorTimeline } from "../src/reliability/timeline.js";
 import { runDueApprovalEscalations, scheduleApprovalEscalation } from "../src/approvals/escalation.js";
 import { verifyMeetingFollowThrough } from "../src/meetings/followThroughVerification.js";
 import { detectBusinessOpportunities } from "../src/autonomy/opportunityDetectors.js";
-import { providerMatrixWithProofs } from "../src/reliability/providerMatrix.js";
+import { providerMatrix, providerMatrixWithProofs } from "../src/reliability/providerMatrix.js";
 import { runProviderSmokeSuite } from "../src/reliability/providerSmoke.js";
 import type { ProviderProof, ProviderSmokeCapability } from "../src/reliability/contracts.js";
 import { buildReadinessReport } from "../src/reliability/readiness.js";
@@ -292,6 +292,11 @@ test("meeting follow-through and opportunity detection fail closed on missing re
 });
 
 test("provider certification requires fresh proof for every modality", async () => {
+  const x = providerMatrix({ X_CONSUMER_SECRET: "secret", X_USER_ACCESS_TOKEN: "token" }).find((entry) => entry.surface === "x");
+  assert.equal(x?.inboundImage, false);
+  assert.equal(x?.outboundImage, true);
+  assert.match(x?.missing ?? "", /Inbound DM images are not exposed/);
+
   const capabilities: ProviderSmokeCapability[] = ["inbound_text", "inbound_image", "outbound_text", "outbound_image"];
   const proofs = await runProviderSmokeSuite([{ surface: "web", run: async () => [
     ...capabilities.map((capability) => ({ capability, status: "passed" as const, observedAt: 9_000, evidenceHash: createHash("sha256").update(capability).digest("hex") })),
