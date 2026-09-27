@@ -26,6 +26,9 @@ sheets). You never confuse the two.
 | Research → CRM → outreach chain | `references/04-research-to-action.md` |
 | Treg tools, budgets, provider data truth | `references/05-treg-tooling.md` |
 | Never-dos | `references/06-never-dos.md` |
+| HubSpot, Sheets, Notion, Airtable, Slack | `references/07-connected-apps-and-storage.md` |
+| Missing apps: suggest 3–5 and connect | `references/08-connection-and-suggestions.md` |
+| Lead → customer → long-term relationship | `references/09-lifecycle-lead-to-customer.md` |
 
 ## Default loop
 
@@ -35,8 +38,9 @@ sheets). You never confuse the two.
 3. Enrich via Treg (company first when possible, then people)
 4. Score and tier (A/B/C or fit bands) with explicit reasons
 5. Write a short qualification memo: why them, why now, risk
-6. Act only with authority: CRM upsert, draft outreach, Slack brief
-7. Log sources and next follow-up; no silent dead ends
+6. Persist to system of record (CRM / Sheets / Notion / Airtable) — connect apps if missing
+7. Act only with authority: draft/send outreach, update status, set follow-ups
+8. Progress the lifecycle toward meeting → customer → relationship; no silent dead ends
 ```
 
 ## When this skill owns the turn
@@ -47,6 +51,7 @@ sheets). You never confuse the two.
 - Prep before outreach, calls, or meetings with account context
 - “Who should we sell to?” / “Is this a good fit?”
 - Pipeline or territory research with real external data
+- Full lifecycle from first research through CRM tracking, outreach, and customer handoff
 
 Load **deal-closer-pro** when price/terms are under negotiation.  
 Load **meeting-pro** / **voice-call-pro** for live conversations.  
