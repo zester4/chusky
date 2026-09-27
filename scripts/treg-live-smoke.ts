@@ -6,6 +6,7 @@ import { getTregSpend, initStore, saveTregReceipt, saveTregSpend } from "../src/
 type Options = {
   domain: string;
   company?: string;
+  personName?: string;
   userId: number;
   realCall: boolean;
 };
@@ -14,6 +15,7 @@ function parseArgs(argv: string[]): Options {
   const options: Options = {
     domain: "airmasters.net",
     company: "Air Masters of Tampa Bay",
+    personName: undefined,
     userId: 1,
     realCall: false,
   };
@@ -22,12 +24,14 @@ function parseArgs(argv: string[]): Options {
     const arg = argv[index];
     if (arg === "--domain") options.domain = String(argv[++index] ?? "").trim();
     else if (arg === "--company") options.company = String(argv[++index] ?? "").trim() || undefined;
+    else if (arg === "--person-name") options.personName = String(argv[++index] ?? "").trim() || undefined;
     else if (arg === "--user-id") options.userId = Number(argv[++index] ?? "");
     else if (arg === "--real-call") options.realCall = true;
     else if (arg === "--help" || arg === "-h") {
       console.log("Usage: npm exec -- tsx scripts/treg-live-smoke.ts [options]");
       console.log("  --domain <domain>       Company domain (default: airmasters.net)");
       console.log("  --company <name>        Company name");
+      console.log("  --person-name <name>    Person name; tests work-email enrichment instead of company enrichment");
       console.log("  --user-id <id>          Owner id for the local spend receipt (default: 1)");
       console.log("  --real-call             Execute one provider call; otherwise discovery only");
       process.exit(0);
@@ -60,8 +64,46 @@ async function main(): Promise<void> {
     tregEnabled: config.tregEnabled,
     tokenConfigured: Boolean(config.tregToken || Object.keys(config.tregOrganizationTokens).length),
     target: { domain: options.domain, company: options.company },
-    mode: options.realCall ? "discovery-and-provider-call" : "catalog-discovery-only",
+    personName: options.personName,
+    mode: options.personName
+      ? (options.realCall ? "person-enrichment-provider-call" : "person-enrichment-preview")
+      : (options.realCall ? "discovery-and-provider-call" : "catalog-discovery-only"),
   }, null, 2));
+
+  if (options.personName) {
+    const personCapabilityHits = await gateway.search("work email person enrichment", 15);
+    console.log(JSON.stringify({
+      personCapabilityQuery: "work email person enrichment",
+      personCapabilityHits,
+    }, null, 2));
+
+    if (!options.realCall) {
+      console.log(JSON.stringify({
+        result: "person_target_validated",
+        providerCallExecuted: false,
+        next: "Re-run with --real-call to execute one work-email enrichment call.",
+      }, null, 2));
+      return;
+    }
+
+    const result = await gateway.enrichPerson({
+      userId: options.userId,
+      name: options.personName,
+      domain: options.domain,
+      company: options.company,
+    });
+
+    console.log(JSON.stringify({
+      result: "person_provider_call_complete",
+      person: options.personName,
+      endpointsUsed: result.endpointsUsed,
+      providerResult: result.items,
+      totalCostUsd: result.totalCostUsd,
+      incomplete: result.incomplete,
+      warnings: result.warnings,
+    }, null, 2));
+    return;
+  }
 
   const queries = [
     "company enrichment by domain",

@@ -277,6 +277,37 @@ test("TregGateway sends the company enrichment contract and unwraps provider out
   }
 });
 
+test("TregGateway falls back to the work-email capability search when a person query is too specific", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let searchCalls = 0;
+  let requestBody: Record<string, unknown> | undefined;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/search")) {
+          searchCalls += 1;
+          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.people.email.find", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }] }), { status: 200 });
+        }
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "treg.people.email.find", title: "Find a work email", provider: "treg", category: "enrichment_person", price_usd: 0.01, input_fields: ["full_name", "domain"] }), { status: 200 });
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person" } }), { status: 200 });
+      },
+    });
+    const result = await gateway.enrichPerson({ userId: 1, name: "A Person", domain: "example.com" });
+    assert.equal(searchCalls, 2);
+    assert.deepEqual(requestBody, { full_name: "A Person", domain: "example.com" });
+    assert.deepEqual(result.endpointsUsed, ["treg.people.email.find"]);
+    assert.equal(result.items.find((item) => item.field === "email")?.value, "person@example.com");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway records mission evidence after a successful paid call", async () => {
     const previous = { enabled: config.tregEnabled, token: config.tregToken };
     config.tregEnabled = true;

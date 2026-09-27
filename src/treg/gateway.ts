@@ -476,7 +476,11 @@ export class TregGateway {
 
   async enrichPerson(options: { userId: number; name?: string; domain?: string; company?: string; linkedinUrl?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["find work email and profile", options.name, options.domain, options.company, options.linkedinUrl].filter(Boolean).join(" ");
-    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_person", options.maxSpendUsd, ["full_name", "domain", "company", "linkedin_url"]).find((item) => !item.requiresOwnAccount && !item.requiresByok);
+    const initialHits = await this.search(query, 6, options.organizationId);
+    const personHits = initialHits.filter((item) => item.category === "enrichment_person" || /email|person|people|enrich/i.test(`${item.id} ${item.title}`));
+    const fallbackHits = personHits.length > 0 ? [] : await this.search("work email person enrichment", 15, options.organizationId);
+    const hit = rankHits([...initialHits, ...fallbackHits], "enrich_person", options.maxSpendUsd, ["full_name", "domain", "company", "linkedin_url"])
+      .find((item) => !item.requiresOwnAccount && !item.requiresByok && !/bulk|status|job/i.test(`${item.id} ${item.title}`) && (item.category === "enrichment_person" || /email|person|people|enrich/i.test(`${item.id} ${item.title}`)));
     if (!hit) return emptyBundle(query, "enrich_person", ["No catalog endpoint matched"]);
     const estimateUsd = hit.priceUsd === undefined
       ? options.maxSpendUsd
