@@ -128,6 +128,11 @@ test("meeting run receives only configured actions and cannot leave on participa
   assert.match(instructions, /Before a non-trivial lookup, check, draft, booking, message, or other tool action/i);
   assert.match(instructions, /After a tool returns/i);
   assert.match(instructions, /vary it/i);
+  assert.match(instructions, /Learn from these contrasts/i);
+  assert.match(instructions, /Good example.*participant asks whether a time is available/i);
+  assert.match(instructions, /Bad example.*call the calendar silently/i);
+  assert.match(instructions, /Good example.*owner approval is required/i);
+  assert.match(instructions, /Bad example.*imply permission was granted/i);
   assert.match(instructions, /SILENT/);
   assert.match(instructions, /no SPEAK\/SILENT label/);
   assert.doesNotMatch(instructions, /company-mail|sales-crm/);
