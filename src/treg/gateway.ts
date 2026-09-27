@@ -21,7 +21,13 @@ function numberOrUndefined(value: unknown): number | undefined {
 }
 
 function boundedError(value: unknown): string {
-  return String(value ?? "Unknown Treg error").replace(/[\r\n]+/g, " ").slice(0, 500);
+  let text: string;
+  if (typeof value === "string") text = value;
+  else {
+    try { text = JSON.stringify(value) ?? String(value ?? "Unknown Treg error"); }
+    catch { text = String(value ?? "Unknown Treg error"); }
+  }
+  return text.replace(/[\r\n]+/g, " ").slice(0, 500);
 }
 
 class TregRequestError extends Error {
@@ -167,8 +173,16 @@ function evidence(field: string, value: unknown, hit: TregEndpointHit, score?: n
   };
 }
 
+function providerPayload(result: unknown): unknown {
+  if (!isObject(result)) return result;
+  if (isObject(result.output)) return result.output;
+  if (isObject(result.data)) return result.data;
+  return result;
+}
+
 function normalizePersonPayload(result: unknown, hit: TregEndpointHit): TregEvidenceItem[] {
-  const row = isObject(result) ? result : {};
+  const payload = providerPayload(result);
+  const row = isObject(payload) ? payload : {};
   const score = providerScore(row);
   const items = [
     evidence("email", row.email ?? row.work_email ?? row.value, hit, score),
@@ -186,7 +200,8 @@ function normalizePersonPayload(result: unknown, hit: TregEndpointHit): TregEvid
 }
 
 function normalizeCompanyPayload(result: unknown, hit: TregEndpointHit): TregEvidenceItem[] {
-  const row = isObject(result) ? result : {};
+  const payload = providerPayload(result);
+  const row = isObject(payload) ? payload : {};
   const score = providerScore(row);
   return [
     evidence("company_name", row.name ?? row.company, hit, score),
@@ -473,9 +488,13 @@ export class TregGateway {
 
   async enrichCompany(options: { userId: number; domain?: string; name?: string; missionId?: string; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["company enrichment", options.domain, options.name].filter(Boolean).join(" ");
-    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_company", undefined, ["domain", "company", "name"]).find((item) => !item.requiresOwnAccount && !item.requiresByok);
+    const initialHits = await this.search(query, 8, options.organizationId);
+    const initialCompanyHits = initialHits.filter((item) => item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`));
+    const fallbackHits = initialCompanyHits.length > 0 ? [] : await this.search("company enrichment by domain", 10, options.organizationId);
+    const hit = rankHits([...initialHits, ...fallbackHits], "enrich_company", undefined, ["domain", "company", "name"])
+      .find((item) => !item.requiresOwnAccount && !item.requiresByok && (item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`)));
     if (!hit) return emptyBundle(query, "enrich_company", ["No catalog endpoint matched"]);
-    const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, company: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
+    const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
     return { query, intent: "enrich_company", items: normalizeCompanyPayload(response.result, hit), endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: [], incomplete: false, generatedAt: new Date().toISOString() };
   }
 

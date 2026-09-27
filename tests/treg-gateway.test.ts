@@ -246,6 +246,37 @@ test("TregGateway unwraps nested endpoint metadata and normalizes live pricing",
   }
 });
 
+test("TregGateway sends the company enrichment contract and unwraps provider output", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let requestBody: Record<string, unknown> | undefined;
+  let searchCalls = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url, init) => {
+        if (url.includes("/catalog/search")) {
+          searchCalls += 1;
+          return new Response(JSON.stringify({ results: searchCalls === 1 ? [] : [{ id: "treg.companies.enrich", title: "Company enrichment", provider: "treg", category: "company", price_usd: 0.01 }] }), { status: 200 });
+        }
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ endpoint: { id: "treg.companies.enrich", name: "Company enrichment", provider: "treg", cost: { usd: 0.01 }, input: { body: { domain: {}, name: {} } } } }), { status: 200 });
+        requestBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ result: { output: { name: "Acme", domain: "acme.test", industry: "software", employees: "1-10" }, raw: { secret: "not returned" } } }), { status: 200 });
+      },
+    });
+    const result = await gateway.enrichCompany({ userId: 1, domain: "acme.test", name: "Acme" });
+    assert.equal(searchCalls, 2);
+    assert.deepEqual(requestBody, { domain: "acme.test", name: "Acme" });
+    assert.deepEqual(result.items.map((item) => item.field), ["company_name", "domain", "industry", "employee_count"]);
+    assert.equal(result.items.some((item) => item.field === "raw"), false);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway records mission evidence after a successful paid call", async () => {
     const previous = { enabled: config.tregEnabled, token: config.tregToken };
     config.tregEnabled = true;

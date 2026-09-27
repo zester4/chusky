@@ -45,15 +45,6 @@ function safeError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/TREG_TOKEN=[^\s]+/gi, "TREG_TOKEN=[redacted]").slice(0, 1000);
 }
 
-function summarizeProviderResult(value: unknown): Record<string, unknown> {
-  const root = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-  const output = root.output && typeof root.output === "object" && !Array.isArray(root.output)
-    ? root.output as Record<string, unknown>
-    : root;
-  const fields = ["name", "domain", "industry", "employees", "founded", "location", "linkedin_url", "description"];
-  return Object.fromEntries(fields.filter((field) => output[field] !== undefined).map((field) => [field, output[field]]));
-}
-
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   if (!config.tregEnabled) throw new Error("Treg is disabled. Set TREG_ENABLED=true in .env.");
@@ -115,24 +106,23 @@ async function main(): Promise<void> {
     return;
   }
 
-  const selected = companyHits.find((hit) => hit.priceUsd !== undefined && hit.priceUsd <= config.tregPerCallSoftCapUsd) ?? companyHits[0];
-  if (!selected) {
+  if (!companyHits.length) {
     throw new Error(`No priced, non-bulk company-enrichment endpoint was returned. Inspected: ${JSON.stringify(inspected)}`);
   }
 
-  const result = await gateway.call({
+  const result = await gateway.enrichCompany({
     userId: options.userId,
-    endpointId: selected.id,
-    method: "POST",
-    body: { domain: options.domain, company: options.company },
-    estimateUsd: selected.priceUsd,
+    domain: options.domain,
+    name: options.company,
   });
 
   console.log(JSON.stringify({
     result: "provider_call_complete",
-    endpoint: selected,
-    providerResult: summarizeProviderResult(result.result),
-    receipt: result.receipt,
+    endpointsUsed: result.endpointsUsed,
+    providerResult: result.items,
+    totalCostUsd: result.totalCostUsd,
+    incomplete: result.incomplete,
+    warnings: result.warnings,
   }, null, 2));
 }
 

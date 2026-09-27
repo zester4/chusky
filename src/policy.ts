@@ -47,6 +47,10 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
   "CHUCK_SCHEDULE_JOB", "CHUCK_PAUSE_JOB", "CHUCK_RESUME_JOB", "CHUCK_RUN_JOB_NOW", "CHUCK_SCRATCHPAD_READ",
   "CHUCK_SCRATCHPAD_WRITE", "CHUCK_SEARCH_MEMORY", "CHUCK_SET_REMINDER",
+  // Context search is a bounded owner-scoped read; it must not interrupt the
+  // agent with an approval prompt. Context writes and deletion keep their own
+  // explicit policy boundaries.
+  "CHUCK_CONTEXT_SEARCH",
   "CHUCK_TASK_BLOCK", "CHUCK_TASK_CANCEL", "CHUCK_TASK_CHECKPOINT",
   "CHUCK_TASK_COMPLETE", "CHUCK_TASK_CREATE", "CHUCK_TASK_GET",
   "CHUCK_TASK_LIST", "CHUCK_TASK_RETRY", "CHUCK_TASK_SCHEDULE",
