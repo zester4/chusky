@@ -31,6 +31,8 @@ export interface Message {
   role: "user" | "assistant";
   content: string;
   createdAt?: number;
+  /** Server-only idempotency marker for imported or SDK-run history. */
+  sourceId?: string;
 }
 
 export interface UserSession {
@@ -98,6 +100,10 @@ export interface UserSession {
   handoffRecords?: HandoffRecord[];
   /** Owner-scoped context graph nodes. Sensitive values are never returned to models unless selected by purpose. */
   contextNodes?: ContextNodeRecord[];
+  /** Web sessions already merged into this canonical owner session, keyed by source snapshot time. */
+  linkedWebSessionImports?: Array<{ sourceUserId: number; sourceUpdatedAt: number; sourceMessageIds?: string[] }>;
+  /** Existing first-party dashboard runs copied into canonical private history. */
+  sdkPrivateHistoryBackfilled?: boolean;
   /** Department operating spaces and typed handoff packets for company workflows. */
   departmentSpaces?: DepartmentSpaceRecord[];
   workPackets?: WorkPacketRecord[];
@@ -1282,11 +1288,14 @@ export interface SendblueGroupLinkCodeRecord {
 export interface WebTelegramLinkCodeRecord {
   codeHash: string;
   webAuthUserId: string;
+  /** Trusted server-derived account session to merge after the owner redeems this code. */
+  sourceUserId?: number;
   expiresAt: number;
   used: boolean;
 }
 
 export type WebTelegramLinkResult = "linked" | "already_linked" | "conflict" | "invalid";
+interface WebTelegramLinkRedemption { status: WebTelegramLinkResult; sourceUserId?: number }
 
 export interface OutboxRecord {
   id: string;
@@ -1467,7 +1476,7 @@ interface Backend {
   saveSendblueGroupAuthorization(record: SendblueGroupAuthorizationRecord): Promise<void>;
   revokeSendblueGroupAuthorization(groupId: string, workspaceId: string, userId: number): Promise<boolean>;
   createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord): Promise<void>;
-  redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult>;
+  redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption>;
   getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined>;
   claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<boolean>;
   completeChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number): Promise<void>;
@@ -2619,17 +2628,25 @@ class RedisBackend implements Backend {
     const ttl = Math.max(1, Math.ceil((record.expiresAt - Date.now()) / 1000));
     await this.r.set(this.webTelegramLinkKey(record.codeHash), JSON.stringify(record), "EX", ttl, "NX");
   }
-  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
+  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption> {
     const codeKey = this.webTelegramLinkKey(codeHash);
     const result = await this.r.eval(
-      "local raw=redis.call('get',KEYS[1]); if not raw then return 'invalid' end; local record=cjson.decode(raw); if record.used or record.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return 'invalid' end; redis.call('del',KEYS[1]); local webKey='chuck:web-telegram:web:' .. redis.sha1hex(record.webAuthUserId); local currentTelegram=redis.call('get',webKey); local currentWeb=redis.call('get',KEYS[2]); if (currentTelegram and currentTelegram ~= ARGV[2]) or (currentWeb and currentWeb ~= record.webAuthUserId) then return 'conflict' end; if currentTelegram and currentWeb then return 'already_linked' end; redis.call('set',webKey,ARGV[2]); redis.call('set',KEYS[2],record.webAuthUserId); return 'linked'",
+      "local raw=redis.call('get',KEYS[1]); if not raw then return cjson.encode({status='invalid'}) end; local record=cjson.decode(raw); local function done(status) local result={status=status}; if type(record.sourceUserId)=='number' then result.sourceUserId=record.sourceUserId end; return cjson.encode(result) end; if record.used or record.expiresAt <= tonumber(ARGV[1]) then redis.call('del',KEYS[1]); return done('invalid') end; redis.call('del',KEYS[1]); local webKey='chuck:web-telegram:web:' .. redis.sha1hex(record.webAuthUserId); local currentTelegram=redis.call('get',webKey); local currentWeb=redis.call('get',KEYS[2]); if (currentTelegram and currentTelegram ~= ARGV[2]) or (currentWeb and currentWeb ~= record.webAuthUserId) then return done('conflict') end; if currentTelegram and currentWeb then return done('already_linked') end; redis.call('set',webKey,ARGV[2]); redis.call('set',KEYS[2],record.webAuthUserId); return done('linked')",
       2,
       codeKey,
       this.telegramWebUserKey(telegramUserId),
       Date.now(),
       String(telegramUserId),
-    ) as WebTelegramLinkResult;
-    return result;
+    );
+    try {
+      const redemption = JSON.parse(String(result)) as WebTelegramLinkRedemption;
+      return {
+        status: ["linked", "already_linked", "conflict", "invalid"].includes(redemption.status) ? redemption.status : "invalid",
+        ...(Number.isSafeInteger(redemption.sourceUserId) && Number(redemption.sourceUserId) > 0 ? { sourceUserId: Number(redemption.sourceUserId) } : {}),
+      };
+    } catch {
+      return { status: "invalid" };
+    }
   }
   async getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {
     const raw = await this.r.get(this.webTelegramUserKey(webAuthUserId));
@@ -2925,8 +2942,11 @@ class MemoryBackend implements Backend {
   private approvals = new Map<string, ApprovalRecord>();
   private blandProviderCalls = new Map<string, { userId: number; callId: string; expiresAt: number }>();
 
-  async getSession(userId: number) { return this.sessions.get(userId) ?? fresh(); }
-  async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, s); }
+  async getSession(userId: number) {
+    const session = this.sessions.get(userId);
+    return session ? structuredClone(session) : fresh();
+  }
+  async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
   async getRecallMeeting(userId: number, id: string) {
     const record = this.recallMeetings.get(`${userId}:${id}`);
     return record ? structuredClone(record) : undefined;
@@ -3487,17 +3507,18 @@ class MemoryBackend implements Backend {
     return true;
   }
   async createWebTelegramLinkCode(record: WebTelegramLinkCodeRecord) { this.webTelegramLinkCodes.set(record.codeHash, record); }
-  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
+  async redeemWebTelegramLinkCode(codeHash: string, telegramUserId: number): Promise<WebTelegramLinkRedemption> {
     const record = this.webTelegramLinkCodes.get(codeHash);
-    if (!record || record.used || record.expiresAt <= Date.now()) { this.webTelegramLinkCodes.delete(codeHash); return "invalid"; }
+    if (!record || record.used || record.expiresAt <= Date.now()) { this.webTelegramLinkCodes.delete(codeHash); return { status: "invalid" }; }
     this.webTelegramLinkCodes.delete(codeHash);
     const linkedTelegram = this.telegramUserByWebAuth.get(record.webAuthUserId);
     const linkedWeb = this.webAuthByTelegramUser.get(telegramUserId);
-    if ((linkedTelegram && linkedTelegram !== telegramUserId) || (linkedWeb && linkedWeb !== record.webAuthUserId)) return "conflict";
-    if (linkedTelegram && linkedWeb) return "already_linked";
+    const source = Number.isSafeInteger(record.sourceUserId) && Number(record.sourceUserId) > 0 ? { sourceUserId: Number(record.sourceUserId) } : {};
+    if ((linkedTelegram && linkedTelegram !== telegramUserId) || (linkedWeb && linkedWeb !== record.webAuthUserId)) return { status: "conflict", ...source };
+    if (linkedTelegram && linkedWeb) return { status: "already_linked", ...source };
     this.telegramUserByWebAuth.set(record.webAuthUserId, telegramUserId);
     this.webAuthByTelegramUser.set(telegramUserId, record.webAuthUserId);
-    return "linked";
+    return { status: "linked", ...source };
   }
   async getTelegramUserIdForWebAuth(webAuthUserId: string) { return this.telegramUserByWebAuth.get(webAuthUserId); }
   async claimChannelEvent(provider: ChannelProvider, eventId: string, ttlSeconds: number) {
@@ -3952,6 +3973,12 @@ export async function getSession(uid: number): Promise<UserSession> {
     return true;
   }).slice(-20) : [];
   s.contextNodes = Array.isArray(s.contextNodes) ? s.contextNodes.filter((item): item is ContextNodeRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-1000) : [];
+  s.linkedWebSessionImports = Array.isArray(s.linkedWebSessionImports) ? s.linkedWebSessionImports.filter((item) => Boolean(item) && Number.isSafeInteger(item.sourceUserId) && item.sourceUserId > 0 && Number.isFinite(item.sourceUpdatedAt)).slice(-20).map((item) => ({
+    sourceUserId: item.sourceUserId,
+    sourceUpdatedAt: item.sourceUpdatedAt,
+    sourceMessageIds: Array.isArray(item.sourceMessageIds) ? item.sourceMessageIds.filter((id): id is string => typeof id === "string" && id.startsWith("web-import:") && id.length <= 100).slice(-400) : [],
+  })) : [];
+  s.sdkPrivateHistoryBackfilled = s.sdkPrivateHistoryBackfilled === true;
   s.departmentSpaces = Array.isArray(s.departmentSpaces) ? s.departmentSpaces.filter((item): item is DepartmentSpaceRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-50) : [];
   s.workPackets = Array.isArray(s.workPackets) ? s.workPackets.filter((item): item is WorkPacketRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-500) : [];
   s.recallMeetings = Array.isArray(s.recallMeetings) ? s.recallMeetings.map((meeting) => ({
@@ -4152,6 +4179,154 @@ function appendSessionHistory(session: UserSession, messages: Message[]): void {
     const compact = overflow.map((message) => `${message.role}: ${message.content}`).join(" ").slice(0, 1800);
     session.summaries = [...session.summaries, compact].slice(-10);
     session.history = session.history.slice(session.history.length - cap);
+  }
+}
+
+/** Add one completed SDK turn to its thread and, for first-party web runs, the owner's canonical history. */
+export function appendSdkRunHistoryToSession(session: UserSession, threadId: string, runId: string, messages: Message[]): boolean {
+  const thread = session.sdkThreads?.find((item) => item.id === threadId);
+  const run = thread?.runs.find((item) => item.id === runId);
+  if (!thread || !run || run.status !== "completed" || !messages.length) return false;
+  const tagged = messages.slice(0, 10).map((message, index) => ({
+    ...message,
+    sourceId: `sdk-run:${runId}:${index}`,
+    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) ? message.createdAt : run.updatedAt,
+  }));
+  const threadSourceIds = new Set(thread.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+  thread.history.push(...tagged.filter((message) => !threadSourceIds.has(message.sourceId!)));
+  if (run.ownerPrivateRun && !run.companyProjectId) {
+    const accountSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+    appendSessionHistory(session, tagged.filter((message) => !accountSourceIds.has(message.sourceId!)));
+  }
+  return true;
+}
+
+/** One-time import of completed first-party dashboard runs written before account history was canonical. */
+export async function backfillSdkPrivateRunHistory(userId: number): Promise<void> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return;
+  if ((await getSession(userId)).sdkPrivateHistoryBackfilled) return;
+
+  await mutateSession(userId, (session) => {
+    if (session.sdkPrivateHistoryBackfilled) return;
+    const knownSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+    const completedRuns = (session.sdkThreads ?? []).flatMap((thread) => thread.runs)
+      .filter((run) => run.ownerPrivateRun !== false && !run.companyProjectId && run.status === "completed" && typeof run.output === "string")
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    const imported = completedRuns.flatMap((run) => [
+      { role: "user" as const, content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt, sourceId: `sdk-run:${run.id}:0` },
+      { role: "assistant" as const, content: run.output!, createdAt: run.updatedAt, sourceId: `sdk-run:${run.id}:1` },
+    ]).filter((message) => !knownSourceIds.has(message.sourceId));
+
+    if (imported.length) {
+      const ordered = [
+        ...session.history.map((message, index) => ({ message, order: index, at: message.createdAt ?? session.createdAt + index })),
+        ...imported.map((message, index) => ({ message, order: session.history.length + index, at: message.createdAt })),
+      ].sort((left, right) => left.at - right.at || left.order - right.order);
+      session.history = ordered.map(({ message, at }) => ({ ...message, createdAt: message.createdAt ?? at }));
+      session.totalMessages += imported.filter((message) => message.role === "user").length;
+      const cap = config.maxHistory * 2;
+      if (session.history.length > cap) {
+        const overflow = session.history.slice(0, session.history.length - cap);
+        const compact = overflow.map((message) => `${message.role}: ${message.content}`).join(" ").slice(0, 1800);
+        session.summaries = [...session.summaries, compact].slice(-10);
+        session.history = session.history.slice(session.history.length - cap);
+      }
+    }
+    session.sdkPrivateHistoryBackfilled = true;
+  });
+}
+
+/** Merge only private web conversation context into its explicitly linked Telegram owner. */
+export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number): Promise<void> {
+  if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
+  const source = await getSession(sourceUserId);
+  const existingTarget = await getSession(telegramUserId);
+  if (existingTarget.linkedWebSessionImports?.some((item) => item.sourceUserId === sourceUserId && item.sourceUpdatedAt === source.updatedAt)) return;
+  let importedMemories: MemoryFact[] = [];
+
+  await mutateSession(telegramUserId, (target) => {
+    const priorImport = target.linkedWebSessionImports?.find((item) => item.sourceUserId === sourceUserId);
+    if (priorImport?.sourceUpdatedAt === source.updatedAt) return;
+    const previouslyImportedSourceIds = new Set(priorImport?.sourceMessageIds ?? []);
+
+    const canonicalCounts = new Map<string, number>();
+    const contentKey = (message: Pick<Message, "role" | "content">) => `${message.role}\u0000${message.content}`;
+    for (const message of source.history) {
+      const key = contentKey(message);
+      canonicalCounts.set(key, (canonicalCounts.get(key) ?? 0) + 1);
+    }
+
+    const sourceOccurrences = new Map<string, number>();
+    const historyImports: Message[] = source.history.map((message) => {
+      const key = `${contentKey(message)}\u0000${message.createdAt ?? "legacy"}`;
+      const occurrence = sourceOccurrences.get(key) ?? 0;
+      sourceOccurrences.set(key, occurrence + 1);
+      const digest = createHash("sha256").update(`${sourceUserId}:${key}:${occurrence}`).digest("hex").slice(0, 32);
+      return { ...message, sourceId: `web-import:${sourceUserId}:${digest}` };
+    });
+
+    const runs = (source.sdkThreads ?? []).flatMap((thread) => thread.runs)
+      .filter((run) => run.status === "completed" && typeof run.output === "string" && !run.companyProjectId)
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    const legacyRunImports: Message[] = [];
+    for (const run of priorImport ? [] : runs) {
+      const userMessage: Message = {
+        role: "user",
+        content: `${run.input || "Attached file(s)"}${run.attachments?.length ? `\n[Attachments: ${run.attachments.map((file) => file.name).join(", ")}]` : ""}`,
+        createdAt: run.createdAt,
+      };
+      const assistantMessage: Message = { role: "assistant", content: run.output!, createdAt: run.updatedAt };
+      for (const [index, message] of [userMessage, assistantMessage].entries()) {
+        const key = contentKey(message);
+        const represented = canonicalCounts.get(key) ?? 0;
+        if (represented > 0) {
+          canonicalCounts.set(key, represented - 1);
+          continue;
+        }
+        legacyRunImports.push({ ...message, sourceId: `web-run-import:${sourceUserId}:${run.id}:${index}` });
+      }
+    }
+
+    const knownSourceIds = new Set(target.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
+    const importedHistory = [...historyImports, ...legacyRunImports].filter((message) => !knownSourceIds.has(message.sourceId!) && !previouslyImportedSourceIds.has(message.sourceId!));
+    const migrationAt = Date.now();
+    const chronological = [
+      ...target.history.map((message, index) => ({ message, order: index, at: message.createdAt ?? target.createdAt + index })),
+      ...importedHistory.map((message, index) => ({ message, order: target.history.length + index, at: message.createdAt ?? source.createdAt + index })),
+    ].sort((left, right) => left.at - right.at || left.order - right.order);
+    target.history = chronological.map(({ message, at }) => ({ ...message, createdAt: message.createdAt ?? at }));
+    target.totalMessages += importedHistory.filter((message) => message.role === "user").length;
+    appendSessionHistory(target, []);
+
+    target.summaries = [...new Set([...target.summaries, ...source.summaries])].slice(-10);
+    target.scratchpad ??= {};
+    for (const [key, entry] of Object.entries(source.scratchpad)) {
+      if (!target.scratchpad[key]) target.scratchpad[key] = structuredClone(entry);
+    }
+
+    const targetMemoryKeys = new Set(target.memories.map((memory) => `${memory.category}\u0000${memory.key}`));
+    importedMemories = source.memories.filter((memory) => {
+      const key = `${memory.category}\u0000${memory.key}`;
+      return !memory.projectId && memory.status !== "deleted" && (!memory.expiresAt || memory.expiresAt > migrationAt) && !targetMemoryKeys.has(key);
+    }).map((memory) => structuredClone(memory));
+    if (importedMemories.length) target.memories = [...target.memories, ...importedMemories].slice(-200);
+
+    const targetContextKeys = new Set((target.contextNodes ?? []).filter((node) => node.scope === "user" && !node.scopeId).map((node) => `${node.kind}\u0000${node.key}`));
+    const importedContext = (source.contextNodes ?? []).filter((node) => node.scope === "user" && !node.scopeId && (!node.expiresAt || node.expiresAt > migrationAt) && !targetContextKeys.has(`${node.kind}\u0000${node.key}`))
+      .map((node) => ({ ...structuredClone(node), userId: telegramUserId }));
+    if (importedContext.length) target.contextNodes = [...(target.contextNodes ?? []), ...importedContext].slice(-1000);
+
+    target.linkedWebSessionImports = [...(target.linkedWebSessionImports ?? []).filter((item) => item.sourceUserId !== sourceUserId), {
+      sourceUserId, sourceUpdatedAt: source.updatedAt, sourceMessageIds: historyImports.map((message) => message.sourceId!).slice(-400),
+    }].slice(-20);
+  });
+
+  if (importedMemories.length && vectorConfigured()) {
+    const vector = new UpstashKnowledgeStore();
+    for (const memory of importedMemories) {
+      void vector.upsertMemory({ userId: String(telegramUserId), id: memory.id, category: memory.category, key: memory.key, value: memory.value, personKey: memory.personKey })
+        .catch((error) => { recordVectorFailure(error, { phase: "linked_memory_index", errorClass: "vector_indexing" }); logger.warn({ err: error, userId: telegramUserId }, "Linked web memory retained but vector indexing is unavailable"); });
+    }
   }
 }
 
@@ -6726,12 +6901,19 @@ export async function revokeSendblueGroupAuthorization(groupId: string, workspac
 const webTelegramCodePattern = /^web_[A-Za-z0-9_-]{20,}$/;
 
 /** Creates a short-lived proof for a signed-in dashboard user. The raw code is returned once. */
-export async function createWebTelegramLinkCode(webAuthUserId: string, ttlMs = 10 * 60 * 1000): Promise<{ code: string; expiresAt: number }> {
+export async function createWebTelegramLinkCode(
+  webAuthUserId: string,
+  options: { sourceUserId?: number; ttlMs?: number } | number = {},
+): Promise<{ code: string; expiresAt: number }> {
   const owner = webAuthUserId.trim();
   if (!owner || owner.length > 200) throw new Error("A valid web account is required");
+  const ttlMs = typeof options === "number" ? options : options.ttlMs ?? 10 * 60 * 1000;
+  const sourceUserId = typeof options === "number" ? undefined : options.sourceUserId;
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0 || ttlMs > 24 * 60 * 60 * 1000) throw new Error("Link-code lifetime must be positive and no longer than 24 hours");
+  if (sourceUserId !== undefined && (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0)) throw new Error("A valid web session owner is required");
   const code = `web_${randomBytes(18).toString("base64url")}`;
   const expiresAt = Date.now() + ttlMs;
-  await backend.createWebTelegramLinkCode({ codeHash: hashCliSecret(code), webAuthUserId: owner, expiresAt, used: false });
+  await backend.createWebTelegramLinkCode({ codeHash: hashCliSecret(code), webAuthUserId: owner, ...(sourceUserId !== undefined ? { sourceUserId } : {}), expiresAt, used: false });
   return { code, expiresAt };
 }
 
@@ -6739,7 +6921,12 @@ export async function createWebTelegramLinkCode(webAuthUserId: string, ttlMs = 1
 export async function redeemWebTelegramLinkCode(code: string, telegramUserId: number): Promise<WebTelegramLinkResult> {
   const clean = code.trim();
   if (!webTelegramCodePattern.test(clean) || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0) return "invalid";
-  return backend.redeemWebTelegramLinkCode(hashCliSecret(clean), telegramUserId);
+  const redemption = await backend.redeemWebTelegramLinkCode(hashCliSecret(clean), telegramUserId);
+  if (redemption.sourceUserId && (redemption.status === "linked" || redemption.status === "already_linked")) {
+    try { await mergeLinkedWebSession(redemption.sourceUserId, telegramUserId); }
+    catch (error) { logger.warn({ err: error, telegramUserId }, "Web account history merge deferred until the next authenticated request"); }
+  }
+  return redemption.status;
 }
 
 export async function getTelegramUserIdForWebAuth(webAuthUserId: string): Promise<number | undefined> {

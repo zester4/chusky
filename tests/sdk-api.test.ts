@@ -361,7 +361,8 @@ test("first-party dashboard chat uses owner-private tools without elevating SDK-
     const url = String(input);
     if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    const payload = JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string }> };
+    const payload = JSON.parse(String(init?.body)) as { stream?: boolean; messages?: Array<{ role?: string }> };
+    if (!payload.stream) return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Synchronous owner-private answer." }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
     const hasToolResult = payload.messages?.some((message) => message.role === "tool") === true;
     const chunk = hasToolResult
       ? { choices: [{ delta: { role: "assistant", content: "The follow-up ticket was created." }, finish_reason: "stop" }] }
@@ -382,6 +383,25 @@ test("first-party dashboard chat uses owner-private tools without elevating SDK-
     const webEvents = (await webRun.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
     assert.equal(webEvents.some((item) => item.type === "run.completed"), true);
     assert.equal(webEvents.some((item) => item.type === "run.approval_required"), false);
+
+    const synchronousRun = await api.fetch(new Request(`http://local/v1/threads/${webThread.id}/runs`, {
+      method: "POST", headers: webHeaders, body: JSON.stringify({ input: "Also save this synchronous web turn." }),
+    }));
+    assert.equal(synchronousRun.status, 201);
+    assert.equal((await synchronousRun.json() as { status: string }).status, "completed");
+    const webHistoryResponse = await api.fetch(new Request("http://local/v1/account/history", { headers: webHeaders }));
+    assert.equal(webHistoryResponse.status, 200);
+    const webHistory = (await webHistoryResponse.json() as { data: Array<{ role: string; content: string }> }).data;
+    assert.deepEqual(webHistory.slice(-4).map(({ role, content }) => ({ role, content: role === "user" ? content : "assistant" })), [
+      { role: "user", content: "Create the follow-up ticket we agreed on." },
+      { role: "assistant", content: "assistant" },
+      { role: "user", content: "Also save this synchronous web turn." },
+      { role: "assistant", content: "assistant" },
+    ]);
+    assert.match(webHistory.at(-3)?.content ?? "", /The follow-up ticket was created\.$/);
+    assert.equal(webHistory.at(-1)?.content, "Synchronous owner-private answer.");
+    const secondWebHistory = await api.fetch(new Request("http://local/v1/account/history", { headers: webHeaders }));
+    assert.equal(((await secondWebHistory.json()) as { data: unknown[] }).data.length, webHistory.length, "history reads do not duplicate streamed turns");
 
     setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-private-web");
     const queuedWebRun = await api.fetch(new Request(`http://local/v1/threads/${webThread.id}/runs`, {
@@ -1300,6 +1320,27 @@ test("dashboard channel controls create one-time link codes, update notification
   assert.deepEqual((await api.fetch(new Request("http://local/v1/channels", { headers })).then((response) => response.json()) as { data: unknown[] }).data, []);
   const primary = await api.fetch(new Request("http://local/v1/channels/telegram/0000000000000000", { method: "DELETE", headers }));
   assert.equal(primary.status, 409);
+});
+
+test("dashboard Telegram linking binds and imports its authenticated private web session", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const webUser = "history-link-owner";
+  const sourceUserId = Number.parseInt(createHash("sha256").update(`sdk:web:${webUser}`).digest("hex").slice(0, 12), 16);
+  const source = await getSession(sourceUserId);
+  source.history = [{ role: "user", content: "Remember this from web", createdAt: Date.now() - 1_000 }];
+  await saveSession(sourceUserId, source);
+
+  const api = app();
+  const headers = { "X-Test-Web-User": webUser, "Content-Type": "application/json" };
+  const response = await api.fetch(new Request("http://local/v1/account/telegram-link", { method: "POST", headers }));
+  assert.equal(response.status, 201);
+  const code = (await response.json() as { code: string }).code;
+  const telegramUserId = 820021;
+  assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "linked");
+  assert.equal((await getSession(telegramUserId)).history[0]?.content, "Remember this from web");
+  const accountHistory = await api.fetch(new Request("http://local/v1/account/history", { headers: { "X-Test-Web-User": webUser } }));
+  assert.deepEqual((await accountHistory.json() as { data: Array<{ content: string }> }).data.map((item) => item.content), ["Remember this from web"]);
 });
 
 test("linked dashboard memory and account overview share one active, owner-scoped projection", async () => {

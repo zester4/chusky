@@ -37,6 +37,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Owner-private interactive runs use relevant owner context and connected tools for routine requests; deletion, financial, permission, deployment/push, and provider-marked high-impact actions pause for exact approval.",
     "Personal and business context stays appropriately separated, and shared rooms, autonomous workflows, and delegated workers keep their explicit scopes and policies.",
   ],
+  sharedHistory: [
+    "Private dashboard conversations now persist in the same owner-scoped account history as Telegram and linked private channels, including eligible conversations created before this upgrade.",
+    "Linking a web account with Telegram imports its private conversation history, scratchpad, and eligible memories once while preserving the Telegram session and connected-app session.",
+    "The dashboard shows earlier shared private turns; shared rooms and company/project runs remain outside personal account history.",
+  ],
   toolReliability: [
     "Added tool preflight and connected-account health checks so Chusky can validate the exact exposed schema and report connection state without executing actions.",
     "Added read-only PDF, DOCX, PPTX, and XLSX QA plus persisted tool-failure recovery guidance that never blindly replays ambiguous actions.",

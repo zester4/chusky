@@ -7,9 +7,9 @@ import {
   upsertMemory, updateMemory, searchMemories, forgetMemory, writeScratchpad, readScratchpad, clearScratchpad,
   claimTelegramUpdate,
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
-  type DaytonaWorkspaceRecord, type TriggerEventRecord,
+  type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
   createTriggerEvent, getTriggerEvent, updateTriggerEvent,
-  createWebTelegramLinkCode, getTelegramUserIdForWebAuth, redeemWebTelegramLinkCode,
+  backfillSdkPrivateRunHistory, createWebTelegramLinkCode, getTelegramUserIdForWebAuth, mergeLinkedWebSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -22,6 +22,45 @@ import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("in-memory sessions return detached snapshots like the Redis backend", async () => {
+  const userId = 810201;
+  const initial = await getSession(userId);
+  initial.history = [{ role: "user", content: "saved state" }];
+  await saveSession(userId, initial);
+
+  const detached = await getSession(userId);
+  detached.history[0]!.content = "unsaved mutation";
+  assert.equal((await getSession(userId)).history[0]?.content, "saved state");
+
+  await saveSession(userId, detached);
+  detached.history[0]!.content = "post-save mutation";
+  assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
+});
+
+test("backfills existing completed dashboard runs into canonical history once", async () => {
+  const userId = 810202;
+  const now = Date.now();
+  const run = (id: string, input: string, createdAt: number, overrides: Partial<SdkRunRecord> = {}): SdkRunRecord => ({
+    id, status: "completed", input, output: `Answer: ${input}`, events: [], createdAt, updatedAt: createdAt + 100, ownerPrivateRun: true, ...overrides,
+  });
+  const session = await getSession(userId);
+  session.sdkThreads = [{
+    id: "thread-history-backfill", externalId: "thread-history-backfill", metadata: {}, history: [], createdAt: now - 2_000, updatedAt: now,
+    runs: [run("run-newer", "Second web turn", now - 500), run("run-older", "First web turn", now - 1_500, { ownerPrivateRun: undefined }), run("run-company", "Do not import", now - 1_000, { companyProjectId: "project-company" }), run("run-non-private", "Do not import this either", now - 900, { ownerPrivateRun: false })],
+  }];
+  await saveSession(userId, session);
+
+  await backfillSdkPrivateRunHistory(userId);
+  const imported = await getSession(userId);
+  assert.deepEqual(imported.history.map(({ role, content }) => [role, content]), [
+    ["user", "First web turn"], ["assistant", "Answer: First web turn"],
+    ["user", "Second web turn"], ["assistant", "Answer: Second web turn"],
+  ]);
+  const updatedAt = imported.updatedAt;
+  await backfillSdkPrivateRunHistory(userId);
+  assert.equal((await getSession(userId)).updatedAt, updatedAt, "the completed migration does not rewrite the session again");
+});
 
 function agentRun(overrides: Partial<AgentRunRecord> = {}): AgentRunRecord {
   const now = Date.now();
@@ -538,4 +577,55 @@ test("web-to-Telegram links are high-entropy, one-time, and cannot be rebound", 
   assert.equal(await redeemWebTelegramLinkCode(second.code, 810013), "conflict");
   const otherWeb = await createWebTelegramLinkCode(`other-${Date.now()}`);
   assert.equal(await redeemWebTelegramLinkCode(otherWeb.code, 810012), "conflict");
+});
+
+test("redeeming a web link merges its private history and memory into the Telegram owner once", async () => {
+  const sourceUserId = 810131;
+  const telegramUserId = 810132;
+  const webAccount = `web-merge-${Date.now()}`;
+  const now = Date.now();
+  const webSession = await getSession(sourceUserId);
+  webSession.history = [
+    { role: "user", content: "My web preference", createdAt: now - 2_000 },
+    { role: "assistant", content: "I will remember it.", createdAt: now - 1_000 },
+  ];
+  webSession.summaries = ["Earlier web context"];
+  await saveSession(sourceUserId, webSession);
+  await upsertMemory(sourceUserId, { category: "preference", key: "coffee", value: "Oat milk", confidence: 0.9 });
+  await writeScratchpad(sourceUserId, "web-plan", "Finish the launch checklist");
+
+  const telegramSession = await getSession(telegramUserId);
+  telegramSession.history = [{ role: "user", content: "Telegram context", createdAt: now }];
+  telegramSession.composioSessionId = "telegram-composio-session";
+  await saveSession(telegramUserId, telegramSession);
+
+  const { code } = await createWebTelegramLinkCode(webAccount, { sourceUserId });
+  assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "linked");
+
+  const merged = await getSession(telegramUserId);
+  assert.deepEqual(merged.history.map(({ content }) => content), [
+    "My web preference", "I will remember it.", "Telegram context",
+  ]);
+  assert.equal(merged.summaries.includes("Earlier web context"), true);
+  assert.equal(merged.memories.some((memory) => memory.key === "coffee" && memory.value === "Oat milk"), true);
+  assert.equal(merged.scratchpad["web-plan"]?.content, "Finish the launch checklist");
+  assert.equal(merged.composioSessionId, "telegram-composio-session", "linking must preserve the Telegram provider session");
+  assert.equal(await redeemWebTelegramLinkCode(code, telegramUserId), "invalid");
+  const mergedUpdatedAt = merged.updatedAt;
+  await mergeLinkedWebSession(sourceUserId, telegramUserId);
+  assert.equal((await getSession(telegramUserId)).history.length, 3, "replaying the code cannot duplicate imported history");
+  assert.equal((await getSession(telegramUserId)).updatedAt, mergedUpdatedAt, "an unchanged web session does not rewrite the Telegram session");
+
+  webSession.history.push(
+    { role: "user", content: "A later web turn", createdAt: now + 100 },
+    { role: "assistant", content: "Later web answer", createdAt: now + 200 },
+  );
+  await saveSession(sourceUserId, webSession);
+  const trimmedTarget = await getSession(telegramUserId);
+  trimmedTarget.history = trimmedTarget.history.filter((message) => message.content === "Telegram context");
+  await saveSession(telegramUserId, trimmedTarget);
+  await mergeLinkedWebSession(sourceUserId, telegramUserId);
+  assert.deepEqual((await getSession(telegramUserId)).history.map(({ content }) => content), [
+    "Telegram context", "A later web turn", "Later web answer",
+  ], "a changed source snapshot does not re-import web messages that were already merged and later trimmed");
 });

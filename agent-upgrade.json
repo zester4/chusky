@@ -1,11 +1,11 @@
 {
-  "id": "release-4.16.0",
-  "version": "4.16.0",
+  "id": "release-4.17.0",
+  "version": "4.17.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added a regular X Direct Messages channel alongside separate encrypted XChat, with independent OAuth settings and identity links.",
-    "X webhook CRC and signature checks use the official adapter; message routing, account linking, durable state, and delivery use Chusky's channel gateway.",
-    "Linked X DMs are private conversations, while unsolicited X notifications stay off until explicitly enabled. The installed adapter does not expose inbound DM images yet."
+    "Private dashboard conversations now persist in the same owner-scoped account history as Telegram and linked private channels, including eligible conversations created before this upgrade.",
+    "Linking a web account with Telegram imports its private conversation history, scratchpad, and eligible memories once while preserving the Telegram session and connected-app session.",
+    "The dashboard shows earlier shared private turns; shared rooms and company/project runs remain outside personal account history."
   ],
-  "createdAt": "2026-09-27T01:44:55.462Z"
+  "createdAt": "2026-09-27T02:57:47.129Z"
 }
