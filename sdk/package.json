@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zester4/chusky",
+    "url": "git+https://github.com/zester4/chusky.git",
     "directory": "sdk"
   },
   "bugs": {
