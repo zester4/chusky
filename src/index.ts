@@ -5,7 +5,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
-import { claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
+import { appendSdkRunHistoryToSession, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
 import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
@@ -2445,7 +2445,10 @@ async function main(): Promise<void> {
               if (task.sdkRunId && task.sdkThreadId) {
                 if (result.cost) await addUsage(task.userId, result.cost);
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
-                if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.artifacts = sdkRunArtifacts(result.generatedFiles); sdkRun.cost = result.cost; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+                if (sdkRun) { sdkRun.status = "completed"; sdkRun.output = result.text; sdkRun.artifacts = sdkRunArtifacts(result.generatedFiles); sdkRun.cost = result.cost; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.completed", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) { sdkThread.updatedAt = sdkRun.updatedAt; appendSdkRunHistoryToSession(current, sdkThread.id, sdkRun.id, [
+                  { role: "user", content: `${sdkRun.input || "Attached file(s)"}${sdkRun.attachments?.length ? `\n[Attachments: ${sdkRun.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: sdkRun.createdAt },
+                  { role: "assistant", content: result.text, createdAt: sdkRun.updatedAt },
+                ]); } await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
                 await completeTask(task.userId, task.id, result.text);
               }
               if (task.meetingFollowUp) {

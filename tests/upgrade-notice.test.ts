@@ -49,6 +49,15 @@ test("owner autonomy preset documents private full-context access and scoped exc
   assert.match(bullets[2], /shared rooms, autonomous workflows, and delegated workers/);
 });
 
+test("shared history upgrade preset documents private web parity without widening room scope", () => {
+  const bullets = getAgentUpgradePreset("sharedHistory");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.sharedHistory]);
+  assert.match(bullets[0], /same owner-scoped account history/);
+  assert.match(bullets[1], /imports its private conversation history/);
+  assert.match(bullets[2], /shared rooms and company\/project runs remain outside/);
+});
+
 test("attention upgrade preset describes evidence-based proactive reconciliation", () => {
   const bullets = getAgentUpgradePreset("attention");
   assert.equal(bullets.length, 3);
@@ -116,13 +125,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces regular X Direct Messages", async () => {
+test("current upgrade manifest announces shared private account history", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.16.0");
-  assert.equal(notice?.version, "4.16.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /regular X Direct Messages channel/);
-  assert.match(formatAgentUpgradeNotice(notice!), /separate encrypted XChat/);
-  assert.match(formatAgentUpgradeNotice(notice!), /inbound DM images yet/);
+  assert.equal(notice?.id, "release-4.17.0");
+  assert.equal(notice?.version, "4.17.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /same owner-scoped account history/);
+  assert.match(formatAgentUpgradeNotice(notice!), /imports its private conversation history/);
+  assert.match(formatAgentUpgradeNotice(notice!), /shared rooms and company\/project runs remain outside/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {
