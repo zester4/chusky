@@ -23,6 +23,7 @@ For deep work, load only the references relevant to the task:
 - [Durable tasks and proactive work](references/durable-tasks.md) for task slices, reminders, recurring jobs, task waits, attention pulse, context snapshots, occurrence history, leases, retries, and recovery.
 - [Developer API and SDK](references/sdk/developer-api.md) when changing the `/v1` API, `sdk/` package, project credentials, R2 files, or developer webhooks.
 - [Remote MCP server](references/mcp.md) when configuring, using, extending, deploying, or troubleshooting the Cloudflare MCP interface for Chusky company agents and developer applications.
+- [Treg external intelligence](references/treg.md) when using Treg catalog search, provider comparison, organization-owned tools, spend/retry semantics, evidence normalization, or Treg's separate hosted MCP endpoint.
 
 ## Identity and compatibility
 
@@ -41,6 +42,7 @@ For deep work, load only the references relevant to the task:
 - `src/agent.ts`: Composio session reuse, OpenRouter chat loop, modality routing, native-tool dispatch, retries, and approval gates.
 - `src/agentTools.ts`: OpenAI-compatible schemas for Chusky's local `CHUCK_*` tools.
 - `src/nativeTools.ts`: reminder, recurring-job, scratchpad, and structured-memory implementations.
+- `src/treg/`: server-side Treg gateway, spend guard, evidence normalization, OAuth handoffs, provider comparison, and registered organization-tool calls.
 - `src/missionScheduler.ts`: materializes dependency-ready mission steps as idempotent durable tasks and enqueues them through the configured workflow provider.
 - `src/taskRunner.ts` and `src/taskWait.ts`: leased task execution, token-checked settlement, bounded durable continuation, and recovery checkpoints.
 - `src/autonomy/`: shared context snapshots, autonomous run/occurrence contracts, and action classification used by reminders, jobs, missions, tasks, and pulse work.

@@ -230,24 +230,46 @@ authorization to expand the task or disclose unrelated private context.
 
 ### Treg external intelligence
 
-Treg is an optional server-side intelligence gateway, separate from third-party
-MCP and Composio. It lets Chusky search a bounded catalog and run selected
-enrichment or web-data endpoints without placing thousands of provider tools in
-the model context. Treg results return as evidence bundles with source,
-confidence, cost, warnings, and an incomplete flag; they are not treated as
-ground truth or as authorization to disclose or change anything.
+Treg is Chusky's first-class server-side live-data gateway, separate from
+third-party MCP and Composio. It lets Chusky search a bounded catalog and run
+real enrichment, SEO, social, advertising, web, voice, video, and market-data
+providers without placing thousands of provider tools in the model context.
+Treg responses are returned with provider, endpoint, observation time, cost,
+warnings, and completeness metadata. Provider-supplied scores are preserved
+only when the upstream response includes one; Chusky does not invent a
+confidence value or describe successful provider data as model speculation.
+Treg data is not an authorization grant for unrelated actions in connected
+apps.
 
 Enable it with `TREG_ENABLED=true` and a server-only `TREG_TOKEN`. Calls are
 budgeted per owner and mission, reserved atomically in Redis, recorded with
 bounded receipts, retried only for idempotent or idempotency-keyed requests,
-and fail closed when an endpoint price is unavailable. The native tools are
+and fail closed when an endpoint price is unavailable. Catalog search,
+inspection, comparison, enrichment, resolve, balance, usage, and OAuth status
+are bounded autonomous operations. `CHUCK_TREG_CALL` remains approval-gated
+because it may spend budget or invoke a registered organization-owned action;
+OAuth start/revoke remain approval-gated because they change authorization. The
+native tools are
 `CHUCK_TREG_SEARCH`, `CHUCK_TREG_GET`, `CHUCK_TREG_CALL`,
 `CHUCK_TREG_ENRICH_PERSON`, `CHUCK_TREG_ENRICH_COMPANY`,
-`CHUCK_TREG_RESOLVE`, `CHUCK_TREG_BALANCE`, and `CHUCK_TREG_USAGE`. Use Composio for actions in a
+`CHUCK_TREG_RESOLVE`, `CHUCK_TREG_PLATFORMS`, `CHUCK_TREG_MY_TOOLS`,
+`CHUCK_TREG_BALANCE`, and `CHUCK_TREG_USAGE`. `CHUCK_TREG_CALL` accepts a
+caller-supplied `idempotencyKey` for an exact retry and records Treg's response
+call ID, settled cost, replay flag, and served-via metadata. It can also call a
+registered organization-owned HTTP tool after `CHUCK_TREG_MY_TOOLS` verifies
+the host/name; it cannot call arbitrary hosts. Use Composio for actions in a
 user's connected accounts; use Treg for external intelligence that needs
 verification before an action.
 
-Optional OAuth tools (`CHUCK_TREG_OAUTH_START`, `STATUS`, `CONNECTIONS`, and
+The native gateway follows Treg's current REST contract: `X-Treg-Token` for
+REST authentication, `x-treg-org` for identity-token organization selection,
+`/catalog/platforms/{slug}` for provider comparison, `GET /tools` for safe
+team-tool discovery, and the `X-Treg-Cost-Micro` / `X-Treg-Call-Id` response
+headers for settlement and audit. Treg's `402` balance and `503` provider
+capacity responses are surfaced as bounded recovery errors rather than being
+silently retried or treated as evidence.
+
+OAuth tools (`CHUCK_TREG_OAUTH_START`, `STATUS`, `CONNECTIONS`, and
 `REVOKE`) let a user connect a provider-owned account through Treg. Chusky
 stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use

@@ -82,7 +82,18 @@ const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
-  "CHUCK_TREG_OAUTH_REVOKE",
+  // Treg calls may spend budget or invoke an organization-owned action.
+  // OAuth start/revoke change an external account authorization.
+  "CHUCK_TREG_CALL", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE",
+]);
+
+// Bounded Treg intelligence and metadata reads stay autonomous. The gateway
+// still enforces account scope, spend reservations, rate limits, and provider
+// availability; this only removes the interactive Chusky approval prompt.
+const TREG_AUTONOMOUS_TOOLS = new Set([
+  "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
+  "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+  "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
 ]);
 
 /**
@@ -152,6 +163,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
   if (slug === "CHUCK_MISSION_COMPENSATE" && String(args.action ?? "") === "inspect") return "private";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
+  if (TREG_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
   if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
     // Batch execution stays autonomous for routine communication/content
@@ -349,6 +361,7 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
 }
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
+  if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;
   if (ownerPrivateRun) {
     if (slug.startsWith("MCP_")) {
       const actionValues = [args.action, args.operation, args.command]

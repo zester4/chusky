@@ -73,9 +73,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "The agent executes discovered tools with schema validation, default human approval, bounded results, visible failures, and account isolation from group and meeting contexts.",
   ],
   treg: [
-    "Added an optional Treg external-intelligence gateway with bounded native tools for catalog search, endpoint inspection, enrichment, data resolution, usage, and balance checks.",
-    "Treg calls now use server-only organization-scoped credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, mission evidence, and safe retry semantics.",
-    "Optional Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, and incomplete or unverified evidence must be cross-checked before customer-facing or irreversible work.",
+    "Added Treg as Chusky's first-class live-data gateway with bounded native tools for provider catalog search, endpoint inspection, provider comparison, enrichment, data resolution, organization-tool discovery, usage, and balance checks.",
+    "Treg calls use server-only organization credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",
+    "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work.",
   ],
 } as const;
 

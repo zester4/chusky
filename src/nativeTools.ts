@@ -917,6 +917,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);
+    case "CHUCK_TREG_PLATFORMS": return tregGateway().platforms(text(args.slug, 200), runtime.organizationId);
+    case "CHUCK_TREG_MY_TOOLS": return tregGateway().myTools(runtime.organizationId);
     case "CHUCK_TREG_CALL": {
       const body = args.body === undefined ? undefined : args.body;
       const query = args.query && typeof args.query === "object" && !Array.isArray(args.query) ? Object.fromEntries(Object.entries(args.query).map(([key, value]) => [key, String(value)])) : undefined;
@@ -929,6 +931,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
         organizationId: runtime.organizationId,
         estimateUsd: args.estimateUsd === undefined ? undefined : Number(args.estimateUsd),
+        idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey, 200) : undefined,
       });
     }
     case "CHUCK_TREG_ENRICH_PERSON": return tregGateway().enrichPerson({

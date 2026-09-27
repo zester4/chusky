@@ -18,12 +18,35 @@ export interface TregEndpointHit {
   latencyMs?: number;
   requiresOwnAccount?: boolean;
   requiresByok?: boolean;
+  strictQuery?: boolean;
+  inputFields?: string[];
+  siblings?: string[];
+}
+
+export interface TregPlatformOption {
+  id: string;
+  title: string;
+  provider: string;
+  priceUsd?: number;
+  successRate?: number;
+  latencyMs?: number;
+  lastOkAt?: string;
+  endpointId?: string;
+  requiresOwnAccount?: boolean;
+}
+
+export interface TregOwnTool {
+  name: string;
+  baseUrl?: string;
+  host?: string;
+  bindings?: string[];
 }
 
 export interface TregEvidenceItem {
   field: string;
   value: string | number | boolean | null;
-  confidence: number;
+  /** Provider-supplied score only; Chusky never invents a confidence value. */
+  providerScore?: number;
   sourceEndpoint: string;
   sourceProvider: string;
   observedAt: string;
@@ -54,6 +77,9 @@ export interface TregCallReceipt {
   error?: string;
   organizationId?: string;
   missionEvidenceRecorded?: boolean;
+  idempotencyKey?: string;
+  replayed?: boolean;
+  servedVia?: string;
 }
 
 export interface TregSpendSnapshot {

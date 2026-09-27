@@ -16,12 +16,15 @@ test("native catalog includes core agent capabilities", () => {
 
 test("Treg exposes bounded intelligence tools without exposing a provider catalog", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
-  for (const name of ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_CALL", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS", "CHUCK_TREG_OAUTH_REVOKE"]) assert.equal(names.has(name), true, name);
+  for (const name of ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_CALL", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS", "CHUCK_TREG_OAUTH_REVOKE"]) assert.equal(names.has(name), true, name);
   validateNativeToolArguments("CHUCK_TREG_SEARCH", { q: "find company revenue", limit: 5 });
   validateNativeToolArguments("CHUCK_TREG_RESOLVE", { need: "Find the company domain", maxCalls: 2, maxSpendUsd: 0.2 });
   assert.throws(() => validateNativeToolArguments("CHUCK_TREG_SEARCH", { q: "x" }), /at least 2/i);
   assert.deepEqual(chuckTools.find((tool) => tool.function.name === "CHUCK_TREG_CALL")?.function.parameters.properties.method.enum, ["GET", "POST", "PUT", "PATCH", "DELETE"]);
   validateNativeToolArguments("CHUCK_TREG_USAGE", { dayKey: "2026-09-27", limit: 10 });
+  validateNativeToolArguments("CHUCK_TREG_PLATFORMS", { slug: "people-email" });
+  validateNativeToolArguments("CHUCK_TREG_MY_TOOLS", {});
+  validateNativeToolArguments("CHUCK_TREG_CALL", { endpointId: "tikhub.tiktok.user.profile", idempotencyKey: "research-1" });
   validateNativeToolArguments("CHUCK_TREG_OAUTH_START", { provider: "example" });
   validateNativeToolArguments("CHUCK_TREG_OAUTH_STATUS", { state: "oauth-state" });
   validateNativeToolArguments("CHUCK_TREG_OAUTH_REVOKE", { connectionId: "conn_123" });

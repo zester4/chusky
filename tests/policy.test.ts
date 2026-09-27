@@ -139,6 +139,24 @@ test("owner-private MCP runs do not inherit a server-wide approval gate but keep
   assert.equal(requiresToolApproval("MCP_private_create_ticket_1234567890", { title: "Follow up" }, true, false), true, "restricted runs keep the connected server's configured approval policy");
 });
 
+test("bounded Treg intelligence tools are autonomous while calls and OAuth changes stay gated", () => {
+  const autonomous = [
+    "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
+    "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
+    "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS",
+  ];
+  for (const slug of autonomous) {
+    assert.equal(toolApprovalPolicy(slug), "private", slug);
+    assert.equal(requiresToolApproval(slug, {}, false), false, `${slug} should not prompt`);
+    assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} should ignore a generic strict-run prompt`);
+  }
+  for (const slug of ["CHUCK_TREG_CALL", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE"]) {
+    assert.equal(toolApprovalPolicy(slug), "approval_required", slug);
+    assert.equal(requiresToolApproval(slug), true, `${slug} should remain gated`);
+    assert.equal(requiresToolApproval(slug, {}, false, true), true, `${slug} should remain gated in owner-private runs`);
+  }
+});
+
 test("tool diagnostics stay read-only while external artifact transfers require approval", () => {
   for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
     assert.equal(toolApprovalPolicy(slug), "private", slug);

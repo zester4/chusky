@@ -112,10 +112,10 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
-test("Treg upgrade preset describes bounded evidence and spend controls", () => {
+test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
-  assert.match(bullets[0], /external-intelligence gateway/);
+  assert.match(bullets[0], /first-class live-data gateway/);
   assert.match(bullets[1], /atomic owner and mission spend/);
   assert.match(bullets[2], /Composio apps/);
 });
@@ -135,9 +135,9 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces Treg intelligence", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.18.0");
-  assert.equal(notice?.version, "4.18.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Treg external-intelligence gateway/);
+  assert.equal(notice?.id, "release-4.19.0");
+  assert.equal(notice?.version, "4.19.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Treg as Chusky's first-class live-data gateway/);
   assert.match(formatAgentUpgradeNotice(notice!), /atomic owner and mission spend/);
   assert.match(formatAgentUpgradeNotice(notice!), /Composio apps/);
 });

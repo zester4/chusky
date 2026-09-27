@@ -71,6 +71,78 @@ test("TregGateway uses the server token and preserves idempotency across transie
     }
 });
 
+test("TregGateway accepts a caller idempotency key and settles the documented response headers", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken, retries: config.tregMaxRetries };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  config.tregMaxRetries = 0;
+  let calls = 0;
+  const spend = new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} });
+  try {
+    const gateway = new TregGateway({
+      spend,
+      recordReceipt: async () => {},
+      fetchImpl: async (_url, init) => {
+        calls += 1;
+        if (calls === 1) return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.05 }), { status: 200 });
+        assert.equal((init.headers as Record<string, string>)["Idempotency-Key"], "same-request-retry");
+        return new Response(JSON.stringify({ result: { ok: true } }), { status: 200, headers: { "X-Treg-Call-Id": "call_123", "X-Treg-Cost-Micro": "7000", "X-Treg-Idempotent-Replay": "true" } });
+      },
+    });
+    const result = await gateway.call({ userId: 1, endpointId: "endpoint-1", estimateUsd: 0.05, idempotencyKey: "same-request-retry" });
+    assert.equal(result.receipt.callId, "call_123");
+    assert.equal(result.receipt.costUsd, 0.007);
+    assert.equal(result.receipt.replayed, true);
+    assert.equal(result.receipt.idempotencyKey, "same-request-retry");
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+    config.tregMaxRetries = previous.retries;
+  }
+});
+
+test("TregGateway exposes platform comparisons and registered team tools without secrets", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  const seenUrls: string[] = [];
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        seenUrls.push(url);
+        if (url.includes("/catalog/platforms/")) return new Response(JSON.stringify([{ slug: "one", provider: "one", price_usd: 0.01 }]), { status: 200 });
+        return new Response(JSON.stringify({ tools: [{ name: "stripe", base_url: "https://api.stripe.com", host: "api.stripe.com", bindings: { Authorization: "redacted" } }] }), { status: 200 });
+      },
+    });
+    assert.deepEqual(await gateway.platforms("email-find"), [{ id: "one", title: "one", provider: "one", priceUsd: 0.01 }]);
+    assert.deepEqual(await gateway.myTools(), [{ name: "stripe", baseUrl: "https://api.stripe.com", host: "api.stripe.com", bindings: ["Authorization"] }]);
+    assert.ok(seenUrls.some((url) => url.includes("/catalog/platforms/email-find")));
+    assert.ok(seenUrls.some((url) => url.endsWith("/tools")));
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
+test("TregGateway rejects an unregistered team-tool target", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async () => new Response(JSON.stringify({ tools: [{ name: "stripe", host: "api.stripe.com" }] }), { status: 200 }),
+    });
+    await assert.rejects(gateway.call({ userId: 1, endpointId: "https://evil.example/charge", estimateUsd: 0 }), /not registered/i);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway uses only the organization credential for scoped calls", async () => {
     const previous = { enabled: config.tregEnabled, token: config.tregToken, orgTokens: config.tregOrganizationTokens };
     config.tregEnabled = true;
@@ -96,6 +168,43 @@ test("TregGateway sanitizes OAuth connection metadata and never returns provider
       const gateway = new TregGateway({ spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }), recordReceipt: async () => {}, fetchImpl: async () => new Response(JSON.stringify({ connections: [{ id: "conn_1", provider: "acme", access_token: "secret", scopes: ["read"] }] }), { status: 200 }) });
       assert.deepEqual(await gateway.oauthConnections(), [{ id: "conn_1", provider: "acme", scopes: ["read"] }]);
     } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; }
+});
+
+test("Treg normalization preserves provider scores without inventing confidence", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let callCount = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        callCount += 1;
+        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
+        return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person", confidence: 0.92 } }), { status: 200 });
+      },
+    });
+    const result = await gateway.enrichPerson({ userId: 1, name: "A Person" });
+    assert.ok(callCount >= 3);
+    assert.ok(result.items.length > 0);
+    assert.ok(result.items.every((item) => item.providerScore === 0.92));
+
+    callCount = 0;
+    const noScoreGateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async (url) => {
+        if (url.includes("/catalog/search")) return new Response(JSON.stringify({ results: [{ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }] }), { status: 200 });
+        if (url.includes("/catalog/endpoints/")) return new Response(JSON.stringify({ id: "person-email", title: "Work email", provider: "hunter", price_usd: 0.01 }), { status: 200 });
+        return new Response(JSON.stringify({ result: { email: "person@example.com", full_name: "A Person" } }), { status: 200 });
+      },
+    });
+    const noScore = await noScoreGateway.enrichPerson({ userId: 1, name: "A Person" });
+    assert.ok(noScore.items.length > 0);
+    assert.ok(noScore.items.every((item) => !("providerScore" in item)));
+  } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; }
 });
 
 test("TregGateway records mission evidence after a successful paid call", async () => {
@@ -127,6 +236,28 @@ test("TregGateway fails closed when the endpoint has no price or explicit estima
       const gateway = new TregGateway({ spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }), recordReceipt: async () => {}, fetchImpl });
       await assert.rejects(gateway.call({ userId: 1, endpointId: "endpoint-1" }), /price is unavailable/i);
     } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; }
+});
+
+test("TregGateway does not send a body to a strict-query catalog endpoint", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  let requests = 0;
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async () => {
+        requests += 1;
+        return new Response(JSON.stringify({ id: "endpoint-1", price_usd: 0.01, strict_query: true }), { status: 200 });
+      },
+    });
+    await assert.rejects(gateway.call({ userId: 1, endpointId: "endpoint-1", body: { q: "bad" } }), /strict-query catalog endpoint requires declared query parameters/i);
+    assert.equal(requests, 1);
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
 });
 
 test("TregGateway retries an idempotent request after a timeout", async () => {

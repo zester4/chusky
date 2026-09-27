@@ -47,9 +47,9 @@ function secretMap(key: string): Record<string, { token: string; tregOrgId?: str
   for (const [organizationId, value] of Object.entries(parsed)) {
     if (!/^org_[A-Za-z0-9_-]{1,120}$/.test(organizationId)) throw new Error(`${key} contains an invalid Chusky organization ID`);
     const token = typeof value === "string" ? value : value && typeof value === "object" && typeof (value as Record<string, unknown>).token === "string" ? String((value as Record<string, unknown>).token) : "";
-    const tregOrgId = value && typeof value === "object" && typeof (value as Record<string, unknown>).tregOrgId === "string" ? String((value as Record<string, unknown>).tregOrgId) : undefined;
+    const tregOrgId = value && typeof value === "object" && typeof (value as Record<string, unknown>).tregOrgId === "string" ? String((value as Record<string, unknown>).tregOrgId).trim() : undefined;
     if (!token.trim()) throw new Error(`${key}.${organizationId} must contain a token`);
-    result[organizationId] = { token: token.trim(), ...(tregOrgId && /^org_[A-Za-z0-9_-]{1,120}$/.test(tregOrgId) ? { tregOrgId } : {}) };
+    result[organizationId] = { token: token.trim(), ...(tregOrgId && /^[A-Za-z0-9][A-Za-z0-9_-]{0,120}$/.test(tregOrgId) ? { tregOrgId } : {}) };
   }
   return result;
 }
@@ -141,8 +141,8 @@ export const config = {
   mcpMaxResultChars: boundedInt("MCP_MAX_RESULT_CHARS", 20_000, 1_000, 100_000),
 
   // Treg is Chusky's server-side external intelligence gateway. It is kept
-  // separate from third-party MCP and Composio: Treg supplies evidence and
-  // enrichment, while authenticated writes remain in the owner's apps.
+  // separate from third-party MCP and Composio: Treg supplies live external
+  // provider data, while authenticated writes remain in the owner's apps.
   tregBaseUrl: optional("TREG_BASE_URL", "https://treg.to"),
   tregToken: optional("TREG_TOKEN", ""),
   tregTimeoutMs: boundedInt("TREG_TIMEOUT_MS", 30_000, 1_000, 120_000),
@@ -303,7 +303,7 @@ When writing to other people on the user's behalf—email, Slack, comments, or m
 CAPABILITIES (USE TOOLS; DO NOT ONLY DESCRIBE THEM)
 - Search and execute Composio tools across GitHub, Gmail, Slack, Notion, Linear, Stripe, and many other apps.
 - Connect an app with COMPOSIO_MANAGE_CONNECTIONS when authorization is missing.
-- TREG EXTERNAL INTELLIGENCE: when the owner needs current external people, company, SEO, social, advertising, or web data not already in owner context, use CHUCK_TREG_SEARCH followed by CHUCK_TREG_GET and then the narrowest ENRICH or RESOLVE tool. Treg results are evidence with source and confidence, not guaranteed truth; cross-check important or customer-facing facts before acting. Never use Treg as a substitute for authenticated actions in the owner's connected apps. Respect Treg's spend and rate denials and narrow the request instead of bypassing the gateway. Use CHUCK_TREG_USAGE to explain spend and receipts. Start Treg OAuth only when the owner explicitly needs a Treg-held provider account; never ask for or expose provider tokens. Revoke is permission-sensitive and retains approval. Never expose the Treg token.
+- TREG EXTERNAL INTELLIGENCE: Treg is Chusky's first-class live-data gateway. When the owner needs current people, company, SEO, social, advertising, web, image, video, voice, or market data not already in owner context, use CHUCK_TREG_SEARCH followed by CHUCK_TREG_GET. Treg responses come from external provider APIs, not from the model. Treat a successful provider response as real returned data and state the provider/source when useful. If a result is empty, ambiguous, stale, or the provider reports a match score, say exactly what the response shows; do not add generic disclaimers or call solid provider data speculative. If several providers serve the capability, use CHUCK_TREG_PLATFORMS and choose by inputs available first, then reliability, price, and recency; Treg does not choose or fail over for you. Use the narrowest ENRICH or RESOLVE tool when available. Never use Treg as a substitute for authenticated actions in the owner's connected apps. For company-owned APIs, inspect CHUCK_TREG_MY_TOOLS first and call only a returned registered tool; never invent a host or send credentials. Search, inspection, comparison, discovery, enrichment, resolve, balance, usage, OAuth status, and connection listing are bounded autonomous operations. CHUCK_TREG_CALL remains approval-gated because it may spend budget or invoke a company-owned action; OAuth start and revoke remain approval-gated because they change authorization. Respect Treg's spend, balance, capacity, and rate denials and narrow the request instead of bypassing the gateway. Use CHUCK_TREG_USAGE for Chusky's local spend and receipts, and CHUCK_TREG_BALANCE for Treg's provider balance. When a paid call may be retried after a timeout, reuse the same idempotencyKey for the exact same request; use a new key for new work. Never ask for or expose provider tokens. Never expose the Treg token.
 - Run shell/code work only through the available sandbox tools.
 - Handle images, documents, audio, and video supplied by the user.
 - Generate new images with CHUCK_GENERATE_IMAGE and new videos with

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
-import type { TregCallReceipt, TregCategory, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection } from "./types.js";
+import type { TregCallReceipt, TregCategory, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPlatformOption } from "./types.js";
 import type { TregSpendGuard } from "./spend.js";
 
 export interface TregGatewayDeps {
@@ -24,9 +24,27 @@ function boundedError(value: unknown): string {
   return String(value ?? "Unknown Treg error").replace(/[\r\n]+/g, " ").slice(0, 500);
 }
 
+class TregRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    readonly recovery?: { balanceUsd?: number; estimatedCostUsd?: number; topupUrl?: string; alternatives?: string[]; resetsAt?: string },
+  ) {
+    super(message);
+    this.name = "TregRequestError";
+  }
+}
+
 function isRetryableNetworkError(error: unknown): boolean {
   if (error instanceof TypeError) return true;
   return isObject(error) && error.name === "AbortError";
+}
+
+function numberArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value.filter((item): item is string => typeof item === "string").map((item) => item.slice(0, 120)).filter(Boolean).slice(0, 50);
+  return values.length ? values : undefined;
 }
 
 function normalizeHit(raw: unknown): TregEndpointHit {
@@ -44,6 +62,41 @@ function normalizeHit(raw: unknown): TregEndpointHit {
     latencyMs: numberOrUndefined(row.latency_ms ?? row.median_ms),
     requiresOwnAccount: Boolean(row.requires_own_account ?? row.oauth),
     requiresByok: Boolean(row.requires_byok ?? row.byok_only),
+    strictQuery: row.strict_query === true,
+    ...(numberArray(row.input_fields ?? row.required_fields ?? row.parameters) ? { inputFields: numberArray(row.input_fields ?? row.required_fields ?? row.parameters) } : {}),
+    ...(numberArray(row.siblings) ? { siblings: numberArray(row.siblings) } : {}),
+  };
+}
+
+function normalizePlatform(raw: unknown): TregPlatformOption | undefined {
+  if (!isObject(raw)) return undefined;
+  const id = String(raw.id ?? raw.slug ?? raw.endpoint_id ?? "").trim();
+  if (!id) return undefined;
+  return {
+    id: id.slice(0, 200),
+    title: String(raw.title ?? raw.name ?? id).slice(0, 240),
+    provider: String(raw.provider ?? raw.platform ?? "unknown").slice(0, 120),
+    ...(numberOrUndefined(raw.price_usd ?? raw.price ?? raw.unit_price) !== undefined ? { priceUsd: numberOrUndefined(raw.price_usd ?? raw.price ?? raw.unit_price) } : {}),
+    ...(numberOrUndefined(raw.success_rate) !== undefined ? { successRate: numberOrUndefined(raw.success_rate) } : {}),
+    ...(numberOrUndefined(raw.latency_ms ?? raw.median_ms) !== undefined ? { latencyMs: numberOrUndefined(raw.latency_ms ?? raw.median_ms) } : {}),
+    ...(typeof raw.last_ok_at === "string" ? { lastOkAt: raw.last_ok_at.slice(0, 80) } : {}),
+    ...(typeof raw.endpoint_id === "string" ? { endpointId: raw.endpoint_id.slice(0, 200) } : {}),
+    ...(raw.requires_own_account === true ? { requiresOwnAccount: true } : {}),
+  };
+}
+
+function normalizeOwnTool(raw: unknown): TregOwnTool | undefined {
+  if (!isObject(raw)) return undefined;
+  const name = String(raw.name ?? raw.id ?? "").trim();
+  if (!name) return undefined;
+  const bindings = isObject(raw.bindings)
+    ? Object.keys(raw.bindings).slice(0, 40).map((key) => key.slice(0, 120))
+    : numberArray(raw.bindings);
+  return {
+    name: name.slice(0, 160),
+    ...(typeof raw.base_url === "string" ? { baseUrl: raw.base_url.slice(0, 500) } : {}),
+    ...(typeof raw.host === "string" ? { host: raw.host.slice(0, 240) } : {}),
+    ...(bindings ? { bindings } : {}),
   };
 }
 
@@ -61,7 +114,7 @@ function mapCategory(raw: JsonObject): TregCategory {
 function payloadRows(data: unknown): unknown[] {
   if (Array.isArray(data)) return data;
   if (!isObject(data)) return [];
-  for (const key of ["results", "endpoints", "data"]) if (Array.isArray(data[key])) return data[key] as unknown[];
+  for (const key of ["results", "endpoints", "tools", "platforms", "data"]) if (Array.isArray(data[key])) return data[key] as unknown[];
   return [];
 }
 
@@ -70,23 +123,43 @@ function evidenceValue(value: unknown): string | number | boolean | null {
   return (JSON.stringify(value) ?? String(value)).slice(0, 2000);
 }
 
-function evidence(field: string, value: unknown, hit: TregEndpointHit, confidence = 0.7): TregEvidenceItem | undefined {
+function providerScore(row: Record<string, unknown>): number | undefined {
+  for (const key of ["provider_score", "match_score", "confidence", "confidence_score", "match_confidence"]) {
+    const value = row[key];
+    const score = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    if (!Number.isFinite(score) || score < 0) continue;
+    // Providers commonly return either a 0..1 score or a percentage.
+    if (score <= 1) return score;
+    if (score <= 100) return score / 100;
+  }
+  return undefined;
+}
+
+function evidence(field: string, value: unknown, hit: TregEndpointHit, score?: number): TregEvidenceItem | undefined {
   if (value === undefined || value === null || value === "") return undefined;
-  return { field, value: evidenceValue(value), confidence: Math.max(0, Math.min(1, confidence)), sourceEndpoint: hit.id, sourceProvider: hit.provider, observedAt: new Date().toISOString() };
+  return {
+    field,
+    value: evidenceValue(value),
+    ...(score === undefined ? {} : { providerScore: score }),
+    sourceEndpoint: hit.id,
+    sourceProvider: hit.provider,
+    observedAt: new Date().toISOString(),
+  };
 }
 
 function normalizePersonPayload(result: unknown, hit: TregEndpointHit): TregEvidenceItem[] {
   const row = isObject(result) ? result : {};
+  const score = providerScore(row);
   const items = [
-    evidence("email", row.email ?? row.work_email ?? row.value, hit),
-    evidence("full_name", row.name ?? row.full_name, hit),
-    evidence("title", row.title ?? row.job_title, hit),
-    evidence("linkedin_url", row.linkedin ?? row.linkedin_url, hit),
-    evidence("company", row.company ?? row.organization, hit),
-    evidence("domain", row.domain, hit),
+    evidence("email", row.email ?? row.work_email ?? row.value, hit, score),
+    evidence("full_name", row.name ?? row.full_name, hit, score),
+    evidence("title", row.title ?? row.job_title, hit, score),
+    evidence("linkedin_url", row.linkedin ?? row.linkedin_url, hit, score),
+    evidence("company", row.company ?? row.organization, hit, score),
+    evidence("domain", row.domain, hit, score),
   ].filter((item): item is TregEvidenceItem => Boolean(item));
   if (!items.length && result !== null && typeof result === "object") {
-    const raw = evidence("raw", result, hit, 0.3);
+    const raw = evidence("raw", result, hit, score);
     if (raw) items.push(raw);
   }
   return items;
@@ -94,12 +167,13 @@ function normalizePersonPayload(result: unknown, hit: TregEndpointHit): TregEvid
 
 function normalizeCompanyPayload(result: unknown, hit: TregEndpointHit): TregEvidenceItem[] {
   const row = isObject(result) ? result : {};
+  const score = providerScore(row);
   return [
-    evidence("company_name", row.name ?? row.company, hit),
-    evidence("domain", row.domain ?? row.website, hit),
-    evidence("industry", row.industry, hit),
-    evidence("employee_count", row.employees ?? row.employee_count, hit),
-    evidence("description", row.description, hit),
+    evidence("company_name", row.name ?? row.company, hit, score),
+    evidence("domain", row.domain ?? row.website, hit, score),
+    evidence("industry", row.industry, hit, score),
+    evidence("employee_count", row.employees ?? row.employee_count, hit, score),
+    evidence("description", row.description, hit, score),
   ].filter((item): item is TregEvidenceItem => Boolean(item));
 }
 
@@ -122,7 +196,7 @@ function emptyBundle(query: string, intent: string, warnings: string[]): TregEvi
   return { query, intent, items: [], endpointsUsed: [], totalCostUsd: 0, warnings, incomplete: true, generatedAt: new Date().toISOString() };
 }
 
-function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: number): TregEndpointHit[] {
+function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: number, availableFields?: string[]): TregEndpointHit[] {
   const query = intent.toLowerCase();
   return [...hits].sort((a, b) => {
     const score = (hit: TregEndpointHit): number => {
@@ -131,7 +205,10 @@ function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: number)
       const reliability = hit.successRate === undefined ? 0 : Math.max(0, Math.min(1, hit.successRate)) * 20;
       const latency = hit.latencyMs === undefined ? 0 : Math.max(-10, 10 - hit.latencyMs / 1000);
       const price = hit.priceUsd === undefined ? -5 : Math.max(-10, 5 - hit.priceUsd * 10);
-      return categoryBoost + affordable + reliability + latency + price + (hit.requiresOwnAccount || hit.requiresByok ? -40 : 0);
+      const compatibility = availableFields?.length && hit.inputFields?.length
+        ? hit.inputFields.filter((field) => availableFields.includes(field)).length / hit.inputFields.length * 40
+        : 0;
+      return categoryBoost + affordable + reliability + latency + price + compatibility + (hit.requiresOwnAccount || hit.requiresByok ? -40 : 0);
     };
     return score(b) - score(a);
   });
@@ -169,7 +246,7 @@ export class TregGateway {
     return { token, tregOrgId: scoped?.tregOrgId };
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string): Promise<{ data: T; status: number; durationMs: number }> {
+  private async request<T>(method: string, path: string, body?: unknown, query?: Record<string, string | number | undefined>, idempotencyKey?: string, organizationId?: string): Promise<{ data: T; status: number; durationMs: number; meta: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string } }> {
     const upper = method.toUpperCase();
     const url = new URL(this.base + path);
     for (const [key, value] of Object.entries(query ?? {})) if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
@@ -191,7 +268,8 @@ export class TregGateway {
         const text = await response.text();
         let data: unknown = null;
         try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text.slice(0, 2000) }; }
-        const transient = [408, 425, 429].includes(response.status) || response.status >= 500;
+        const errorCode = isObject(data) && typeof data.error === "string" ? data.error : undefined;
+        const transient = [408, 425, 429].includes(response.status) || (response.status >= 500 && !(response.status === 503 && errorCode === "provider_capacity_unavailable") && !(response.status === 502 && errorCode === "response_buffer_limit"));
         if (retryableMethod && transient) {
           if (attempt < config.tregMaxRetries) {
             lastError = new Error(`Treg upstream ${response.status}`);
@@ -200,10 +278,29 @@ export class TregGateway {
           }
         }
         if (!response.ok) {
-          const detail = isObject(data) ? data.detail ?? data.message : text;
-          throw new Error(`Treg ${upper} ${path} failed (${response.status}): ${boundedError(detail)}`);
+          const detail = isObject(data) ? data.detail ?? data.message ?? data.error : text;
+          const recovery = isObject(data) ? {
+            ...(numberOrUndefined(data.balance_micro) !== undefined ? { balanceUsd: Number(data.balance_micro) / 1_000_000 } : {}),
+            ...(numberOrUndefined(data.estimated_cost_micro) !== undefined ? { estimatedCostUsd: Number(data.estimated_cost_micro) / 1_000_000 } : {}),
+            ...(typeof data.topup_url === "string" && /^https:\/\//i.test(data.topup_url) ? { topupUrl: data.topup_url.slice(0, 500) } : {}),
+            ...(Array.isArray(data.alternatives) ? { alternatives: data.alternatives.filter((item): item is string => typeof item === "string").slice(0, 10) } : {}),
+            ...(typeof data.resets_at === "string" ? { resetsAt: data.resets_at.slice(0, 80) } : {}),
+          } : undefined;
+          const suffix = recovery?.topupUrl ? ` Top up at ${recovery.topupUrl}.` : recovery?.alternatives?.length ? ` Alternatives: ${recovery.alternatives.join(", ")}.` : recovery?.resetsAt ? ` Provider capacity may recover at ${recovery.resetsAt}.` : "";
+          throw new TregRequestError(`Treg ${upper} ${path} failed (${response.status})${errorCode ? ` ${errorCode}` : ""}: ${boundedError(detail)}.${suffix}`, response.status, errorCode, recovery);
         }
-        return { data: data as T, status: response.status, durationMs };
+        const costMicro = numberOrUndefined(response.headers.get("X-Treg-Cost-Micro"));
+        return {
+          data: data as T,
+          status: response.status,
+          durationMs,
+          meta: {
+            ...(response.headers.get("X-Treg-Call-Id") ? { callId: response.headers.get("X-Treg-Call-Id") ?? undefined } : {}),
+            ...(costMicro !== undefined ? { costUsd: costMicro / 1_000_000 } : {}),
+            ...(response.headers.get("X-Treg-Idempotent-Replay") === "true" ? { replayed: true } : {}),
+            ...(response.headers.get("X-Treg-Served-Via") ? { servedVia: response.headers.get("X-Treg-Served-Via") ?? undefined } : {}),
+          },
+        };
       } catch (error) {
         lastError = error;
         if (attempt < config.tregMaxRetries && retryableMethod && isRetryableNetworkError(error)) {
@@ -226,6 +323,18 @@ export class TregGateway {
   async getEndpoint(endpointId: string, organizationId?: string): Promise<TregEndpointHit> {
     const result = await this.request<unknown>("GET", `/catalog/endpoints/${encodeURIComponent(endpointId)}`, undefined, undefined, undefined, organizationId);
     return normalizeHit(result.data);
+  }
+
+  async platforms(slug: string, organizationId?: string): Promise<TregPlatformOption[]> {
+    const cleanSlug = slug.trim().replace(/^\/+|\/+$/g, "");
+    if (!cleanSlug || cleanSlug.length > 200 || /[?#]/.test(cleanSlug)) throw new Error("Invalid Treg platform slug");
+    const result = await this.request<unknown>("GET", `/catalog/platforms/${encodeURIComponent(cleanSlug)}`, undefined, undefined, undefined, organizationId);
+    return payloadRows(result.data).map(normalizePlatform).filter((item): item is TregPlatformOption => Boolean(item)).slice(0, 50);
+  }
+
+  async myTools(organizationId?: string): Promise<TregOwnTool[]> {
+    const result = await this.request<unknown>("GET", "/tools", undefined, undefined, undefined, organizationId);
+    return payloadRows(result.data).map(normalizeOwnTool).filter((item): item is TregOwnTool => Boolean(item)).slice(0, 100);
   }
 
   async balance(orgId?: string, organizationId?: string): Promise<{ balanceUsd?: number; raw: unknown }> {
@@ -269,37 +378,58 @@ export class TregGateway {
     return { revoked: true, id: secretId.slice(0, 200) };
   }
 
-  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; organizationId?: string }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
-    const metadata = await this.getEndpoint(options.endpointId, options.organizationId).catch(() => undefined);
-    const estimate = options.estimateUsd ?? metadata?.priceUsd;
+  async call(options: { userId: number; endpointId: string; method?: string; body?: unknown; query?: Record<string, string | number | undefined>; missionId?: string; estimateUsd?: number; organizationId?: string; idempotencyKey?: string }): Promise<{ result: unknown; receipt: TregCallReceipt }> {
+    const target = options.endpointId.trim();
+    if (!target || target.length > 500 || /[#?]/.test(target)) throw new Error("Invalid Treg endpoint or team-tool target");
+    const isOwnTarget = /^https:\/\//i.test(target) || target.includes("/");
+    const metadata = isOwnTarget ? undefined : await this.getEndpoint(target, options.organizationId).catch(() => undefined);
+    if (metadata?.strictQuery && options.body !== undefined) throw new Error("strict-query catalog endpoint requires declared query parameters; omit the request body");
+    if (isOwnTarget) {
+      const tools = await this.myTools(options.organizationId);
+      const targetUrl = /^https:\/\//i.test(target) ? new URL(target) : undefined;
+      if (targetUrl && (targetUrl.username || targetUrl.password || targetUrl.hash)) throw new Error("Treg team-tool URL must not contain credentials or a fragment");
+      const targetName = target.split("/", 1)[0];
+      const matches = tools.some((tool) => {
+        if (targetUrl) {
+          const baseUrl = tool.baseUrl && /^https:\/\//i.test(tool.baseUrl) ? new URL(tool.baseUrl) : undefined;
+          return tool.host === targetUrl.host || baseUrl?.host === targetUrl.host;
+        }
+        return tool.name === targetName;
+      });
+      if (!matches) throw new Error("Treg team tool is not registered for this organization; inspect CHUCK_TREG_MY_TOOLS first");
+    }
+    const estimate = options.estimateUsd ?? (isOwnTarget ? 0 : metadata?.priceUsd);
     if (estimate === undefined) throw new Error("Treg endpoint price is unavailable; inspect the endpoint or provide an owner-approved estimate");
     const reservation = await this.deps.spend.reserve(options.userId, estimate, options.missionId);
     const method = (options.method ?? "POST").toUpperCase();
-    const idempotencyKey = randomUUID();
+    const idempotencyKey = options.idempotencyKey?.trim() || randomUUID();
+    if (idempotencyKey.length > 200) throw new Error("Treg idempotency key is too long");
+    const callPath = `/call/${encodeURI(target.replace(/^\/+/, ""))}`;
     const started = Date.now();
     let response: { data: unknown; status: number; durationMs: number };
     try {
-      response = await this.request<unknown>(method, `/call/${options.endpointId.replace(/^\//, "")}`, options.body, options.query, idempotencyKey, options.organizationId);
+      response = await this.request<unknown>(method, callPath, options.body, options.query, idempotencyKey, options.organizationId);
     } catch (error) {
       const providerError = boundedError(error instanceof Error ? error.message : error);
       let settlementError: string | undefined;
       try { await this.deps.spend.settle(reservation, 0); } catch (settlement) { settlementError = boundedError(settlement instanceof Error ? settlement.message : settlement); }
-      const receipt: TregCallReceipt = { callId: `treg_err_${randomUUID()}`, endpointId: options.endpointId, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: 0, ok: false, durationMs: Date.now() - started, at: Date.now(), error: boundedError(settlementError ? `${providerError}; spend settlement failed: ${settlementError}` : providerError) };
+      const receipt: TregCallReceipt = { callId: `treg_err_${randomUUID()}`, endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: 0, ok: false, durationMs: Date.now() - started, at: Date.now(), idempotencyKey, error: boundedError(settlementError ? `${providerError}; spend settlement failed: ${settlementError}` : providerError) };
       await this.deps.recordReceipt(receipt);
-      throw error;
+      throw new Error(`${providerError}; if you retry this exact request, reuse idempotencyKey ${idempotencyKey}`);
     }
 
     const row = isObject(response.data) ? response.data : {};
-    const cost = numberOrUndefined(row.cost_usd ?? row.cost) ?? estimate;
+    const responseMeta = (response as { meta?: { callId?: string; costUsd?: number; replayed?: boolean; servedVia?: string } }).meta ?? {};
+    const cost = responseMeta.costUsd ?? numberOrUndefined(row.cost_usd ?? row.cost) ?? estimate;
     try {
       await this.deps.spend.settle(reservation, cost);
     } catch (error) {
-      const receipt: TregCallReceipt = { callId: String(row.call_id ?? row.id ?? `treg_settlement_error_${randomUUID()}`), endpointId: options.endpointId, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: false, statusCode: response.status, durationMs: response.durationMs, at: Date.now(), error: boundedError(`Provider returned data, but Treg spend settlement failed: ${error instanceof Error ? error.message : error}`) };
+      const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? row.id ?? `treg_settlement_error_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: false, statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}), error: boundedError(`Provider returned data, but Treg spend settlement failed: ${error instanceof Error ? error.message : error}`) };
       await this.deps.recordReceipt(receipt);
       throw new Error(receipt.error);
     }
 
-    const receipt: TregCallReceipt = { callId: String(row.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: options.endpointId, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: true, statusCode: response.status, durationMs: response.durationMs, at: Date.now() };
+    const receipt: TregCallReceipt = { callId: String(responseMeta.callId ?? row.call_id ?? row.id ?? `treg_${randomUUID()}`), endpointId: target, userId: options.userId, missionId: options.missionId, ...(options.organizationId ? { organizationId: options.organizationId } : {}), costUsd: cost, ok: true, statusCode: response.status, durationMs: response.durationMs, at: Date.now(), idempotencyKey, ...(responseMeta.replayed ? { replayed: true } : {}), ...(responseMeta.servedVia ? { servedVia: responseMeta.servedVia } : {}) };
     if (options.missionId && this.deps.recordMissionEvidence) {
       try {
         receipt.missionEvidenceRecorded = await this.deps.recordMissionEvidence({ userId: options.userId, missionId: options.missionId, receipt, resultHash: safeResultHash(row.result ?? response.data) });
@@ -311,7 +441,7 @@ export class TregGateway {
 
   async enrichPerson(options: { userId: number; name?: string; domain?: string; company?: string; linkedinUrl?: string; missionId?: string; maxSpendUsd?: number; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["find work email and profile", options.name, options.domain, options.company, options.linkedinUrl].filter(Boolean).join(" ");
-    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_person", options.maxSpendUsd).find((item) => !item.requiresOwnAccount && !item.requiresByok);
+    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_person", options.maxSpendUsd, ["full_name", "domain", "company", "linkedin_url"]).find((item) => !item.requiresOwnAccount && !item.requiresByok);
     if (!hit) return emptyBundle(query, "enrich_person", ["No catalog endpoint matched"]);
     const estimateUsd = hit.priceUsd === undefined
       ? options.maxSpendUsd
@@ -323,7 +453,7 @@ export class TregGateway {
 
   async enrichCompany(options: { userId: number; domain?: string; name?: string; missionId?: string; organizationId?: string }): Promise<TregEvidenceBundle> {
     const query = ["company enrichment", options.domain, options.name].filter(Boolean).join(" ");
-    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_company").find((item) => !item.requiresOwnAccount && !item.requiresByok);
+    const hit = rankHits(await this.search(query, 6, options.organizationId), "enrich_company", undefined, ["domain", "company", "name"]).find((item) => !item.requiresOwnAccount && !item.requiresByok);
     if (!hit) return emptyBundle(query, "enrich_company", ["No catalog endpoint matched"]);
     const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, company: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
     return { query, intent: "enrich_company", items: normalizeCompanyPayload(response.result, hit), endpointsUsed: [hit.id], totalCostUsd: response.receipt.costUsd, warnings: [], incomplete: false, generatedAt: new Date().toISOString() };
