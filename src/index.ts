@@ -65,6 +65,7 @@ import { normalizeVoiceDelta, normalizeVoiceText } from "./voiceText.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTranscriptArtifactWebhook, readRecallVisualContextFrame, getRecallMediaAuthorization, getRecallMediaAuthorizationState, recallChatConfigurationReady, recallChatConfigurationIssue, recallChatConfigurationStatus, recallConfigurationReady, receiveRecallVisualFrame, resolveRecallChatWebhook, resolveRecallTranscriptWebhook, sendRecallMeetingChat, leaveRecallMeeting, reconcileCalendarMeetingAutoJoin, cancelAutomaticCalendarMeetingJoins, lookupRecallMeetingContext, joinRecallMeeting, prepareRecallMeetingMission, joinPreparedCalendarMeeting } from "./meetings/service.js";
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
+import { meetingAgentFailureDiagnostics } from "./meetings/diagnostics.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook, receiveRecallTranscriptWebhook } from "./meetings/webhook.js";
 import { mcpClient } from "./mcp/client.js";
 import { isMeetingRepresentativeEmailTool, meetingRepresentativeCopilotInstructions, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist, ownerPrivateMeetingInstructions } from "./meetings/representative.js";
@@ -941,6 +942,11 @@ async function main(): Promise<void> {
                   } : undefined,
                   sharedMeetingRoomAccess: !ownerPrivateMeeting && Boolean(roomPolicy),
                   meetingId,
+                  // Private Recall runs are live spoken turns, just like the
+                  // Twilio path. This enables voice-specific routing, model
+                  // fallbacks, bounded spoken output, and cache affinity.
+                  voiceTurn: ownerPrivateMeeting,
+                  ...(ownerPrivateMeeting ? { voiceSessionId: `recall:${meetingId}` } : {}),
                 maxToolCalls: ownerPrivateMeeting ? 20 : representativeActive ? 8 : 4,
                 maxCost: ownerPrivateMeeting ? 1 : representativeActive ? 0.5 : 0.25,
                 ephemeral: true,
@@ -963,21 +969,13 @@ async function main(): Promise<void> {
             }
             if (!c.req.raw.signal.aborted) {
               const failureCode = error instanceof ApprovalRequiredError ? "approval_required" : "agent_run_failed";
-              const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name) ? error.name : "UnknownError";
-              const errorShape = error && typeof error === "object" ? error as {
-                status?: unknown;
-                statusCode?: unknown;
-                response?: { status?: unknown; status_code?: unknown };
-              } : undefined;
-              const rawStatus = errorShape?.response?.status ?? errorShape?.response?.status_code ?? errorShape?.status ?? errorShape?.statusCode;
-              const httpStatus = typeof rawStatus === "number" && Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : undefined;
+              const diagnostics = meetingAgentFailureDiagnostics(error);
               logger.warn({
                 meetingId,
                 userId,
                 stage: "agent_run",
                 failureCode,
-                errorType: errorName,
-                ...(httpStatus ? { httpStatus } : {}),
+                ...diagnostics,
                 ...(error instanceof ApprovalRequiredError ? { toolSlug: error.toolSlug, approvalId: error.approvalId } : {}),
               }, "Recall meeting voice turn failed");
               send({ type: "error", error: "meeting voice turn failed", code: failureCode });
