@@ -39,6 +39,16 @@ test("autonomy upgrade preset covers the current orchestration surfaces", () => 
   assert.match(bullets[2], /Daytona browser and artifact execution/);
 });
 
+test("owner autonomy preset documents private full-context access and scoped exceptions", () => {
+  const bullets = getAgentUpgradePreset("ownerAutonomy");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.ownerAutonomy]);
+  assert.match(bullets[0], /chat, calls, and meetings/);
+  assert.match(bullets[0], /Composio, MCP, and native tools/);
+  assert.match(bullets[1], /deletion, financial, permission, deployment\/push, and provider-marked high-impact actions pause for exact approval/);
+  assert.match(bullets[2], /shared rooms, autonomous workflows, and delegated workers/);
+});
+
 test("attention upgrade preset describes evidence-based proactive reconciliation", () => {
   const bullets = getAgentUpgradePreset("attention");
   assert.equal(bullets.length, 3);
@@ -106,11 +116,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Daytona image transfers", async () => {
+test("current upgrade manifest announces owner-private autonomy", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.14.0");
-  assert.equal(notice?.version, "4.14.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /created inside Daytona/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Current chat images/);
-  assert.match(formatAgentUpgradeNotice(notice!), /explicitly asks/);
+  assert.equal(notice?.id, "release-4.15.0");
+  assert.equal(notice?.version, "4.15.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /owner history and context/);
+  assert.match(formatAgentUpgradeNotice(notice!), /personal and business/);
+  assert.match(formatAgentUpgradeNotice(notice!), /shared rooms/);
 });

@@ -819,6 +819,7 @@ async function sendPrivateBrowserLinks(ctx: Context, links: Awaited<ReturnType<t
 function telegramAgentOptions(ctx: Context, receivedAt: number) {
   const shared = isTelegramShared(ctx);
   return {
+    ...(!shared ? { ownerPrivateRun: true } : {}),
     ...(shared ? { instructions: sharedGroupInstructions("Telegram"), toolDeny: [...SHARED_GROUP_TOOL_DENY] } : {}),
     temporalContext: { messageReceivedAt: receivedAt, timezone: config.timezone },
   };
@@ -2726,7 +2727,7 @@ export function registerHandlers(bot: Bot): void {
         await ctx.reply(`📞 ${label} started. I’m joining the call now.`);
         return;
       }
-      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id);
+      const result = await runAgent(ctx.from.id, approval.request, approval.history, approval.model, undefined, undefined, undefined, id, undefined, { ownerPrivateRun: true });
       await appendMessages(ctx.from.id, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
       await replyHtml(ctx, mdToTelegramHtml(result.text));
       await sendVoiceReply(ctx, result.text, (await getSession(ctx.from.id)).voiceReplies === true);

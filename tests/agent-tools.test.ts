@@ -31,15 +31,30 @@ test("tool reliability diagnostics are explicit and image transfer is resolved i
   }
   const bridge = chuckTools.find((entry) => entry.function.name === "CHUCK_FILE_BRIDGE")!;
   assert.deepEqual(bridge.function.parameters.required, ["artifactId", "toolSlug", "arguments"]);
-  assert.match(bridge.function.description, /requires approval/i);
+  assert.match(bridge.function.description, /routine uploads follow the owner's direct request/i);
+  assert.match(bridge.function.description, /high-impact nested actions retain exact approval checks/i);
   assert.match(bridge.function.description, /base64\/binary field/i);
   const media = chuckTools.find((entry) => entry.function.name === "CHUCK_MEDIA_BRIDGE")!;
   assert.deepEqual(media.function.parameters.required, ["source", "toolSlug", "arguments"]);
-  assert.match(media.function.description, /no separate approval step/i);
+  assert.match(media.function.description, /routine actions need no extra prompt/i);
+  assert.match(media.function.description, /high-impact nested actions retain exact approval checks/i);
   assert.match(media.function.description, /fail closed/i);
   assert.equal(modelFacingChuckTools.some((entry) => entry.function.name === "CHUCK_MEDIA_BRIDGE"), false);
   const qa = chuckTools.find((entry) => entry.function.name === "CHUCK_ARTIFACT_QA")!;
   assert.deepEqual(qa.function.parameters.properties.type.enum, ["pdf", "docx", "presentation", "spreadsheet"]);
+});
+
+test("owner-private call, meeting, browser, Git, and preflight descriptions agree with central approval policy", () => {
+  for (const name of [
+    "CHUCK_START_PHONE_CALL", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_PROFILE_UPDATE",
+    "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_GIT", "CHUCK_DAYTONA_BROWSER",
+    "CHUCK_EMAIL_ARTIFACT", "CHUCK_TOOL_PREFLIGHT",
+  ]) {
+    const tool = chuckTools.find((entry) => entry.function.name === name);
+    assert.ok(tool, name);
+    assert.doesNotMatch(tool.function.description, /only deletion|no separate approval step/i, name);
+    assert.match(tool.function.description, /deletions?.*(?:high-impact|financial|permission|remote push|deployment).*(?:approval checks|retain approval)|(?:remote push|deployment).*(?:approval checks|retain approval)|approval for deletion and high-impact actions/i, name);
+  }
 });
 
 test("internal task wait requires a checkpoint and an exact next action", () => {

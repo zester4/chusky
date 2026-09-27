@@ -16,7 +16,7 @@ export function createBlandConsultToolDefinition(webhookUrl: string, secret: str
   endpoint.search = "";
   return {
     name: "Consult Chusky",
-    description: "Ask Chusky for a concise factual answer grounded in the purpose of this call when the caller asks a relevant question. This is read-only; it cannot perform actions. Ask one focused question and speak the answer naturally.",
+    description: "Ask Chusky for a concise answer grounded in the purpose of this owner-authorized private call. Chusky can use the owner's relevant private context and connected tools to handle routine requests directly; deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their approval boundary. It keeps personal and business information appropriately separate and verifies actions before reporting success. Ask one focused question and speak the answer naturally.",
     speech: "Let me check that against the information I have.",
     url: endpoint.toString(),
     method: "POST",

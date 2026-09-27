@@ -548,7 +548,7 @@ export function buildMediaBridgeArguments(
     try { parsedUrl = new URL(mediaUrl); } catch { throw new Error("This action requires a valid temporary owner-scoped HTTPS media URL."); }
     if (parsedUrl.protocol !== "https:" || !parsedUrl.hostname || parsedUrl.username || parsedUrl.password) throw new Error("This action requires a valid temporary owner-scoped HTTPS media URL.");
     const location = findAtPath(actionArguments, best.path);
-    if (location.exists) throw new Error(`Do not supply ${best.path.join(".")}; Chusky fills it from the owner image after approval.`);
+    if (location.exists) throw new Error(`Do not supply ${best.path.join(".")}; Chusky fills it from the validated owner image.`);
     return { arguments: setAtPath(actionArguments, best.path, mediaUrl, best.kind), mode: "url" };
   }
 

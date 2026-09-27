@@ -30,6 +30,7 @@ test("channel approval resumes preserve shared privacy boundaries", () => {
     replyTarget: { provider: "sendblue" as const, conversationId: "group-1" },
   };
   const sharedOptions = channelAgentRunOptions(shared, 123);
+  assert.equal(sharedOptions.ownerPrivateRun, undefined);
   assert.match(sharedOptions.instructions ?? "", /shared sendblue group/i);
   assert.ok(sharedOptions.toolDeny?.includes("CHUCK_SEARCH_MEMORY"));
   for (const privateOnly of SHARED_CHANNEL_TOOL_DENY) {
@@ -40,6 +41,7 @@ test("channel approval resumes preserve shared privacy boundaries", () => {
   const privateOptions = channelAgentRunOptions({ ...shared, scope: "private", conversationId: "+15550001", replyTarget: { provider: "sendblue", conversationId: "+15550001" } }, 123);
   assert.equal(privateOptions.instructions, undefined);
   assert.equal(privateOptions.toolDeny, undefined);
+  assert.equal(privateOptions.ownerPrivateRun, true);
 });
 
 test("native execution enforces the full shared-channel private-tool boundary", async () => {

@@ -114,6 +114,8 @@ export interface NativeToolRuntime {
   meetingId?: string;
   /** Private relationship preparation must never run from a shared channel. */
   sharedConversation?: boolean;
+  /** Authenticated owner-private interactive run; broadens context/tools while preserving high-impact approval checks. */
+  ownerPrivateRun?: boolean;
   /** Current owner request, used for explicit-opt-in checks at native boundaries. */
   userRequest?: string;
   /** The durable task currently executing; absent for interactive turns. */
@@ -876,7 +878,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const requestedTool = text(args.toolName, 200);
       const callArguments = args.arguments;
       if (!callArguments || typeof callArguments !== "object" || Array.isArray(callArguments)) throw new Error("arguments must be an object");
-      return preflightToolCall(runtime.toolCatalog, requestedTool, callArguments as Record<string, unknown>);
+      return preflightToolCall(runtime.toolCatalog, requestedTool, callArguments as Record<string, unknown>, runtime.ownerPrivateRun);
     }
     case "CHUCK_INTEGRATION_HEALTH":
       return summarizeIntegrationHealth(runtime.connectedAccounts, args.toolkit === undefined ? undefined : text(args.toolkit, 120));
@@ -1546,7 +1548,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
-        const result = await daytonaCall(runtime, () => daytonaEngine.browser(userId, args));
+        const result = await daytonaCall(runtime, () => daytonaEngine.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
           runtime.registerCancellationCleanup(async () => { await daytonaEngine.browser(userId, { action: "session_release", sessionId }); });

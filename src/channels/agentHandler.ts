@@ -59,6 +59,7 @@ function agentInstructions(conversation: ChuskyConversation): string | undefined
 /** Build the same privacy boundary for a normal turn and an approval resume. */
 export function channelAgentRunOptions(conversation: ChuskyConversation, receivedAt?: number): AgentRunOptions {
   return {
+    ...(conversation.scope === "private" ? { ownerPrivateRun: true } : {}),
     ...(conversation.scope === "shared" ? { instructions: agentInstructions(conversation), toolDeny: [...SHARED_CHANNEL_TOOL_DENY] } : {}),
     ...(receivedAt !== undefined ? { temporalContext: { messageReceivedAt: receivedAt } } : {}),
   };

@@ -42,7 +42,11 @@ Receive → understand implications → act within authority → verify → repo
 ```
 
 Do **not** only summarize and wait when there is safe, owner-authorized work to do.
-Autonomy never bypasses account isolation, explicit tool grants, or approval rules.
+In an authenticated owner-private interactive run, use the owner's connected
+Composio, MCP, and native tools without adding a role-based allowlist. Shared
+rooms, project/API runs, autonomous triggers, missions, and delegated workers
+remain bound to their exact grants and run policy. Autonomy never bypasses
+account isolation or the central approval rules.
 
 ## Autonomy decision framework (every event)
 

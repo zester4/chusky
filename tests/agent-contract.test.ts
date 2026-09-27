@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, getSession, initStore, listAgentRuns, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, getApproval, getSession, initStore, listAgentRuns, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -38,7 +38,7 @@ test("verified triggers receive executor framing while ordinary conversations do
 test("private runs receive a capability-neutral operating kernel", () => {
   assert.match(AUTONOMY_OPERATING_KERNEL, /connected app or web tool, native tool, MCP, browser\/computer/i);
   assert.match(AUTONOMY_OPERATING_KERNEL, /provider receipt.*artifact validation.*browser inspection/i);
-  assert.match(AUTONOMY_OPERATING_KERNEL, /exact approval and provider-verification boundary/i);
+  assert.match(AUTONOMY_OPERATING_KERNEL, /exact approval boundary/i);
   assert.match(AUTONOMY_OPERATING_KERNEL, /exact next action/i);
 });
 
@@ -837,8 +837,8 @@ test("enabled private meeting representatives discover owner calendar tools and 
       undefined,
       undefined,
       undefined,
-      { accountId: "meeting:mtg_calendar", provider: "telegram", conversationId: "mtg_calendar", scope: "shared" },
-      { ephemeral: true, meetingId: "mtg_calendar", meetingAppAccess: true, meetingCapabilityContext: { role: "sales", objective: "Reschedule an agreed customer meeting", subject: "Acme" }, meetingComposioAccountAliases: {}, toolAllow: ["CHUCK_MEETING_JOIN"], maxToolCalls: 8 },
+      { accountId: "meeting:mtg_calendar", provider: "telegram", conversationId: "mtg_calendar", scope: "private" },
+      { ownerPrivateRun: true, ephemeral: true, meetingId: "mtg_calendar", meetingAppAccess: true, meetingCapabilityContext: { role: "sales", objective: "Reschedule an agreed customer meeting", subject: "Acme" }, meetingComposioAccountAliases: {}, maxToolCalls: 8 },
     );
     assert.match(result.text, /checked availability and rescheduled/);
     const shownNames = requests[0]?.tools?.map((tool: any) => tool.function?.name) ?? [];
@@ -911,8 +911,8 @@ test("private meeting mission discovers owner-connected HR and CRM schemas while
       undefined,
       undefined,
       undefined,
-      { accountId: "meeting:mtg_business_systems", provider: "telegram", conversationId: "mtg_business_systems", scope: "shared" },
-      { ephemeral: true, meetingId: "mtg_business_systems", meetingAppAccess: true, meetingCapabilityContext: { role: "custom", objective: "Prepare an accurate onboarding discussion from hiring and CRM records", subject: "Amina" }, meetingComposioAccountAliases: {}, toolAllow: ["CHUCK_MEETING_JOIN"], maxToolCalls: 8 },
+      { accountId: "meeting:mtg_business_systems", provider: "telegram", conversationId: "mtg_business_systems", scope: "private" },
+      { ownerPrivateRun: true, ephemeral: true, meetingId: "mtg_business_systems", meetingAppAccess: true, meetingCapabilityContext: { role: "custom", objective: "Prepare an accurate onboarding discussion from hiring and CRM records", subject: "Amina" }, meetingComposioAccountAliases: {}, maxToolCalls: 8 },
     );
     assert.match(result.text, /checked the hiring and CRM records/);
     assert.deepEqual(discoveryRequests[0]?.toolkits, ["ashby", "hubspot", "gmail"]);
@@ -979,6 +979,205 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       }),
       /explicit allowlist of read-only Chusky tools/,
     );
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("owner-private voice and meeting turns execute routine writes directly and retain high-impact approval", async () => {
+  const userId = 830058;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
+  const requests: Array<Record<string, any>> = [];
+  let created = 0;
+  const session = {
+    sessionId: "owner-private-voice-session",
+    tools: async () => [
+      { type: "function", function: { name: "GMAIL_SEND_EMAIL", description: "Send an email", parameters: { type: "object", required: ["to", "subject", "body"], properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" } } } } },
+      { type: "function", function: { name: "STRIPE_CREATE_PAYMENT", description: "Create a payment", parameters: { type: "object", required: ["amount"], properties: { amount: { type: "number" } } } } },
+    ],
+    execute: async (slug: string, args: Record<string, unknown>) => {
+      executed.push({ slug, args });
+      return { successful: true, data: { id: "payment_123", status: "created" } };
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  let chatIndex = 0;
+  let nextToolSlug = "GMAIL_SEND_EMAIL";
+  let nextToolArguments: Record<string, unknown> = { to: "client@example.com", subject: "Follow-up", body: "Thanks for the conversation." };
+  setAgentDependenciesForTests({ composio: { create: async () => { created++; return session; }, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return chatIndex++ === 0
+        ? toolResponse(nextToolSlug, JSON.stringify(nextToolArguments))
+        : chatResponse({ role: "assistant", content: "The email was sent and Gmail confirmed delivery." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Send the agreed follow-up email now.",
+      [{ role: "user", content: "We agreed to send a short follow-up after the conversation." }],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `meeting:${userId}`, provider: "telegram", conversationId: `meeting:${userId}`, scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "private-meeting-test", meetingId: "private-meeting-test" },
+    );
+    assert.match(result.text, /email was sent/);
+    assert.equal(created, 1, "the private voice turn must initialize the owner's Composio session");
+    assert.deepEqual(executed, [{ slug: "GMAIL_SEND_EMAIL", args: { to: "client@example.com", subject: "Follow-up", body: "Thanks for the conversation." } }]);
+    assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === "GMAIL_SEND_EMAIL"), true);
+    assert.equal(requests[0]?.messages.at(-2)?.content, "We agreed to send a short follow-up after the conversation.");
+    assert.equal((await listAgentRuns(userId)).length, 0, "live voice/meeting work remains ephemeral in the durable run ledger");
+
+    nextToolSlug = "STRIPE_CREATE_PAYMENT";
+    nextToolArguments = { amount: 25 };
+    chatIndex = 0;
+    await assert.rejects(
+      () => runAgent(
+        userId,
+        "Pay the $25 invoice now.",
+        [],
+        "test/model",
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { accountId: `meeting:${userId}`, provider: "telegram", conversationId: `meeting:${userId}`, scope: "private" },
+        { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "private-meeting-payment-test", meetingId: "private-meeting-payment-test" },
+      ),
+      (error: unknown) => error instanceof ApprovalRequiredError && error.toolSlug === "STRIPE_CREATE_PAYMENT",
+    );
+    assert.equal(executed.length, 1, "a financial write pauses before provider execution even in an owner-private voice turn");
+    assert.equal((await listAgentRuns(userId)).length, 0, "approval pauses remain ephemeral for live voice/meeting work");
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("owner-private voice and meeting turns can use routine MCP writes without inheriting the server-wide approval flag", async () => {
+  const userId = 830060;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const { mcpClient } = await import("../src/mcp/client.js");
+  const manager = mcpClient as any;
+  const originalDiscover = manager.discoverToolsForUser;
+  const originalRequiresApproval = manager.requiresApproval;
+  const originalCallTool = manager.callTool;
+  const originalFetch = globalThis.fetch;
+  const toolName = "MCP_private_create_ticket_1234567890";
+  const requests: Array<Record<string, any>> = [];
+  const executed: Array<{ name: string; args: Record<string, unknown> }> = [];
+  manager.discoverToolsForUser = async () => ({
+    tools: [{ type: "function", function: { name: toolName, description: "Create a follow-up ticket", parameters: { type: "object", required: ["title"], properties: { title: { type: "string" } } } } }],
+    failures: [],
+  });
+  manager.requiresApproval = () => true;
+  manager.callTool = async (_ownerId: number, name: string, args: Record<string, unknown>) => {
+    executed.push({ name, args });
+    return "Ticket created";
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "owner-private-mcp-session", tools: async () => [], execute: async () => undefined }) } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return requests.length === 1
+        ? toolResponse(toolName, JSON.stringify({ title: "Follow up with the client" }))
+        : chatResponse({ role: "assistant", content: "The follow-up ticket was created." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(
+      userId,
+      "Create the follow-up ticket we agreed on.",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { accountId: `meeting:${userId}`, provider: "telegram", conversationId: `meeting:${userId}`, scope: "private" },
+      { ownerPrivateRun: true, voiceTurn: true, voiceSessionId: "private-meeting-mcp-test", meetingId: "private-meeting-mcp-test" },
+    );
+    assert.match(result.text, /ticket was created/i);
+    assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === toolName), true);
+    assert.deepEqual(executed, [{ name: toolName, args: { title: "Follow up with the client" } }]);
+  } finally {
+    manager.discoverToolsForUser = originalDiscover;
+    manager.requiresApproval = originalRequiresApproval;
+    manager.callTool = originalCallTool;
+    globalThis.fetch = originalFetch;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
+test("owner-private deletion pauses before provider execution and stores an exact approval", async () => {
+  const userId = 830057;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  let executed = 0;
+  const session = {
+    sessionId: "owner-private-delete-session",
+    tools: async () => [{ type: "function", function: { name: "GITHUB_DELETE_REPOSITORY", parameters: { type: "object", required: ["owner", "repo"], properties: { owner: { type: "string" }, repo: { type: "string" } } } } }],
+    execute: async () => { executed++; return { successful: true }; },
+  };
+  const originalFetch = globalThis.fetch;
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input) => String(input).includes("/chat/completions")
+    ? toolResponse("GITHUB_DELETE_REPOSITORY", JSON.stringify({ owner: "owner", repo: "archive" }))
+    : new Response("{}", { status: 200 })) as typeof fetch;
+  try {
+    await assert.rejects(
+      () => runAgent(userId, "Delete the archived repository.", [], "test/model", undefined, undefined, undefined, undefined,
+        { accountId: `account_${userId}`, provider: "telegram", conversationId: "private-delete", scope: "private" },
+        { ownerPrivateRun: true }),
+      (error: unknown) => error instanceof ApprovalRequiredError && error.toolSlug === "GITHUB_DELETE_REPOSITORY",
+    );
+    assert.equal(executed, 0, "deletion must pause before the connected provider is called");
+    const approval = (await getSession(userId)).approvals.at(-1);
+    assert.ok(approval);
+    assert.equal(approval?.status, "pending");
+    assert.equal(approval?.toolSlug, "GITHUB_DELETE_REPOSITORY");
+    assert.deepEqual(approval?.args, { owner: "owner", repo: "archive" });
+    assert.equal((await getApproval(userId, approval!.id))?.userId, userId);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("shared meeting rooms expose only explicitly granted connected actions", async () => {
+  const userId = 830056;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const displayedTools: string[][] = [];
+  const executed: string[] = [];
+  const session = {
+    sessionId: "shared-room-exact-grants",
+    tools: async () => ["GMAIL_SEND_EMAIL", "SLACK_POST_MESSAGE", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_SEARCH_WEB"].map((name) => ({ type: "function", function: { name, parameters: { type: "object" } } })),
+    execute: async (slug: string) => { executed.push(slug); return { successful: true, data: { id: "sent_1" } }; },
+  };
+  const originalFetch = globalThis.fetch;
+  let chatIndex = 0;
+  setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
+  globalThis.fetch = (async (input, init) => {
+    if (String(input).includes("/chat/completions")) {
+      const request = JSON.parse(String(init?.body));
+      displayedTools.push((request.tools ?? []).map((tool: any) => tool.function.name));
+      return chatIndex++ === 0
+        ? toolResponse("GMAIL_SEND_EMAIL", JSON.stringify({ recipient: "team@example.com", body: "The room's agreed summary." }))
+        : chatResponse({ role: "assistant", content: "I sent the agreed summary." });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    await runAgent(userId, "Send the agreed summary.", [], "test/model", undefined, undefined, undefined, undefined,
+      { accountId: "meeting:shared-room", provider: "telegram", conversationId: "shared-room", scope: "shared" },
+      { meetingId: "shared-room", sharedMeetingRoomAccess: true, toolAllow: ["GMAIL_SEND_EMAIL"], ephemeral: true });
+    assert.equal(displayedTools[0]?.includes("GMAIL_SEND_EMAIL"), true);
+    assert.equal(displayedTools[0]?.includes("SLACK_POST_MESSAGE"), false);
+    assert.equal(displayedTools[0]?.includes("COMPOSIO_EXECUTE_TOOL"), false);
+    assert.deepEqual(executed, ["GMAIL_SEND_EMAIL"]);
   } finally { globalThis.fetch = originalFetch; }
 });
 

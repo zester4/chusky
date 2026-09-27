@@ -40,7 +40,6 @@ import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
-import { voiceProfileNativeTools } from "./calls/voiceProfile.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
 import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
@@ -67,7 +66,7 @@ import { applyRecallParticipantWebhook, applyRecallStatusWebhook, applyRecallTra
 import { verifyRecallWebhookSignature } from "./meetings/recall.js";
 import { processRecallStatusWebhook, receiveRecallChatWebhook, receiveRecallTranscriptWebhook } from "./meetings/webhook.js";
 import { mcpClient } from "./mcp/client.js";
-import { isMeetingRepresentativeEmailTool, meetingConversationToolAllowlist, meetingRepresentativeCopilotInstructions, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist } from "./meetings/representative.js";
+import { isMeetingRepresentativeEmailTool, meetingRepresentativeCopilotInstructions, meetingRepresentativeGreeting, meetingRepresentativeInstructions, meetingRepresentativeToolAllowlist, ownerPrivateMeetingInstructions } from "./meetings/representative.js";
 import { buildMeetingFollowThroughPrompt, buildMeetingOutcomeChunkPrompt, buildMeetingOutcomePrompt, buildMeetingOutcomeSynthesisPrompt, splitMeetingOutcomeTranscript, MEETING_OUTCOME_MAX_TRANSCRIPT_CHUNKS, executeScheduledMeetingFollowUp, deliverMeetingOutcomeOnce, extractMeetingNotionUrl, formatMeetingOutcomeNotification, formatMeetingOutcomeScratchpad, processMeetingOutcome } from "./meetings/outcome.js";
 import { parseGoogleCalendarMeetingTrigger, sealCalendarMeetingUrl } from "./meetings/calendar.js";
 import { buildAutonomyContextBundle, contextBundleToPrompt } from "./autonomy/context.js";
@@ -81,6 +80,25 @@ import { defaultMediaInstruction } from "./mediaInput.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
+}
+
+async function notifyOwnerApproval(bot: Bot, userId: number, approval: ApprovalRequiredError): Promise<boolean> {
+  try {
+    await bot.api.sendMessage(
+      userId,
+      `⚠️ <b>Deletion approval required</b>\n\nChusky paused before deleting anything. Review the exact prepared action: <code>${xmlEscape(approval.toolSlug.slice(0, 160))}</code>.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("Approve deletion", `appr:approve:${approval.approvalId}`)
+          .text("Deny", `appr:deny:${approval.approvalId}`),
+      },
+    );
+    return true;
+  } catch (error) {
+    logger.warn({ err: error, userId, approvalId: approval.approvalId }, "Could not deliver private deletion approval notification");
+    return false;
+  }
 }
 
 function safeTriggerSummary(event: { triggerSlug: string; payload: Record<string, unknown>; toolkit?: string; connectionId?: string }): string {
@@ -99,6 +117,10 @@ function meetingRoomToolPolicy(meeting: { roomAllowedComposioTools?: string[]; r
   return meeting.roomAllowedComposioTools || meeting.roomAllowedNativeTools
     ? { allowedComposioTools: meeting.roomAllowedComposioTools ?? [], allowedNativeTools: meeting.roomAllowedNativeTools ?? [] }
     : undefined;
+}
+
+function meetingRoomToolAllowlist(policy: NonNullable<ReturnType<typeof meetingRoomToolPolicy>>): string[] {
+  return [...new Set([...policy.allowedComposioTools, ...policy.allowedNativeTools])];
 }
 
 async function persistCalendarMeetingPreparation(userId: number, eventId: string, triggerSlug: string, payload: Record<string, unknown>) {
@@ -583,8 +605,8 @@ async function main(): Promise<void> {
 
     // Private bridge-only route. It receives final speech transcripts, not
     // audio, and reuses the owner's normal Chusky memory and agent runtime.
-    // Voice turns deliberately expose only read-only native tools: an agent
-    // cannot silently take an external action during a live call.
+    // Verified owner-private calls use the full private agent runtime; only
+    // speculative audio turns remain tool-less.
     app.post("/internal/twilio/turn", async (c) => {
       if (!hasBridgeAuthorization(c.req.header("Authorization"), config.twilioMediaBridgeSecret)) return c.json({ ok: false, error: "unauthorized" }, 401);
       const body = await c.req.json().catch(() => ({})) as { callId?: string; userId?: number; transcript?: string; speculative?: boolean };
@@ -600,9 +622,10 @@ async function main(): Promise<void> {
       try {
         const result = await withCliLock(userId, c.req.raw.signal, async () => {
           const session = await getSession(userId);
-          return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined, undefined, {
+          return runAgent(userId, transcript, session.history, config.voiceModel, undefined, c.req.raw.signal, undefined, undefined,
+            { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
             instructions: twilioVoiceInstructions(call),
-            toolAllow: call.direction === "outbound" || (call.callProfile === "business" && call.callVerification !== "verified") ? [] : voiceProfileNativeTools(call.voiceProfile),
+            ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
             voiceTurn: true,
             voiceSessionId: `twilio:${callId}`,
           });
@@ -617,6 +640,14 @@ async function main(): Promise<void> {
         }
         return c.json({ ok: true, text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
       } catch (error) {
+        if (error instanceof ApprovalRequiredError && !speculative) {
+          await notifyOwnerApproval(bot, userId, error);
+          return c.json({
+            ok: true,
+            text: "I paused before that action. Please review the owner's approval request to continue.",
+            approvalRequired: true,
+          });
+        }
         // A Flux eager draft is intentionally aborted when the caller resumes
         // speaking. Avoid treating that normal client disconnect as an error.
         if (!speculative || !c.req.raw.signal.aborted) logger.warn({ err: error, callId, userId }, "Voice turn failed");
@@ -659,7 +690,17 @@ async function main(): Promise<void> {
           authorizeQuestion: async (userId) => !(await checkRateLimit(userId))
             ? "rate_limited"
             : !(await canSpend(userId)) ? "usage_limit" : "allowed",
-          answerQuestion: ({ userId, callId, purpose, question }) => answerBlandQuestion({ userId, callId, purpose, question }, c.req.raw.signal),
+          answerQuestion: async ({ userId, callId, purpose, question }) => {
+            try {
+              return await answerBlandQuestion({ userId, callId, purpose, question }, c.req.raw.signal);
+            } catch (error) {
+              if (error instanceof ApprovalRequiredError) {
+                await notifyOwnerApproval(bot, userId, error);
+                return "I paused before that action. Please review the owner's approval request to continue.";
+              }
+              throw error;
+            }
+          },
         });
         return new Response(JSON.stringify(result.body), { status: result.status, headers: { "Content-Type": "application/json" } });
       } catch (error) {
@@ -691,16 +732,20 @@ async function main(): Promise<void> {
           try {
             const result = await withCliLock(userId, c.req.raw.signal, async () => {
               send({ type: "start", model: config.voiceModel, speculative });
-              return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, {
+              return runAgent(userId, transcript, (await getSession(userId)).history, config.voiceModel, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined,
+                { accountId: `account_${userId}`, provider: "voice", conversationId: callId, scope: "private" }, {
                 instructions: twilioVoiceInstructions(call),
-                toolAllow: call.direction === "outbound" || (call.callProfile === "business" && call.callVerification !== "verified") ? [] : voiceProfileNativeTools(call.voiceProfile),
+                ...(speculative ? { toolAllow: [] } : { ownerPrivateRun: true }),
                 voiceTurn: true,
                 voiceSessionId: `twilio:${callId}`,
               });
             });
             send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), cost: result.cost ?? 0, speculative });
           } catch (error) {
-            if (!c.req.raw.signal.aborted) send({ type: "error", error: "voice turn failed" });
+            if (error instanceof ApprovalRequiredError && !speculative) {
+              await notifyOwnerApproval(bot, userId, error);
+              send({ type: "done", text: "I paused before that action. Please review the owner's approval request to continue.", speak: true, cost: 0, speculative: false });
+            } else if (!c.req.raw.signal.aborted) send({ type: "error", error: "voice turn failed" });
           } finally {
             controller.close();
           }
@@ -771,6 +816,9 @@ async function main(): Promise<void> {
       try { context = validateMeetingContext(body.context); } catch { return c.json({ ok: false, error: "invalid meeting context" }, 400); }
       const meeting = await getRecallMeeting(userId, meetingId);
       if (!meeting || meeting.status !== "in_call") return c.json({ ok: false, error: "unknown or inactive meeting" }, 404);
+      const roomPolicy = meetingRoomToolPolicy(meeting);
+      const sharedMeetingRoom = Boolean(meeting.roomId || roomPolicy);
+      const ownerPrivateMeeting = !sharedMeetingRoom;
       const now = Date.now();
       const turnStartedAtMs = body.turnStartedAtMs;
       const turnEndedAtMs = body.turnEndedAtMs;
@@ -847,22 +895,27 @@ async function main(): Promise<void> {
               c.req.raw.signal,
               streamDelta,
               undefined,
-              { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: "shared" },
+              { accountId: `meeting:${meetingId}`, provider: "telegram", conversationId: meetingId, scope: ownerPrivateMeeting ? "private" : "shared" },
               {
-                instructions: representativeActive
-                  ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
-                  : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission, meetingRoomToolPolicy(meeting)) : meetingConversationToolAllowlist(),
+                instructions: ownerPrivateMeeting
+                  ? ownerPrivateMeetingInstructions(meetingId, interactionMode, representativeActive ? profile : undefined, meeting.mission)
+                  : representativeActive
+                    ? meetingRepresentativeInstructions(profile!, meetingId, proactive, meeting.mission)
+                    : meetingRepresentativeCopilotInstructions(meetingId, interactionMode === "copilot" ? "copilot" : "addressed"),
+                  ...(ownerPrivateMeeting
+                    ? (speculative ? { toolAllow: [] } : { ownerPrivateRun: true })
+                    : { toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(profile, meeting.mission) : [] }),
                   meetingComposioAccountAliases: representativeActive ? profile!.composioAccountAliases : undefined,
-                  meetingAppAccess: representativeActive && !meetingRoomToolPolicy(meeting),
-                  meetingCapabilityContext: representativeActive ? {
+                  meetingAppAccess: !ownerPrivateMeeting && representativeActive && !roomPolicy,
+                  meetingCapabilityContext: !ownerPrivateMeeting && representativeActive ? {
                     role: profile!.role,
                     objective: meeting.mission?.objective ?? profile!.objective,
                     subject: meeting.mission?.clientName ?? meeting.title,
                   } : undefined,
+                  sharedMeetingRoomAccess: !ownerPrivateMeeting && Boolean(roomPolicy),
                   meetingId,
-                maxToolCalls: representativeActive ? 8 : 4,
-                maxCost: representativeActive ? 0.5 : 0.25,
+                maxToolCalls: ownerPrivateMeeting ? 20 : representativeActive ? 8 : 4,
+                maxCost: ownerPrivateMeeting ? 1 : representativeActive ? 0.5 : 0.25,
                 ephemeral: true,
               },
             ));
@@ -876,6 +929,11 @@ async function main(): Promise<void> {
               send({ type: "done", text: normalizeVoiceText(result.text).slice(0, 5000), speak: true, cost: result.cost ?? 0, speculative });
             }
           } catch (error) {
+            if (error instanceof ApprovalRequiredError && ownerPrivateMeeting && !speculative) {
+              await notifyOwnerApproval(bot, userId, error);
+              send({ type: "done", text: "I paused before that action. Please review the owner's approval request to continue.", speak: true, cost: 0, speculative: false });
+              return;
+            }
             if (!c.req.raw.signal.aborted) {
               const failureCode = error instanceof ApprovalRequiredError ? "approval_required" : "agent_run_failed";
               const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(error.name) ? error.name : "UnknownError";
@@ -1106,7 +1164,7 @@ async function main(): Promise<void> {
       } else if (mime.startsWith("video/")) parts = [{ type: "text", text: message || defaultMediaInstruction("video") }, { type: "video_url", video_url: { url: dataUrl } }];
       else parts = [{ type: "text", text: `${message}\n\nPlease read and analyze the attached file: ${filename}`.trim() }, { type: "file", file: { filename, file_data: dataUrl } }];
       const s = await getSession(device.userId);
-      const result = await withCliLock(device.userId, c.req.raw.signal, () => runAgent(device.userId, parts, s.history, s.model, undefined, c.req.raw.signal));
+      const result = await withCliLock(device.userId, c.req.raw.signal, () => runAgent(device.userId, parts, s.history, s.model, undefined, c.req.raw.signal, undefined, undefined, undefined, { ownerPrivateRun: true }));
       await appendMessages(device.userId, [{ role: "user", content: historyLabel }, { role: "assistant", content: result.text }]);
       if (result.cost) await addUsage(device.userId, result.cost);
       return c.json({ ok: true, text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), speech: await cliSpeech(device.userId, result.text) });
@@ -1780,7 +1838,7 @@ async function main(): Promise<void> {
       const s = await getSession(device.userId);
       try {
         return c.json(await withCliLock(device.userId, c.req.raw.signal, async () => {
-          const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, undefined, body.approvalId);
+          const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, undefined, body.approvalId, undefined, { ownerPrivateRun: true });
           await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
           posthog?.capture({ distinctId: String(device.userId), event: "cli_chat_completed", properties: { model: s.model, tools_used: result.toolsUsed ?? [], cost: result.cost ?? 0, message_length: message.length } });
@@ -1815,7 +1873,7 @@ async function main(): Promise<void> {
               await new Promise((resolve) => setTimeout(resolve, 250));
             }
             send({ type: "start", model: s.model });
-            const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }));
+            const result = await runAgent(device.userId, message, s.history, s.model, undefined, c.req.raw.signal, (delta) => send({ type: "delta", text: delta }), undefined, undefined, { ownerPrivateRun: true });
             await appendMessages(device.userId, [{ role: "user", content: message }, { role: "assistant", content: result.text }]);
             if (result.cost) await addUsage(device.userId, result.cost);
             send({ type: "done", text: result.text, model: s.model, toolsUsed: result.toolsUsed, cost: result.cost ?? 0, images: (result.generatedImages ?? []).map((image) => ({ data: image.data.toString("base64"), mediaType: image.mediaType })), files: (result.generatedFiles ?? []).map((file) => ({ data: file.data.toString("base64"), name: file.name, contentType: file.contentType, artifactId: file.artifactId, type: file.type })), speech: await cliSpeech(device.userId, result.text) });
@@ -1864,7 +1922,7 @@ async function main(): Promise<void> {
             await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: text }]);
             return { ok: true, text, toolsUsed: [approval.toolSlug], cost: 0, images: [], files: [] };
           }
-          const result = await runAgent(device.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, id);
+          const result = await runAgent(device.userId, approval.request, approval.history, approval.model, undefined, c.req.raw.signal, undefined, id, undefined, { ownerPrivateRun: true });
           await appendMessages(device.userId, [{ role: "user", content: approval.request }, { role: "assistant", content: result.text }]);
           if (result.cost) await addUsage(device.userId, result.cost);
           posthog?.capture({ distinctId: String(device.userId), event: "tool_approval_resolved", properties: { decision: "approve", tool_slug: approval.toolSlug, cost: result.cost ?? 0 } });
@@ -2260,7 +2318,7 @@ async function main(): Promise<void> {
                   if (!task.meetingFollowUp) {
                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
                     const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId });
+                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, ownerPrivateRun: task.sdkOwnerPrivateRun === true });
                   }
 
                   const followUp = task.meetingFollowUp;
@@ -2733,6 +2791,9 @@ async function main(): Promise<void> {
               await updateRecallChatEvent(eventId, { status: "completed", command: undefined, senderName: undefined, replyToParticipantId: undefined, reply: undefined, replyCost: undefined });
               return { skipped: true };
             }
+            const roomPolicy = meetingRoomToolPolicy(meeting);
+            const sharedMeetingRoom = Boolean(meeting.roomId || roomPolicy);
+            const ownerPrivateMeeting = !sharedMeetingRoom;
             let representativeProfile = meeting.interactionMode === "representative"
               ? await getMeetingRepresentativeProfile(event.userId)
               : undefined;
@@ -2763,37 +2824,52 @@ async function main(): Promise<void> {
                 text: String(message.content ?? "").slice(0, 1_000),
               })).filter((turn) => turn.text.trim()));
               const prompt = buildMeetingInput(context, command.text, (meeting.participantRoster ?? []).filter((participant) => participant.status === "present").map(({ name, identityStatus, isHost }) => ({ name, identityStatus, ...(isHost ? { isHost } : {}) })), event.senderName);
-              const result = await withCliLock(event.userId, undefined, () => runAgent(
-                event.userId,
-                prompt,
-                meeting.history ?? [],
-                config.voiceModel,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                { accountId: `meeting:${event.meetingId}`, provider: "telegram", conversationId: event.meetingId, scope: "shared" },
-                {
-                  instructions: representativeActive
-                    ? meetingRepresentativeInstructions(representativeProfile!, event.meetingId, command.kind === "ambient", meeting.mission)
-                    : [
-                      meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
-                      "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
-                    ].join("\n\n"),
-                  toolAllow: representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission, meetingRoomToolPolicy(meeting)) : [],
-                  meetingId: event.meetingId,
-                  meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
-                  meetingAppAccess: representativeActive && !meetingRoomToolPolicy(meeting),
-                  meetingCapabilityContext: representativeActive ? {
-                    role: representativeProfile!.role,
-                    objective: meeting.mission?.objective ?? representativeProfile!.objective,
-                    subject: meeting.mission?.clientName ?? meeting.title,
-                  } : undefined,
-                  maxToolCalls: representativeActive ? 8 : 1,
-                  maxCost: representativeActive ? 0.5 : 0.15,
-                  ephemeral: true,
-                },
-              ));
+              let result: Awaited<ReturnType<typeof runAgent>>;
+              try {
+                result = await withCliLock(event.userId, undefined, () => runAgent(
+                  event.userId,
+                  prompt,
+                  meeting.history ?? [],
+                  config.voiceModel,
+                  undefined,
+                  undefined,
+                  undefined,
+                  undefined,
+                  { accountId: `meeting:${event.meetingId}`, provider: "telegram", conversationId: event.meetingId, scope: ownerPrivateMeeting ? "private" : "shared" },
+                  {
+                    instructions: ownerPrivateMeeting
+                      ? ownerPrivateMeetingInstructions(event.meetingId, meeting.interactionMode ?? (representativeActive ? "representative" : "copilot"), representativeActive ? representativeProfile : undefined, meeting.mission)
+                      : representativeActive
+                        ? meetingRepresentativeInstructions(representativeProfile!, event.meetingId, command.kind === "ambient", meeting.mission)
+                        : [
+                          meetingRepresentativeCopilotInstructions(event.meetingId, command.kind === "ambient" ? "copilot" : "addressed"),
+                          "This is shared meeting chat. Use only the bounded meeting context; never use or reveal the owner’s private chat, memories, credentials, connected apps, files, or other private data. Do not claim to record the call or perform follow-up work. Return plain text without Markdown or HTML.",
+                        ].join("\n\n"),
+                    ...(ownerPrivateMeeting ? { ownerPrivateRun: true } : {
+                      toolAllow: roomPolicy ? meetingRoomToolAllowlist(roomPolicy) : representativeActive ? meetingRepresentativeToolAllowlist(representativeProfile, meeting.mission) : [],
+                    }),
+                    meetingId: event.meetingId,
+                    meetingComposioAccountAliases: representativeActive ? representativeProfile!.composioAccountAliases : undefined,
+                    meetingAppAccess: !ownerPrivateMeeting && representativeActive && !roomPolicy,
+                    meetingCapabilityContext: !ownerPrivateMeeting && representativeActive ? {
+                      role: representativeProfile!.role,
+                      objective: meeting.mission?.objective ?? representativeProfile!.objective,
+                      subject: meeting.mission?.clientName ?? meeting.title,
+                    } : undefined,
+                    sharedMeetingRoomAccess: !ownerPrivateMeeting && Boolean(roomPolicy),
+                    maxToolCalls: ownerPrivateMeeting ? 16 : representativeActive ? 8 : 1,
+                    maxCost: ownerPrivateMeeting ? 0.75 : representativeActive ? 0.5 : 0.15,
+                    ephemeral: true,
+                  },
+                ));
+              } catch (error) {
+                if (!(error instanceof ApprovalRequiredError) || !ownerPrivateMeeting) throw error;
+                await notifyOwnerApproval(bot, event.userId, error);
+                reply = "I paused before that action. Please review the owner's approval request to continue.";
+                const bounded = boundedRecallChatReply(reply, meeting.platform === "google_meet" ? 500 : 4096);
+                await updateRecallChatEvent(eventId, { reply: bounded, replyCost: 0 });
+                return { prepared: true };
+              }
               if (command.kind === "ambient") {
                 const decision = parseCopilotOutput(result.text);
                 if (!decision.speak) {

@@ -10,8 +10,15 @@ During a meeting, Chusky should:
 
 1. Join only an owner- or workspace-authorized meeting.
 2. Use the configured interaction mode (`addressed`, `copilot`, or
-   `representative`) and the exact representative tool grants.
-3. Keep live context bounded and transient.
+   `representative`). In a direct owner-private meeting, the representative
+   profile guides behavior but does not constrain relevant owner history,
+   memory, knowledge, connected Composio/MCP/native tools, or routine actions.
+   Shared workspace rooms continue to use their exact room grants and bounded
+   room context only.
+3. Keep live transcript context bounded and transient while making relevant,
+   owner-scoped persistent context available to owner-private meetings. Keep
+   personal and business information separate and never treat private records
+   as permission to disclose them to meeting participants.
 4. Speak naturally: stream a response, stop cleanly when a participant talks
    over it, and reuse a matching speculative response instead of generating a
    duplicate answer.

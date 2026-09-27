@@ -2602,7 +2602,7 @@ export class DaytonaEngine {
     return { sandboxId: sandbox.id, path, action, result };
   }
 
-  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean } = {}): Promise<unknown> {
+  async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean } = {}): Promise<unknown> {
     const action = boundedText(args.action, "action", 20);
     const sandbox = await this.getOrCreateWorkspace(userId);
     const stored = await getDaytonaWorkspace(userId);
@@ -2668,7 +2668,7 @@ export class DaytonaEngine {
       const refreshed = browserSessions.map((session) => session.id === lease.id ? { ...session, updatedAt: now } : session);
       await saveBrowserState(refreshed, { ...(stored?.browser ?? {}), sessionId: lease.id, updatedAt: now });
     }
-    if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl });
+    if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, sandbox.id, { ...args, currentUrl: stored?.browser?.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
     if (["start", "stop", "process_status", "process_restart", "process_logs", "process_errors", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "display_info", "mouse_position", "screenshot_region", "screenshot_full", "screenshot_region_full", "move", "drag"].includes(action)) {
       const mapped = action === "move" ? { ...args, action: "mouse_move" } : action === "drag" ? { ...args, action: "mouse_drag" } : args;
       return this.computer(userId, mapped, { trustedVaultFlow: true });

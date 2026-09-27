@@ -30,6 +30,29 @@ test("tool preflight validates only an exact currently exposed schema and marks 
   assert.equal(hidden.argumentsValid, null);
 });
 
+test("owner-private preflight mirrors routine and high-impact approval boundaries without execution", async () => {
+  const catalog = [
+    tool("STRIPE_CREATE_PAYMENT", { type: "object", required: ["amount"], properties: { amount: { type: "number" } } }),
+    tool("GITHUB_DELETE_REPOSITORY", { type: "object", required: ["owner", "repo"], properties: { owner: { type: "string" }, repo: { type: "string" } } }),
+  ];
+  const payment = preflightToolCall(catalog, "STRIPE_CREATE_PAYMENT", { amount: 25 }, true);
+  assert.equal(payment.status, "approval_required");
+  assert.equal(payment.approvalRequired, true);
+  assert.match(payment.message, /high-impact action/);
+
+  const deletion = preflightToolCall(catalog, "GITHUB_DELETE_REPOSITORY", { owner: "acme", repo: "old" }, true);
+  assert.equal(deletion.status, "approval_required");
+  assert.equal(deletion.approvalRequired, true);
+  assert.match(deletion.message, /before this high-impact action/);
+
+  const throughNativeTool = await nativeTool(101, "CHUCK_TOOL_PREFLIGHT", {
+    toolName: "STRIPE_CREATE_PAYMENT",
+    arguments: { amount: 25 },
+  }, { ownerPrivateRun: true, toolCatalog: catalog }) as { approvalRequired: boolean; status: string };
+  assert.equal(throughNativeTool.status, "approval_required");
+  assert.equal(throughNativeTool.approvalRequired, true);
+});
+
 test("integration health never calls unknown statuses healthy or leaks credentials", () => {
   assert.equal(summarizeIntegrationHealth(undefined).status, "unknown");
   assert.equal(summarizeIntegrationHealth([]).status, "not_connected");

@@ -8,11 +8,14 @@ const base = {
   createdAt: 1, updatedAt: 1,
 };
 
-test("outbound Twilio turns receive the approved objective but retain the action boundary", () => {
+test("outbound Twilio turns receive the owner-authorized objective and private context boundary", () => {
   const prompt = twilioVoiceInstructions({ ...base, direction: "outbound" });
-  assert.match(prompt, /Approved outbound call objective: Confirm the implementation meeting/);
-  assert.match(prompt, /not as authorization/i);
-  assert.match(prompt, /continue in Telegram for approvals or actions/i);
+  assert.match(prompt, /Owner-authorized outbound call objective: Confirm the implementation meeting/);
+  assert.match(prompt, /objective as context, not authorization/i);
+  assert.match(prompt, /relevant owner-scoped history, memory, knowledge, and connected tools/i);
+  assert.match(prompt, /business call, do not volunteer unrelated personal information/i);
+  assert.match(prompt, /Deletions, financial actions, permission changes, deployment\/push actions, and provider-declared high-risk actions retain their exact approval boundary/i);
+  assert.doesNotMatch(prompt, /never load the owner's full memory/i);
 });
 
 test("inbound Twilio turns do not inherit an outbound objective", () => {

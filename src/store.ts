@@ -514,6 +514,8 @@ export interface SdkRunRecord {
   id: string;
   /** Set only for runs submitted through a project key; used for company-level status reporting. */
   companyProjectId?: string;
+  /** Server-set provenance for first-party owner chat; never expose through runView. */
+  ownerPrivateRun?: boolean;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
   input: string;
   model?: string;
@@ -872,6 +874,8 @@ export interface TaskRecord {
   sdkStartedAt?: number;
   sdkSkills?: string[];
   sdkInstructions?: string;
+  /** Preserve first-party owner-private execution through durable SDK task continuations. */
+  sdkOwnerPrivateRun?: boolean;
   /** Admission slot held for an asynchronous SDK run until it settles. */
   quotaReservationId?: string;
   /** Narrow delayed meeting follow-up context; deliberately excludes general chat history and arbitrary tools. */
@@ -5037,6 +5041,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkStartedAt: input.sdkStartedAt,
     sdkSkills: input.sdkSkills,
     sdkInstructions: input.sdkInstructions,
+    sdkOwnerPrivateRun: input.sdkOwnerPrivateRun === true ? true : undefined,
     quotaReservationId: input.quotaReservationId,
     meetingFollowUp: input.meetingFollowUp,
     missionId: input.missionId,

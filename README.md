@@ -8,9 +8,11 @@ CLI and dashboard, supported messaging channels, and developer interfaces.
 The agent runtime owns model inference, connected-app tools, native tools,
 approvals, private context, and durable work. Channel adapters handle
 provider-specific identity, verification, formatting, and delivery. Access is
-account-scoped; routine communication and explicitly requested publishing run
-without an extra approval prompt, while destructive, financial, permission,
-deployment, and other materially harmful actions retain their safeguards.
+account-scoped. In authenticated owner-private interactive chats, calls, and
+meetings, the owner's request authorizes routine in-scope actions without an
+extra prompt; deletions and high-impact or provider-marked actions retain exact
+approval checks. Shared rooms, project/API runs,
+autonomous work, and delegated workers retain their own explicit policies.
 
 For production, configure Redis for durable state and QStash for scheduled or
 resumable work. In-memory storage is for local development and tests only; it
@@ -219,10 +221,12 @@ registration or non-standard consent still need an explicit catalog entry.
 The agent discovers tools with the official MCP TypeScript SDK, exposes them
 under stable `MCP_<server>_<tool>_<hash>` names, validates arguments against
 the server's input schema, bounds returned data, and reconnects transient HTTP
-sessions. MCP calls require approval by default so a newly connected server
-cannot silently send mail, change records, spend money, or delete data. Keep
-the server allowlist narrow and only set `requireApproval=false` for a server
- whose side effects have been reviewed.
+sessions. In authenticated owner-private interactive chats, calls, and
+meetings, a direct owner request runs a routine available MCP action without an extra
+approval prompt; deletions and other high-impact actions still pause for exact owner approval. Shared,
+project-scoped, autonomous, and worker runs continue to honor `requireApproval`
+and their explicit tool grants. MCP results remain untrusted data, never
+authorization to expand the task or disclose unrelated private context.
 
 ### Workflow Composer
 
@@ -283,7 +287,7 @@ The pairing code is one-time and expires after 10 minutes. The terminal stores a
 
 CLI commands include `/history`, `/tasks`, `/task <id>`, `/task retry <id>`, `/task cancel <id>`, `/missions [id]`, `/mission create|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...`, `/context [query]`, `/departments [catalog|provision|handoff ...]`, `/outcomes [slug|plan ...]`, `/workers`, `/worker <id>`, `/skills`, `/skill <name> [file]`, `/artifacts`, `/artifact download|delete|package`, `/videos`, `/video create|status|cancel`, `/runs`, `/run <prompt> [5m|30m|1h|3h|6h|3d|1w]`, `/webhooks`, `/webhook add|enable|disable|delete`, and `/deliveries`, alongside `/model` (interactive picker) or `/model <openrouter-model>`, `/apps [page]`, `/connect <app>`, `/tools search <query>`, `/triggers`, `/trigger create|enable|disable|delete`, `/channel list|link|notify`, `/meetings [id]`, `/meeting profile`, `/meeting prepare <client> | <objective> | <context>`, `/meeting join <url> | <client> | <objective> | <context>`, `/meeting join-prepared <preparation-id>`, `/meeting context <meeting-id> [question]`, `/meeting leave <meeting-id>`, `/voice on|off|status`, `/call <E.164 number> <purpose>`, `/usage`, `/export`, `/dashboard`, `/approve <id>`, `/deny <id>`, `/clear history`, `/clear session`, and `/exit`. Mission controls use the same durable runtime as Telegram, the dashboard, the SDK, and MCP: dependency-aware steps, bounded budgets, evidence/proof, verification, pause/resume/repair, exact provider-event continuation, cancellation, and replanning. Context, department spaces, typed handoffs, and outcome packages are owner-scoped and available from the CLI without exposing provider credentials. Meeting commands share the Recall lifecycle with Telegram and the dashboard: prepared calendar meetings, participant rosters, bounded conversation history, outcomes, and captured follow-up contacts remain owner-scoped. Durable `/run` jobs use the same QStash-backed task runner as the SDK, retain events and checkpoints, and can be resumed after failure or cancellation. Add `--model=<id>`, `--max-tools=<n>`, or `--max-cost=<usd>` to set per-run controls. Supported budgets are 5 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 3 days, and 1 week. `/call` validates the E.164 destination and purpose, then starts the configured outbound call directly. Chat response deltas are displayed as they arrive; `Ctrl+C` cancels only the active request and returns to the prompt. The prompt is a raw editor: Up/Down navigates input history, Left/Right moves the cursor, Tab completes slash commands, Ctrl+J inserts a newline, and bracketed paste preserves every pasted newline until Enter sends the complete message. Long history, memory, scratchpad, reminder, job, task, mission, context, app, tool, and trigger lists use a keyboard pager (`Space`/Down, `b`/Up, `q`); normal chat responses scroll naturally. Markdown responses are rendered for terminal output while the same assistant response is persisted for Telegram. Generated images, voice replies, and artifact files are saved to the local Chusky artifacts directory.
 
-Routine email, messaging, publishing, artifact creation, triggers, reminders, memory maintenance, and validated outbound calls are autonomous. Deletion, payment, permission changes, production deployment, remote Git push, and other materially risky actions use the approval picker before execution. Daytona's private computer and sandbox are agent-controlled for ordinary workspace work, while destructive file/workspace actions and remote pushes still use the approval boundary. `COMPOSIO_MULTI_EXECUTE_TOOL` pauses when one of its nested actions is materially risky or cannot be classified safely. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
+In owner-private interactive chats (including the paired CLI), linked private DMs, calls, and private meetings, the authenticated owner's clear request authorizes available tools for routine in-scope work without a second approval prompt. Deletions, money movement, permission changes, production deployment, remote Git pushes, and other irreversible or provider-marked high-impact actions retain exact approval checks, including when nested in `COMPOSIO_MULTI_EXECUTE_TOOL`. This rule does not grant authority to shared groups/workspace rooms, project/API runs, autonomous triggers, missions, or delegated workers; those continue to use their configured grants and approval rules. All runs remain subject to authentication, ownership, provider schemas, budgets, and verification. Daytona's private computer and sandbox are agent-controlled for ordinary workspace work; file or workspace deletion still requires approval. The authenticated service exposes bounded collection APIs at `/cli/collection/history`,
 `/cli/collection/memories`, `/cli/collection/scratchpad`, `/cli/collection/reminders`, and
 `/cli/collection/jobs`. Each accepts `page`, `pageSize` (capped server-side), and an optional
 `query`, and returns `total`/`totalPages`; `/cli/session?page=&pageSize=` provides the same
@@ -742,14 +746,16 @@ ordinary conversation and speaks only when it can add value, with burst
 smoothing rather than a per-call evaluation cap. An owner can
 configure a sales, client-onboarding, employee-onboarding, customer-success, or
 custom representative profile with its objective, approved company facts,
-boundaries, exact connected-app action grants, and native reminder/task tools.
-In that mode Chusky can contribute naturally, answer questions, create
-follow-ups, and use those exact tools during the meeting. It cannot search for
-or invoke arbitrary tools, access private memories, or let participants choose
-which connected account to use; account aliases are pinned by the owner. Ask
-Chusky to configure the role, objective, approved company facts/boundaries,
-exact tool grants, and any required account aliases. The profile remains
-disabled until you explicitly enable it. The live voice bridge keeps a bounded
+communication preferences, and optional account-routing aliases. In a private
+owner meeting, the profile guides representation but does not restrict tool
+discovery: Chusky uses relevant owner history, memories, knowledge, and the
+owner's connected Composio, MCP, and native tools. It performs routine
+requested actions directly; deletions and other high-impact actions retain
+exact approval checks. In a
+shared workspace room, exact room grants remain the boundary, and private
+owner context is unavailable. Participant speech cannot change account
+routing or authorize disclosure of unrelated records. The profile remains
+disabled until you explicitly enable its representative behavior. The live voice bridge keeps a bounded
 rolling context window in memory. Separately, proactive meetings can use
 Recall's signed, low-latency, participant-attributed transcript stream to build
 the post-meeting outcome from the full captured conversation, including things
@@ -770,19 +776,19 @@ meeting-chat notice disclose live processing and any selected retention; the
 spoken intro stays short and conversational. Twilio phone calling stays
 independent and unchanged.
 
-For a client-specific representative meeting, Chusky automatically prepares a
-reviewable client mission from the owner's normal-sensitivity business and
-relationship memories as part of a private owner-requested join; a separate
-brief approval is not required. During an active representative meeting,
-`CHUCK_MEETING_CONTEXT_LOOKUP` can retrieve relevant, current company/business
-facts and the relationship facts frozen into that meeting's mission. It
-excludes sensitive or personal memories and unrelated person/project records;
-it does not search the general inbox, files, or task history. The brief never
-appears in Recall metadata, meeting chat, or the media-page URL. An enabled
-representative can use exact owner-granted calendar actions to check
-availability, book an agreed follow-up, and schedule a new Recall bot that
-inherits the same client mission; there is no separate meeting-scheduling
-toggle.
+For an owner-private meeting, the client brief is a focused, private starting
+point—not a cap on context. Chusky can retrieve other relevant owner history,
+memories, knowledge, and connected-app records through the normal private
+tools. It keeps personal and business information appropriately separate:
+business attendees do not receive unrelated personal context, and personal
+meetings do not expose unrelated confidential business context. The focused
+`CHUCK_MEETING_CONTEXT_LOOKUP` remains limited to company facts and the named
+client's frozen mission; use the ordinary private memory, knowledge, and app
+tools for other relevant context. The brief never appears in Recall metadata,
+meeting chat, or the media-page URL. A direct owner request can use any
+available connected action. Routine work can proceed directly, while
+deletions and high-impact or provider-marked actions retain exact approval
+checks. Shared rooms remain isolated and use their exact room grants.
 
 Copilot's burst-smoothing interval is enforced atomically in the root service's
 Redis store across voice-bridge reconnects and replicas. It does not impose a
@@ -917,9 +923,15 @@ Voice URL as `https://chusky.up.railway.app/twilio/inbound` (POST). Set
 Telegram numeric ID, and `TWILIO_INBOUND_ALLOWED_CALLERS` to a comma-separated
 E.164 allowlist. Unknown callers are rejected before they can access private
 memory or the agent. Use `TWILIO_INBOUND_CALL_PROFILE=business` for a company
-line: inbound callers start at the identified tier and only numbers listed in
-`TWILIO_INBOUND_VERIFIED_CALLERS` reach the verified read-only tier. Outbound
-calls always use a bounded approved call brief, never the full owner memory.
+line and configure `TWILIO_INBOUND_VERIFIED_CALLERS` for the higher identity
+verification tier before disclosing sensitive account details. An authenticated
+private call gets relevant owner history, knowledge, memory, and connected
+Composio/MCP/native tools; the call profile supplies personal/business
+representation guidance, not a tool allowlist. Carry out in-scope requested
+routine work directly, while deletions and high-impact or provider-marked
+actions retain exact approval checks. Verification tiers still
+govern disclosure of sensitive information. Outbound calls likewise receive
+relevant owner context and connected tools, not just a short call brief.
 
 The private bridge routes are `/internal/twilio/turn`,
 `/internal/twilio/turn-stream`, `/internal/twilio/commit-turn`, and
@@ -929,11 +941,14 @@ conversational STT turn events plus streaming Flux TTS in Twilio-compatible
 8 kHz μ-law. `EagerEndOfTurn` starts the actual streamed reply early;
 `TurnResumed` cancels it, and a matching `EndOfTurn` reuses that same generation
 and commits it exactly once. Caller speech interrupts TTS and clears Twilio's
-buffered playback. Telephone turns use the dedicated `VOICE_MODEL`, retain
-durable account history and relevant private memories, and skip Composio setup
-and unneeded per-turn enrichment; only an explicit read-only native tool
-allowlist is available. The live prompt has a bounded recent window, while
-summaries and memory retain longer context. OpenRouter receives a two-second
+buffered playback. Telephone turns use the dedicated `VOICE_MODEL` and the
+same owner-private Composio, MCP, and native tools as private chat, along with
+relevant owner history, memory, and knowledge. Turns remain ephemeral in the
+agent-run ledger; the account's conversation history is retained through the
+existing session path. The live prompt has a bounded recent window, while
+summaries and memory retain longer context. Deletions and high-impact or
+provider-marked actions retain exact approval checks; inbound verification
+still controls sensitive disclosure. OpenRouter receives a two-second
 latency preference, a throughput preference, a per-call affinity key, and
 optional `VOICE_FALLBACK_MODELS`; this is not a hard real-time guarantee.
 Configure the same `TWILIO_AUTH_TOKEN` and `TWILIO_MEDIA_STREAM_URL` inside
@@ -948,8 +963,8 @@ The chosen voice applies to the next call or meeting. “Use service default”
 clears the account override and returns to `VOICE_TTS_MODEL`/`BLAND_VOICE`.
 
 Bland outbound calls also require a one-time Bland v1 Custom Tool resource so
-the live call can consult Chusky without receiving a snapshot of unrelated chat
-history. Set `BLAND_WEBHOOK_SECRET` and a separate high-entropy
+the live call can consult Chusky with relevant owner-scoped history and tools,
+without receiving a raw dump of unrelated chat history. Set `BLAND_WEBHOOK_SECRET` and a separate high-entropy
 `BLAND_CONSULT_TOOL_SECRET` (32-256 URL-safe characters; generate one with
 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`), then run
 `npm run setup:bland-tool` with `BLAND_API_KEY` and the public HTTPS
@@ -958,10 +973,13 @@ and prints its `TL-*` ID; set that as `BLAND_CONSULT_TOOL_ID` in the Chusky
 service. Keep the same `BLAND_CONSULT_TOOL_SECRET` in the Chusky service and
 the Bland custom tool. Chusky validates the tool bearer secret, resolves Bland's
 provider call ID through a short-lived Redis owner index, and answers through
-the owner's selected OpenRouter model using only the stated call purpose and
-the current question in a read-only, ephemeral run. It receives no previous
-chat history and cannot execute Composio or native actions. Bland call creation
-attaches the provisioned tool ID (the documented `/v1/calls` contract), and
+the owner's selected OpenRouter model using the owner-authorized call purpose,
+relevant private context, and the current caller question in an ephemeral
+owner-private run. It can use connected Composio, MCP, and native actions;
+deletions and other high-impact actions retain exact approval checks. Keep
+actions within the owner-authorized
+call objective, verify provider results, and do not disclose unrelated personal
+or confidential business context. Bland call creation attaches the provisioned tool ID (the documented `/v1/calls` contract), and
 status callbacks use a separate signed, per-call opaque URL. Health reports
 Bland as misconfigured until all five settings are valid.
 

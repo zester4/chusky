@@ -101,6 +101,43 @@ test("owner-scoped autonomy controls do not become approval prompts in strict ru
   assert.equal(requiresToolApproval("STRIPE_CREATE_PAYMENT", {}, false), true);
 });
 
+test("owner-private runs keep routine actions direct and preserve high-impact approval checks", () => {
+  for (const slug of ["GOOGLECALENDAR_UPDATE_EVENT", "GMAIL_SEND_EMAIL", "LINKEDIN_CREATE_LINKED_IN_POST"]) {
+    assert.equal(requiresToolApproval(slug, {}, false, true), false, `${slug} is routine owner-requested work`);
+  }
+  for (const [slug, args] of [
+    ["STRIPE_CREATE_PAYMENT", {}],
+    ["CHUCK_DAYTONA_SET_FILE_PERMISSIONS", { path: "app", permissions: { mode: "777" } }],
+    ["CHUCK_DAYTONA_GIT", { action: "push" }],
+    ["GITHUB_PUSH_COMMITS", {}],
+    ["VERCEL_DEPLOY_PROJECT", {}],
+  ] as Array<[string, Record<string, unknown>]>) {
+    assert.equal(requiresToolApproval(slug, args, false, true), true, `${slug} must retain its high-impact approval check`);
+  }
+  for (const [slug, args] of [
+    ["GITHUB_DELETE_REPOSITORY", {}],
+    ["CHUCK_FORGET_MEMORY", {}],
+    ["CHUCK_SCRATCHPAD_CLEAR", {}],
+    ["CHUCK_DAYTONA_VOLUME", { action: "delete", volumeId: "vol_1" }],
+    ["CHUCK_DAYTONA_BROWSER", { action: "invoke", nodeId: "node_1", vaultAction: "delete_account" }],
+    ["COMPOSIO_EXECUTE_TOOL", { tool_slug: "GOOGLECALENDAR_DELETE_EVENT", arguments: { eventId: "evt_1" } }],
+    ["COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: { owner: "me", repo: "old" } }] }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    assert.equal(requiresToolApproval(slug, args, false, true), true, `${slug} must pause before deleting`);
+  }
+  assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { text: "Update" } }, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "GITHUB_PUSH_COMMITS", arguments: {} }, false, true), true);
+  assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE", { toolSlug: "GITHUB_DELETE_REPOSITORY", arguments: {} }, false, true), true);
+});
+
+test("owner-private MCP runs do not inherit a server-wide approval gate but keep high-impact checks", () => {
+  assert.equal(requiresToolApproval("MCP_private_create_ticket_1234567890", { title: "Follow up" }, false, true), false);
+  assert.equal(requiresToolApproval("MCP_private_delete_record_1234567890", { id: "record-1" }, false, true), true);
+  assert.equal(requiresToolApproval("MCP_private_update_record_1234567890", { action: "change_permissions" }, false, true), true);
+  assert.equal(requiresToolApproval("MCP_private_create_payment_1234567890", { amount: 25 }, false, true), true);
+  assert.equal(requiresToolApproval("MCP_private_create_ticket_1234567890", { title: "Follow up" }, true, false), true, "restricted runs keep the connected server's configured approval policy");
+});
+
 test("tool diagnostics stay read-only while external artifact transfers require approval", () => {
   for (const slug of ["CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY"]) {
     assert.equal(toolApprovalPolicy(slug), "private", slug);
@@ -108,7 +145,7 @@ test("tool diagnostics stay read-only while external artifact transfers require 
   }
   assert.equal(toolApprovalPolicy("CHUCK_FILE_BRIDGE"), "approval_required");
   assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE"), true);
-  assert.match(humanToolStatus("CHUCK_FILE_BRIDGE"), /approved file transfer/i);
+  assert.match(humanToolStatus("CHUCK_FILE_BRIDGE"), /preparing the owner-requested file transfer/i);
   assert.equal(toolApprovalPolicy("CHUCK_MEDIA_BRIDGE"), "private");
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE"), false);
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", {}, true), false, "an explicit run policy cannot re-gate directly requested image publishing");
@@ -123,6 +160,10 @@ test("provider metadata classifies dynamic Composio tools before heuristic fallb
   assert.equal(toolApprovalPolicy("MYSTERY_READ"), "private");
   assert.equal(toolApprovalPolicy("MYSTERY_ACTION"), "approval_required");
   assert.equal(toolApprovalPolicy("HUBSPOT_UPDATE_CONTACT"), "private");
+  registerComposioToolMetadata({ name: "GITHUB_DELETE_REPOSITORY", annotations: { readOnlyHint: true, destructiveHint: false } });
+  registerComposioToolMetadata({ name: "STRIPE_CREATE_PAYMENT", metadata: { risk: "safe" } });
+  assert.equal(toolApprovalPolicy("GITHUB_DELETE_REPOSITORY"), "approval_required", "provider metadata must not downgrade destructive action names");
+  assert.equal(toolApprovalPolicy("STRIPE_CREATE_PAYMENT"), "approval_required", "provider metadata must not downgrade financial action names");
   clearComposioToolMetadata();
 });
 

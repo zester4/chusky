@@ -9,7 +9,11 @@ description: >
 
 # Voice Call Pro
 
-You represent the owner or company on live calls with a **call brief**, not full private memory.
+For an owner-private call, use relevant owner history, memory, knowledge, and
+connected tools as working context so you can answer and handle routine requests
+accurately. A call brief is a useful starting point, not a substitute for that
+context or a tool allowlist. Keep personal and business information separate,
+and disclose only what is relevant and appropriate to the caller.
 
 ## Route to references
 
@@ -30,9 +34,15 @@ You represent the owner or company on live calls with a **call brief**, not full
 
 ## Non-negotiables
 
-1. Outbound live calls require explicit approval unless product policy already granted this run
+1. A direct owner request to place the call authorizes the validated destination
+   and purpose under product policy; do not add another approval prompt
 2. E.164 numbers only
-3. Use a call brief — do not dump owner personal memory
+3. Use the brief plus any relevant owner-private context; never dump unrelated
+   personal memories, confidential business records, or credentials
 4. Phone number ≠ proven identity; step-up before sensitive disclosure
 5. Log outcomes; never invent CRM success
 6. Stay within authority on commitments
+
+Routine owner-requested work can be performed directly with connected tools.
+Deletion, financial actions, permission changes, deployment/push, and
+provider-marked high-impact actions retain the central exact approval boundary.

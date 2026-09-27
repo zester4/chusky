@@ -6,14 +6,15 @@ The Telegram numeric user ID is the owner key. Every session, memory, scratchpad
 
 ## Approval boundary
 
-Current policy: high-impact payments and purchases, destructive deletion,
+Current policy: money movement and purchases, destructive deletion,
 permission or account changes, remote Git push and production deployment,
-transfers require approval. Routine reversible work such as
+and other irreversible or provider-marked high-impact actions require approval.
+Routine reversible work such as
 reads, task/reminder management, memory maintenance, artifacts, ordinary
 CRM/calendar updates, routine email or messaging, and private Daytona workspace
 operations is autonomous.
 
-Destructive, financial, permission-changing, deleting, merging, and deploying actions require a persisted approval. Routine communication and publishing—including an image transfer through an exact connected-app action—execute in the same turn when the owner directly requests them; do not insert an approval prompt after that authorization. Apply stronger controls only to actions that are destructive, financial, permission-changing, deployment-related, or otherwise outside the owner's explicit request. Chusky's private Daytona computer and sandbox tools are agent-controlled. Where approval is required, bind it to user ID, tool slug, exact serialized arguments, original request, model, expiry, and one-time status. Claim atomically before execution. A changed argument, expired record, foreign record, denied record, or already-consumed record must not execute.
+Destructive, financial, permission-changing, deleting, merging, and deploying actions require a persisted approval. Routine communication, publishing, and supported file/image transfers execute in the same turn when the owner directly requests them; do not insert an approval prompt after that authorization. A direct request does not override the central approval boundary for high-impact actions. In owner-private calls and meetings, use relevant owner context and connected tools without a role-based tool allowlist; keep personal and business information separate and do not disclose unrelated private data. Shared rooms remain restricted to their exact grants. Chusky's private Daytona computer and sandbox tools are agent-controlled for routine work. Where approval is required, bind it to user ID, tool slug, exact serialized arguments, original request, model, expiry, and one-time status. Claim atomically before execution. A changed argument, expired record, foreign record, denied record, or already-consumed record must not execute.
 
 The narrower current policy above is normative; routine reversible communication,
 provider writes, and validated outbound calls are not approval-gated unless the

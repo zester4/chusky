@@ -329,6 +329,96 @@ test("SDK run streams the same human-readable tool progress used by Telegram", a
   }
 });
 
+test("first-party dashboard chat uses owner-private tools without elevating SDK-key runs", async () => {
+  const originalVectorUrl = config.upstashVectorRestUrl;
+  const originalVectorToken = config.upstashVectorRestToken;
+  config.upstashVectorRestUrl = "";
+  config.upstashVectorRestToken = "";
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user")
+    ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } }
+    : null);
+
+  const { mcpClient } = await import("../src/mcp/client.js");
+  const manager = mcpClient as any;
+  const originalDiscover = manager.discoverToolsForUser;
+  const originalRequiresApproval = manager.requiresApproval;
+  const originalCallTool = manager.callTool;
+  const originalFetch = globalThis.fetch;
+  const toolName = "MCP_private_create_ticket_1234567890";
+  const executed: Array<{ userId: number; name: string; args: Record<string, unknown> }> = [];
+  manager.discoverToolsForUser = async () => ({
+    tools: [{ type: "function", function: { name: toolName, description: "Create a follow-up ticket", parameters: { type: "object", required: ["title"], properties: { title: { type: "string" } } } } }],
+    failures: [],
+  });
+  manager.requiresApproval = () => true;
+  manager.callTool = async (userId: number, name: string, args: Record<string, unknown>) => {
+    executed.push({ userId, name, args });
+    return "Ticket created";
+  };
+  setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "dashboard-private-session", tools: async () => [] }) } });
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (!url.includes("openrouter.ai")) return new Response("offline", { status: 503 });
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    const payload = JSON.parse(String(init?.body)) as { messages?: Array<{ role?: string }> };
+    const hasToolResult = payload.messages?.some((message) => message.role === "tool") === true;
+    const chunk = hasToolResult
+      ? { choices: [{ delta: { role: "assistant", content: "The follow-up ticket was created." }, finish_reason: "stop" }] }
+      : { choices: [{ delta: { role: "assistant", tool_calls: [{ index: 0, id: "call_create_ticket", type: "function", function: { name: toolName, arguments: JSON.stringify({ title: "Follow up with the client" }) } }] }, finish_reason: "tool_calls" }] };
+    return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+
+  try {
+    const api = app();
+    const webHeaders = { "X-Test-Web-User": "dashboard-owner", "Content-Type": "application/json" };
+    const webThreadResponse = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: webHeaders, body: "{}" }));
+    assert.equal(webThreadResponse.status, 201);
+    const webThread = await webThreadResponse.json() as { id: string };
+    const webRun = await api.fetch(new Request(`http://local/v1/threads/${webThread.id}/runs/stream`, {
+      method: "POST", headers: webHeaders, body: JSON.stringify({ input: "Create the follow-up ticket we agreed on." }),
+    }));
+    assert.equal(webRun.status, 200);
+    const webEvents = (await webRun.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
+    assert.equal(webEvents.some((item) => item.type === "run.completed"), true);
+    assert.equal(webEvents.some((item) => item.type === "run.approval_required"), false);
+
+    setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-private-web");
+    const queuedWebRun = await api.fetch(new Request(`http://local/v1/threads/${webThread.id}/runs`, {
+      method: "POST", headers: webHeaders, body: JSON.stringify({ input: "Continue this owner task later.", wait: false }),
+    }));
+    assert.equal(queuedWebRun.status, 202);
+    const queuedWebRunData = await queuedWebRun.json() as { taskId?: string };
+    assert.ok(queuedWebRunData.taskId);
+    assert.equal("ownerPrivateRun" in queuedWebRunData, false, "private execution provenance is never exposed to dashboard clients");
+    const webOwnerId = Number.parseInt(createHash("sha256").update("sdk:web:dashboard-owner").digest("hex").slice(0, 12), 16);
+    const queuedWebTask = await getTask(webOwnerId, queuedWebRunData.taskId!);
+    assert.equal((queuedWebTask as (typeof queuedWebTask & { sdkOwnerPrivateRun?: boolean }))?.sdkOwnerPrivateRun, true);
+
+    const sdkHeaders = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "sdk-caller", "Content-Type": "application/json" };
+    const sdkThreadResponse = await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers: sdkHeaders, body: "{}" }));
+    assert.equal(sdkThreadResponse.status, 201);
+    const sdkThread = await sdkThreadResponse.json() as { id: string };
+    const sdkRun = await api.fetch(new Request(`http://local/v1/threads/${sdkThread.id}/runs/stream`, {
+      method: "POST", headers: sdkHeaders, body: JSON.stringify({ input: "Create the follow-up ticket we agreed on." }),
+    }));
+    assert.equal(sdkRun.status, 200);
+    const sdkEvents = (await sdkRun.text()).trim().split("\n").map((line) => JSON.parse(line) as { type: string });
+    assert.equal(sdkEvents.some((item) => item.type === "run.approval_required"), true);
+    assert.equal(executed.length, 1);
+    assert.equal(executed[0]?.name, toolName);
+    assert.deepEqual(executed[0]?.args, { title: "Follow up with the client" });
+  } finally {
+    manager.discoverToolsForUser = originalDiscover;
+    manager.requiresApproval = originalRequiresApproval;
+    manager.callTool = originalCallTool;
+    globalThis.fetch = originalFetch;
+    config.upstashVectorRestUrl = originalVectorUrl;
+    config.upstashVectorRestToken = originalVectorToken;
+    setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
+  }
+});
+
 test("denying a run approval preserves its recorded tool steps after reload", async () => {
   const externalId = "approval-denial-timeline-owner";
   const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);

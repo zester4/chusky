@@ -1,10 +1,10 @@
 //src/policy.ts
 import { composioMetadataPolicy } from "./composioRisk.js";
 
-// Routine communications and content publishing are autonomous. Keep the
-// approval boundary for destructive, financial, permission-changing, and
-// deployment actions that can cause material or irreversible harm.
-export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|ERASE|PURGE|PAYMENT|CHARGE|TRANSFER|REFUND|PURCHASE|CHECKOUT|PLACE_ORDER|CREATE_ORDER|ADD_PAYMENT_METHOD|SUBSCRIBE|INVITE|REVOKE|GRANT|UPDATE_PERMISSION|CHANGE_ROLE|UPDATE_ROLE|ADD_MEMBER|REMOVE_MEMBER|MERGE|DEPLOY)(_|$)|(^|_)(GIT|GITHUB|GITLAB|BITBUCKET)_?PUSH(_|$)/i;
+// Restricted/background runs use risk classification and explicit grants.
+// Authenticated owner-private interactive runs get broad tool access while
+// retaining the central high-impact and provider-declared approval boundary.
+export const RISKY_TOOL_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|ERASE|PURGE|PAYMENT|CHARGE|TRANSFER|REFUND|PURCHASE|CHECKOUT|PLACE_ORDER|CREATE_ORDER|ADD_PAYMENT_METHOD|SUBSCRIBE|INVITE|REVOKE|GRANT|PERMISSIONS?|CHANGE_ROLE|UPDATE_ROLE|SET_ROLE|ADD_MEMBER|REMOVE_MEMBER|MERGE|DEPLOY)(_|$)|(^|_)(GIT|GITHUB|GITLAB|BITBUCKET)_?PUSH(_|$)/i;
 const COMPOSIO_READ_ONLY_PATTERN = /(^|_)(GET|LIST|SEARCH|FETCH|READ|LOOKUP|CHECK|VERIFY|DESCRIBE|FIND|RETRIEVE|COUNT|VIEW|PREVIEW|VALIDATE)(_|$)/i;
 const COMPOSIO_WRITE_PATTERN = /(^|_)(CREATE|UPDATE|SET|ADD|SEND|POST|PUBLISH|WRITE|UPLOAD|MOVE|ARCHIVE|CLOSE|ENABLE|DISABLE|CHANGE|MODIFY|SUBSCRIBE|UNSUBSCRIBE)(_|$)/i;
 // Some provider action names combine a read verb with a mutation, e.g.
@@ -109,9 +109,11 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
 ]);
 
 function composioActionPolicy(slug: string): ToolApprovalPolicy {
+  // Provider annotations are useful for discovering additional risk, but
+  // they must never downgrade a risk that is evident from the action name.
+  if (!slug || RISKY_TOOL_PATTERN.test(slug)) return "approval_required";
   const metadataPolicy = composioMetadataPolicy(slug);
   if (metadataPolicy) return metadataPolicy;
-  if (!slug || RISKY_TOOL_PATTERN.test(slug)) return "approval_required";
   if (FACEBOOK_PUBLISH_ACTIONS.has(slug.toUpperCase())) return "private";
   if (COMPOSIO_READ_ONLY_PATTERN.test(slug) || COMPOSIO_AUTONOMOUS_PATTERN.test(slug)) return "private";
   // Ordinary provider writes (CRM updates, drafts, notes, calendar changes,
@@ -174,7 +176,7 @@ const STATUSES: Record<string, string> = {
   CHUCK_INTEGRATION_HEALTH: "🔌 I’m checking the connected app status…",
   CHUCK_ARTIFACT_QA: "📄 I’m independently checking the rendered file…",
   CHUCK_TOOL_RECOVERY: "🛠️ I’m checking the saved execution outcome…",
-  CHUCK_FILE_BRIDGE: "📎 I’m preparing the approved file transfer…",
+  CHUCK_FILE_BRIDGE: "📎 I’m preparing the owner-requested file transfer…",
   CHUCK_MEDIA_BRIDGE: "🖼️ I’m transferring your image…",
   CHUCK_LIST_SKILL_FILES: "🧭 I’m checking the supporting guidance…",
   CHUCK_READ_SKILL_FILE: "📖 I’m reviewing the relevant guidance…",
@@ -291,12 +293,87 @@ export function isRiskyToolSlug(slug: string, args?: Record<string, unknown>): b
 }
 
 /**
- * Shared approval decision for execution paths that can add a stricter
- * per-run policy. Explicit run policies may tighten ordinary actions, but
- * cannot turn owner-scoped autonomy/mission bookkeeping into an approval
- * loop. High-impact actions always retain the central policy boundary.
+ * Shared approval decision for execution paths. Owner-private interactive
+ * runs may use the owner's full connected-tool context, but still retain the
+ * central high-impact and provider-declared approval boundary.
  */
-export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false): boolean {
+const OWNER_PRIVATE_DELETION_TOOLS = new Set([
+  "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR",
+  "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE",
+  "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_DAYTONA_DELETE_FILE", "CHUCK_DAYTONA_DELETE_WORKSPACE",
+]);
+const DELETION_ACTION_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|ERASE|PURGE|TRASH|FORGET|CLEAR)(_|$)/i;
+
+/** Recognize destructive actions, including wrapped Composio batch/execute calls. */
+export function isDeletionToolCall(slug: string, args: Record<string, unknown> = {}, depth = 0): boolean {
+  if (depth > 5) return false;
+  const normalized = slug.trim().toUpperCase();
+  if (!normalized) return false;
+  if (OWNER_PRIVATE_DELETION_TOOLS.has(normalized) || DELETION_ACTION_PATTERN.test(normalized)) return true;
+
+  const actions = [args.action, args.operation, args.command, args.vaultAction]
+    .filter((value): value is string => typeof value === "string");
+  if (actions.some((action) => DELETION_ACTION_PATTERN.test(action.trim().toUpperCase()))) return true;
+
+  // Browser/computer actions identify a destructive page control by its
+  // accessible label or name rather than by a provider action slug.
+  if ((normalized === "CHUCK_DAYTONA_BROWSER" || normalized === "CHUCK_DAYTONA_COMPUTER")
+    && [args.name, args.label, args.nodeAction].some((value) => typeof value === "string" && /\b(?:delete|remove|destroy|erase|purge|trash)\b/i.test(value))) return true;
+
+  if (normalized === "COMPOSIO_EXECUTE_TOOL") {
+    const nestedSlug = String(args.tool_slug ?? args.toolSlug ?? args.slug ?? "");
+    const nestedArgs = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+      ? args.arguments as Record<string, unknown>
+      : {};
+    return isDeletionToolCall(nestedSlug, nestedArgs, depth + 1);
+  }
+  if (normalized === "CHUCK_MISSION_COMPENSATE" && String(args.action ?? "") === "execute") {
+    const nestedArgs = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+      ? args.arguments as Record<string, unknown>
+      : {};
+    return isDeletionToolCall(String(args.toolSlug ?? ""), nestedArgs, depth + 1);
+  }
+  if (normalized === "COMPOSIO_MULTI_EXECUTE_TOOL" && Array.isArray(args.tools)) {
+    return args.tools.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const call = item as Record<string, unknown>;
+      const nestedSlug = String(call.tool_slug ?? call.toolSlug ?? call.name ?? "");
+      const nestedArgs = call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
+        ? call.arguments as Record<string, unknown>
+        : {};
+      return isDeletionToolCall(nestedSlug, nestedArgs, depth + 1);
+    });
+  }
+  return false;
+}
+
+export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
+  if (ownerPrivateRun) {
+    if (slug.startsWith("MCP_")) {
+      const actionValues = [args.action, args.operation, args.command]
+        .filter((value): value is string => typeof value === "string");
+      return isDeletionToolCall(slug, args)
+        || RISKY_TOOL_PATTERN.test(slug)
+        || actionValues.some((value) => RISKY_TOOL_PATTERN.test(value))
+        || forceApproval;
+    }
+    if (["CHUCK_FILE_BRIDGE", "CHUCK_MEDIA_BRIDGE"].includes(slug)) {
+      const nestedSlug = String(args.toolSlug ?? "");
+      const nestedArgs = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+        ? args.arguments as Record<string, unknown>
+        : {};
+      return isDeletionToolCall(slug, args) || isDeletionToolCall(nestedSlug, nestedArgs)
+        || isRiskyToolSlug(slug, args) || isRiskyToolSlug(nestedSlug, nestedArgs) || forceApproval;
+    }
+    if (slug === "CHUCK_EMAIL_ARTIFACT") {
+      const nestedSlug = String(args.emailTool ?? "");
+      const nestedArgs = args.arguments && typeof args.arguments === "object" && !Array.isArray(args.arguments)
+        ? args.arguments as Record<string, unknown>
+        : {};
+      return isDeletionToolCall(nestedSlug, nestedArgs) || isRiskyToolSlug(nestedSlug, nestedArgs) || forceApproval;
+    }
+    return isDeletionToolCall(slug, args) || isRiskyToolSlug(slug, args) || forceApproval;
+  }
   if (isRiskyToolSlug(slug, args)) return true;
   if (AUTONOMOUS_CONTROL_TOOLS.has(slug)) return false;
   return forceApproval;

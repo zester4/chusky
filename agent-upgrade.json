@@ -1,11 +1,11 @@
 {
-  "id": "release-4.14.0",
-  "version": "4.14.0",
+  "id": "release-4.15.0",
+  "version": "4.15.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Images created inside Daytona can be imported into the owner's private image library and then used by connected-app posts and uploads in the same conversation.",
-    "Current chat images, generated images, and saved images can be copied into the owner's Daytona workspace with unique filenames and a returned file path.",
-    "A Daytona screenshot becomes available for a connected-app action only when the owner explicitly asks to send or publish that screenshot."
+    "Owner-private chat, calls, and meetings now use relevant owner history and context plus connected Composio, MCP, and native tools across personal and business use.",
+    "Owner-private interactive runs use relevant owner context and connected tools for routine requests; deletion, financial, permission, deployment/push, and provider-marked high-impact actions pause for exact approval.",
+    "Personal and business context stays appropriately separated, and shared rooms, autonomous workflows, and delegated workers keep their explicit scopes and policies."
   ],
-  "createdAt": "2026-09-26T21:20:48.728Z"
+  "createdAt": "2026-09-26T23:54:16.617Z"
 }

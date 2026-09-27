@@ -76,7 +76,7 @@ export async function startBlandCallForUser(userId: number, input: BlandCallInpu
       signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
         phone_number: phoneNumber,
-        task: `${voiceProfileInstructions(profile, "outbound", purpose)} Use the Consult Chusky tool only when a relevant factual question is not answered by this approved call context; do not use it for ordinary pleasantries.`,
+        task: `${voiceProfileInstructions(profile, "outbound", purpose)} Use the Consult Chusky tool when a question needs the owner's private context, a connected app, or a requested action. Do not use it for ordinary pleasantries. Chusky can carry out routine requested work directly; deletions, financial actions, permission changes, deployment/push actions, and provider-declared high-risk actions retain their approval boundary. Never claim a connected-app action succeeded until Chusky confirms the provider result.`,
         voice: selectedVoice,
         webhook: callbackUrl.toString(),
         webhook_events: ["queue", "call", "latency", "tool"],

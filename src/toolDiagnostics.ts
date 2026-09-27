@@ -1,5 +1,5 @@
 import { validateToolArgumentsAgainstSchema } from "./agentTools.js";
-import { toolApprovalPolicy } from "./policy.js";
+import { requiresToolApproval } from "./policy.js";
 
 type ToolDefinition = { function?: { name?: unknown; parameters?: unknown }; name?: unknown; inputSchema?: unknown };
 type AccountMetadata = { id: string; toolkit: string; status: string; alias?: string; updatedAt?: string };
@@ -10,22 +10,22 @@ function slugOf(tool: ToolDefinition): string {
 }
 
 /** Inspect the exact catalog shown to this model turn; never discover or grant tools. */
-export function preflightToolCall(catalog: readonly unknown[] | undefined, requestedTool: string, args: Record<string, unknown>) {
+export function preflightToolCall(catalog: readonly unknown[] | undefined, requestedTool: string, args: Record<string, unknown>, ownerPrivateRun = false) {
   const toolName = requestedTool.trim();
   if (!catalog) return { tool: toolName, available: false, schemaAvailable: false, argumentsValid: null, approvalRequired: true, status: "unavailable" as const, message: "The current run's tool catalog is unavailable; no execution was attempted." };
   const tool = catalog.find((entry): entry is ToolDefinition => Boolean(entry && typeof entry === "object" && slugOf(entry as ToolDefinition) === toolName)) as ToolDefinition | undefined;
   if (!tool) return { tool: toolName, available: false, schemaAvailable: false, argumentsValid: null, approvalRequired: true, status: "unavailable" as const, message: "This exact tool is not in the current run's exposed/granted tool list. No execution was attempted." };
   const schema = tool.function?.parameters ?? tool.inputSchema;
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-    return { tool: toolName, available: true, schemaAvailable: false, argumentsValid: null, approvalRequired: toolApprovalPolicy(toolName, args) === "approval_required", status: "schema_unavailable" as const, message: "The tool is exposed, but no concrete input schema was advertised, so arguments cannot be safely prevalidated." };
+    return { tool: toolName, available: true, schemaAvailable: false, argumentsValid: null, approvalRequired: requiresToolApproval(toolName, args, false, ownerPrivateRun), status: "schema_unavailable" as const, message: "The tool is exposed, but no concrete input schema was advertised, so arguments cannot be safely prevalidated." };
   }
   try {
     validateToolArgumentsAgainstSchema(toolName, structuredClone(args), schema);
-    const approvalRequired = toolApprovalPolicy(toolName, args) === "approval_required";
-    return { tool: toolName, available: true, schemaAvailable: true, argumentsValid: true, approvalRequired, status: approvalRequired ? "approval_required" as const : "ready" as const, message: approvalRequired ? "Arguments match the advertised schema. The normal approval gate is still required; this check does not approve or execute the action." : "Arguments match the advertised schema. No tool was executed." };
+    const approvalRequired = requiresToolApproval(toolName, args, false, ownerPrivateRun);
+    return { tool: toolName, available: true, schemaAvailable: true, argumentsValid: true, approvalRequired, status: approvalRequired ? "approval_required" as const : "ready" as const, message: approvalRequired ? "Arguments match the advertised schema. Owner approval is required before this high-impact action; this check does not approve or execute the action." : ownerPrivateRun ? "Arguments match the advertised schema. Routine owner-private actions can proceed directly; deletion and high-impact actions retain approval checks. No tool was executed." : "Arguments match the advertised schema. No tool was executed." };
   } catch (error) {
     const message = (error instanceof Error ? error.message : "Arguments do not match the advertised schema.").slice(0, 500);
-    return { tool: toolName, available: true, schemaAvailable: true, argumentsValid: false, approvalRequired: toolApprovalPolicy(toolName, args) === "approval_required", status: "invalid_arguments" as const, message };
+    return { tool: toolName, available: true, schemaAvailable: true, argumentsValid: false, approvalRequired: requiresToolApproval(toolName, args, false, ownerPrivateRun), status: "invalid_arguments" as const, message };
   }
 }
 

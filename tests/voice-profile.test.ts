@@ -4,7 +4,7 @@ import { normalizeVoiceCallProfile, voiceProfileInstructions, voiceProfileNative
 import { initStore, getPhoneCall } from "../src/store.js";
 import { startTwilioCallForUser } from "../src/calls/twilio.js";
 
-test("voice profiles force spoken-language instructions and only expose selected read-only capabilities", () => {
+test("voice profiles keep spoken output while private owner calls use full context and tools", () => {
   const profile = normalizeVoiceCallProfile({
     identity: "Amina", organization: "Chusky Labs", mode: "sales", tone: "consultative",
     opening: "Hello, this is Amina from Chusky Labs.",
@@ -16,6 +16,10 @@ test("voice profiles force spoken-language instructions and only expose selected
   assert.match(prompt, /Never use Markdown, emojis, brackets/i);
   assert.match(prompt, /Amina, speaking on behalf of Chusky Labs/);
   assert.match(prompt, /Conversation mode: sales/);
+  assert.match(prompt, /relevant private context and connected tools/i);
+  assert.match(prompt, /Deletions, financial actions, permission changes, deployment\/push actions, and provider-declared high-risk actions retain their exact approval boundary/i);
+  assert.match(prompt, /business call, do not volunteer or disclose the owner's unrelated personal/i);
+  assert.doesNotMatch(prompt, /Use only this call brief|Do not claim to perform an external action/i);
   assert.deepEqual(voiceProfileNativeTools(profile), ["CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET"]);
 });
 

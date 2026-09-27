@@ -169,6 +169,24 @@ test("retains mission controls with the supervisor instead of failing a speciali
   assert.deepEqual(result.handoffRecord?.delegation?.allowedTools, ["CHUCK_SCRATCHPAD_READ"]);
 });
 
+test("publishes safe specialist and child-tool lifecycle events to the parent chat run", async () => {
+  const events: Array<{ activityId: string; parentToolCallId: string; kind: string; status: string; toolSlug?: string }> = [];
+  await nativeTool(991019, "CHUCK_DELEGATE_SUBAGENT", {
+    worker: "nora",
+    objective: "Research the topic and return a concise summary",
+    context: { toolCall: { name: "CHUCK_SCRATCHPAD_READ", args: { query: "research notes" } } },
+  }, {
+    parentToolCallId: "parent-tool-call",
+    onSubagentActivity: (activity) => { events.push({ activityId: activity.activityId, parentToolCallId: activity.parentToolCallId, kind: activity.kind, status: activity.status, toolSlug: activity.toolSlug }); },
+  });
+
+  assert.ok(events.some((item) => item.kind === "worker" && item.status === "started"));
+  assert.ok(events.some((item) => item.kind === "tool" && item.status === "started" && item.toolSlug === "CHUCK_SCRATCHPAD_READ"), JSON.stringify(events));
+  assert.ok(events.some((item) => item.kind === "tool" && item.status === "completed" && item.toolSlug === "CHUCK_SCRATCHPAD_READ"));
+  assert.ok(events.some((item) => item.kind === "worker" && item.status === "completed"));
+  assert.ok(events.every((item) => item.parentToolCallId === "parent-tool-call"));
+});
+
 test("gives Lucas a complete private engineering loop while keeping provider tools role-scoped", () => {
   const lucas = WORKER_CAPABILITIES.lucas;
   for (const tool of ["CHUCK_DAYTONA_GIT", "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_PREVIEW"]) {

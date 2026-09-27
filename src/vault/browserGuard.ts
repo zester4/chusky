@@ -30,7 +30,7 @@ export async function rememberVaultBrowserNodes(userId: number, workspaceId: str
 }
 
 /** Enforces a narrow UI policy only while a matching retained identity is authenticated. */
-export async function guardVaultBrowserAction(userId: number, workspaceId: string, args: Record<string, unknown>): Promise<void> {
+export async function guardVaultBrowserAction(userId: number, workspaceId: string, args: Record<string, unknown>, ownerPrivateRun = false, ownerApprovedAction = false): Promise<void> {
   if (!config.vaultEnabled || !vaultBroker.enabled()) return;
   const action = String(args.action ?? "");
   let sessions;
@@ -75,8 +75,8 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   }
   if (["screenshot", "screenshot_region", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
   if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
-  if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" });
-  if (action === "accessibility_set_value") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "fill" });
+  if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" }, ownerPrivateRun, ownerApprovedAction);
+  if (action === "accessibility_set_value") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "fill" }, ownerPrivateRun, ownerApprovedAction);
   if (!(["invoke", "fill", "press", "open"].includes(action))) return;
   if (action === "press") throw new Error("Keyboard submit is disabled in an authenticated vault session. Invoke a discovered accessible control instead.");
   let target: VaultAction | undefined;
@@ -98,8 +98,10 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   }
   target ??= "unknown";
   const decision = vaultActionPolicy(target);
+  if (ownerPrivateRun && target === "delete_account" && args.vaultAction !== target) throw new Error("Set vaultAction to delete_account so the owner-private approval boundary can pause before deleting the account.");
   if (decision === "blocked") throw new Error(`Vault policy blocks ${target.replaceAll("_", " ")} for authenticated websites.`);
   if (decision === "approval_required" && args.vaultAction !== target) throw new Error(`Vault action ${target.replaceAll("_", " ")} requires an explicit matching vaultAction and approval.`);
+  if (decision === "approval_required" && ownerPrivateRun && !ownerApprovedAction) throw new Error(`Vault action ${target.replaceAll("_", " ")} must pass the exact owner-approval check before execution.`);
 }
 
 /** Prevent generic Daytona tools from reading or changing browser credential stores. */
