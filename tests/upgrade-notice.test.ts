@@ -112,6 +112,14 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
+test("Treg upgrade preset describes bounded evidence and spend controls", () => {
+  const bullets = getAgentUpgradePreset("treg");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /external-intelligence gateway/);
+  assert.match(bullets[1], /atomic owner and mission spend/);
+  assert.match(bullets[2], /Composio apps/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -125,13 +133,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces shared private account history", async () => {
+test("current upgrade manifest announces Treg intelligence", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.17.0");
-  assert.equal(notice?.version, "4.17.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /same owner-scoped account history/);
-  assert.match(formatAgentUpgradeNotice(notice!), /imports its private conversation history/);
-  assert.match(formatAgentUpgradeNotice(notice!), /shared rooms and company\/project runs remain outside/);
+  assert.equal(notice?.id, "release-4.18.0");
+  assert.equal(notice?.version, "4.18.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Treg external-intelligence gateway/);
+  assert.match(formatAgentUpgradeNotice(notice!), /atomic owner and mission spend/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Composio apps/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

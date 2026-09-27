@@ -72,6 +72,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Bearer credentials are encrypted at rest, outbound hosts are pinned to validated public DNS results, and private/link-local targets and redirects are rejected.",
     "The agent executes discovered tools with schema validation, default human approval, bounded results, visible failures, and account isolation from group and meeting contexts.",
   ],
+  treg: [
+    "Added an optional Treg external-intelligence gateway with bounded native tools for catalog search, endpoint inspection, enrichment, data resolution, usage, and balance checks.",
+    "Treg calls now use server-only organization-scoped credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, mission evidence, and safe retry semantics.",
+    "Optional Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, and incomplete or unverified evidence must be cross-checked before customer-facing or irreversible work.",
+  ],
 } as const;
 
 export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;

@@ -1,11 +1,11 @@
 {
-  "id": "release-4.17.0",
-  "version": "4.17.0",
+  "id": "release-4.18.0",
+  "version": "4.18.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Private dashboard conversations now persist in the same owner-scoped account history as Telegram and linked private channels, including eligible conversations created before this upgrade.",
-    "Linking a web account with Telegram imports its private conversation history, scratchpad, and eligible memories once while preserving the Telegram session and connected-app session.",
-    "The dashboard shows earlier shared private turns; shared rooms and company/project runs remain outside personal account history."
+    "Added an optional Treg external-intelligence gateway with bounded native tools for catalog search, endpoint inspection, enrichment, data resolution, usage, and balance checks.",
+    "Treg calls use server-only organization-scoped credentials, rate limits, evidence bundles with sources and confidence, atomic owner and mission spend reservations, bounded receipts, mission evidence, and safe retry semantics.",
+    "Optional Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, and incomplete evidence must be cross-checked before customer-facing or irreversible work."
   ],
-  "createdAt": "2026-09-27T02:57:47.129Z"
+  "createdAt": "2026-09-27T03:30:00.000Z"
 }

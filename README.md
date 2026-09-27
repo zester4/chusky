@@ -228,6 +228,31 @@ project-scoped, autonomous, and worker runs continue to honor `requireApproval`
 and their explicit tool grants. MCP results remain untrusted data, never
 authorization to expand the task or disclose unrelated private context.
 
+### Treg external intelligence
+
+Treg is an optional server-side intelligence gateway, separate from third-party
+MCP and Composio. It lets Chusky search a bounded catalog and run selected
+enrichment or web-data endpoints without placing thousands of provider tools in
+the model context. Treg results return as evidence bundles with source,
+confidence, cost, warnings, and an incomplete flag; they are not treated as
+ground truth or as authorization to disclose or change anything.
+
+Enable it with `TREG_ENABLED=true` and a server-only `TREG_TOKEN`. Calls are
+budgeted per owner and mission, reserved atomically in Redis, recorded with
+bounded receipts, retried only for idempotent or idempotency-keyed requests,
+and fail closed when an endpoint price is unavailable. The native tools are
+`CHUCK_TREG_SEARCH`, `CHUCK_TREG_GET`, `CHUCK_TREG_CALL`,
+`CHUCK_TREG_ENRICH_PERSON`, `CHUCK_TREG_ENRICH_COMPANY`,
+`CHUCK_TREG_RESOLVE`, `CHUCK_TREG_BALANCE`, and `CHUCK_TREG_USAGE`. Use Composio for actions in a
+user's connected accounts; use Treg for external intelligence that needs
+verification before an action.
+
+Optional OAuth tools (`CHUCK_TREG_OAUTH_START`, `STATUS`, `CONNECTIONS`, and
+`REVOKE`) let a user connect a provider-owned account through Treg. Chusky
+stores only an expiring owner-scoped state hash and safe connection metadata;
+Treg retains provider credentials. For company deployments, use
+`TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
+
 ### Workflow Composer
 
 The authenticated `/v1/workflows/composer` API and `/app/composer` dashboard
@@ -1168,6 +1193,16 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `MCP_MAX_SERVERS` | — | `20` | Maximum configured MCP servers loaded at startup |
 | `MCP_MAX_TOOLS_PER_SERVER` | — | `100` | Maximum discovered tools exposed from each MCP server |
 | `MCP_MAX_RESULT_CHARS` | — | `20000` | Maximum MCP output passed back into the model |
+| `TREG_ENABLED` | — | `false` | Enable the server-side Treg external intelligence gateway |
+| `TREG_BASE_URL` | — | `https://treg.to` | Treg REST API origin |
+| `TREG_TOKEN` | Treg | — | Server-only Treg token; never place it in prompts or client config |
+| `TREG_TIMEOUT_MS` | — | `30000` | Maximum time for one Treg request |
+| `TREG_MAX_RETRIES` | — | `2` | Retries for transient idempotent or idempotency-keyed requests |
+| `TREG_DAILY_BUDGET_USD` | — | `5` | Per-owner daily Treg spend cap |
+| `TREG_MISSION_BUDGET_USD` | — | `1` | Per-mission Treg spend cap |
+| `TREG_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost of one Treg call |
+| `TREG_RATE_LIMIT_PER_MINUTE` | — | `30` | Per-owner Treg call-attempt limit per minute |
+| `TREG_ORG_TOKENS_JSON` | Treg | `{}` | Server-only organization-to-token map; never put this in client config |
 
 ---
 

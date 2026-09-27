@@ -22,6 +22,7 @@ import {
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
   searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff,
+  getTregSpend, saveTregSpend, saveTregReceipt, listTregReceipts, acquireTregSpendLock, releaseTregSpendLock, saveTregOAuthState, getTregOAuthState, removeTregOAuthState,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
@@ -60,6 +61,9 @@ import { executeOutcomeVerification, verifiedOutcomeEvidenceSummary, type Outcom
 import { appendTraceEvent, compensationView, executeCompensation, listCompensations } from "./reliability/persistence.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { diagnoseMissionRepair } from "./reliability/repair.js";
+import { TregGateway } from "./treg/gateway.js";
+import { TregSpendGuard } from "./treg/spend.js";
+import { TregOAuth } from "./treg/oauth.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -122,6 +126,8 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** Trusted company workspace scope; never accepted from model tool arguments. */
+  organizationId?: string;
   /** Exact model-visible tool catalog and safe owner connection snapshot for read-only diagnostics. */
   toolCatalog?: unknown[];
   connectedAccounts?: Array<{ id: string; toolkit: string; status: string; alias?: string; updatedAt?: string }>;
@@ -147,6 +153,41 @@ export interface MissionWaitRequest {
 
 type PhoneCallLauncherForTests = (userId: number, input: Record<string, unknown>) => Promise<unknown>;
 let phoneCallLauncherForTests: PhoneCallLauncherForTests | undefined;
+let tregGatewayForTests: TregGateway | undefined;
+
+function tregGateway(): TregGateway {
+  if (tregGatewayForTests) return tregGatewayForTests;
+  const spend = new TregSpendGuard({
+    getSnap: getTregSpend,
+    saveSnap: saveTregSpend,
+    acquireLock: async (key, token, leaseSeconds) => {
+      const match = /^treg-spend:(\d+):(.+)$/.exec(key);
+      return match ? acquireTregSpendLock(Number(match[1]), match[2], token, leaseSeconds) : false;
+    },
+    releaseLock: async (key, token) => {
+      const match = /^treg-spend:(\d+):(.+)$/.exec(key);
+      if (match) await releaseTregSpendLock(Number(match[1]), match[2], token);
+    },
+  });
+  tregGatewayForTests = new TregGateway({
+    spend,
+    recordReceipt: saveTregReceipt,
+    recordMissionEvidence: async ({ userId, missionId, receipt, resultHash }) => Boolean(await recordTrustedMissionEvidence(userId, missionId, [{ id: `treg_${receipt.callId}`, kind: "tool_receipt", summary: `Treg ${receipt.endpointId} completed for $${receipt.costUsd.toFixed(4)} with provider status ${receipt.statusCode ?? "unknown"}.`, ref: `treg://receipts/${receipt.callId}`, hash: resultHash, verified: true, verifiedBy: "system" }])),
+  });
+  return tregGatewayForTests;
+}
+
+function tregOAuth(): TregOAuth {
+  return new TregOAuth(tregGateway());
+}
+
+function tregStateHash(state: string): string {
+  return createHash("sha256").update(state).digest("hex");
+}
+
+export function setTregGatewayForTests(gateway?: TregGateway): void {
+  tregGatewayForTests = gateway;
+}
 
 /** Test seam for authenticated call routes; production uses the configured provider below. */
 export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTests): void {
@@ -874,6 +915,76 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
   validateNativeToolArguments(slug, args);
   switch (slug) {
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
+    case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);
+    case "CHUCK_TREG_CALL": {
+      const body = args.body === undefined ? undefined : args.body;
+      const query = args.query && typeof args.query === "object" && !Array.isArray(args.query) ? Object.fromEntries(Object.entries(args.query).map(([key, value]) => [key, String(value)])) : undefined;
+      return tregGateway().call({
+        userId,
+        endpointId: text(args.endpointId, 200),
+        method: args.method ? String(args.method) : undefined,
+        body,
+        query,
+        missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
+        organizationId: runtime.organizationId,
+        estimateUsd: args.estimateUsd === undefined ? undefined : Number(args.estimateUsd),
+      });
+    }
+    case "CHUCK_TREG_ENRICH_PERSON": return tregGateway().enrichPerson({
+      userId,
+      name: args.name ? text(args.name, 240) : undefined,
+      domain: args.domain ? text(args.domain, 240) : undefined,
+      company: args.company ? text(args.company, 240) : undefined,
+      linkedinUrl: args.linkedinUrl ? text(args.linkedinUrl, 1000) : undefined,
+      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
+      maxSpendUsd: args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd),
+      organizationId: runtime.organizationId,
+    });
+    case "CHUCK_TREG_ENRICH_COMPANY": return tregGateway().enrichCompany({
+      userId,
+      domain: args.domain ? text(args.domain, 240) : undefined,
+      name: args.name ? text(args.name, 240) : undefined,
+      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
+      organizationId: runtime.organizationId,
+    });
+    case "CHUCK_TREG_RESOLVE": return tregGateway().resolveDataNeed({
+      userId,
+      need: text(args.need, 1000),
+      requiredFields: Array.isArray(args.requiredFields) ? args.requiredFields.map((field) => text(field, 120)) : undefined,
+      maxCalls: args.maxCalls === undefined ? undefined : Number(args.maxCalls),
+      maxSpendUsd: args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd),
+      missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
+      organizationId: runtime.organizationId,
+    });
+    case "CHUCK_TREG_BALANCE": return tregGateway().balance(args.orgId ? text(args.orgId, 160) : undefined, runtime.organizationId);
+    case "CHUCK_TREG_USAGE": {
+      const dayKey = args.dayKey ? text(args.dayKey, 10) : new Date().toISOString().slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey)) throw new Error("dayKey must use YYYY-MM-DD");
+      const spend = await getTregSpend(userId, dayKey);
+      return { spend: spend ?? { userId, dayKey, spentUsd: 0, reservedUsd: 0, missionSpent: {}, missionReserved: {}, rateWindowCalls: 0 }, receipts: await listTregReceipts(userId, args.limit === undefined ? 25 : Number(args.limit), runtime.organizationId) };
+    }
+    case "CHUCK_TREG_OAUTH_START": {
+      const provider = text(args.provider, 120);
+      const result = await tregOAuth().start(provider, runtime.organizationId);
+      await saveTregOAuthState(userId, { stateHash: tregStateHash(result.state), provider, ...(runtime.organizationId ? { organizationId: runtime.organizationId } : {}), createdAt: Date.now(), expiresAt: result.expiresAt ?? Date.now() + 10 * 60 * 1000 });
+      return result;
+    }
+    case "CHUCK_TREG_OAUTH_STATUS": {
+      const state = text(args.state, 500);
+      const record = await getTregOAuthState(userId, tregStateHash(state));
+      if (!record) throw new Error("Treg OAuth state is missing, expired, or belongs to another account");
+      const result = await tregOAuth().status(state, record.organizationId);
+      if (result.connected === true) await removeTregOAuthState(userId, record.stateHash);
+      return result;
+    }
+    case "CHUCK_TREG_OAUTH_CONNECTIONS": return tregOAuth().connections(runtime.organizationId);
+    case "CHUCK_TREG_OAUTH_REVOKE": {
+      const id = text(args.connectionId, 200);
+      const connections = await tregOAuth().connections(runtime.organizationId);
+      if (!connections.some((connection) => connection.id === id)) throw new Error("That Treg connection is not owned by this account or is no longer available");
+      return tregOAuth().revoke(id, runtime.organizationId);
+    }
     case "CHUCK_TOOL_PREFLIGHT": {
       const requestedTool = text(args.toolName, 200);
       const callArguments = args.arguments;

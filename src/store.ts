@@ -26,6 +26,7 @@ import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRu
 import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
+import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -88,6 +89,8 @@ export interface UserSession {
   mcpConnections?: McpConnectionRecord[];
   /** Short-lived encrypted MCP OAuth/PKCE handshakes. Never expose this to clients. */
   mcpOAuthStates?: McpOAuthStateRecord[];
+  /** Short-lived owner-scoped Treg OAuth state; never stores provider tokens. */
+  tregOAuthStates?: TregOAuthStateRecord[];
   workflowComposers?: WorkflowComposerRecord[];
   /** Per-origin browser operating recipes; never contains credentials or cookies. */
   browserPlaybooks?: BrowserPlaybookRecord[];
@@ -520,6 +523,8 @@ export interface SdkRunRecord {
   id: string;
   /** Set only for runs submitted through a project key; used for company-level status reporting. */
   companyProjectId?: string;
+  /** Trusted organization scope for connected intelligence credentials. */
+  organizationId?: string;
   /** Server-set provenance for first-party owner chat; never expose through runView. */
   ownerPrivateRun?: boolean;
   status: "queued" | "running" | "requires_approval" | "completed" | "failed" | "cancelled";
@@ -880,6 +885,8 @@ export interface TaskRecord {
   sdkStartedAt?: number;
   sdkSkills?: string[];
   sdkInstructions?: string;
+  /** Organization scope carried across asynchronous SDK task execution. */
+  sdkOrganizationId?: string;
   /** Preserve first-party owner-private execution through durable SDK task continuations. */
   sdkOwnerPrivateRun?: boolean;
   /** Admission slot held for an asynchronous SDK run until it settles. */
@@ -1373,6 +1380,10 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
+  saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
+  appendTregReceipt(receipt: TregCallReceipt): Promise<void>;
+  listTregReceipts(userId: number, limit: number, organizationId?: string): Promise<TregCallReceipt[]>;
   getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined>;
   saveRecallMeeting(record: RecallMeetingRecord): Promise<void>;
   listRecallMeetings(userId: number, limit: number): Promise<RecallMeetingRecord[]>;
@@ -1699,6 +1710,8 @@ class RedisBackend implements Backend {
   private uk = (id: number) => `chuck:user:${id}:devices`;
   private telegramUpdateKey = (id: number) => `chuck:telegram:update:${id}`;
   private agentUpgradeKey = (userId: number, upgradeId: string) => `chuck:agent-upgrade:${userId}:${createHash("sha256").update(upgradeId).digest("hex")}`;
+  private tregSpendKey = (userId: number, dayKey: string) => `chuck:treg:spend:${userId}:${dayKey}`;
+  private tregReceiptKey = (userId: number) => `chuck:treg:receipts:${userId}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
   private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
   private recallVisualDigest = (userId: number, meetingId: string) => createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
@@ -1750,6 +1763,26 @@ class RedisBackend implements Backend {
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+  }
+
+  async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
+    const raw = await this.r.get(this.tregSpendKey(userId, dayKey));
+    if (!raw) return undefined;
+    try {
+      const snapshot = JSON.parse(raw) as TregSpendSnapshot;
+      return snapshot.userId === userId && snapshot.dayKey === dayKey ? snapshot : undefined;
+    } catch { return undefined; }
+  }
+  async saveTregSpend(snapshot: TregSpendSnapshot): Promise<void> {
+    await this.r.setex(this.tregSpendKey(snapshot.userId, snapshot.dayKey), 8 * 24 * 60 * 60, JSON.stringify(snapshot));
+  }
+  async appendTregReceipt(receipt: TregCallReceipt): Promise<void> {
+    const key = this.tregReceiptKey(receipt.userId);
+    await this.r.multi().lpush(key, JSON.stringify(receipt)).ltrim(key, 0, 199).expire(key, 30 * 24 * 60 * 60).exec();
+  }
+  async listTregReceipts(userId: number, limit: number, organizationId?: string): Promise<TregCallReceipt[]> {
+    const raw = await this.r.lrange(this.tregReceiptKey(userId), 0, Math.max(0, Math.min(200, Math.floor(limit)) - 1));
+    return raw.flatMap((item) => { try { const receipt = JSON.parse(item) as TregCallReceipt; return receipt.userId === userId && (!organizationId || receipt.organizationId === organizationId) ? [receipt] : []; } catch { return []; } });
   }
 
   async getRecallMeeting(userId: number, id: string): Promise<RecallMeetingRecord | undefined> {
@@ -2891,6 +2924,8 @@ class RedisBackend implements Backend {
 // ── Memory ────────────────────────────────────────────────────────────────────
 class MemoryBackend implements Backend {
   private sessions = new Map<number, UserSession>();
+  private tregSpend = new Map<string, TregSpendSnapshot>();
+  private tregReceipts = new Map<number, TregCallReceipt[]>();
   private companyRuns = new Map<string, Map<string, CompanyRunSummary>>();
   private companyAudits = new Map<string, CompanyAuditEvent[]>();
   private companyCompletions = new Set<string>();
@@ -2947,6 +2982,21 @@ class MemoryBackend implements Backend {
     return session ? structuredClone(session) : fresh();
   }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
+  async getTregSpend(userId: number, dayKey: string) {
+    const snapshot = this.tregSpend.get(`${userId}:${dayKey}`);
+    return snapshot ? structuredClone(snapshot) : undefined;
+  }
+  async saveTregSpend(snapshot: TregSpendSnapshot) {
+    this.tregSpend.set(`${snapshot.userId}:${snapshot.dayKey}`, structuredClone(snapshot));
+  }
+  async appendTregReceipt(receipt: TregCallReceipt) {
+    const receipts = this.tregReceipts.get(receipt.userId) ?? [];
+    receipts.unshift(structuredClone(receipt));
+    this.tregReceipts.set(receipt.userId, receipts.slice(0, 200));
+  }
+  async listTregReceipts(userId: number, limit: number, organizationId?: string) {
+    return (this.tregReceipts.get(userId) ?? []).filter((receipt) => !organizationId || receipt.organizationId === organizationId).slice(0, Math.max(1, Math.min(200, Math.floor(limit)))).map((receipt) => structuredClone(receipt));
+  }
   async getRecallMeeting(userId: number, id: string) {
     const record = this.recallMeetings.get(`${userId}:${id}`);
     return record ? structuredClone(record) : undefined;
@@ -3622,7 +3672,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], tregOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -3967,6 +4017,7 @@ export async function getSession(uid: number): Promise<UserSession> {
   const browserPlaybooks = Array.isArray(s.browserPlaybooks) ? s.browserPlaybooks.filter((item): item is BrowserPlaybookRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.origin === "string").slice(0, 50) : [];
   const browserAudit = Array.isArray(s.browserAudit) ? s.browserAudit.filter((item): item is BrowserAuditRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.summary === "string").slice(-200) : [];
   const now = Date.now();
+  s.tregOAuthStates = Array.isArray(s.tregOAuthStates) ? s.tregOAuthStates.filter((item): item is TregOAuthStateRecord => Boolean(item) && typeof item === "object" && typeof item.stateHash === "string" && /^[a-f0-9]{64}$/.test(item.stateHash) && typeof item.provider === "string" && item.provider.length <= 120 && (item.organizationId === undefined || typeof item.organizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(item.organizationId)) && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt) && item.expiresAt > now).slice(-20) : [];
   const browserHandoffs = Array.isArray(s.browserHandoffs) ? s.browserHandoffs.filter((item): item is BrowserHandoffRecord => {
     if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^bh_[A-Za-z0-9_-]{1,120}$/.test(item.id) || typeof item.workspaceId !== "string" || !item.workspaceId || typeof item.reason !== "string" || !["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(item.reason) || typeof item.status !== "string" || !["waiting", "awaiting_verification", "completed", "expired", "cancelled"].includes(item.status) || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt)) return false;
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
@@ -3998,6 +4049,54 @@ export async function getSession(uid: number): Promise<UserSession> {
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+export interface TregOAuthStateRecord {
+  stateHash: string;
+  provider: string;
+  organizationId?: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export async function getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
+  return backend.getTregSpend(userId, dayKey);
+}
+
+export async function saveTregSpend(snapshot: TregSpendSnapshot): Promise<void> {
+  return backend.saveTregSpend(snapshot);
+}
+
+export async function saveTregReceipt(receipt: TregCallReceipt): Promise<void> {
+  return backend.appendTregReceipt(receipt);
+}
+
+export async function listTregReceipts(userId: number, limit = 50, organizationId?: string): Promise<TregCallReceipt[]> {
+  return backend.listTregReceipts(userId, Math.max(1, Math.min(200, Math.floor(limit))), organizationId);
+}
+
+export async function saveTregOAuthState(userId: number, record: TregOAuthStateRecord): Promise<void> {
+  const session = await getSession(userId);
+  session.tregOAuthStates = [...(session.tregOAuthStates ?? []).filter((item) => item.stateHash !== record.stateHash), record].slice(-20);
+  await saveSession(userId, session);
+}
+
+export async function getTregOAuthState(userId: number, stateHash: string): Promise<TregOAuthStateRecord | undefined> {
+  return (await getSession(userId)).tregOAuthStates?.find((item) => item.stateHash === stateHash && item.expiresAt > Date.now());
+}
+
+export async function removeTregOAuthState(userId: number, stateHash: string): Promise<void> {
+  const session = await getSession(userId);
+  session.tregOAuthStates = (session.tregOAuthStates ?? []).filter((item) => item.stateHash !== stateHash);
+  await saveSession(userId, session);
+}
+
+export async function acquireTregSpendLock(userId: number, dayKey: string, token: string, leaseSeconds = 15): Promise<boolean> {
+  return backend.acquireKeyLock(`treg-spend:${userId}:${dayKey}`, token, leaseSeconds);
+}
+
+export async function releaseTregSpendLock(userId: number, dayKey: string, token: string): Promise<void> {
+  return backend.releaseKeyLock(`treg-spend:${userId}:${dayKey}`, token);
 }
 
 /**
@@ -5177,6 +5276,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
     ...(typeof task.quotaReservationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.quotaReservationId) ? { quotaReservationId: task.quotaReservationId } : { quotaReservationId: undefined }),
+    ...(typeof task.sdkOrganizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(task.sdkOrganizationId) ? { sdkOrganizationId: task.sdkOrganizationId } : { sdkOrganizationId: undefined }),
     ...(task.enqueueClaim && typeof task.enqueueClaim === "object" && typeof task.enqueueClaim.token === "string" && Number.isFinite(task.enqueueClaim.expiresAt)
       ? { enqueueClaim: { token: task.enqueueClaim.token.slice(0, 120), expiresAt: Number(task.enqueueClaim.expiresAt) } }
       : { enqueueClaim: undefined }),
@@ -5216,6 +5316,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     sdkStartedAt: input.sdkStartedAt,
     sdkSkills: input.sdkSkills,
     sdkInstructions: input.sdkInstructions,
+    sdkOrganizationId: input.sdkOrganizationId,
     sdkOwnerPrivateRun: input.sdkOwnerPrivateRun === true ? true : undefined,
     quotaReservationId: input.quotaReservationId,
     meetingFollowUp: input.meetingFollowUp,

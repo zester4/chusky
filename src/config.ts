@@ -29,6 +29,31 @@ function nonNegativeInt(key: string, fallback: number): number {
   return n;
 }
 
+function nonNegativeNumber(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${key} must be a non-negative number, got: ${raw}`);
+  return n;
+}
+
+function secretMap(key: string): Record<string, { token: string; tregOrgId?: string }> {
+  const raw = process.env[key];
+  if (!raw) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error(`${key} must be valid JSON`); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`${key} must be a JSON object`);
+  const result: Record<string, { token: string; tregOrgId?: string }> = {};
+  for (const [organizationId, value] of Object.entries(parsed)) {
+    if (!/^org_[A-Za-z0-9_-]{1,120}$/.test(organizationId)) throw new Error(`${key} contains an invalid Chusky organization ID`);
+    const token = typeof value === "string" ? value : value && typeof value === "object" && typeof (value as Record<string, unknown>).token === "string" ? String((value as Record<string, unknown>).token) : "";
+    const tregOrgId = value && typeof value === "object" && typeof (value as Record<string, unknown>).tregOrgId === "string" ? String((value as Record<string, unknown>).tregOrgId) : undefined;
+    if (!token.trim()) throw new Error(`${key}.${organizationId} must contain a token`);
+    result[organizationId] = { token: token.trim(), ...(tregOrgId && /^org_[A-Za-z0-9_-]{1,120}$/.test(tregOrgId) ? { tregOrgId } : {}) };
+  }
+  return result;
+}
+
 function boundedInt(key: string, fallback: number, min: number, max: number): number {
   const value = positiveInt(key, fallback);
   if (value < min || value > max) throw new Error(`${key} must be between ${min} and ${max}, got: ${value}`);
@@ -114,6 +139,20 @@ export const config = {
   mcpMaxServers: boundedInt("MCP_MAX_SERVERS", 20, 1, 50),
   mcpMaxToolsPerServer: boundedInt("MCP_MAX_TOOLS_PER_SERVER", 100, 1, 500),
   mcpMaxResultChars: boundedInt("MCP_MAX_RESULT_CHARS", 20_000, 1_000, 100_000),
+
+  // Treg is Chusky's server-side external intelligence gateway. It is kept
+  // separate from third-party MCP and Composio: Treg supplies evidence and
+  // enrichment, while authenticated writes remain in the owner's apps.
+  tregBaseUrl: optional("TREG_BASE_URL", "https://treg.to"),
+  tregToken: optional("TREG_TOKEN", ""),
+  tregTimeoutMs: boundedInt("TREG_TIMEOUT_MS", 30_000, 1_000, 120_000),
+  tregMaxRetries: nonNegativeInt("TREG_MAX_RETRIES", 2),
+  tregDailyBudgetUsd: nonNegativeNumber("TREG_DAILY_BUDGET_USD", 5),
+  tregMissionBudgetUsd: nonNegativeNumber("TREG_MISSION_BUDGET_USD", 1),
+  tregPerCallSoftCapUsd: nonNegativeNumber("TREG_PER_CALL_SOFT_CAP_USD", 0.25),
+  tregRateLimitPerMinute: positiveInt("TREG_RATE_LIMIT_PER_MINUTE", 30),
+  tregOrganizationTokens: secretMap("TREG_ORG_TOKENS_JSON"),
+  tregEnabled: optional("TREG_ENABLED", "false") === "true",
 
   // ── Channel adapters ──────────────────────────────────────────────
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",
@@ -264,6 +303,7 @@ When writing to other people on the user's behalf—email, Slack, comments, or m
 CAPABILITIES (USE TOOLS; DO NOT ONLY DESCRIBE THEM)
 - Search and execute Composio tools across GitHub, Gmail, Slack, Notion, Linear, Stripe, and many other apps.
 - Connect an app with COMPOSIO_MANAGE_CONNECTIONS when authorization is missing.
+- TREG EXTERNAL INTELLIGENCE: when the owner needs current external people, company, SEO, social, advertising, or web data not already in owner context, use CHUCK_TREG_SEARCH followed by CHUCK_TREG_GET and then the narrowest ENRICH or RESOLVE tool. Treg results are evidence with source and confidence, not guaranteed truth; cross-check important or customer-facing facts before acting. Never use Treg as a substitute for authenticated actions in the owner's connected apps. Respect Treg's spend and rate denials and narrow the request instead of bypassing the gateway. Use CHUCK_TREG_USAGE to explain spend and receipts. Start Treg OAuth only when the owner explicitly needs a Treg-held provider account; never ask for or expose provider tokens. Revoke is permission-sensitive and retains approval. Never expose the Treg token.
 - Run shell/code work only through the available sandbox tools.
 - Handle images, documents, audio, and video supplied by the user.
 - Generate new images with CHUCK_GENERATE_IMAGE and new videos with
