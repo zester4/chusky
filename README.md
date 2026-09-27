@@ -40,7 +40,7 @@ The sections below are the detailed self-hosting and operations reference.
 | Area | What it provides | Important boundary |
 |---|---|---|
 | Connected apps | Composio app discovery, account connections, and a large catalog of provider actions | Uses the account's connected apps; availability depends on the selected action and connection |
-| Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, and XChat, plus optional voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
+| Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, regular X DMs, and optional encrypted XChat, plus voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
 | Durable work | Owner-scoped tasks, missions, reminders, recurring jobs, triggers, and resumable workflows | Production durability requires Redis; scheduled and continued work also requires QStash |
 | Workspaces and media | Optional Daytona computer/browser workspaces, generated media, and verified artifacts | Optional provider configuration and capability limits apply |
 | Developer access | REST API and TypeScript SDK, plus A2A and remote MCP integrations | Project scopes, stable user identity, budgets, and approvals are enforced server-side |
@@ -459,7 +459,7 @@ Chusky will use `COMPOSIO_MANAGE_CONNECTIONS` to connect GitHub if needed, then 
 | `/cli link` | Create a one-time terminal pairing code |
 | `/cli devices` | List linked terminals |
 | `/cli revoke <name>` | Revoke a linked terminal |
-| `/channel link slack|whatsapp|sendblue|sms|xchat` | Create a one-time verified external-channel link |
+| `/channel link slack|whatsapp|sendblue|sms|x|xchat` | Create a one-time verified external-channel link |
 | `/channel list` | List channels linked to your Chusky account |
 | `/channel notify slack|whatsapp|sendblue on|off` | Enable or disable proactive notifications for a linked channel |
 | `/link web_<one-time-code>` | Link the authenticated dashboard workspace to this verified Telegram account |
@@ -637,9 +637,34 @@ Enable the adapters only after their public HTTPS webhook endpoints are reachabl
 
 Slack setup requires an app Signing Secret, `chat:write`, `files:read`, and `files:write`, Event Subscriptions for direct messages and app mentions, Interactivity enabled at `/slack/interactions`, and OAuth Redirect URL matching `SLACK_REDIRECT_URI`. Reauthorize existing Slack installations after adding `files:write` so Chusky can upload generated images and artifacts. WhatsApp setup requires a Cloud API access token, phone number ID, verify token, and app secret. Keep all tokens in the deployment secret store; never commit `.env`.
 
-### XChat channel
+### X Direct Messages
 
-XChat uses the official `@chat-adapter/x` encrypted messaging adapter. Chusky handles direct messages and explicit group mentions through the same normalized gateway as its other channels; identity linking, Redis history, shared/private scope, locks, approvals, and the durable outbox remain Chusky-owned. The adapter also handles XChat encryption, media encryption/decryption, typing pills, read receipts, reactions, edits, and webhook CRC/signature validation.
+Regular X DMs use the official `@chat-adapter/x` adapter and the X API v2. This is X's unencrypted, standard Direct Message system. Chusky handles linked one-to-one DMs through the private account gateway; XChat credentials, identity links, and encrypted conversations remain separate.
+
+Configure a user-context OAuth token for the X bot account. For long-running production deployments, use managed refresh so token rotation survives restarts, and configure the encryption key because refreshed OAuth tokens are persisted in the adapter's durable state:
+
+```text
+X_ENABLED=true
+X_CONSUMER_SECRET=<X app consumer secret>
+X_CLIENT_ID=<OAuth 2.0 client ID>
+X_CLIENT_SECRET=<optional confidential-client secret>
+X_REFRESH_TOKEN=<OAuth 2.0 refresh token>
+X_ENCRYPTION_KEY=<base64 32-byte encryption key>
+X_USERNAME=<optional bot handle>
+X_API_BASE_URL=https://api.x.com
+```
+
+For a short-lived development setup, `X_USER_ACCESS_TOKEN` can replace the managed refresh credentials. The X OAuth app needs `users.read`, `dm.read`, and `dm.write`; add both `media.write` and `tweet.write` if Chusky will send images in a DM, and `offline.access` for managed refresh. R2 must be configured for generated images to be staged privately before the adapter uploads them. Keep the app consumer secret and OAuth credentials in the backend deployment secret store.
+
+Register `https://your-domain.example/x/webhook` in the X Developer Console and subscribe the bot account to `dm.received` and `dm.sent`. X requires the bot account to authorize the app before private DM events can be subscribed. Chusky routes both the CRC challenge and signed event body through the official adapter. Subscription management stays in the X Console; startup does not create X Activity subscriptions.
+
+From Telegram or the dashboard, create a link code for `x`, then send `/link <code>` from the X account in a regular DM to the bot. Linked X DMs use the owner's private Chusky history and are processed under the normal private-channel approval policy. Linking does not enable unsolicited notifications; opt in explicitly with `/channel notify x on`.
+
+The installed `@chat-adapter/x` 4.40.0 exposes inbound DM text but does not surface inbound DM media in its normalized messages. Outbound media can be uploaded through X's media API when the action includes an attachment and the token has `media.write`. Public mentions are not enabled in this channel implementation.
+
+### Encrypted XChat (optional legacy channel)
+
+XChat uses the separate `@chat-adapter/x/chat` adapter and X's encrypted messaging system. Chusky handles DMs and explicit group mentions through the same normalized gateway as its other channels; identity linking, Redis history, shared/private scope, locks, approvals, and the durable outbox remain Chusky-owned. The adapter handles encryption, media encryption/decryption, typing pills, read receipts, reactions, edits, and webhook CRC/signature validation. It is separate from regular X DMs: do not reuse X OAuth user credentials as `XCHAT_BOT_TOKEN`, and do not expect one provider link to authorize the other.
 
 Enable it only when the XChat bot has been provisioned with an OAuth access token, Juicebox PIN, webhook consumer secret, and a public HTTPS callback:
 
@@ -995,10 +1020,11 @@ Sendblue `content` is plain text, not rendered Markdown. Chusky converts common 
 | WhatsApp | Implemented | Linked private chats use the account session; proactive notifications require explicit opt-in |
 | Sendblue | Implemented | Linked private iMessages use the account session; groups use shared scope; replies use the durable outbox |
 | SMS | Twilio Messaging | Configure a Twilio sender or Messaging Service, `/twilio/sms` webhook, and signature validation |
-| XChat | Implemented | Official encrypted X DMs/groups, media, mentions, typing, receipts, edits, and reactions through `/xchat/webhook` |
+| X Direct Messages | Implemented | Official regular, unencrypted X DMs through `/x/webhook`; inbound DM media is not exposed by the installed adapter |
+| Encrypted XChat | Implemented | Separate encrypted X DMs/groups, media, mentions, typing, receipts, edits, and reactions through `/xchat/webhook` |
 | Voice | Implemented | Twilio phone calls plus optional Recall meeting bots; the two transports and their credentials stay separate |
 
-To connect Slack, WhatsApp, Sendblue, SMS, or XChat, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
+To connect Slack, WhatsApp, Sendblue, SMS, X DMs, or XChat, first run `/channel link <provider>` in the owning Telegram account. Complete the provider OAuth or send the one-time code from the external channel. Unlinked messages are rejected before they reach Chusky’s history, memory, tasks, or approvals. Sendblue requires `SENDBLUE_ENABLED`, API credentials, an iMessage-capable line, a `receive` webhook at `/sendblue/webhook`, Redis, QStash, and an HTTPS `WEBHOOK_URL`. Use `/channel list` to inspect links and `/channel notify <provider> on` only when the user wants proactive delivery.
 
 In webhook mode, provider routes must be publicly reachable over HTTPS. Slack uses `/slack/events` and `/slack/interactions`; WhatsApp Cloud API uses `GET` and `POST /whatsapp/webhook`. Both routes verify the raw request signature, reject invalid requests with a non-2xx status, acknowledge provider webhooks quickly, and dispatch work asynchronously. Duplicate events are claimed in Redis, and every outbound reply is persisted in the Redis outbox before provider delivery.
 
@@ -1113,11 +1139,19 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `WHATSAPP_VERIFY_TOKEN` | WhatsApp | — | Webhook verification token |
 | `WHATSAPP_APP_SECRET` | WhatsApp | — | Meta app secret for `X-Hub-Signature-256` |
 | `WHATSAPP_GRAPH_VERSION` | — | `v23.0` | Graph API version |
+| `X_ENABLED` | — | `false` | Enable regular, unencrypted X Direct Messages |
+| `X_USER_ACCESS_TOKEN` | X OAuth 2.0 | — | Static OAuth user token for development; expires and is not suitable for a long-running production bot |
+| `X_CLIENT_ID` | X OAuth 2.0 | — | OAuth client ID for managed token refresh |
+| `X_CLIENT_SECRET` | X OAuth 2.0 | — | Optional confidential OAuth client secret |
+| `X_REFRESH_TOKEN` | X OAuth 2.0 | — | Refresh token with `offline.access`; use with `X_CLIENT_ID` |
+| `X_ENCRYPTION_KEY` | — | — | Base64 32-byte key required in production to encrypt persisted refreshed OAuth tokens |
+| `X_USERNAME` | X account | — | Optional bot handle used by the adapter |
+| `X_API_BASE_URL` | — | `https://api.x.com` | X API base URL override |
+| `X_CONSUMER_SECRET` | X developer app | — | Consumer secret used for CRC and webhook signature verification by X DM and XChat adapters |
 | `XCHAT_ENABLED` | — | `false` | Enable the encrypted XChat adapter |
 | `XCHAT_BOT_TOKEN` | X OAuth 2.0 | — | OAuth 2.0 user token for the XChat bot account |
 | `X_BEARER_TOKEN` | X developer app | — | App-only bearer token used to list Activity API subscriptions |
 | `XCHAT_PIN` | Juicebox | — | PIN used to unlock the bot's encrypted XChat keys |
-| `X_CONSUMER_SECRET` | X developer app | — | Consumer secret used for webhook CRC/signature verification |
 | `XCHAT_WEBHOOK_ID` | X developer app | — | Existing X Activity API webhook ID |
 | `SENDBLUE_ENABLED` | — | `false` | Enable the Sendblue iMessage adapter |
 | `SENDBLUE_API_KEY` | Sendblue | — | Sendblue API key ID |

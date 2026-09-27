@@ -57,6 +57,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "The SDK refreshes a short-lived image download URL through an owner-scoped endpoint; image bytes, storage keys, and signed URLs are not persisted in run records.",
     "The dashboard renders generated image previews, and project API keys require the dedicated images:read permission.",
   ],
+  xDirectMessages: [
+    "Added a regular X Direct Messages channel alongside separate encrypted XChat, with independent OAuth settings and identity links.",
+    "X webhook CRC and signature checks use the official adapter; message routing, account linking, durable state, and delivery use Chusky's channel gateway.",
+    "Linked X DMs are private conversations, while unsolicited X notifications stay off until explicitly enabled. The installed adapter does not expose inbound DM images yet.",
+  ],
   customMcp: [
     "Accounts can add third-party MCP servers from the dashboard or SDK; Chusky supports Streamable HTTP with legacy HTTP+SSE fallback and verifies discovery before saving.",
     "Bearer credentials are encrypted at rest, outbound hosts are pinned to validated public DNS results, and private/link-local targets and redirects are rejected.",

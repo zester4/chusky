@@ -1,11 +1,11 @@
 {
-  "id": "release-4.15.0",
-  "version": "4.15.0",
+  "id": "release-4.16.0",
+  "version": "4.16.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Owner-private chat, calls, and meetings now use relevant owner history and context plus connected Composio, MCP, and native tools across personal and business use.",
-    "Owner-private interactive runs use relevant owner context and connected tools for routine requests; deletion, financial, permission, deployment/push, and provider-marked high-impact actions pause for exact approval.",
-    "Personal and business context stays appropriately separated, and shared rooms, autonomous workflows, and delegated workers keep their explicit scopes and policies."
+    "Added a regular X Direct Messages channel alongside separate encrypted XChat, with independent OAuth settings and identity links.",
+    "X webhook CRC and signature checks use the official adapter; message routing, account linking, durable state, and delivery use Chusky's channel gateway.",
+    "Linked X DMs are private conversations, while unsolicited X notifications stay off until explicitly enabled. The installed adapter does not expose inbound DM images yet."
   ],
-  "createdAt": "2026-09-26T23:54:16.617Z"
+  "createdAt": "2026-09-27T01:44:55.462Z"
 }

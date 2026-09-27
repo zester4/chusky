@@ -143,6 +143,17 @@ export const config = {
   twilioMessagingServiceSid: optional("TWILIO_MESSAGING_SERVICE_SID", ""),
   twilioSmsWebhookUrl: optional("TWILIO_SMS_WEBHOOK_URL", ""),
   twilioSmsStatusCallbackUrl: optional("TWILIO_SMS_STATUS_CALLBACK_URL", ""),
+  // Standard X (unencrypted) Direct Messages use OAuth user credentials that
+  // are independent from XChat's bot token and Juicebox PIN.
+  xEnabled: optional("X_ENABLED", "false") === "true",
+  xUserAccessToken: optional("X_USER_ACCESS_TOKEN", ""),
+  xClientId: optional("X_CLIENT_ID", ""),
+  xClientSecret: optional("X_CLIENT_SECRET", ""),
+  xRefreshToken: optional("X_REFRESH_TOKEN", ""),
+  xEncryptionKey: optional("X_ENCRYPTION_KEY", ""),
+  xUsername: optional("X_USERNAME", ""),
+  xApiBaseUrl: optional("X_API_BASE_URL", "https://api.x.com"),
+  xConsumerSecret: optional("X_CONSUMER_SECRET", ""),
   xchatEnabled: optional("XCHAT_ENABLED", "false") === "true",
   xchatBotToken: optional("XCHAT_BOT_TOKEN", ""),
   xchatAppBearerToken: optional("X_BEARER_TOKEN", ""),

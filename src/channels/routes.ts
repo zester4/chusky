@@ -9,7 +9,8 @@ import { normalizeSlackEvent, parseSlackInteraction, SlackAdapter, verifySlackSi
 import { normalizeWhatsAppMessages, normalizeWhatsAppStatuses, verifyWhatsAppChallenge, verifyWhatsAppSignature, WhatsAppAdapter } from "./whatsapp.js";
 import { normalizeSendblueMessage, normalizeSendblueStatus, SendblueAdapter, verifySendblueSignature } from "./sendblue.js";
 import { normalizeTwilioMessage, verifyTwilioSignature, TwilioSmsAdapter } from "./sms.js";
-import { createXchatCrcResponse, XchatAdapter } from "./xchat.js";
+import { XchatAdapter } from "./xchat.js";
+import { XAdapter } from "./x.js";
 import { ChannelDebouncer } from "./debounce.js";
 import { logger } from "../logger.js";
 
@@ -26,7 +27,8 @@ interface ChannelRouteOptions {
   whatsapp?: { adapter: WhatsAppAdapter; appSecret: string; verifyToken: string };
   sendblue?: { adapter: SendblueAdapter; webhookSecret: string; enqueue?: (eventId: string) => Promise<void>; processInline?: (eventId: string) => Promise<void> };
   twilioSms?: { adapter: TwilioSmsAdapter; authToken: string; webhookUrl?: string; statusWebhookUrl?: string };
-  xchat?: { adapter: XchatAdapter; consumerSecret: string };
+  x?: { adapter: XAdapter };
+  xchat?: { adapter: XchatAdapter };
 }
 
 function errorStatus(error: unknown): 400 | 401 | 403 | 500 | 503 {
@@ -254,17 +256,16 @@ export function registerChannelRoutes(app: Hono, options: ChannelRouteOptions): 
 
   if (options.xchat) {
     const xchat = options.xchat;
-    // Answer CRC directly. X sends this challenge while creating and
-    // periodically revalidating the webhook; it must not depend on the full
-    // XChat SDK initialization or an X API round trip.
-    app.get("/xchat/webhook", (c) => {
-      const crcToken = String(c.req.query("crc_token") ?? "").trim();
-      if (!crcToken) return c.json({ ok: false, error: "missing crc_token" }, 400);
-      try { return c.json(createXchatCrcResponse(crcToken, xchat.consumerSecret)); }
-      catch { return c.json({ ok: false, error: "XChat CRC is not configured" }, 503); }
-    });
-    // Pass POST untouched through so the official adapter validates the raw
-    // encrypted body and X signature before dispatching to Chusky.
+    // Route both CRC and event requests through the official adapter. Its CRC
+    // parser rejects malformed tokens before signing, avoiding a signing oracle.
+    app.get("/xchat/webhook", async (c) => xchat.adapter.handleWebhook(c.req.raw));
     app.post("/xchat/webhook", async (c) => xchat.adapter.handleWebhook(c.req.raw));
+  }
+
+  if (options.x) {
+    const x = options.x;
+    // The adapter verifies the raw body signature and answers CRC challenges.
+    app.get("/x/webhook", async (c) => x.adapter.handleWebhook(c.req.raw));
+    app.post("/x/webhook", async (c) => x.adapter.handleWebhook(c.req.raw));
   }
 }

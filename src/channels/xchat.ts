@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import type { Chat, Message } from "chat";
 import { CHANNEL_CAPABILITIES } from "./capabilities.js";
 import type { ChannelAdapter, ChannelAttachment, DeliveryReceipt, InboundMessage, OutboundMessage, ReplyTarget } from "./contracts.js";
@@ -10,13 +9,6 @@ type XchatRawMessage = {
 };
 
 const nativeImport = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<any>;
-
-/** Build the X Activity API CRC response without initializing the full SDK. */
-export function createXchatCrcResponse(crcToken: string, consumerSecret: string): { response_token: string } {
-  if (!crcToken || !consumerSecret) throw new Error("XChat CRC requires a token and consumer secret");
-  const responseToken = createHmac("sha256", consumerSecret).update(crcToken).digest("base64");
-  return { response_token: `sha256=${responseToken}` };
-}
 
 export interface XchatAdapterOptions {
   accessToken: string;

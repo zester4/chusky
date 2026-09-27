@@ -32,6 +32,7 @@ import { SendblueAdapter } from "./channels/sendblue.js";
 import { TwilioSmsAdapter } from "./channels/sms.js";
 import { XchatAdapter } from "./channels/xchat.js";
 import { ensureXchatActivitySubscriptions, type XchatSetupStatus } from "./channels/xchatSetup.js";
+import { XAdapter, type XSetupStatus } from "./channels/x.js";
 import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
@@ -252,6 +253,8 @@ async function main(): Promise<void> {
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
   const app = new Hono();
+  let xSetup: XSetupStatus | undefined;
+  let xAdapter: XAdapter | undefined;
   let xchatSetup: XchatSetupStatus | undefined;
   let composioTriggerSetup: ComposioTriggerSetupStatus | undefined;
   const composioWebhookUrl = config.composioWebhookUrl || (config.webhookUrl ? `${config.webhookUrl.replace(/\/+$/, "")}/composio/triggers` : "");
@@ -347,6 +350,28 @@ async function main(): Promise<void> {
       process: (message: InboundMessage) => channelGateway.processInbound(message),
       recordFailure: (error: unknown, context: Record<string, unknown>) => recordFailure("workflow_failure", error, context),
     };
+    if (config.xEnabled) {
+      try {
+        const candidate = new XAdapter({
+          consumerSecret: config.xConsumerSecret,
+          userAccessToken: config.xUserAccessToken || undefined,
+          clientId: config.xClientId || undefined,
+          clientSecret: config.xClientSecret || undefined,
+          refreshToken: config.xRefreshToken || undefined,
+          encryptionKey: config.xEncryptionKey || undefined,
+          userName: config.xUsername || undefined,
+          apiBaseUrl: config.xApiBaseUrl,
+          redisUrl: config.redisUrl,
+          processInbound: (message) => channelGateway.processInbound(message),
+        });
+        xSetup = await candidate.initialize();
+        xAdapter = candidate;
+        logger.info({ botUserId: xSetup.botUserId, botUsername: xSetup.botUsername }, "X Direct Messages are ready");
+      } catch (error) {
+        xSetup = { status: "misconfigured", error: error instanceof Error ? error.message.slice(0, 300) : "X adapter initialization failed" };
+        logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError", error: xSetup.error }, "X Direct Messages setup is incomplete");
+      }
+    }
     const xchatAdapter = config.xchatEnabled && config.xchatBotToken && config.xchatConsumerSecret && config.xchatPin
       ? new XchatAdapter({
         accessToken: config.xchatBotToken,
@@ -398,6 +423,7 @@ async function main(): Promise<void> {
     if (config.whatsappEnabled) channelGateway.register(whatsappAdapter);
     if (config.sendblueEnabled) channelGateway.register(sendblueAdapter);
     if (twilioSmsAdapter) channelGateway.register(twilioSmsAdapter);
+    if (xAdapter) channelGateway.register(xAdapter);
     if (xchatAdapter) channelGateway.register(xchatAdapter);
     registerChannelRoutes(app, {
       gateway: channelGateway,
@@ -415,7 +441,8 @@ async function main(): Promise<void> {
         },
       } } : {}),
       ...(twilioSmsAdapter ? { twilioSms: { adapter: twilioSmsAdapter, authToken: config.twilioAuthToken, webhookUrl: twilioSmsWebhookUrl, statusWebhookUrl: twilioSmsStatusCallbackUrl } } : {}),
-      ...(xchatAdapter ? { xchat: { adapter: xchatAdapter, consumerSecret: config.xchatConsumerSecret } } : {}),
+      ...(xAdapter ? { x: { adapter: xAdapter } } : {}),
+      ...(xchatAdapter ? { xchat: { adapter: xchatAdapter } } : {}),
     });
     if (config.sendblueEnabled) {
       app.post("/workflows/sendblue-event", serveWorkflow(async (workflow) => {
@@ -2728,12 +2755,13 @@ async function main(): Promise<void> {
         const me = await bot.api.getMe();
         const redis = isDurableStore();
         const production = process.env.NODE_ENV === "production";
+        const xCheck = !config.xEnabled ? "disabled" : xSetup?.status === "ready" ? "configured" : "misconfigured";
         const xchatCheck = !config.xchatEnabled ? "disabled" : xchatSetup?.status === "ready" ? "configured" : "misconfigured";
         const composioTriggersCheck = !composioTriggerSetup ? "disabled" : composioTriggerSetup.status === "ready" ? "configured" : "misconfigured";
-        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", xchat: xchatCheck } as const;
+        const checks = { telegram: "ok", redis: redis ? "ok" : production ? "failed" : "degraded", qstash: config.qstashToken ? "configured" : "disabled", composioTriggers: composioTriggersCheck, sendblue: config.sendblueEnabled ? (config.sendblueApiKey && config.sendblueApiSecret && config.sendblueNumber && config.sendblueWebhookSecret ? "configured" : "misconfigured") : "disabled", twilio: config.twilioVoiceEnabled ? (config.twilioAccountSid && config.twilioAuthToken && config.twilioCallerId && config.twilioWebhookBaseUrl && config.twilioMediaStreamUrl && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", bland: config.blandVoiceEnabled ? (isBlandVoiceConfigured() ? "configured" : "misconfigured") : "disabled", recallMeetings: config.recallMeetingsEnabled ? (recallConfigurationReady() ? "configured" : "misconfigured") : "disabled", recallChat: recallChatConfigurationStatus(), mcp: config.mcpEnabled ? (mcpClient.configurationErrors().length ? "misconfigured" : "configured") : "disabled", twilioSms: config.twilioSmsEnabled ? (config.twilioAccountSid && config.twilioAuthToken && (config.twilioPhoneNumber || config.twilioMessagingServiceSid) ? "configured" : "misconfigured") : "disabled", twilioInbound: config.twilioInboundEnabled ? (config.twilioVoiceEnabled && config.twilioInboundOwnerUserId && config.twilioInboundAllowedCallers && config.twilioMediaBridgeSecret ? "configured" : "misconfigured") : "disabled", x: xCheck, xchat: xchatCheck } as const;
         const recallChatIssue = recallChatConfigurationIssue();
-        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.bland !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.mcp !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.xchat !== "misconfigured";
-        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, configurationIssues: { recallChat: recallChatIssue }, composioTriggers: composioTriggerSetup, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
+        const ok = checks.telegram === "ok" && checks.redis === "ok" && checks.composioTriggers !== "misconfigured" && checks.sendblue !== "misconfigured" && checks.twilio !== "misconfigured" && checks.bland !== "misconfigured" && checks.recallMeetings !== "misconfigured" && checks.recallChat !== "misconfigured" && checks.mcp !== "misconfigured" && checks.twilioSms !== "misconfigured" && checks.twilioInbound !== "misconfigured" && checks.x !== "misconfigured" && checks.xchat !== "misconfigured";
+        return c.json({ ok, status: ok ? "operational" : "degraded", bot: me.username, agent: "Chusky", persistence: redis ? "redis" : "memory", checks, configurationIssues: { recallChat: recallChatIssue }, x: config.xEnabled ? xSetup : undefined, xchat: config.xchatEnabled ? { ...xchatSetup, cryptoStatus: xchatAdapter?.cryptoStatus ?? "uninitialized" } : undefined, composioTriggers: composioTriggerSetup, channels: { telegram: true, cli: true, slack: config.slackEnabled, whatsapp: config.whatsappEnabled, sendblue: config.sendblueEnabled, sms: config.twilioSmsEnabled, x: config.xEnabled, xchat: config.xchatEnabled }, monitoring: monitoringSnapshot() }, ok ? 200 : 503);
       } catch (e) {
         recordFailure("provider_failure", e, { provider: "telegram", check: "health" });
         logger.warn({ errorName: e instanceof Error ? e.name : "UnknownError" }, "Deep health check failed");

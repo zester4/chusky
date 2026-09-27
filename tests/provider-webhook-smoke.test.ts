@@ -13,6 +13,7 @@ const completeConfig = {
   sendblueWebhookSecret: "sendblue-test-secret",
   twilioAuthToken: "twilio-test-auth-token",
   xchatConsumerSecret: "xchat-test-consumer-secret",
+  xConsumerSecret: "x-test-consumer-secret",
 };
 
 test("staging webhook smoke exercises only signed callbacks and never sends or certifies messages", async () => {
@@ -26,20 +27,21 @@ test("staging webhook smoke exercises only signed callbacks and never sends or c
     }
     if (url.pathname === "/whatsapp/webhook" && init.method === "GET") return new Response(url.searchParams.get("hub.challenge"));
     if (url.pathname === "/xchat/webhook") return Response.json({ response_token: `sha256=${createHmac("sha256", completeConfig.xchatConsumerSecret).update(url.searchParams.get("crc_token") ?? "").digest("base64")}` });
+    if (url.pathname === "/x/webhook") return Response.json({ response_token: `sha256=${createHmac("sha256", completeConfig.xConsumerSecret).update(url.searchParams.get("crc_token") ?? "").digest("base64")}` });
     if (url.pathname === "/twilio/sms/status") return new Response("ok");
     return Response.json({ ok: true });
   };
 
   const report = await runStagingWebhookSmoke(completeConfig, fetchImpl);
 
-  assert.deepEqual(report.results.map((result) => result.provider).sort(), ["sendblue", "slack", "twilio", "whatsapp", "xchat"]);
+  assert.deepEqual(report.results.map((result) => result.provider).sort(), ["sendblue", "slack", "twilio", "whatsapp", "x", "xchat"]);
   assert.equal(report.outboundMessagesSent, 0);
   assert.equal(report.fullProviderProofCreated, false);
   assert.equal(report.readinessChanged, false);
   assert.ok(requests.every(({ url }) => url.origin === completeConfig.baseUrl));
   assert.ok(requests.every(({ url }) => !url.pathname.includes("provider-proof")));
   assert.ok(requests.every(({ url }) => !["slack.com", "graph.facebook.com", "api.sendblue.com", "api.twilio.com"].includes(url.hostname)));
-  assert.deepEqual(requests.map(({ url }) => url.pathname).sort(), ["/sendblue/status", "/slack/events", "/twilio/sms/status", "/whatsapp/webhook", "/whatsapp/webhook", "/xchat/webhook"].sort());
+  assert.deepEqual(requests.map(({ url }) => url.pathname).sort(), ["/sendblue/status", "/slack/events", "/twilio/sms/status", "/whatsapp/webhook", "/whatsapp/webhook", "/x/webhook", "/xchat/webhook"].sort());
   assert.ok(requests.every(({ init }) => init.redirect === "manual"));
 });
 
