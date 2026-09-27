@@ -1029,6 +1029,9 @@ test("owner-private voice and meeting turns execute routine writes directly and 
     );
     assert.match(result.text, /email was sent/);
     assert.equal(created, 1, "the private voice turn must initialize the owner's Composio session");
+    assert.equal(requests[0]?.max_tokens, config.voiceMaxTokens, "private meeting/call speech should use the bounded voice response budget");
+    assert.deepEqual(requests[0]?.models, ["test/model", ...config.voiceFallbackModels.filter((fallback) => fallback !== "test/model")]);
+    assert.equal(requests[0]?.session_id, "private-meeting-test", "voice requests should retain provider prompt-cache affinity");
     assert.deepEqual(executed, [{ slug: "GMAIL_SEND_EMAIL", args: { to: "client@example.com", subject: "Follow-up", body: "Thanks for the conversation." } }]);
     assert.equal(requests[0]?.tools.some((tool: any) => tool.function.name === "GMAIL_SEND_EMAIL"), true);
     assert.equal(requests[0]?.messages.at(-2)?.content, "We agreed to send a short follow-up after the conversation.");
