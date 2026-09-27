@@ -67,9 +67,12 @@ status, and connection listing are bounded autonomous operations. The gateway
 still enforces account scope, spend reservations, rate limits, provider
 balance/capacity, and registered-tool checks.
 
-`CHUCK_TREG_CALL` remains approval-gated because it may spend budget or invoke a
-registered organization-owned action. OAuth start and revoke remain
-approval-gated because they change an external account authorization.
+Catalog provider calls through `CHUCK_TREG_CALL` are autonomous within the
+gateway's spend reservations, daily/mission/per-call budgets, rate limits,
+capacity checks, and idempotency rules. Calls to registered organization-owned
+tools remain approval-gated because they can change company systems. OAuth
+start and revoke remain approval-gated because they change an external account
+authorization.
 
 ## MCP distinction
 

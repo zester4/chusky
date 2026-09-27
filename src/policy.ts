@@ -86,9 +86,8 @@ const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_FORGET_MEMORY", "CHUCK_FORGET_IMAGE_ASSET", "CHUCK_SCRATCHPAD_CLEAR", "CHUCK_DAYTONA_SET_FILE_PERMISSIONS",
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
-  // Treg calls may spend budget or invoke an organization-owned action.
   // OAuth start/revoke change an external account authorization.
-  "CHUCK_TREG_CALL", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE",
+  "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE",
 ]);
 
 // Bounded Treg intelligence and metadata reads stay autonomous. The gateway
@@ -123,6 +122,13 @@ const PRIVATE_COMPOSIO_META_TOOLS = new Set([
   "COMPOSIO_SEARCH_TOOLS", "COMPOSIO_SEARCH_WEB",
   "COMPOSIO_SEARCH_FETCH_URL_CONTENT", "COMPOSIO_GET_TOOL_SCHEMAS",
 ]);
+
+function isAutonomousTregCatalogCall(args: Record<string, unknown>): boolean {
+  const endpointId = String(args.endpointId ?? "").trim();
+  // Match TregGateway's boundary: catalog IDs are opaque IDs without a path;
+  // slash targets and absolute URLs are registered organization tools.
+  return Boolean(endpointId) && !/^https:\/\//i.test(endpointId) && !endpointId.includes("/");
+}
 
 function composioActionPolicy(slug: string): ToolApprovalPolicy {
   // Provider annotations are useful for discovering additional risk, but
@@ -166,6 +172,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
   if (slug === "CHUCK_DAYTONA_SET_FILE_PERMISSIONS") return "approval_required";
   if (slug.startsWith("CHUCK_DAYTONA_")) return "private";
   if (slug === "CHUCK_MISSION_COMPENSATE" && String(args.action ?? "") === "inspect") return "private";
+  if (slug === "CHUCK_TREG_CALL") return isAutonomousTregCatalogCall(args) ? "private" : "approval_required";
   if (APPROVAL_NATIVE_TOOLS.has(slug)) return "approval_required";
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (PRIVATE_NATIVE_TOOLS.has(slug) || PRIVATE_COMPOSIO_META_TOOLS.has(slug)) return "private";
@@ -365,6 +372,7 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
 }
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
+  if (slug === "CHUCK_TREG_CALL" && isAutonomousTregCatalogCall(args)) return false;
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;
   if (ownerPrivateRun) {
     if (slug.startsWith("MCP_")) {

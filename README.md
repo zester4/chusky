@@ -246,9 +246,11 @@ budgeted per owner and mission, reserved atomically in Redis, recorded with
 bounded receipts, retried only for idempotent or idempotency-keyed requests,
 and fail closed when an endpoint price is unavailable. Catalog search,
 inspection, comparison, enrichment, resolve, balance, usage, and OAuth status
-are bounded autonomous operations. `CHUCK_TREG_CALL` remains approval-gated
-because it may spend budget or invoke a registered organization-owned action;
-OAuth start/revoke remain approval-gated because they change authorization. The
+are bounded autonomous operations. Catalog provider calls through
+`CHUCK_TREG_CALL` run autonomously within the configured spend, rate, capacity,
+and idempotency guards. Calls to registered organization-owned tools remain
+approval-gated because they can change company systems; OAuth start/revoke
+remain approval-gated because they change authorization. The
 native tools are
 `CHUCK_TREG_SEARCH`, `CHUCK_TREG_GET`, `CHUCK_TREG_CALL`,
 `CHUCK_TREG_ENRICH_PERSON`, `CHUCK_TREG_ENRICH_COMPANY`,

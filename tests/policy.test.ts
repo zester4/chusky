@@ -141,7 +141,7 @@ test("owner-private MCP runs do not inherit a server-wide approval gate but keep
   assert.equal(requiresToolApproval("MCP_private_create_ticket_1234567890", { title: "Follow up" }, true, false), true, "restricted runs keep the connected server's configured approval policy");
 });
 
-test("bounded Treg intelligence tools are autonomous while calls and OAuth changes stay gated", () => {
+test("bounded Treg intelligence and catalog calls are autonomous while company tools and OAuth changes stay gated", () => {
   const autonomous = [
     "CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS",
     "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE",
@@ -152,7 +152,14 @@ test("bounded Treg intelligence tools are autonomous while calls and OAuth chang
     assert.equal(requiresToolApproval(slug, {}, false), false, `${slug} should not prompt`);
     assert.equal(requiresToolApproval(slug, {}, true), false, `${slug} should ignore a generic strict-run prompt`);
   }
-  for (const slug of ["CHUCK_TREG_CALL", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE"]) {
+  assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }), false);
+  assert.equal(requiresToolApproval("CHUCK_TREG_CALL", { endpointId: "treg.companies.enrich" }, true), false);
+  for (const args of [{}, { endpointId: "stripe/charges" }, { endpointId: "https://api.example.com/charge" }]) {
+    assert.equal(toolApprovalPolicy("CHUCK_TREG_CALL", args), "approval_required");
+    assert.equal(requiresToolApproval("CHUCK_TREG_CALL", args), true);
+  }
+  for (const slug of ["CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE"]) {
     assert.equal(toolApprovalPolicy(slug), "approval_required", slug);
     assert.equal(requiresToolApproval(slug), true, `${slug} should remain gated`);
     assert.equal(requiresToolApproval(slug, {}, false, true), true, `${slug} should remain gated in owner-private runs`);
