@@ -275,6 +275,24 @@ stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use
 `TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
 
+For a live local smoke test, keep `TREG_TOKEN` in `.env` and run the
+read-only catalog check:
+
+```bash
+npm run treg:live-smoke
+```
+
+To execute one low-cost company-enrichment provider call as well, pass
+`--real-call` explicitly:
+
+```bash
+npm run treg:live-smoke -- --real-call --domain airmasters.net --company "Air Masters of Tampa Bay"
+```
+
+The script prints normalized provider fields and the safe receipt only; it does
+not print the Treg token or the raw provider payload. The provider call consumes
+Treg balance and is subject to the configured spend cap.
+
 ### Workflow Composer
 
 The authenticated `/v1/workflows/composer` API and `/app/composer` dashboard

@@ -47,8 +47,28 @@ function numberArray(value: unknown): string[] | undefined {
   return values.length ? values : undefined;
 }
 
+function unwrapEndpoint(raw: unknown): JsonObject {
+  let current: unknown = raw;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (!isObject(current)) return {};
+    const object = current;
+    if (object.id !== undefined || object.endpoint_id !== undefined || object.slug !== undefined) return object;
+    const nested = ["endpoint", "endpoint_data", "tool", "result", "data", "details"]
+      .map((key) => object[key])
+      .find((value) => isObject(value));
+    if (!nested) return current;
+    current = nested;
+  }
+  return isObject(current) ? current : {};
+}
+
 function normalizeHit(raw: unknown): TregEndpointHit {
-  const row = isObject(raw) ? raw : {};
+  const row = unwrapEndpoint(raw);
+  const cost = isObject(row.cost) ? row.cost : {};
+  const observed = isObject(row.observed) ? row.observed : {};
+  const input = isObject(row.input) ? row.input : {};
+  const inputBody = isObject(input.body) ? input.body : {};
+  const inputFields = Object.keys(inputBody).slice(0, 50);
   const id = String(row.id ?? row.endpoint_id ?? row.slug ?? "").trim();
   if (!id) throw new Error("Treg returned an endpoint without an id");
   return {
@@ -56,14 +76,14 @@ function normalizeHit(raw: unknown): TregEndpointHit {
     title: String(row.title ?? row.name ?? id).slice(0, 240),
     provider: String(row.provider ?? row.platform ?? "unknown").slice(0, 120),
     category: mapCategory(row),
-    priceUsd: numberOrUndefined(row.price_usd ?? row.price ?? row.unit_price),
+    priceUsd: numberOrUndefined(row.price_usd ?? row.price ?? row.unit_price ?? cost.usd ?? cost.value),
     priceUnit: row.price_unit === "call" || row.price_unit === "result" || row.price_unit === "row" ? row.price_unit : "unknown",
-    successRate: numberOrUndefined(row.success_rate),
-    latencyMs: numberOrUndefined(row.latency_ms ?? row.median_ms),
+    successRate: numberOrUndefined(row.success_rate ?? observed.ok_rate),
+    latencyMs: numberOrUndefined(row.latency_ms ?? row.median_ms ?? observed.p50_ms),
     requiresOwnAccount: Boolean(row.requires_own_account ?? row.oauth),
     requiresByok: Boolean(row.requires_byok ?? row.byok_only),
     strictQuery: row.strict_query === true,
-    ...(numberArray(row.input_fields ?? row.required_fields ?? row.parameters) ? { inputFields: numberArray(row.input_fields ?? row.required_fields ?? row.parameters) } : {}),
+    ...(inputFields.length ? { inputFields } : numberArray(row.input_fields ?? row.required_fields ?? row.parameters) ? { inputFields: numberArray(row.input_fields ?? row.required_fields ?? row.parameters) } : {}),
     ...(numberArray(row.siblings) ? { siblings: numberArray(row.siblings) } : {}),
   };
 }
@@ -103,7 +123,7 @@ function normalizeOwnTool(raw: unknown): TregOwnTool | undefined {
 function mapCategory(raw: JsonObject): TregCategory {
   const value = `${String(raw.category ?? "")} ${String(raw.title ?? "")} ${String(raw.id ?? "")}`.toLowerCase();
   if (/email|person|people|hunter|apollo/.test(value)) return "enrichment_person";
-  if (/company|firm|crunchbase|domain/.test(value)) return "enrichment_company";
+  if (/company|companies|firm|firmographic|crunchbase|domain/.test(value)) return "enrichment_company";
   if (/backlink|keyword|seo|semrush|moz/.test(value)) return "seo";
   if (/tiktok|instagram|twitter|social/.test(value)) return "social_intel";
   if (/ads? library|facebook ads|google ads/.test(value)) return "ads_intel";

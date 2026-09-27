@@ -207,6 +207,45 @@ test("Treg normalization preserves provider scores without inventing confidence"
   } finally { config.tregEnabled = previous.enabled; config.tregToken = previous.token; }
 });
 
+test("TregGateway unwraps nested endpoint metadata and normalizes live pricing", async () => {
+  const previous = { enabled: config.tregEnabled, token: config.tregToken };
+  config.tregEnabled = true;
+  config.tregToken = "test-token";
+  try {
+    const gateway = new TregGateway({
+      spend: new TregSpendGuard({ getSnap: async () => null, saveSnap: async () => {} }),
+      recordReceipt: async () => {},
+      fetchImpl: async () => new Response(JSON.stringify({
+        endpoint: {
+          id: "treg.companies.enrich",
+          name: "Company enrichment",
+          provider: "treg",
+          cost: { usd: 0.0018 },
+          observed: { ok_rate: 0.7682, p50_ms: 420 },
+          input: { body: { domain: {}, name: {} } },
+        },
+      }), { status: 200 }),
+    });
+    assert.deepEqual(await gateway.getEndpoint("treg.companies.enrich"), {
+      id: "treg.companies.enrich",
+      title: "Company enrichment",
+      provider: "treg",
+      category: "enrichment_company",
+      priceUsd: 0.0018,
+      priceUnit: "unknown",
+      successRate: 0.7682,
+      latencyMs: 420,
+      requiresOwnAccount: false,
+      requiresByok: false,
+      strictQuery: false,
+      inputFields: ["domain", "name"],
+    });
+  } finally {
+    config.tregEnabled = previous.enabled;
+    config.tregToken = previous.token;
+  }
+});
+
 test("TregGateway records mission evidence after a successful paid call", async () => {
     const previous = { enabled: config.tregEnabled, token: config.tregToken };
     config.tregEnabled = true;
