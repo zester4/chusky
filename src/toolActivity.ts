@@ -66,13 +66,14 @@ export function collectComposioToolPresentations(input: unknown): Map<string, Co
     }
     const record = current.value as Record<string, unknown>;
     const slug = normalizeToolSlug(record.toolSlug ?? record.tool_slug ?? record.slug);
-    const toolkit = record.toolkit && typeof record.toolkit === "object" && !Array.isArray(record.toolkit)
-      ? record.toolkit as Record<string, unknown>
+    const toolkitValue = record.toolkit;
+    const toolkit = toolkitValue && typeof toolkitValue === "object" && !Array.isArray(toolkitValue)
+      ? toolkitValue as Record<string, unknown>
       : {};
-    const toolkitSlug = safeText(toolkit.slug ?? record.toolkitSlug ?? record.toolkit_slug, 120);
+    const toolkitSlug = safeText(typeof toolkitValue === "string" ? toolkitValue : toolkit.slug ?? record.toolkitSlug ?? record.toolkit_slug, 120);
     const toolkitName = safeText(toolkit.name ?? record.toolkitName ?? record.toolkit_name, 120);
     const toolkitLogo = safeLogo(toolkit.logo ?? record.toolkitLogo ?? record.toolkit_logo ?? (record.deprecated && typeof record.deprecated === "object" ? (record.deprecated as Record<string, unknown>).toolkit && typeof (record.deprecated as Record<string, unknown>).toolkit === "object" ? ((record.deprecated as Record<string, unknown>).toolkit as Record<string, unknown>).logo : undefined : undefined));
-    const actionLabel = safeText(record.human_description ?? record.humanDescription ?? record.display_name ?? record.displayName ?? record.name, 180);
+    const actionLabel = safeText(record.human_description ?? record.humanDescription ?? record.display_name ?? record.displayName ?? record.name ?? record.description, 180);
     if (slug && (toolkitSlug || toolkitName || toolkitLogo || actionLabel)) {
       const previous = result.get(slug);
       result.set(slug, {
@@ -89,6 +90,48 @@ export function collectComposioToolPresentations(input: unknown): Map<string, Co
     }
   }
   return result;
+}
+
+/** Attach official Composio toolkit branding to discovered action metadata. */
+export function enrichComposioToolPresentationsFromToolkits(
+  presentations: Map<string, ComposioToolPresentation>,
+  input: unknown,
+): void {
+  if (!Array.isArray(input)) return;
+  const toolkits = new Map<string, { name?: string; logo?: string }>();
+  for (const value of input.slice(0, 100)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    const slug = safeText(record.slug ?? record.toolkitSlug ?? record.toolkit_slug, 120);
+    if (!slug || !/^[a-z0-9][a-z0-9_-]{0,119}$/i.test(slug)) continue;
+    const meta = record.meta && typeof record.meta === "object" && !Array.isArray(record.meta)
+      ? record.meta as Record<string, unknown>
+      : {};
+    const name = safeText(record.name ?? record.displayName ?? record.display_name, 120);
+    const logo = safeLogo(meta.logo ?? record.logo);
+    if (name || logo) toolkits.set(slug.toLowerCase(), { ...(name ? { name } : {}), ...(logo ? { logo } : {}) });
+  }
+
+  for (const [toolSlug, presentation] of presentations) {
+    if (!presentation.toolkitSlug) continue;
+    const toolkit = toolkits.get(presentation.toolkitSlug.toLowerCase());
+    if (!toolkit) continue;
+    presentations.set(toolSlug, {
+      ...presentation,
+      ...(toolkit.name ? { toolkitName: toolkit.name } : {}),
+      ...(toolkit.logo ? { toolkitLogo: toolkit.logo } : {}),
+    });
+  }
+}
+
+/** Limit each run to one bounded bulk lookup of official toolkit metadata. */
+export function composioToolkitSlugsNeedingMetadata(
+  presentations: ReadonlyMap<string, ComposioToolPresentation>,
+): string[] {
+  return [...new Set([...presentations.values()]
+    .filter((presentation) => presentation.toolkitSlug && (!presentation.toolkitName || !presentation.toolkitLogo))
+    .map((presentation) => presentation.toolkitSlug!)
+    .filter((slug) => /^[a-z0-9][a-z0-9_-]{0,119}$/i.test(slug)))].slice(0, 50);
 }
 
 export function buildComposioBatchActions(

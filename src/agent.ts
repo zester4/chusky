@@ -65,7 +65,7 @@ import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonom
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
-import { buildComposioBatchActions, collectComposioToolPresentations, settleComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -1915,6 +1915,25 @@ function toolPresentationActivityFields(presentation?: ComposioToolPresentation)
   };
 }
 
+async function enrichComposioToolPresentations(
+  composioClient: any,
+  presentations: Map<string, ComposioToolPresentation>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const toolkitSlugs = composioToolkitSlugsNeedingMetadata(presentations);
+  const getMany = composioClient?.toolkits?.getMany;
+  if (!toolkitSlugs.length || typeof getMany !== "function") return;
+  try {
+    const toolkits = await abortable(getMany.call(composioClient.toolkits, toolkitSlugs, {}, signal ? { signal } : undefined), signal);
+    enrichComposioToolPresentationsFromToolkits(presentations, toolkits);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    // Branding is a presentation enhancement; never fail a real action because
+    // the optional toolkit catalog is temporarily unavailable.
+    logger.debug({ errorClass: error instanceof Error ? error.name : "UnknownError" }, "Composio toolkit branding lookup failed");
+  }
+}
+
 const VOICE_HISTORY_MAX_MESSAGES = 12;
 const VOICE_HISTORY_MAX_CHARS = 6_000;
 
@@ -2557,7 +2576,12 @@ export async function runAgent(
         }
         const args = parseToolArguments(call.function.arguments);
         activityPresentation = composioToolPresentations.get(slug);
+        if (!slug.startsWith("COMPOSIO_") && activityPresentation) {
+          await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
+          activityPresentation = composioToolPresentations.get(slug);
+        }
         if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+          await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
           batchActivityActions = buildComposioBatchActions(args, call.id, composioToolPresentations);
           if (batchActivityActions.length) {
             activityMessage = `Carrying out ${batchActivityActions.length} independent actions in parallel`;
@@ -2978,6 +3002,7 @@ export async function runAgent(
           for (const [toolSlug, presentation] of collectComposioToolPresentations(execResult)) {
             composioToolPresentations.set(toolSlug, { ...composioToolPresentations.get(toolSlug), ...presentation });
           }
+          await enrichComposioToolPresentations(composio, composioToolPresentations, signal);
         }
         if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL" && batchActivityActions.length) {
           batchActivityActions = settleComposioBatchActions(batchActivityActions, execResult);
