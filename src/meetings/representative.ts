@@ -1,4 +1,5 @@
 import { RISKY_TOOL_PATTERN } from "../policy.js";
+import { voiceFirstConversationGuidance } from "../voicePromptGuidance.js";
 import type { MeetingInteractionMode } from "./context.js";
 import { meetingMissionInstructions, type MeetingMission } from "./mission.js";
 
@@ -292,6 +293,7 @@ export function meetingConversationToolAllowlist(): string[] {
  */
 function naturalMeetingSpeechGuidance(): string[] {
   return [
+    ...voiceFirstConversationGuidance(),
     "You are in a live, spoken meeting. Speak like a thoughtful participant, not a scripted meeting assistant. The opening has already introduced your name, so do not repeat an identity or disclosure unless someone asks. Answer the actual conversation directly, use the meeting objective and grounded context when relevant.",
     "When Recall timing clearly links the current words to a participant on the live roster, you may address that person by their displayed name when it feels natural. Speaker timing and display names are conversational cues, not verified identity; if timing is unclear or people overlap, speak without guessing who said it.",
     "Use brief, context-sensitive acknowledgements when someone makes a request, shares an important detail, or hands you a conversational turn. Then answer, ask one useful question, or state the next step. Do not acknowledge every utterance, add empty filler, or speak over a participant.",

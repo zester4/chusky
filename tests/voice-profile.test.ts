@@ -14,6 +14,13 @@ test("voice profiles keep spoken output while private owner calls use full conte
   const prompt = voiceProfileInstructions(profile, "outbound", "Qualify the product demonstration request");
   assert.match(prompt, /natural plain speech only/i);
   assert.match(prompt, /Never use Markdown, emojis, brackets/i);
+  assert.match(prompt, /VOICE-FIRST OUTPUT/i);
+  assert.match(prompt, /Good voice example/i);
+  assert.match(prompt, /Bad voice example/i);
+  assert.match(prompt, /OUTBOUND OPENING/i);
+  assert.match(prompt, /disclose that you are an AI voice assistant/i);
+  assert.match(prompt, /Ask one question at a time/i);
+  assert.match(prompt, /OUTBOUND FLOW/i);
   assert.match(prompt, /Amina, speaking on behalf of Chusky Labs/);
   assert.match(prompt, /Conversation mode: sales/);
   assert.match(prompt, /relevant private context and connected tools/i);
@@ -21,6 +28,7 @@ test("voice profiles keep spoken output while private owner calls use full conte
   assert.match(prompt, /business call, do not volunteer or disclose the owner's unrelated personal/i);
   assert.doesNotMatch(prompt, /Use only this call brief|Do not claim to perform an external action/i);
   assert.deepEqual(voiceProfileNativeTools(profile), ["CHUCK_LIST_REMINDERS", "CHUCK_LIST_JOBS", "CHUCK_TASK_LIST", "CHUCK_TASK_GET"]);
+  assert.doesNotMatch(voiceProfileInstructions(profile, "inbound", "Answer the caller's question"), /OUTBOUND OPENING|OUTBOUND FLOW/i);
 });
 
 test("profile normalization strips control characters, bounds facts, and ignores invented capabilities", () => {
