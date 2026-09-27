@@ -626,7 +626,10 @@ async function sendPrivateChannelLink(ctx: Context, provider: "slack" | "whatsap
   const code = await createLinkCode(ctx.from!.id, provider);
   if (provider === "slack" && config.webhookUrl && config.slackClientId && config.slackRedirectUri) {
     const install = `${config.webhookUrl.replace(/\/$/, "")}/slack/install?code=${encodeURIComponent(code)}`;
-    await replyHtml(ctx, `<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`);
+    await ctx.reply(`<b>Link Slack</b>\n\n<a href="${install}">Install Chusky in Slack</a>\n\nThis one-time link expires in 10 minutes.`, {
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+    });
     return;
   }
   const label = provider === "sendblue" ? "iMessage/Sendblue" : provider === "sms" ? "SMS/Twilio" : provider === "xchat" ? "XChat" : provider;

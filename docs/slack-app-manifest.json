@@ -1,0 +1,41 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "Chusky",
+    "description": "Your AI assistant in Slack",
+    "background_color": "#1F2937"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Chusky",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://chusky.up.railway.app/slack/oauth/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "mpim:history",
+        "mpim:read",
+        "reactions:read",
+        "reactions:write",
+        "users:read",
+        "files:read",
+        "files:write"
+      ]
+    }
+  }
+}
