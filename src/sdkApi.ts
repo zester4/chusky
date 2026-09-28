@@ -42,6 +42,7 @@ import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinPrepa
 import { MEETING_REPRESENTATIVE_NATIVE_TOOLS } from "./meetings/representative.js";
 import { addCustomMcpServer, connectMcpServer, disconnectMcpServer, listMcpCatalogForUser, listMcpConnections } from "./mcp/client.js";
 import { beginMcpOAuth, finishMcpOAuth } from "./mcp/oauth.js";
+import { finishLinkOAuth } from "./link/agentWallet.js";
 import { createComposerWorkflow, listComposerWorkflows, reconcileComposerWorkflow, rejectComposerApproval, startComposerWorkflow, updateComposerWorkflow, type ComposerStageInput } from "./workflows/composer.js";
 import {
   COMPANY_AGENT_TEMPLATES,
@@ -1207,6 +1208,21 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) {
       logger.warn({ err: error }, "MCP OAuth callback failed");
       return c.html("<!doctype html><title>Chusky connection failed</title><main><h1>Chusky could not connect</h1><p>The authorization could not be completed. Return to Chusky and try again.</p></main>", 400);
+    }
+  });
+
+  app.get("/link/oauth/callback", async (c) => {
+    const state = c.req.query("state") ?? "";
+    const code = c.req.query("code") ?? "";
+    const providerError = c.req.query("error");
+    if (providerError) return c.html("<!doctype html><title>Chusky Link connection not completed</title><p>Link authorization was not completed. You can close this window and return to Chusky.</p>", 400);
+    if (!state || !code) return c.html("<!doctype html><title>Chusky Link connection not completed</title><p>The Link authorization response was incomplete. You can close this window and return to Chusky.</p>", 400);
+    try {
+      await finishLinkOAuth(state, code);
+      return c.html("<!doctype html><title>Chusky Link connected</title><main><h1>Link Agent Wallet connected</h1><p>You can close this window and return to Chusky.</p></main>");
+    } catch (error) {
+      logger.warn({ errorName: error instanceof Error ? error.name : "UnknownError" }, "Link OAuth callback failed");
+      return c.html("<!doctype html><title>Chusky Link connection failed</title><main><h1>Chusky could not connect Link</h1><p>The authorization could not be completed. Return to Chusky and try again.</p></main>", 400);
     }
   });
 

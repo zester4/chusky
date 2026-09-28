@@ -277,6 +277,39 @@ stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use
 `TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
 
+### Stripe Link Agent Wallet
+
+Chusky can use Stripe's Link Agent Wallet as an owner-controlled payment rail.
+Link keeps the customer's payment credentials and sends the owner an approval
+request for the exact merchant, amount, currency, and purchase context before
+Chusky can retrieve an approved checkout credential. Chusky stores only
+encrypted Link OAuth tokens and bounded spend metadata; card numbers, CVV,
+shared payment tokens, and Link Pay Tokens never enter model context, chat
+history, Redis plaintext, or model tool arguments.
+
+Enable it only after registering a confidential Link OAuth client and an exact
+public HTTPS callback with Stripe:
+
+```text
+LINK_AGENT_WALLET_ENABLED=true
+LINK_CLIENT_ID=...
+LINK_CLIENT_SECRET=...
+LINK_PUBLISHABLE_KEY=pk_live_...
+LINK_AGENT_WALLET_ENCRYPTION_KEY=<stable base64url 32-byte key>
+LINK_OAUTH_CALLBACK_URL=https://your-public-host.example/link/oauth/callback
+```
+
+The owner connects Link in a private conversation, then asks Chusky to make a
+specific purchase. Chusky creates a Link spend request with approval required;
+the owner approves or declines it in Link. An approved request can be used by
+the private E2B checkout path, which fills payment fields server-side and does
+not claim success until both Link and the merchant confirm the result. Link
+wallet tools are unavailable in shared rooms and group conversations.
+`LINK_TEST_MODE=true` and `LINK_MAX_SPEND_CENTS` support bounded testing and a
+per-request ceiling; production still requires real Link eligibility,
+registered OAuth credentials, E2B checkout configuration, and
+merchant-specific checkout verification.
+
 ### TinyFish web search and page fetch
 
 Set the server-only `TINYFISH_API_KEY` to expose `CHUCK_TINYFISH_SEARCH` and
@@ -617,17 +650,35 @@ reports a recoverable error, and starts it again after an idle pause or stop. Th
 filesystem is retained by Daytona across those lifecycle states; a provider-side deletion or
 wall-clock TTL is permanent and causes Chusky to require a new workspace.
 
-Daytona also provides three coding surfaces. `CHUCK_DAYTONA_BROWSER` controls a browser in the
-Daytona desktop through the official Computer Use API (navigation, accessibility snapshots,
-screenshots, clicks, typing, key presses, and scrolling). It is desktop/browser control rather
-than a DOM selector API, so Chusky verifies results after interactions. The selected snapshot must
-include a browser, and internet access remains subject to Daytona network policy. `CHUCK_DAYTONA_PTY`
+Daytona provides the private computer, workspace, and application surfaces. `CHUCK_DAYTONA_COMPUTER`
+controls the desktop through the official Computer Use API, while `CHUCK_DAYTONA_PTY`
 creates durable interactive terminal sessions for shells, dev servers, and test watchers; session
 IDs are retained in the Redis-backed workspace record and can be reused with `write`, `read`,
 `resize`, `status`, and `kill`. `CHUCK_DAYTONA_GIT` uses Daytona's official Git API for clone,
 status, branches, checkout, pull, add, commit, and push. Local operations stay private; push is
 approval-gated. Pull requests, CI checks, reviews, and deployments use verified GitHub/Composio
 tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an existing workspace.
+
+### E2B automated browser
+
+When `E2B_ENABLED=true`, `CHUCK_BROWSER` routes normal browser actions through the
+owner-scoped E2B Playwright/Chromium
+template. E2B keeps a retained headed Playwright process per owner, returns
+bounded accessibility candidates, and supports page navigation, tabs, clicks,
+hover, drag-and-drop, form controls, typing, keyboard presses, scrolling,
+screenshots, and verification. CAPTCHA/2FA and passkey challenges can expose
+that same browser through a short-lived private noVNC handoff. Daytona continues
+to provide files, artifacts, terminals, and desktop Computer Use; it is not the
+automated browser backend.
+
+Build the template with `npm run e2b:template:build`, then configure
+`E2B_API_KEY`, `E2B_BROWSER_TEMPLATE`, and `E2B_ENABLED=true`. The template
+installs Chromium with Playwright into `/opt/ms-playwright`, makes it readable
+by the non-root `chusky` user, and launches with safe container flags. Run
+`npm run e2b:browser:live-smoke -- https://example.com` after the template is
+available. E2B is the automated browser backend; Daytona remains responsible for
+computer, files, artifacts, terminals, and app work. The former Daytona browser
+names remain accepted only at the execution boundary for older queued runs and clients.
 
 ### Browser and vault operations
 
@@ -639,7 +690,7 @@ verification metadata; they never contain passwords, cookies, screenshots, or ra
 
 Unknown or security-sensitive actions require owner approval. Checkout, payment, account changes,
 credential changes, sensitive downloads, and uncertain actions stop for approval. CAPTCHA, 2FA,
-SSO, passkeys, and device approvals use a private browser handoff in the same Daytona workspace.
+SSO, passkeys, and device approvals use a private browser handoff in the same E2B browser session.
 Replacing a saved identity logs out its prior browser identities, and aliases allow separate
 personal and work accounts for the same service.
 
@@ -1191,6 +1242,22 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DAYTONA_CPU` | — | provider default | CPU cores for newly created workspaces, up to 4 |
 | `DAYTONA_MEMORY_GIB` | — | provider default | Memory in GiB for newly created workspaces, up to 8 |
 | `DAYTONA_DISK_GIB` | — | provider default | Disk in GiB for newly created workspaces, up to 10 |
+| `E2B_ENABLED` | automated browser | `false` | Routes normal Playwright browser work through E2B when true |
+| `E2B_API_KEY` | automated browser | — | E2B server-side API key; never expose to the model or client |
+| `E2B_BROWSER_TEMPLATE` | automated browser | `chusky-browser-playwright` | Built E2B template containing Playwright and Chromium |
+| `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
+| `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
+| `LINK_AGENT_WALLET_ENABLED` | Stripe Link Agent Wallet | `false` | Enable owner-controlled Link spend requests |
+| `LINK_CLIENT_ID` | Stripe Link OAuth | — | Confidential Link OAuth client ID |
+| `LINK_CLIENT_SECRET` | Stripe Link OAuth | — | Server-only Link OAuth client secret |
+| `LINK_PUBLISHABLE_KEY` | Stripe Link OAuth | — | Publishable key used for Link OAuth authentication |
+| `LINK_AGENT_WALLET_ENCRYPTION_KEY` | Stripe Link | — | Stable base64url-encoded 32-byte key for encrypted wallet tokens |
+| `LINK_OAUTH_CALLBACK_URL` | Stripe Link OAuth | derived from `WEBHOOK_URL` | Public HTTPS `/link/oauth/callback` URL registered exactly with Link |
+| `LINK_API_BASE_URL` | Stripe Link API | `https://api.link.com` | Link API origin; override only for a verified environment |
+| `LINK_AUTH_BASE_URL` | Stripe Link OAuth | `https://login.link.com` | Link OAuth origin; override only for a verified environment |
+| `LINK_TEST_MODE` | Stripe Link | `false` | Ask Link for test-mode spend behavior when the account supports it |
+| `LINK_MAX_SPEND_CENTS` | Stripe Link | `50000` | Per-request ceiling in the currency minor unit |
+| `LINK_REQUEST_TIMEOUT_MS` | Stripe Link | `20000` | Link API/OAuth request timeout |
 | `DAYTONA_NETWORK_BLOCK_ALL` | — | `true` | Blocks outbound sandbox network by default; set false only deliberately |
 | `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |

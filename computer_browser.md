@@ -51,7 +51,7 @@ The vault boundary is also a significant strength. Credentials are not handed to
 
 ### Browser interaction
 
-`CHUCK_DAYTONA_BROWSER` is a useful convenience layer over Computer Use. It simplifies common browser tasks while keeping the lower-level computer tool available for unusual interfaces.
+`CHUCK_BROWSER` is the E2B Playwright/Chromium browser layer. It handles ordinary web tasks while keeping `CHUCK_DAYTONA_COMPUTER` available for desktop, file, artifact, and unusual application interfaces.
 
 The agent prompt also correctly requires:
 
@@ -635,7 +635,7 @@ CHUCK_DAYTONA_CODE
   inspect
   artifact
 
-CHUCK_DAYTONA_BROWSER
+CHUCK_BROWSER
   navigate
   inspect
   locate

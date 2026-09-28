@@ -1,16 +1,19 @@
 # Browser, Vault, and Cloudflare Broker
 
 This reference documents Chusky's implemented browser and website-identity path.
-It is the source of truth for agents changing Daytona browser tools, the vault
-broker, or the Cloudflare Worker/D1 deployment.
+It is the source of truth for agents changing the E2B automated browser, the
+Daytona desktop/file backend, the vault broker, or the Cloudflare Worker/D1 deployment.
 
 ## Capability split
 
 Chusky has two separate execution paths:
 
 ```text
-CHUCK_DAYTONA_BROWSER
-  └─ normal browsing and site interaction in the user's isolated Daytona desktop
+CHUCK_BROWSER
+  └─ E2B Playwright/Chromium for retained automated browser sessions
+
+CHUCK_DAYTONA_COMPUTER
+  └─ Daytona desktop Computer Use for desktop, file, artifact, and app work
 
 CHUCK_VAULT_LOGIN
   └─ trusted CredentialBroker
@@ -37,10 +40,10 @@ because a user asks to connect a website account.
 - Website identities belong to the Chusky account, not Telegram, a group, or a
   provider conversation. Group requests must continue in a private conversation.
 
-## Daytona browser operating loop
+## Browser operating loop
 
-1. Confirm the Daytona workspace and browser are available with the appropriate
-   status tool.
+1. Confirm the E2B browser provider is available. Daytona remains the
+   computer, file/artifact, and app backend rather than the automated browser.
 2. Open only an explicit `http://` or `https://` URL. Never put credentials,
    cookies, access tokens, or secrets in a URL.
 3. Inspect the page with `snapshot` or `find` before interacting.
@@ -49,17 +52,18 @@ because a user asks to connect a website account.
    private values, and may use Jev to rank those server-generated candidates.
    Jev sees safe labels only; it never sees node IDs, credentials, cookies,
    screenshots, or raw page text. Jev is guidance, not authority.
-5. Prefer accessible node actions (`focus`, `invoke`, `fill`) over guessed
-   coordinates. Do not claim an interaction succeeded without inspecting the
-   resulting page or state.
+5. Prefer accessible node actions (`focus`, `invoke`, `fill`, `click`, `hover`,
+   `select_option`, `check`, and `uncheck`) over coordinates. Use bounded
+   coordinates only for canvas/custom controls. `type`, `press`, `scroll`, and
+   `drag` operate on the retained page and must be followed by inspection.
 6. Re-check the page after navigation, form submission, or any consequential
-   action. Keep browser state in the retained Daytona workspace.
-7. If CAPTCHA, MFA/2FA, consent, or a site-specific challenge appears, pause
-   the affected workflow and use `CHUCK_DAYTONA_BROWSER_HANDOFF`. It creates a
-   short-lived signed noVNC link into the same retained private desktop, so the
-   user completes the step without losing browser state. Deliver it only to the
-   owner’s direct channel; after they reply “continue”, inspect the page before
-   resuming. Never export cookies, credentials, or a permanent VNC endpoint.
+   action. E2B keeps a retained headed Playwright process and profile in the
+   owner-scoped sandbox; tabs and the current URL survive between commands.
+7. If CAPTCHA, MFA/2FA, passkeys, security keys, or a site-specific challenge
+   appears, pause the affected workflow. The browser action returns a
+   short-lived E2B noVNC handoff. Deliver it only to the owner’s direct channel; after they reply
+   “continue”, inspect the same-origin page before resuming. Never export
+   cookies, credentials, or a permanent VNC endpoint.
 
 During a vault-authenticated session, normal browser tools must not receive a
 password or cookie. The browser policy requires a matching `vaultAction` for
@@ -77,8 +81,8 @@ these actions; the existing browser guard remains the final authority.
 - The Worker stores encrypted credential ciphertext in D1. The master key is a
   Worker Secret, not a D1 value and not a Railway variable.
 - `CHUCK_VAULT_LOGIN` requests a short-lived broker lease and injects secrets
-  directly into the trusted Daytona login flow. Return only authenticated status
-  and safe session metadata.
+  directly into the selected trusted browser flow. Return only authenticated
+  status and safe session metadata.
 - Destroy plaintext values as soon as the broker operation completes. Never log
   raw request bodies, credentials, cookies, decrypted values, or encryption keys.
 - Audit identity usage with account, service/origin, action, run/request ID,
@@ -127,7 +131,7 @@ calling the feature live.
 - In a private Telegram chat, send “connect my [website] account” and verify a
   setup URL is returned instead of a Composio search or an unsupported message.
 - Complete setup with a test account, then verify `CHUCK_VAULT_LOGIN` authenticates
-  inside Daytona without exposing the username/password to the model.
+  inside E2B without exposing the username/password to the model.
 - Test retained-session reuse, logout, expired-session handling, CAPTCHA/2FA
   pause behavior, group denial, and high-impact action policy.
 - Inspect logs for metadata only and confirm no credential or raw tool argument

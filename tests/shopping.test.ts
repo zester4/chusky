@@ -9,7 +9,7 @@ import { shoppingActionPolicy } from "../src/shopping/policy.js";
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
 
 test("shopping tools are exposed without accepting credentials or payment data", () => {
-  for (const name of ["CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_DAYTONA_BROWSER_HANDOFF"]) {
+  for (const name of ["CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES", "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_HANDOFF"]) {
     const tool = chuckTools.find((candidate) => candidate.function.name === name);
     assert.ok(tool, `${name} is exposed`);
     const properties = Object.keys((tool!.function.parameters as { properties?: Record<string, unknown> }).properties ?? {});

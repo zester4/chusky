@@ -62,7 +62,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
       throw new Error("A private browser handoff is awaiting verification. Inspect the retained website, then call CHUCK_BROWSER_VERIFY with the handoffId before taking another action.");
     }
     const hasRevokedIdentity = workspaceSessions.some(browserSessionIsRevoked);
-    if (hasRevokedIdentity && !["status", "start"].includes(action)) throw new Error("This Daytona workspace contains a revoked or expired website session. Log in again with CHUCK_VAULT_LOGIN or complete a private browser handoff before using the browser.");
+    if (hasRevokedIdentity && !["status", "start"].includes(action)) throw new Error("This E2B browser session contains a revoked or expired website identity. Log in again with CHUCK_VAULT_LOGIN or complete a private browser handoff before using the browser.");
     return;
   }
   const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
@@ -91,7 +91,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   }
   else {
     const nodeId = String(args.nodeId ?? ""); const known = knownNodes.get(key(userId, workspaceId, nodeId));
-    if (!known || Date.now() - known.capturedAt > NODE_TTL_MS) { knownNodes.delete(key(userId, workspaceId, nodeId)); throw new Error("Authenticated vault interactions require a fresh CHUCK_DAYTONA_BROWSER find call so Chusky can verify the control safely."); }
+    if (!known || Date.now() - known.capturedAt > NODE_TTL_MS) { knownNodes.delete(key(userId, workspaceId, nodeId)); throw new Error("Authenticated vault interactions require a fresh CHUCK_BROWSER find call so Chusky can verify the control safely."); }
     const discoveredOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
     if (!discoveredOrigin || discoveredOrigin !== known.origin || !activeSessions.some((session) => session.origin === discoveredOrigin)) throw new Error("The discovered browser control is stale or belongs to a different website origin. Inspect the current page again before acting.");
     target = classifyBrowserIntent({ label: known.label, url: discoveredOrigin });

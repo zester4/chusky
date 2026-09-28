@@ -96,7 +96,7 @@ function view(run: ShoppingRun) {
     suggestions,
     questions: questions(run),
     nextStep: run.retailer
-      ? "Check the selected website in CHUCK_VAULT_LIST or CHUCK_VAULT_STATUS. If it is not connected, use CHUCK_VAULT_SAVE. Then use CHUCK_VAULT_LOGIN and CHUCK_DAYTONA_BROWSER."
+      ? "Check the selected website in CHUCK_VAULT_LIST or CHUCK_VAULT_STATUS. If it is not connected, use CHUCK_VAULT_SAVE. Then use CHUCK_VAULT_LOGIN and CHUCK_BROWSER."
       : "Ask the user to choose a retailer from the suggestions or name another HTTPS retailer. Do not ask for login credentials in chat.",
   };
 }
@@ -194,7 +194,7 @@ export async function pauseShopping(userId: number, args: Record<string, unknown
   if (run.status === "cancelled" || run.status === "completed") throw new Error("This shopping plan is no longer active");
   const reason = pauseReason(args.reason);
   const updated = await updateShoppingRun(userId, run.id, { status: "awaiting_user_interaction", pausedReason: reason, pausedAt: Date.now() });
-  return { ...view(updated!), message: "The shopping plan and the same Daytona browser session are preserved. Send ‘continue’ after you finish the private website step." };
+  return { ...view(updated!), message: "The shopping plan and the same E2B browser session are preserved. Send ‘continue’ after you finish the private website step." };
 }
 
 export async function resumeShopping(userId: number, id: string) {
@@ -215,9 +215,9 @@ export const SHOPPING_AGENT_PLAYBOOK = `
 SHOPPING ENGINE
 - Treat shopping as a general browser workflow, never as Amazon-only logic. Start a private shopping request with CHUCK_SHOPPING_START when the user asks to buy, order, restock, find, compare, or add physical goods to a cart.
 - Ask only for missing decision-critical details: delivery country/area, retailer when more than one fits, delivery versus pickup, and budget or substitutions when relevant. If the user has named a retailer, respect it; otherwise use the shopping suggestions and, when necessary, live web research to propose current local options.
-- After a retailer is chosen, call CHUCK_SHOPPING_SELECT_RETAILER. A user-owned saved site may be selected by name; use CHUCK_SHOPPING_SAVE_SITE to remember a clean HTTPS origin for future plans. Check CHUCK_VAULT_LIST or CHUCK_VAULT_STATUS. If that website is not connected, call CHUCK_VAULT_SAVE; never request a password in chat. If connected, call CHUCK_VAULT_LOGIN, then use CHUCK_DAYTONA_BROWSER to browse, search, compare, and add items to the cart.
+- After a retailer is chosen, call CHUCK_SHOPPING_SELECT_RETAILER. A user-owned saved site may be selected by name; use CHUCK_SHOPPING_SAVE_SITE to remember a clean HTTPS origin for future plans. Check CHUCK_VAULT_LIST or CHUCK_VAULT_STATUS. If that website is not connected, call CHUCK_VAULT_SAVE; never request a password in chat. If connected, call CHUCK_VAULT_LOGIN, then use CHUCK_BROWSER to browse, search, compare, and add items to the cart.
 - Use browser vaultAction=browse or search for ordinary navigation, and vaultAction=add_to_cart for cart changes. Verify every browser interaction with a snapshot or find result. A cart total, delivery slot, substitution, checkout, or order is not complete until the page confirms it.
 - In an authenticated owner-private interactive run, a clear direct request authorizes ordinary browsing and cart preparation. Checkout, payment, placing an order, changing an address, adding a payment method, and deletions retain their exact approval or blocked policy. Clarify genuinely missing transaction details, and never claim a purchase succeeded unless the retailer confirmation page proves it. Other run types follow their configured approval policy.
-- If CAPTCHA, 2FA, age verification, or another user-only challenge appears, call CHUCK_SHOPPING_PAUSE and CHUCK_DAYTONA_BROWSER_HANDOFF. Send the returned short-lived private browser link only in the user's direct conversation. The user completes the website challenge in the same retained browser and replies “continue”; then call CHUCK_BROWSER_HANDOFF_COMPLETE with the returned handoffId, inspect the same-origin page, call CHUCK_BROWSER_VERIFY with the required detectors, and only then call CHUCK_SHOPPING_RESUME. Do not expose credentials, cookies, or session URLs in a shared group.
-- If the user asks to see the browser, check progress, or take a screenshot without asking for another action, call CHUCK_DAYTONA_BROWSER with action=screenshot and stop. The screenshot is delivered through the active private channel; do not browse, click, or change the page beyond the explicit request.
+- If CAPTCHA, 2FA, age verification, or another user-only challenge appears, call CHUCK_SHOPPING_PAUSE and CHUCK_BROWSER_HANDOFF. Send the returned short-lived private browser link only in the user's direct conversation. The user completes the website challenge in the same retained browser and replies “continue”; then call CHUCK_BROWSER_HANDOFF_COMPLETE with the returned handoffId, inspect the same-origin page, call CHUCK_BROWSER_VERIFY with the required detectors, and only then call CHUCK_SHOPPING_RESUME. Do not expose credentials, cookies, or session URLs in a shared group.
+- If the user asks to see the browser, check progress, or take a screenshot without asking for another action, call CHUCK_BROWSER with action=screenshot and stop. The screenshot is delivered through the active private channel; do not browse, click, or change the page beyond the explicit request.
 `.trim();

@@ -22,11 +22,13 @@ import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
+import type { E2BBrowserRecord } from "./lib/e2b/types.js";
 import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
 import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
 import type { ApprovalEscalationRecord } from "./approvals/escalation.js";
 import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
+import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
 
 export interface Message {
   role: "user" | "assistant";
@@ -160,6 +162,8 @@ function compactSessionPersistence(session: UserSession): void {
     .map((summary) => boundPersistedText(summary, 1_800));
   session.sdkThreads = compactSdkThreads(session.sdkThreads);
   session.sdkIdempotency = compactSdkIdempotency(session.sdkIdempotency);
+  session.linkOAuthStates = (Array.isArray(session.linkOAuthStates) ? session.linkOAuthStates : []).slice(-10);
+  session.linkSpendRequests = (Array.isArray(session.linkSpendRequests) ? session.linkSpendRequests : []).slice(-50);
 }
 
 export interface UserSession {
@@ -169,6 +173,8 @@ export interface UserSession {
   totalCost: number;
   composioSessionId?: string; // persisted Composio ToolRouter session ID
   daytonaWorkspaceId?: string;
+  /** Owner-scoped automated browser sandbox. Daytona remains the desktop backend. */
+  e2bBrowser?: E2BBrowserRecord;
   telegramChatId?: number;
   voiceReplies?: boolean;
   /** Per-account voices for the three live call transports, independent of Telegram audio replies. */
@@ -217,6 +223,12 @@ export interface UserSession {
   mcpOAuthStates?: McpOAuthStateRecord[];
   /** Short-lived owner-scoped Treg OAuth state; never stores provider tokens. */
   tregOAuthStates?: TregOAuthStateRecord[];
+  /** Link Agent Wallet OAuth state; the PKCE verifier is encrypted at rest. */
+  linkOAuthStates?: LinkOAuthStateRecord[];
+  /** Link Agent Wallet tokens are encrypted; this record contains no card data. */
+  linkWallet?: LinkWalletRecord;
+  /** Bounded Link spend metadata; never stores card, token, or credential payloads. */
+  linkSpendRequests?: LinkSpendRequestRecord[];
   workflowComposers?: WorkflowComposerRecord[];
   /** Per-origin browser operating recipes; never contains credentials or cookies. */
   browserPlaybooks?: BrowserPlaybookRecord[];
@@ -3798,7 +3810,7 @@ class MemoryBackend implements Backend {
 
 function fresh(): UserSession {
   const now = Date.now();
-  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], tregOAuthStates: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
+  return { model: config.defaultModel, history: [], totalMessages: 0, totalCost: 0, triggerIds: [], reminders: [], jobs: [], autonomyRuns: [], jobOccurrences: [], externalActions: [], reliabilitySamples: [], executionReservations: [], outcomeVerifications: [], compensations: [], reliabilityTrace: [], providerProofs: [], approvalEscalations: [], scratchpad: {}, memories: [], imageAssets: [], summaries: [], approvals: [], artifacts: [], phoneCalls: [], videoJobs: [], shoppingRuns: [], shoppingSites: [], mcpConnections: [], mcpOAuthStates: [], tregOAuthStates: [], linkOAuthStates: [], linkSpendRequests: [], workflowComposers: [], recallMeetings: [], calendarMeetingPreparations: [], meetingRooms: [], createdAt: now, updatedAt: now };
 }
 
 let backend: Backend;
@@ -4168,7 +4180,17 @@ export async function getSession(uid: number): Promise<UserSession> {
   const browserPlaybooks = Array.isArray(s.browserPlaybooks) ? s.browserPlaybooks.filter((item): item is BrowserPlaybookRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.origin === "string").slice(0, 50) : [];
   const browserAudit = Array.isArray(s.browserAudit) ? s.browserAudit.filter((item): item is BrowserAuditRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && typeof item.summary === "string").slice(-200) : [];
   const now = Date.now();
+  const e2bBrowser = s.e2bBrowser && typeof s.e2bBrowser === "object" && typeof s.e2bBrowser.sandboxId === "string" && Number.isFinite(s.e2bBrowser.createdAt) && Number.isFinite(s.e2bBrowser.updatedAt) && Number.isFinite(s.e2bBrowser.expiresAt)
+    ? { ...s.e2bBrowser, sandboxId: s.e2bBrowser.sandboxId.slice(0, 200), nodes: Array.isArray(s.e2bBrowser.nodes) ? s.e2bBrowser.nodes.filter((node) => node && typeof node.nodeId === "string" && typeof node.role === "string" && typeof node.name === "string" && Number.isSafeInteger(node.index) && Number.isFinite(node.capturedAt)).slice(-60) : [] } satisfies E2BBrowserRecord
+    : undefined;
+  if (e2bBrowser) s.e2bBrowser = e2bBrowser;
   s.tregOAuthStates = Array.isArray(s.tregOAuthStates) ? s.tregOAuthStates.filter((item): item is TregOAuthStateRecord => Boolean(item) && typeof item === "object" && typeof item.stateHash === "string" && /^[a-f0-9]{64}$/.test(item.stateHash) && typeof item.provider === "string" && item.provider.length <= 120 && (item.organizationId === undefined || typeof item.organizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(item.organizationId)) && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt) && item.expiresAt > now).slice(-20) : [];
+  s.linkOAuthStates = Array.isArray(s.linkOAuthStates) ? s.linkOAuthStates.filter((item): item is LinkOAuthStateRecord => Boolean(item) && typeof item === "object" && typeof item.state === "string" && /^[A-Za-z0-9_-]{40,4096}$/.test(item.state) && typeof item.redirectUri === "string" && /^https:\/\//i.test(item.redirectUri) && item.encryptedSecret && typeof item.encryptedSecret === "object" && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt) && item.expiresAt > now).slice(-10) : [];
+  const linkWallet = s.linkWallet && typeof s.linkWallet === "object" && s.linkWallet.userId === uid && ["connected", "reauth_required", "disconnected"].includes(String(s.linkWallet.status)) && s.linkWallet.encryptedTokens && typeof s.linkWallet.encryptedTokens === "object" && Number.isFinite(s.linkWallet.expiresAt) && Number.isFinite(s.linkWallet.createdAt) && Number.isFinite(s.linkWallet.updatedAt)
+    ? { ...s.linkWallet, scopes: Array.isArray(s.linkWallet.scopes) ? s.linkWallet.scopes.filter((scope): scope is string => typeof scope === "string").slice(0, 20).map((scope) => scope.slice(0, 120)) : [] } as LinkWalletRecord
+    : undefined;
+  s.linkSpendRequests = Array.isArray(s.linkSpendRequests) ? s.linkSpendRequests.filter((item): item is LinkSpendRequestRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && /^lsp_[A-Za-z0-9_-]{20,120}$/.test(item.id) && typeof item.merchantName === "string" && typeof item.merchantUrl === "string" && /^https:\/\//i.test(item.merchantUrl) && Number.isSafeInteger(item.amount) && item.amount > 0 && typeof item.currency === "string" && typeof item.context === "string" && typeof item.status === "string" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt)).slice(-50) : [];
+  s.linkWallet = linkWallet;
   const browserHandoffs = Array.isArray(s.browserHandoffs) ? s.browserHandoffs.filter((item): item is BrowserHandoffRecord => {
     if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^bh_[A-Za-z0-9_-]{1,120}$/.test(item.id) || typeof item.workspaceId !== "string" || !item.workspaceId || typeof item.reason !== "string" || !["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(item.reason) || typeof item.status !== "string" || !["waiting", "awaiting_verification", "completed", "expired", "cancelled"].includes(item.status) || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt)) return false;
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
@@ -4241,6 +4263,56 @@ export async function removeTregOAuthState(userId: number, stateHash: string): P
   const session = await getSession(userId);
   session.tregOAuthStates = (session.tregOAuthStates ?? []).filter((item) => item.stateHash !== stateHash);
   await saveSession(userId, session);
+}
+
+export async function saveLinkOAuthState(userId: number, record: LinkOAuthStateRecord): Promise<void> {
+  const session = await getSession(userId);
+  session.linkOAuthStates = [...(session.linkOAuthStates ?? []).filter((item) => item.state !== record.state && item.expiresAt > Date.now()), record].slice(-10);
+  await saveSession(userId, session);
+}
+
+export async function getLinkOAuthState(userId: number, state: string): Promise<LinkOAuthStateRecord | undefined> {
+  return (await getSession(userId)).linkOAuthStates?.find((item) => item.state === state && item.expiresAt > Date.now());
+}
+
+export async function removeLinkOAuthState(userId: number, state: string): Promise<void> {
+  const session = await getSession(userId);
+  session.linkOAuthStates = (session.linkOAuthStates ?? []).filter((item) => item.state !== state);
+  await saveSession(userId, session);
+}
+
+export async function saveLinkWallet(userId: number, record: LinkWalletRecord): Promise<void> {
+  if (record.userId !== userId) throw new Error("Link wallet owner mismatch");
+  const session = await getSession(userId);
+  session.linkWallet = record;
+  await saveSession(userId, session);
+}
+
+export async function getLinkWallet(userId: number): Promise<LinkWalletRecord | undefined> {
+  const wallet = (await getSession(userId)).linkWallet;
+  return wallet?.userId === userId ? wallet : undefined;
+}
+
+export async function clearLinkWallet(userId: number): Promise<void> {
+  const session = await getSession(userId);
+  session.linkWallet = undefined;
+  session.linkSpendRequests = [];
+  await saveSession(userId, session);
+}
+
+export async function saveLinkSpendRequest(userId: number, record: LinkSpendRequestRecord): Promise<void> {
+  if (record.userId !== userId) throw new Error("Link spend owner mismatch");
+  const session = await getSession(userId);
+  session.linkSpendRequests = [...(session.linkSpendRequests ?? []).filter((item) => item.id !== record.id), record].slice(-50);
+  await saveSession(userId, session);
+}
+
+export async function getLinkSpendRequest(userId: number, id: string): Promise<LinkSpendRequestRecord | undefined> {
+  return (await getSession(userId)).linkSpendRequests?.find((item) => item.userId === userId && item.id === id);
+}
+
+export async function listLinkSpendRequests(userId: number, limit = 20): Promise<LinkSpendRequestRecord[]> {
+  return (await getSession(userId)).linkSpendRequests?.slice(-Math.max(1, Math.min(50, Math.floor(limit)))).reverse() ?? [];
 }
 
 export async function acquireTregSpendLock(userId: number, dayKey: string, token: string, leaseSeconds = 15): Promise<boolean> {

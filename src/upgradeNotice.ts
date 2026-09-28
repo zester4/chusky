@@ -15,7 +15,7 @@ export const AGENT_UPGRADE_PRESETS = {
   autonomy: [
     "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
-    "Extended the governed runtime across meetings, A2A, Daytona browser and artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
+    "Extended the governed runtime across meetings, A2A, E2B browser and Daytona artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
   ],
   attention: [
     "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
@@ -77,15 +77,20 @@ export const AGENT_UPGRADE_PRESETS = {
     "Treg calls use server-only organization credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",
     "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work.",
   ],
+  linkAgentWallet: [
+    "Added an owner-controlled Stripe Link Agent Wallet with PKCE OAuth, encrypted server-side token storage, and bounded safe wallet and payment-method metadata.",
+    "Purchase requests carry the exact merchant, amount, currency, and owner-visible context to Link, which owns the approval notification and approval decision before any payment credential is released.",
+    "Approved checkout credentials remain outside model context, chat history, Redis plaintext, and tool arguments; owner-private E2B checkout can fill them server-side and never claims success before Link and the merchant confirm it.",
+  ],
   jevRouting: [
     "Added Jev decision routing for skills, Composio toolkits and actions, and Treg endpoint selection, layered on top of Chusky's existing deterministic routes.",
     "Composio routing now includes a bounded catalog of apps the user has not connected; named unavailable apps trigger connection setup while their actions remain non-callable until connected.",
     "Jev runs under one per-turn deadline with deterministic fallback, while approvals, budgets, account isolation, and native tool policy remain authoritative.",
   ],
   browserAutonomy: [
-    "Added a bounded browser decision loop: inspect a live page, rank the next safe candidate, execute only through the existing Daytona and vault controls, then verify the result.",
-    "Browser observations are redacted and bounded before Jev sees them; node identifiers, cookies, credentials, page source, and screenshots remain outside the decision model.",
-    "Jev can improve browser sequencing in enforce mode, while off and shadow modes retain the deterministic browser path and existing approval, origin, session, and high-impact gates.",
+    "Added a bounded browser decision loop and an owner-scoped E2B Playwright/Chromium browser with headed sessions, accessible controls, tabs, scrolling, drag/drop, forms, keyboard actions, navigation, and screenshots.",
+    "CAPTCHA, 2FA, passkeys, security keys, and other human-only challenges can hand the same E2B browser session to the owner through a short-lived private noVNC link; ordinary browsing remains autonomous.",
+    "Browser observations are redacted and bounded before Jev sees them, while origin checks, session leases, existing approval policy, high-impact safeguards, and the Daytona fallback remain authoritative.",
   ],
 } as const;
 

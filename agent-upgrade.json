@@ -1,11 +1,11 @@
 {
-  "id": "release-4.22.0",
-  "version": "4.22.0",
+  "id": "release-4.25.0",
+  "version": "4.25.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added a bounded browser decision loop: inspect a live page, rank the next safe candidate, execute only through the existing Daytona and vault controls, then verify the result.",
-    "Browser observations are redacted and bounded before Jev sees them; node identifiers, cookies, credentials, page source, and screenshots remain outside the decision model.",
-    "Jev can improve browser sequencing in enforce mode, while off and shadow modes retain the deterministic browser path and existing approval, origin, session, and high-impact gates."
+    "Added an owner-scoped E2B Playwright/Chromium browser with bounded decisions, headed sessions, accessible controls, navigation, forms, screenshots, and private CAPTCHA/2FA handoff.",
+    "Stripe Link purchase requests carry the exact merchant, amount, currency, and owner-visible context; Link owns the approval notification and approval decision before any payment credential is released.",
+    "Approved Link credentials stay outside model context, chat history, Redis, and tool arguments; private E2B fills them server-side and never claims success before Link and the merchant confirm it."
   ],
-  "createdAt": "2026-09-28T04:00:00.000Z"
+  "createdAt": "2026-09-28T16:49:47.291Z"
 }

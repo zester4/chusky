@@ -35,7 +35,7 @@ import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./n
 import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim } from "./autonomy/actions.js";
 import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
-import { chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
+import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
 import type { ApiMessage, ContentPart, TaskWaitRequest, ToolCall } from "./types.js";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
@@ -2595,7 +2595,7 @@ export async function runAgent(
     });
 
     for (const call of toolCalls) {
-      const slug = call.function.name;
+      const slug = canonicalNativeToolSlug(call.function.name);
       if (!toolsUsed.includes(slug)) toolsUsed.push(slug);
 
       if (onStatus) await onStatus(toolStatus(slug));
@@ -2951,20 +2951,20 @@ export async function runAgent(
             const url = String((execResult as { url?: unknown }).url ?? "").trim();
             if (url) previewLinks.push(url);
           }
-          if ((slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN") && execResult && typeof execResult === "object") {
+          if ((slug === "CHUCK_BROWSER_HANDOFF" || slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && execResult && typeof execResult === "object") {
             const vaultResult = execResult as { browserHandoff?: unknown };
-            const handoff = (slug === "CHUCK_VAULT_LOGIN" && vaultResult.browserHandoff && typeof vaultResult.browserHandoff === "object"
+            const handoff = ((slug === "CHUCK_VAULT_LOGIN" || slug === "CHUCK_BROWSER") && vaultResult.browserHandoff && typeof vaultResult.browserHandoff === "object"
               ? vaultResult.browserHandoff
               : execResult) as { url?: unknown; handoffId?: unknown; status?: unknown; expiresAt?: unknown; message?: unknown; sandboxId?: unknown; shoppingPlan?: unknown };
             const url = typeof handoff.url === "string" ? handoff.url.trim() : "";
-            if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" && !/^https:\/\//i.test(url)) throw new Error("Daytona did not return a valid private browser handoff link");
+            if ((slug === "CHUCK_BROWSER_HANDOFF" || (slug === "CHUCK_BROWSER" && vaultResult.browserHandoff)) && !/^https:\/\//i.test(url)) throw new Error("Browser backend did not return a valid private browser handoff link");
             if (url) privateLinks.push({ url, expiresAt: typeof handoff.expiresAt === "number" ? handoff.expiresAt : undefined, label: "Open your private browser session" });
             // The model only needs confirmation that delivery will occur. Do
             // not put a short-lived bearer URL into model context, run state,
             // logs, or the saved conversation history.
-            if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF") {
+            if (slug === "CHUCK_BROWSER_HANDOFF") {
               execResult = { browserHandoffIssued: true, handoffId: handoff.handoffId, status: handoff.status, expiresAt: handoff.expiresAt, message: handoff.message, sandboxId: handoff.sandboxId, shoppingPlan: handoff.shoppingPlan };
-            } else if (url) {
+            } else if (url || vaultResult.browserHandoff) {
               execResult = { ...(execResult as Record<string, unknown>), browserHandoffIssued: true, browserHandoff: { issued: true, handoffId: handoff.handoffId, status: handoff.status, expiresAt: handoff.expiresAt } };
             }
           }
@@ -2984,7 +2984,7 @@ export async function runAgent(
               execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, ...(artifact.verification ? { verification: artifact.verification } : {}), note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
             }
           }
-          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_DAYTONA_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
             const screenshotBytes = Buffer.from(screenshot.base64, "base64");
             generatedImages.push({ data: screenshotBytes, mediaType: screenshot.mediaType });
@@ -3022,7 +3022,7 @@ export async function runAgent(
               });
               execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, app: screenshot.app, url: screenshot.url, note: "The screenshot is available for visual QA in this agent turn and was sent through the active channel." };
             } else {
-              execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The current Daytona browser screenshot was sent through the active private channel. No browser interaction was performed after capture." };
+              execResult = { screenshotCaptured: true, mediaType: screenshot.mediaType, sizeBytes: screenshot.sizeBytes, note: "The current E2B browser screenshot was sent through the active private channel. No browser interaction was performed after capture." };
             }
           }
         } else {

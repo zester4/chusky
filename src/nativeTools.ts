@@ -27,6 +27,7 @@ import {
   getTregSpend, saveTregSpend, saveTregReceipt, listTregReceipts, acquireTregSpendLock, releaseTregSpendLock, saveTregOAuthState, getTregOAuthState, removeTregOAuthState,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
+import { e2bBrowserEngine } from "./lib/e2b/index.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { startBlandCallForUser } from "./calls/bland.js";
@@ -55,7 +56,7 @@ import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
-import { validateNativeToolArguments } from "./agentTools.js";
+import { canonicalNativeToolSlug, validateNativeToolArguments } from "./agentTools.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
@@ -69,6 +70,7 @@ import { TregOAuth } from "./treg/oauth.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
 import { buildBrowserCandidates } from "./vault/browserObservation.js";
+import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, createLinkSpendRequest, disconnectLinkWallet, linkPaymentMethods, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews } from "./link/agentWallet.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -226,6 +228,27 @@ function daytonaCommand(value: unknown): string {
   return result;
 }
 
+function e2bSupportsBrowserAction(action?: unknown): boolean {
+  const e2bActions = new Set(["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"]);
+  return config.e2bEnabled && Boolean(config.e2bApiKey) && (action === undefined || e2bActions.has(String(action)));
+}
+
+async function automatedBrowserEngine(userId: number, action?: unknown) {
+  if (!e2bSupportsBrowserAction(action)) return daytonaEngine;
+  if (!config.vaultEnabled) return e2bBrowserEngine;
+  try {
+    const sessions = await vaultStatus(userId);
+    // Keep legacy Daytona-authenticated sessions on Daytona. New E2B vault
+    // sessions stay on E2B so Playwright and the human handoff share cookies.
+    if (sessions.some((session) => (session.status === "authenticated" || session.status === "awaiting_user_interaction") && !session.workspaceId.startsWith("e2b-"))) return daytonaEngine;
+  } catch {
+    // If vault status cannot be checked, fail closed to Daytona rather than
+    // risking a browser action against a provider that cannot see the saved session.
+    return daytonaEngine;
+  }
+  return e2bBrowserEngine;
+}
+
 function fileContent(value: unknown): string {
   const result = String(value ?? "");
   const max = 48000;
@@ -282,7 +305,9 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
   const reason = browserHandoffReason(input.reason);
   const service = input.service ? normaliseVaultService(text(input.service)) : undefined;
   const origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
-  const handoff = await daytonaEngine.browserHandoff(userId, reason.replaceAll("_", " "));
+  const handoff = config.e2bEnabled && config.e2bApiKey
+    ? await e2bBrowserEngine.browserHandoff(userId, reason.replaceAll("_", " "))
+    : await daytonaEngine.browserHandoff(userId, reason.replaceAll("_", " "));
   const record = await saveBrowserHandoff(userId, {
     id: `bh_${randomUUID()}`,
     userId,
@@ -909,6 +934,8 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
 }
 
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
+  const canonicalSlug = canonicalNativeToolSlug(slug);
+  if (canonicalSlug !== slug) return nativeTool(userId, canonicalSlug, args, runtime);
   if (runtime.sharedConversation && isSharedChannelToolDenied(slug)) {
     throw new Error(`${slug} is available only in a private owner conversation`);
   }
@@ -1611,7 +1638,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_BROWSER_NEXT": {
       const goal = text(args.goal, 1500);
-      const inspected = await daytonaCall(runtime, () => daytonaEngine.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+      const browser = await automatedBrowserEngine(userId, "state");
+      const inspected = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
       const state = inspected && typeof inspected === "object" ? inspected as Record<string, unknown> : {};
       const page = state.page && typeof state.page === "object" ? state.page as Record<string, unknown> : state;
       const accessibility = state.accessibility ?? state.snapshot ?? page.accessibility;
@@ -1685,14 +1713,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       // Never let model-authored metadata authorize a retained website session.
       // Read the live retained desktop and verify only its observed state.
-      const observed = await daytonaCall(runtime, () => daytonaEngine.browser(userId, { action: "state", maxDepth: 8 })) as {
+      const browser = await automatedBrowserEngine(userId, "state");
+      const observed = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 })) as {
         observedUrl?: unknown; title?: unknown; accessibility?: unknown; observationMethod?: unknown;
       };
       const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
       const title = typeof observed.title === "string" ? observed.title : undefined;
       const liveText = JSON.stringify(observed.accessibility ?? "").slice(0, 5000);
-      if (handoff && (!currentUrl || observed.observationMethod !== "address_bar")) {
-        throw new Error("Daytona could not observe the live browser URL; the handoff remains unverified");
+      if (handoff && (!currentUrl || (observed.observationMethod !== "address_bar" && !config.e2bEnabled))) {
+        throw new Error("The automated browser could not observe the live browser URL; the handoff remains unverified");
       }
       const result = verifyBrowserResult({
         currentUrl,
@@ -1720,23 +1749,30 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       return result;
     }
-    case "CHUCK_DAYTONA_BROWSER": {
+    case "CHUCK_BROWSER": {
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
-        const result = await daytonaCall(runtime, () => daytonaEngine.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+        const browser = await automatedBrowserEngine(userId, args.action);
+        const result = await daytonaCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
-          runtime.registerCancellationCleanup(async () => { await daytonaEngine.browser(userId, { action: "session_release", sessionId }); });
+          runtime.registerCancellationCleanup(async () => { await browser.browser(userId, { action: "session_release", sessionId }); });
         }
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "succeeded", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} completed`, createdAt: Date.now() });
+        if (result && typeof result === "object" && (result as { needsUserInteraction?: unknown }).needsUserInteraction === true && (result as { challenge?: unknown }).challenge) {
+          const challenge = (result as { challenge?: { type?: unknown } }).challenge;
+          const reason = challenge?.type === "two_factor" ? "two_factor" : challenge?.type === "captcha" ? "captcha" : "site_challenge";
+          const handoff = await createBrowserHandoffRecord(userId, { reason, origin });
+          return { ...(result as Record<string, unknown>), browserHandoff: handoff, next: "Open the private browser link delivered to you, complete the challenge there, return and say continue, then call CHUCK_BROWSER_HANDOFF_COMPLETE followed by CHUCK_BROWSER_VERIFY." };
+        }
         return result;
       } catch (error) {
         await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "browser_action", ...(origin ? { origin } : {}), action, status: "failed", summary: `Browser ${String(args.action ?? "operation").replaceAll("_", " ")} failed`, createdAt: Date.now() });
         throw error;
       }
     }
-    case "CHUCK_DAYTONA_BROWSER_HANDOFF": return daytonaCall(runtime, () => createBrowserHandoffRecord(userId, args));
+    case "CHUCK_BROWSER_HANDOFF": return daytonaCall(runtime, () => createBrowserHandoffRecord(userId, args));
     case "CHUCK_BROWSER_HANDOFF_STATUS": {
       const id = args.id ? text(args.id) : undefined;
       const records = id ? [await getBrowserHandoff(userId, id)] : await listBrowserHandoffs(userId, args.limit === undefined ? 10 : Number(args.limit));
@@ -1762,7 +1798,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
       const saved = (await listVault(userId)).filter((credential) => credential.service === service && credential.accountAlias === accountAlias && (!origin || credential.origin === origin));
       const loginRecipe = saved.length === 1 ? await findBrowserPlaybook(userId, saved[0]!.origin, accountAlias) : undefined;
-      const login = await loginWithVault(userId, service, { workspaceId: (owner) => daytonaEngine.workspaceId(owner), login: (owner, input) => daytonaEngine.vaultLogin(owner, input) }, accountAlias, origin, loginRecipe?.login);
+      // E2B owns normal Playwright login when enabled. Its retained headed
+      // Chromium session is also the session exposed by the E2B handoff when
+      // a CAPTCHA/2FA challenge needs the owner. Daytona remains the fallback.
+      const browser = config.e2bEnabled && config.e2bApiKey ? e2bBrowserEngine : daytonaEngine;
+      const login = await loginWithVault(userId, service, { workspaceId: (owner) => browser.workspaceId(owner), login: (owner, input) => browser.vaultLogin(owner, input) }, accountAlias, origin, loginRecipe?.login);
       if (loginRecipe) {
         const verifiedAt = login.authenticated ? Date.now() : loginRecipe.login.lastVerifiedAt;
         await saveBrowserPlaybook(userId, normalizePlaybook({ ...loginRecipe, login: { ...loginRecipe.login, ...(verifiedAt ? { lastVerifiedAt: verifiedAt } : {}) }, successCount: login.authenticated ? loginRecipe.successCount + 1 : loginRecipe.successCount, failureCount: login.authenticated ? loginRecipe.failureCount : loginRecipe.failureCount + 1, lastUsedAt: Date.now() })).catch(() => undefined);
@@ -1785,7 +1825,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       let browserLogout: { attempted: boolean; completed?: boolean; note?: string } = { attempted: false, note: "No site logout URL was configured." };
       if (saved?.logoutUrl) {
         try {
-          await daytonaEngine.browser(userId, { action: "open", url: saved.logoutUrl });
+          await (await automatedBrowserEngine(userId, "open")).browser(userId, { action: "open", url: saved.logoutUrl });
           browserLogout = { attempted: true, completed: true };
         } catch (error) {
           browserLogout = { attempted: true, completed: false, note: error instanceof Error ? error.message : "The site logout page could not be opened." };
@@ -1795,6 +1835,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service, ...(saved?.origin ? { origin: saved.origin } : {}), status: "succeeded", summary: `Revoked the ${service}${accountAlias ? ` (${accountAlias})` : ""} browser session`, createdAt: Date.now() });
       return { ...result, browserLogout, workspacePaused: false, note: "The selected saved session is revoked. Other browser identities and workspace processes remain available." };
     })();
+    case "CHUCK_LINK_WALLET_CONNECT": return beginLinkOAuth(userId);
+    case "CHUCK_LINK_WALLET_STATUS": return linkWalletStatus(userId);
+    case "CHUCK_LINK_PAYMENT_METHODS": return linkPaymentMethods(userId);
+    case "CHUCK_LINK_CREATE_SPEND_REQUEST": return createLinkSpendRequest(userId, args);
+    case "CHUCK_LINK_SPEND_STATUS": return linkSpendStatus(userId, text(args.spendRequestId));
+    case "CHUCK_LINK_SPEND_LIST": return listLinkSpendRequestViews(userId, args.limit === undefined ? 20 : Number(args.limit));
+    case "CHUCK_LINK_SPEND_CANCEL": return cancelLinkSpendRequest(userId, text(args.spendRequestId));
+    case "CHUCK_LINK_COMPLETE_CHECKOUT": return completeApprovedLinkCheckout(userId, args);
+    case "CHUCK_LINK_WALLET_DISCONNECT": return disconnectLinkWallet(userId);
     case "CHUCK_BROWSER_SESSION_REVOKE": return nativeTool(userId, "CHUCK_VAULT_LOGOUT", args, runtime);
     case "CHUCK_SHOPPING_START": return startShopping(userId, args);
     case "CHUCK_SHOPPING_LIST": return listShopping(userId, args.limit === undefined ? undefined : Number(args.limit));

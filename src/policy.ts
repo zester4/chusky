@@ -20,6 +20,12 @@ const KNOWN_COMPOSIO_TOOLKIT_PATTERN = /^(GMAIL|GOOGLECALENDAR|CALENDLY|SLACK|X|
 
 export type ToolApprovalPolicy = "private" | "approval_required";
 
+function canonicalPolicySlug(slug: string): string {
+  if (slug === "CHUCK_DAYTONA_BROWSER") return "CHUCK_BROWSER";
+  if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF") return "CHUCK_BROWSER_HANDOFF";
+  return slug;
+}
+
 const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
   "CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY",
@@ -62,8 +68,9 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_RESOLVE_SUBAGENT_TOOL_REQUEST",
   "CHUCK_REVIEW_SUBAGENT_ACTION",
   "CHUCK_VAULT_SAVE", "CHUCK_VAULT_LIST", "CHUCK_VAULT_STATUS", "CHUCK_VAULT_LOGIN", "CHUCK_VAULT_LOGOUT",
-  "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_NEXT", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
-  "CHUCK_DAYTONA_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE",
+  "CHUCK_LINK_WALLET_STATUS", "CHUCK_LINK_PAYMENT_METHODS", "CHUCK_LINK_CREATE_SPEND_REQUEST", "CHUCK_LINK_SPEND_STATUS", "CHUCK_LINK_SPEND_LIST", "CHUCK_LINK_SPEND_CANCEL", "CHUCK_LINK_COMPLETE_CHECKOUT",
+  "CHUCK_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER_PLAN", "CHUCK_BROWSER_NEXT", "CHUCK_BROWSER_SESSION_HEALTH", "CHUCK_BROWSER_PLAYBOOK_SAVE", "CHUCK_BROWSER_PLAYBOOK_LIST", "CHUCK_BROWSER_VERIFY", "CHUCK_BROWSER_AUDIT_LIST",
+  "CHUCK_BROWSER_HANDOFF", "CHUCK_BROWSER_HANDOFF_STATUS", "CHUCK_BROWSER_HANDOFF_COMPLETE",
   "CHUCK_SHOPPING_START", "CHUCK_SHOPPING_LIST", "CHUCK_SHOPPING_SELECT_RETAILER", "CHUCK_SHOPPING_UPDATE", "CHUCK_SHOPPING_CANCEL", "CHUCK_SHOPPING_PAUSE", "CHUCK_SHOPPING_RESUME", "CHUCK_SHOPPING_SAVE_SITE", "CHUCK_SHOPPING_LIST_SITES",
   "CHUCK_TASK_WAIT",
   "CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_CHECKPOINT",
@@ -87,7 +94,7 @@ const APPROVAL_NATIVE_TOOLS = new Set([
   "CHUCK_BROWSER_PLAYBOOK_REMOVE", "CHUCK_MEETING_CONTACT_DELETE", "CHUCK_MEETING_TRANSCRIPT_DELETE", "CHUCK_MISSION_COMPENSATE",
   "CHUCK_SHOPPING_REMOVE_SITE", "CHUCK_BROWSER_SESSION_REVOKE", "CHUCK_MEETING_PROFILE_UPDATE",
   // OAuth start/revoke change an external account authorization.
-  "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE",
+  "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_REVOKE", "CHUCK_LINK_WALLET_CONNECT", "CHUCK_LINK_WALLET_DISCONNECT",
 ]);
 
 // Bounded Treg intelligence and metadata reads stay autonomous. The gateway
@@ -158,7 +165,8 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
  * fail closed until they are deliberately added here.
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
-  if (slug === "CHUCK_DAYTONA_BROWSER") {
+  slug = canonicalPolicySlug(slug);
+  if (slug === "CHUCK_BROWSER") {
     if (["checkout", "place_order", "purchase", "change_address", "add_payment_method", "unknown"].includes(String(args.vaultAction ?? ""))) return "approval_required";
     return "private";
   }
@@ -253,13 +261,13 @@ const STATUSES: Record<string, string> = {
   CHUCK_DAYTONA_CODE: "🐍 I’m running code in your isolated Daytona interpreter…",
   CHUCK_DAYTONA_LSP: "🧩 I’m inspecting the workspace with Daytona code intelligence…",
   CHUCK_DAYTONA_GIT: "🔀 I’m working with the repository…",
-  CHUCK_DAYTONA_BROWSER: "🌐 I’m browsing with my private computer workspace…",
+  CHUCK_BROWSER: "🌐 I’m browsing with my private browser workspace…",
   CHUCK_VAULT_SAVE: "🔐 I’m opening a private encrypted website-login form…",
   CHUCK_VAULT_LIST: "🔐 I’m checking the connected websites…",
   CHUCK_VAULT_STATUS: "🔐 I’m checking my secure browser session…",
   CHUCK_VAULT_LOGIN: "🔐 I’m signing in through my encrypted website identity…",
   CHUCK_VAULT_LOGOUT: "🔐 I’m ending Chusky’s saved browser session…",
-  CHUCK_DAYTONA_BROWSER_HANDOFF: "🔐 I’m preparing a private browser handoff…",
+  CHUCK_BROWSER_HANDOFF: "🔐 I’m preparing a private browser handoff…",
   CHUCK_BROWSER_HANDOFF_STATUS: "🔐 I’m checking the private browser handoff…",
   CHUCK_BROWSER_HANDOFF_COMPLETE: "🔐 I’m verifying the private browser handoff…",
   CHUCK_SHOPPING_START: "🛒 I’m setting up your shopping plan…",
@@ -332,7 +340,7 @@ const DELETION_ACTION_PATTERN = /(^|_)(DELETE|REMOVE|DESTROY|ERASE|PURGE|TRASH|F
 /** Recognize destructive actions, including wrapped Composio batch/execute calls. */
 export function isDeletionToolCall(slug: string, args: Record<string, unknown> = {}, depth = 0): boolean {
   if (depth > 5) return false;
-  const normalized = slug.trim().toUpperCase();
+  const normalized = canonicalPolicySlug(slug.trim()).toUpperCase();
   if (!normalized) return false;
   if (OWNER_PRIVATE_DELETION_TOOLS.has(normalized) || DELETION_ACTION_PATTERN.test(normalized)) return true;
 
@@ -342,7 +350,7 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
 
   // Browser/computer actions identify a destructive page control by its
   // accessible label or name rather than by a provider action slug.
-  if ((normalized === "CHUCK_DAYTONA_BROWSER" || normalized === "CHUCK_DAYTONA_COMPUTER")
+  if ((normalized === "CHUCK_BROWSER" || normalized === "CHUCK_DAYTONA_COMPUTER")
     && [args.name, args.label, args.nodeAction].some((value) => typeof value === "string" && /\b(?:delete|remove|destroy|erase|purge|trash)\b/i.test(value))) return true;
 
   if (normalized === "COMPOSIO_EXECUTE_TOOL") {

@@ -34,7 +34,7 @@ Amazon-only logic or as a list of hard-coded login instructions.
 5. Check the chosen website using `CHUCK_VAULT_LIST` or
    `CHUCK_VAULT_STATUS`. If not connected, use `CHUCK_VAULT_SAVE`; otherwise
    use `CHUCK_VAULT_LOGIN`.
-6. Use `CHUCK_DAYTONA_BROWSER` to inspect, search, compare, and add items to
+6. Use `CHUCK_BROWSER` to inspect, search, compare, and add items to
    the cart. Use accessibility-first interactions and verify every resulting
    page state.
 7. Present cart total, delivery options, substitutions, and any uncertainty.
@@ -45,8 +45,8 @@ Amazon-only logic or as a list of hard-coded login instructions.
 For CAPTCHA, 2FA/MFA, consent, age verification, or a website-only login step:
 
 1. Call `CHUCK_SHOPPING_PAUSE` with its safe reason.
-2. Call `CHUCK_DAYTONA_BROWSER_HANDOFF`. It issues a short-lived signed noVNC
-   link to the **same retained Daytona desktop/browser**.
+2. Call `CHUCK_BROWSER_HANDOFF`. It issues a short-lived signed noVNC
+   link to the **same retained E2B browser session**.
 3. Deliver that bearer link only in the owner’s direct conversation. Never log
    it, store it in plan metadata, or put it in a group.
 4. The user completes the step privately and replies “continue”.
@@ -60,7 +60,7 @@ cookies, authentication codes, or browser tokens.
 ## Screenshots and saved sites
 
 - For “show me the browser” or “take a screenshot and do nothing else”, call
-  `CHUCK_DAYTONA_BROWSER` with `action=screenshot`. The image is delivered
+  `CHUCK_BROWSER` with `action=screenshot`. The image is delivered
   through the private active channel; do not take another browser action.
 - `CHUCK_SHOPPING_SAVE_SITE`, `CHUCK_SHOPPING_LIST_SITES`, and
   `CHUCK_SHOPPING_REMOVE_SITE` manage user-owned retailer preferences. A saved

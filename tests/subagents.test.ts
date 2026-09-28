@@ -189,7 +189,7 @@ test("publishes safe specialist and child-tool lifecycle events to the parent ch
 
 test("gives Lucas a complete private engineering loop while keeping provider tools role-scoped", () => {
   const lucas = WORKER_CAPABILITIES.lucas;
-  for (const tool of ["CHUCK_DAYTONA_GIT", "CHUCK_DAYTONA_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_PREVIEW"]) {
+  for (const tool of ["CHUCK_DAYTONA_GIT", "CHUCK_BROWSER", "CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_PTY", "CHUCK_DAYTONA_PREVIEW"]) {
     assert.ok(lucas.allowedTools.includes(tool), `${tool} should be available to Lucas`);
   }
   assert.equal(isComposioToolAllowedForWorker("lucas", "GITHUB_CREATE_PULL_REQUEST"), true);

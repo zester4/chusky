@@ -36,7 +36,7 @@ test("autonomy upgrade preset covers the current orchestration surfaces", () => 
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.autonomy]);
   assert.match(bullets[0], /personal and business autonomy queues/);
   assert.match(bullets[1], /dependency-graph workflow composer/);
-  assert.match(bullets[2], /Daytona browser and artifact execution/);
+  assert.match(bullets[2], /E2B browser and Daytona artifact execution/);
 });
 
 test("owner autonomy preset documents private full-context access and scoped exceptions", () => {
@@ -120,6 +120,17 @@ test("Treg upgrade preset describes live provider data and spend controls", () =
   assert.match(bullets[2], /Composio apps/);
 });
 
+test("Link Agent Wallet upgrade preset describes approval and credential boundaries", () => {
+  const bullets = getAgentUpgradePreset("linkAgentWallet");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.linkAgentWallet]);
+  assert.match(bullets[0], /PKCE OAuth/);
+  assert.match(bullets[1], /exact merchant, amount, currency/);
+  assert.match(bullets[1], /approval notification/);
+  assert.match(bullets[2], /outside model context/);
+  assert.match(bullets[2], /merchant confirm/);
+});
+
 test("Jev routing upgrade preset describes semantic routing and connection safety", () => {
   const bullets = getAgentUpgradePreset("jevRouting");
   assert.equal(bullets.length, 3);
@@ -142,21 +153,22 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces proactive Jev attention routing", async () => {
+test("current upgrade manifest announces the Link Agent Wallet release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.22.0");
-  assert.equal(notice?.version, "4.22.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /bounded browser decision loop/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Jev/);
-  assert.match(formatAgentUpgradeNotice(notice!), /existing approval/);
+  assert.equal(notice?.id, "release-4.25.0");
+  assert.equal(notice?.version, "4.25.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /E2B Playwright\/Chromium/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Stripe Link purchase requests/);
+  assert.match(formatAgentUpgradeNotice(notice!), /approval notification/);
+  assert.match(formatAgentUpgradeNotice(notice!), /merchant confirm/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {
   const bullets = getAgentUpgradePreset("browserAutonomy");
   assert.equal(bullets.length, 3);
   assert.match(bullets[0], /bounded browser decision loop/);
-  assert.match(bullets[1], /credentials/);
-  assert.match(bullets[2], /deterministic browser path/);
+  assert.match(bullets[1], /E2B|Playwright/);
+  assert.match(bullets[2], /authoritative|deterministic/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

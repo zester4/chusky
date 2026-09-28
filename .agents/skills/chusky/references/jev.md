@@ -42,7 +42,7 @@ and Treg spend guards are unchanged.
 - `src/decisions/browserRouter.ts` and `src/vault/browserObservation.ts` —
   redact live Daytona accessibility observations, generate synthetic
   server-side candidate IDs, and let Jev rank only those bounded candidates.
-  The router never executes the selected action; `CHUCK_DAYTONA_BROWSER` and
+  The router never executes the selected action; `CHUCK_BROWSER` and
   the vault guard remain the execution and approval boundary.
 
 ## Modes
@@ -62,7 +62,7 @@ signal aborts in-flight Jev and catalogue requests, so routing adds at most
 that budget to the critical path. Deadline aborts do not open the breaker.
 
 Browser routing is used only when `CHUCK_BROWSER_NEXT` is called for an
-inspected Daytona page. It does not add a Jev request to ordinary chat or
+inspected E2B browser page. It does not add a Jev request to ordinary chat or
 public web search. In shadow mode the Jev result is telemetry only; in enforce
 mode it may select an inspected low-risk candidate. Low confidence, unavailable
 Jev, or any high-impact candidate falls back to deterministic guidance and the

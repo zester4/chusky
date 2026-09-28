@@ -74,7 +74,7 @@ test("tool reliability diagnostics are explicit and image transfer is resolved i
 test("owner-private call, meeting, browser, Git, and preflight descriptions agree with central approval policy", () => {
   for (const name of [
     "CHUCK_START_PHONE_CALL", "CHUCK_MEETING_JOIN", "CHUCK_MEETING_PROFILE_UPDATE",
-    "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_GIT", "CHUCK_DAYTONA_BROWSER",
+    "CHUCK_DAYTONA_APP", "CHUCK_DAYTONA_GIT", "CHUCK_BROWSER",
     "CHUCK_EMAIL_ARTIFACT", "CHUCK_TOOL_PREFLIGHT",
   ]) {
     const tool = chuckTools.find((entry) => entry.function.name === name);
@@ -184,13 +184,20 @@ test("image generation exposes a bounded multiple-image count", () => {
 });
 
 test("Daytona accessibility search exposes a valid matching mode", () => {
-  for (const name of ["CHUCK_DAYTONA_COMPUTER", "CHUCK_DAYTONA_BROWSER"]) {
+  for (const name of ["CHUCK_DAYTONA_COMPUTER", "CHUCK_BROWSER"]) {
     const tool = chuckTools.find((item) => item.function.name === name);
     const properties = tool?.function.parameters.properties as Record<string, { enum?: string[] }>;
     assert.deepEqual(properties.nameMatch?.enum, ["exact", "substring", "regex"]);
   }
-  assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "OpenRouter" }), /unsupported value/);
-  validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
+  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "OpenRouter" }), /unsupported value/);
+  validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
+});
+
+test("legacy Daytona browser aliases remain accepted only at validation boundaries", () => {
+  validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "status" });
+  validateNativeToolArguments("CHUCK_DAYTONA_BROWSER_HANDOFF", { reason: "user_requested" });
+  assert.equal(chuckTools.some((tool) => tool.function.name === "CHUCK_DAYTONA_BROWSER"), false);
+  assert.equal(chuckTools.some((tool) => tool.function.name === "CHUCK_DAYTONA_BROWSER_HANDOFF"), false);
 });
 
 test("normalizes recoverable PDF section argument shapes before validation", () => {

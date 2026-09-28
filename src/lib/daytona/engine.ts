@@ -3062,7 +3062,7 @@ export class DaytonaEngine {
 
   /**
    * Trusted vault-only path. This method is intentionally not reachable from
-   * CHUCK_DAYTONA_BROWSER: it receives secrets only from the credential broker
+   * CHUCK_BROWSER: it receives secrets only from the credential broker
    * and returns no accessibility tree, screenshot, or typed values.
    */
   async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: { steps?: Array<{ role?: string; name?: string; action?: string }>; failure?: Array<{ textIncludes?: string }> } }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
