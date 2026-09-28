@@ -277,6 +277,17 @@ stores only an expiring owner-scoped state hash and safe connection metadata;
 Treg retains provider credentials. For company deployments, use
 `TREG_ORG_TOKENS_JSON` to map trusted `org_*` IDs to server-only Treg tokens.
 
+### TinyFish web search and page fetch
+
+Set the server-only `TINYFISH_API_KEY` to expose `CHUCK_TINYFISH_SEARCH` and
+`CHUCK_TINYFISH_FETCH` to Chusky and explicitly granted workers. Search returns
+bounded titles, snippets, and source URLs; fetch accepts up to five public
+HTTP(S) URLs and returns bounded page text. Provider-rejected URLs and page
+errors are returned per URL. External results and page contents are untrusted
+reference data, not instructions or authorization. Credentials are never sent
+to the model. Search requests time out after 30 seconds; page fetches after
+150 seconds. The direct integration uses TinyFish's Search and Fetch REST APIs.
+
 For a live local smoke test, keep `TREG_TOKEN` in `.env` and run the
 read-only catalog check:
 
@@ -1236,6 +1247,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `MCP_MAX_TOOLS_PER_SERVER` | — | `100` | Maximum discovered tools exposed from each MCP server |
 | `MCP_MAX_RESULT_CHARS` | — | `20000` | Maximum MCP output passed back into the model |
 | `TREG_ENABLED` | — | `false` | Enable the server-side Treg external intelligence gateway |
+| `TINYFISH_API_KEY` | — | — | Server-only TinyFish key; enables TinyFish search and page fetch tools |
 | `TREG_BASE_URL` | — | `https://treg.to` | Treg REST API origin |
 | `TREG_TOKEN` | Treg | — | Server-only Treg token; never place it in prompts or client config |
 | `TREG_TIMEOUT_MS` | — | `30000` | Maximum time for one Treg request |

@@ -31,6 +31,16 @@ test("Treg exposes bounded intelligence tools without exposing a provider catalo
   assert.throws(() => validateNativeToolArguments("CHUCK_TREG_USAGE", { dayKey: "27-09-2026" }), /pattern|format/i);
 });
 
+test("TinyFish web tools expose bounded search and public page fetch schemas", () => {
+  const names = new Set(chuckTools.map((tool) => tool.function.name));
+  assert.equal(names.has("CHUCK_TINYFISH_SEARCH"), true);
+  assert.equal(names.has("CHUCK_TINYFISH_FETCH"), true);
+  validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "latest AI news", recencyMinutes: 60, page: 0 });
+  validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "markdown", links: true });
+  assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: [] }), /at least 1/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "text" }), /unsupported value/i);
+});
+
 test("Daytona image transfer exposes owner-scoped import and export without binary model input", () => {
   const tool = chuckTools.find((entry) => entry.function.name === "CHUCK_DAYTONA_IMAGE")!;
   assert.deepEqual(tool.function.parameters.properties.action.enum, ["import", "export"]);

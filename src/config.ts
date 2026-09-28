@@ -168,6 +168,9 @@ export const config = {
   tregOrganizationTokens: secretMap("TREG_ORG_TOKENS_JSON"),
   tregEnabled: optional("TREG_ENABLED", "false") === "true",
 
+  // TinyFish provides server-side public web search and page extraction.
+  tinyFishApiKey: optional("TINYFISH_API_KEY", ""),
+
   // ── Jev decision routing (TypeSafe System One) ────────────────────
   // Jev answers typed routing questions (skill, Composio toolkit/action,
   // Treg endpoint) with calibrated probabilities. It never authorizes an

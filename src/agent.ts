@@ -112,7 +112,9 @@ function assertNoCompensationCredentialFields(value: unknown, path = "arguments"
   }
 }
 /* native tool catalog lives in agentTools.ts */
-const LOCAL_TOOLS = modelFacingChuckTools;
+const LOCAL_TOOLS = modelFacingChuckTools.filter((tool) =>
+  !tool.function.name.startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey),
+);
 const HIDDEN_COMPOSIO_MODEL_TOOLS = new Set(["COMPOSIO_GET_CONNECTED_ACCOUNTS"]);
 const SHARED_PUBLIC_COMPOSIO_TOOLS = new Set(["COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
 export const VOICE_TURN_NATIVE_TOOLS = [

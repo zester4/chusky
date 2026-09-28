@@ -8,6 +8,7 @@ import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { createTinyFishClient } from "./tinyfish.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -917,6 +918,27 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
   validateNativeToolArguments(slug, args);
   switch (slug) {
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
+    case "CHUCK_TINYFISH_SEARCH": {
+      if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
+      return createTinyFishClient(config.tinyFishApiKey).search({
+        query: text(args.query, 500),
+        location: args.location === undefined ? undefined : text(args.location, 100),
+        language: args.language === undefined ? undefined : text(args.language, 20),
+        recencyMinutes: args.recencyMinutes === undefined ? undefined : Number(args.recencyMinutes),
+        afterDate: args.afterDate === undefined ? undefined : text(args.afterDate, 10),
+        beforeDate: args.beforeDate === undefined ? undefined : text(args.beforeDate, 10),
+        page: args.page === undefined ? undefined : Number(args.page),
+      }, runtime.signal);
+    }
+    case "CHUCK_TINYFISH_FETCH": {
+      if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
+      return createTinyFishClient(config.tinyFishApiKey).fetch({
+        urls: Array.isArray(args.urls) ? args.urls.map((url) => text(url, 2_000)) : [],
+        format: args.format as "markdown" | "html" | "json" | undefined,
+        links: args.links === true,
+        imageLinks: args.imageLinks === true,
+      }, runtime.signal);
+    }
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);
     case "CHUCK_TREG_PLATFORMS": return tregGateway().platforms(text(args.slug, 200), runtime.organizationId);

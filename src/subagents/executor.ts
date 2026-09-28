@@ -258,7 +258,8 @@ export async function executeDelegation(
   // Filter available tools to strictly match the native + provider boundaries.
   // Composio actions are resolved only when a supervisor explicitly selected
   // exact slugs for this run; workers never inherit the full provider catalogue.
-  const nativeWorkerTools = chuckTools.filter((t) => contract.allowedTools.includes(t.function.name));
+  const nativeWorkerTools = chuckTools.filter((t) => contract.allowedTools.includes(t.function.name)
+    && (!t.function.name.startsWith("CHUCK_TINYFISH_") || Boolean(config.tinyFishApiKey)));
   const allowedToolNames = new Set([...contract.allowedTools, ...contract.allowedComposioTools]);
 
   // Determine if context contains an explicit tool call payload
