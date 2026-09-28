@@ -489,6 +489,10 @@ test("reminder timestamps reject timezone-less and ambiguous inputs before enque
 
 test("browser verification uses observed page text, not model-authored metadata", async () => {
   const originalBrowser = e2bBrowserEngine.browser;
+  const originalE2bEnabled = config.e2bEnabled;
+  const originalE2bApiKey = config.e2bApiKey;
+  config.e2bEnabled = true;
+  config.e2bApiKey = "ci-test-e2b-key";
   e2bBrowserEngine.browser = async () => ({ observedUrl: "https://example.test/real", title: "Real page", accessibility: { role: "main", name: "Real content" }, observationMethod: "address_bar" }) as any;
   try {
     const result = await nativeTool(810069, "CHUCK_BROWSER_VERIFY", {
@@ -500,6 +504,8 @@ test("browser verification uses observed page text, not model-authored metadata"
     assert.equal(result.passed, false);
   } finally {
     e2bBrowserEngine.browser = originalBrowser;
+    config.e2bEnabled = originalE2bEnabled;
+    config.e2bApiKey = originalE2bApiKey;
   }
 });
 
