@@ -1279,7 +1279,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `RATE_LIMIT` | — | `10` | Messages per window |
 | `RATE_WINDOW_SECONDS` | — | `60` | Rate window |
 | `ALLOWED_USERS` | — | (all) | Telegram user IDs allowlist |
-| `MAX_HISTORY` | — | `20` | Conversation turns to keep |
+| `MAX_HISTORY` | — | `10` | Conversation turns to keep (clamped to 7–12) |
 | `REDIS_URL` | — | (memory) | Redis for persistence |
 | `SESSION_TTL` | — | `2592000` | Redis TTL (30 days) |
 | `BETTER_AUTH_DATABASE_URL` | Neon | — | Production Better Auth PostgreSQL connection string; required when `NODE_ENV=production` and auth is enabled |

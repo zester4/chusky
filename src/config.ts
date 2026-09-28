@@ -60,6 +60,11 @@ function boundedInt(key: string, fallback: number, min: number, max: number): nu
   return value;
 }
 
+function clampedInt(key: string, fallback: number, min: number, max: number): number {
+  const value = positiveInt(key, fallback);
+  return Math.min(max, Math.max(min, value));
+}
+
 function optionalBoundedNumber(key: string, min: number, max: number): number | undefined {
   const raw = process.env[key];
   if (!raw || !raw.trim()) return undefined;
@@ -583,7 +588,7 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
     .filter(Boolean),
 
   // ── Conversation ───────────────────────────────────────────────────
-  maxHistory: positiveInt("MAX_HISTORY", 20),
+  maxHistory: clampedInt("MAX_HISTORY", 10, 7, 12),
   // Give the supervisor room for longer tool workflows while keeping a hard
   // ceiling; per-run tool-call, cost, and durable-work budgets still apply.
   maxToolRounds: boundedInt("MAX_TOOL_ROUNDS", 70, 1, 100),
