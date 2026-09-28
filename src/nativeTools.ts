@@ -67,6 +67,8 @@ import { TregGateway } from "./treg/gateway.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
+import { routeBrowserNext } from "./decisions/browserRouter.js";
+import { buildBrowserCandidates } from "./vault/browserObservation.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -1606,6 +1608,25 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const plan = createBrowserOperationPlan(text(args.goal), origin, playbook);
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "plan_created", ...(origin ? { origin } : {}), ...(playbook ? { service: playbook.service, playbookId: playbook.id } : {}), action: plan.action, status: "started", summary: `Planned ${plan.action.replaceAll("_", " ")} browser work`, createdAt: Date.now() });
       return { ...plan, ...(playbook ? { playbook: { id: playbook.id, service: playbook.service, accountAlias: playbook.accountAlias, version: playbook.version } } : {}) };
+    }
+    case "CHUCK_BROWSER_NEXT": {
+      const goal = text(args.goal, 1500);
+      const inspected = await daytonaCall(runtime, () => daytonaEngine.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+      const state = inspected && typeof inspected === "object" ? inspected as Record<string, unknown> : {};
+      const page = state.page && typeof state.page === "object" ? state.page as Record<string, unknown> : state;
+      const accessibility = state.accessibility ?? state.snapshot ?? page.accessibility;
+      const currentUrl = typeof state.observedUrl === "string" ? state.observedUrl : typeof page.observedUrl === "string" ? page.observedUrl : undefined;
+      const observation = buildBrowserCandidates({
+        accessibility,
+        goal,
+        currentUrl,
+        title: typeof state.title === "string" ? state.title : typeof page.title === "string" ? page.title : undefined,
+        loadState: typeof state.loadState === "string" ? state.loadState : undefined,
+        sessionStatus: typeof args.sessionStatus === "string" ? args.sessionStatus : undefined,
+      }, args.maxCandidates === undefined ? 12 : Number(args.maxCandidates));
+      const decision = await routeBrowserNext({ observation, signal: runtime.signal, sessionId: runtime.currentRunId ?? runtime.missionId });
+      await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: decision.source === "jev" ? "decision_proposed" : "decision_fallback", ...(observation.origin ? { origin: observation.origin } : {}), status: decision.candidate?.requiresApproval ? "waiting" : "succeeded", summary: decision.candidate ? `Browser next-step proposal: ${decision.candidate.kind}` : "Browser next-step proposal had no safe candidate", createdAt: Date.now() });
+      return { source: decision.source, mode: decision.mode, ...(decision.fallbackReason ? { fallbackReason: decision.fallbackReason } : {}), confidence: decision.confidence, observation: { origin: observation.origin, path: observation.path, title: observation.title, loadState: observation.loadState, sessionStatus: observation.sessionStatus, goal: observation.goal }, candidates: observation.candidates.map(({ id, kind, role, name, action, risk, description, requiresApproval, execution }) => ({ id, kind, role, name, action, risk, description, requiresApproval, execution })), ...(decision.candidate ? { next: decision.candidate } : {}) };
     }
     case "CHUCK_BROWSER_SESSION_HEALTH": {
       const service = args.service ? text(args.service) : undefined;

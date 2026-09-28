@@ -1186,7 +1186,11 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `DAYTONA_API_KEY` | Daytona | — | Enables an isolated per-user Daytona workspace |
 | `DAYTONA_API_URL` | — | `https://app.daytona.io/api` | Daytona API endpoint |
 | `DAYTONA_TARGET` | — | provider default | Optional Daytona execution target |
+| `DAYTONA_IMAGE` | — | — | Optional image source; required for inline resource sizing |
 | `DAYTONA_SNAPSHOT` | — | provider default | Optional reusable snapshot |
+| `DAYTONA_CPU` | — | provider default | CPU cores for newly created workspaces, up to 4 |
+| `DAYTONA_MEMORY_GIB` | — | provider default | Memory in GiB for newly created workspaces, up to 8 |
+| `DAYTONA_DISK_GIB` | — | provider default | Disk in GiB for newly created workspaces, up to 10 |
 | `DAYTONA_NETWORK_BLOCK_ALL` | — | `true` | Blocks outbound sandbox network by default; set false only deliberately |
 | `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
@@ -1259,7 +1263,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `TREG_ORG_TOKENS_JSON` | Treg | `{}` | Server-only organization-to-token map; never put this in client config |
 | `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, and Treg: `off`, `shadow` (log only), or `enforce` (apply with keyword fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
-| `JEV_SURFACES` | — | `skills,composio,treg,autonomy` | Jev surfaces: skills, Composio, Treg, and bounded autonomy decisions for durable proactive work |
+| `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy decisions, and inspected browser next-step proposals |
 | `JEV_COMPOSIO_ROUTE_UNCONNECTED` | — | `true` | Route across Composio's full toolkit catalogue so requests can target apps that are not connected yet (connect-first hint, never executable until connected) |
 | `JEV_COMPOSIO_CATALOG_LIMIT` | — | `500` | Most-used Composio toolkits considered for routing (cached 6h) |
 | `JEV_TURN_BUDGET_MS` | — | `3000` | One shared per-turn deadline for all routing before the first model call; slower routes fall back to keywords |

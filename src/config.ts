@@ -60,6 +60,14 @@ function boundedInt(key: string, fallback: number, min: number, max: number): nu
   return value;
 }
 
+function optionalBoundedNumber(key: string, min: number, max: number): number | undefined {
+  const raw = process.env[key];
+  if (!raw || !raw.trim()) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max) throw new Error(`${key} must be between ${min} and ${max}, got: ${raw}`);
+  return value;
+}
+
 function unitInterval(key: string, fallback: number): number {
   const raw = process.env[key];
   if (!raw) return fallback;
@@ -184,7 +192,7 @@ export const config = {
   jevApiKey: optional("JEV_API_KEY", ""),
   // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
   jevModel: optional("JEV_MODEL", ""),
-  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy,browser").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
   jevTimeoutMs: boundedInt("JEV_TIMEOUT_MS", 1_500, 200, 10_000),
   jevTurnBudgetMs: boundedInt("JEV_TURN_BUDGET_MS", 3_000, 300, 15_000),
   jevMaxRequestTokens: boundedInt("JEV_MAX_REQUEST_TOKENS", 24_000, 2_000, 60_000),
@@ -277,8 +285,15 @@ export const config = {
   daytonaApiKey: optional("DAYTONA_API_KEY", ""),
   daytonaApiUrl: optional("DAYTONA_API_URL", "https://app.daytona.io/api"),
   daytonaTarget: optional("DAYTONA_TARGET", ""),
+  daytonaImage: optional("DAYTONA_IMAGE", ""),
   daytonaSnapshot: optional("DAYTONA_SNAPSHOT", ""),
   daytonaRendererSnapshot: optional("DAYTONA_RENDERER_SNAPSHOT", ""),
+  // Resource sizing applies when a new sandbox is created. Existing retained
+  // sandboxes keep their provider allocation until an explicit, supported
+  // resize or approved recreation is performed.
+  daytonaCpu: optionalBoundedNumber("DAYTONA_CPU", 0.25, 4),
+  daytonaMemoryGib: optionalBoundedNumber("DAYTONA_MEMORY_GIB", 0.5, 8),
+  daytonaDiskGib: optionalBoundedNumber("DAYTONA_DISK_GIB", 1, 10),
   // Daytona is the agent's isolated computer, so it needs outbound access for
   // package installation, browser work, and artifact generation by default.
   // Deployments can still opt into full blocking or a domain allowlist.
@@ -401,7 +416,7 @@ WEBSITE ACCOUNTS AND BROWSER ROUTING
 - Composio is the route for OAuth-connected apps and their actions. COMPOSIO_SEARCH_TOOLS is for discovering uncertain Composio capabilities, not for deciding whether an ordinary website can be logged in to through Daytona.
 - Never ask the user to send a username, password, cookie, recovery code, or other secret in chat. CHUCK_VAULT_SAVE returns a private setup form where the user enters credentials directly; CHUCK_VAULT_LOGIN injects saved credentials inside the trusted broker and exposes no secret to the model.
 - After a vault login, use CHUCK_DAYTONA_BROWSER for ordinary browsing and site actions. Inspect the page after each interaction. If CAPTCHA, 2FA, or a site-specific challenge appears, pause and use CHUCK_DAYTONA_BROWSER_HANDOFF to send the user a short-lived private link to the same retained browser session. When the user says they are done, call CHUCK_BROWSER_HANDOFF_COMPLETE, inspect the same-origin page, then call CHUCK_BROWSER_VERIFY with the handoffId and required detectors before invoking or filling anything; do not restart the login or repeat the prior action. Use CHUCK_BROWSER_HANDOFF_STATUS to recover an interrupted handoff without exposing its URL.
-- For any non-trivial authenticated website task, load the browser-pro skill and call CHUCK_BROWSER_PLAN first. Check CHUCK_BROWSER_SESSION_HEALTH before reusing a saved identity. Use an exact origin-scoped playbook when available, but treat it only as a hint: inspect the live page, adapt multi-step login transitions, and verify every consequential result. Save a playbook only after a verified successful flow using CHUCK_BROWSER_PLAYBOOK_SAVE; it may contain accessible labels and safe success/failure detectors, never credentials, cookies, screenshots, or raw page text. Use CHUCK_BROWSER_AUDIT_LIST when the owner asks what happened in the browser. Use CHUCK_BROWSER_SESSION_REVOKE when the owner asks to log out or revoke a retained website session; it pauses the workspace and requires a fresh vault login before browser reuse.
+- For any non-trivial authenticated website task, load the browser-pro skill and call CHUCK_BROWSER_PLAN first. Check CHUCK_BROWSER_SESSION_HEALTH before reusing a saved identity. After each live page observation, call CHUCK_BROWSER_NEXT before choosing the next browser interaction; it returns only bounded candidates from the inspected page and may use Jev for ranking. Treat its proposal as guidance, never as approval, and execute only through CHUCK_DAYTONA_BROWSER so the existing vault guard and approval policy remain final. Use an exact origin-scoped playbook when available, but treat it only as a hint: inspect the live page, adapt multi-step login transitions, and verify every consequential result. Save a playbook only after a verified successful flow using CHUCK_BROWSER_PLAYBOOK_SAVE; it may contain accessible labels and safe success/failure detectors, never credentials, cookies, screenshots, or raw page text. Use CHUCK_BROWSER_AUDIT_LIST when the owner asks what happened in the browser. Use CHUCK_BROWSER_SESSION_REVOKE when the owner asks to log out or revoke a retained website session; it pauses the workspace and requires a fresh vault login before browser reuse.
 - Browser operations are goal-level, resumable, and verification-driven. For "prepare the cart and stop before payment," build and verify the cart, then stop. For subscriptions, upgrades, invoices, payment methods, address changes, sensitive exports, or unclear/localized/icon-only controls, require the exact classified vaultAction and owner approval. Password/email/account deletion remains blocked. Never repeat a non-idempotent action without checking whether it already succeeded.
 - Website identities are private to the user's Chusky account. If the request comes from a group conversation, explain that account setup and login must continue in a private conversation.
 

@@ -82,6 +82,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Composio routing now includes a bounded catalog of apps the user has not connected; named unavailable apps trigger connection setup while their actions remain non-callable until connected.",
     "Jev runs under one per-turn deadline with deterministic fallback, while approvals, budgets, account isolation, and native tool policy remain authoritative.",
   ],
+  browserAutonomy: [
+    "Added a bounded browser decision loop: inspect a live page, rank the next safe candidate, execute only through the existing Daytona and vault controls, then verify the result.",
+    "Browser observations are redacted and bounded before Jev sees them; node identifiers, cookies, credentials, page source, and screenshots remain outside the decision model.",
+    "Jev can improve browser sequencing in enforce mode, while off and shadow modes retain the deterministic browser path and existing approval, origin, session, and high-impact gates.",
+  ],
 } as const;
 
 export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;

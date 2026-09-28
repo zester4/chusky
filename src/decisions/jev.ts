@@ -115,6 +115,13 @@ export function parseJevAnswer(question: JevQuestion, raw: unknown): JevAnswer {
 
 type Breaker = { failures: number; openUntil: number };
 
+function modelForProvider(provider: "openrouter" | "typesafe", configured: string): string {
+  const value = configured.trim();
+  if (provider === "typesafe" && value === "typesafe/jev-1.13") return "jev-1.13.0";
+  if (provider === "openrouter" && value === "jev-1.13.0") return "typesafe/jev-1.13";
+  return value || (provider === "typesafe" ? "jev-1.13.0" : "typesafe/jev-1.13");
+}
+
 export class JevClient {
   private readonly provider: "openrouter" | "typesafe";
   private readonly apiKey: string;
@@ -129,7 +136,7 @@ export class JevClient {
   constructor(options: JevClientOptions = {}) {
     this.provider = options.provider ?? config.jevProvider;
     this.apiKey = options.apiKey ?? (this.provider === "typesafe" ? config.jevApiKey : config.openRouterApiKey);
-    this.model = options.model || config.jevModel || (this.provider === "typesafe" ? "jev-1.13.0" : "typesafe/jev-1.13");
+    this.model = options.model || modelForProvider(this.provider, config.jevModel);
     this.timeoutMs = options.timeoutMs ?? config.jevTimeoutMs;
     this.fetcher = options.fetchImpl ?? fetch;
     this.now = options.now ?? Date.now;
@@ -350,7 +357,7 @@ export async function verifyCandidates(client: JevClient, input: {
 
 let sharedClient: JevClient | undefined;
 
-export function jevEnabled(surface?: "skills" | "composio" | "treg" | "autonomy"): boolean {
+export function jevEnabled(surface?: "skills" | "composio" | "treg" | "autonomy" | "browser"): boolean {
   if (config.jevMode === "off") return false;
   if (surface && !config.jevSurfaces.has(surface)) return false;
   return Boolean(config.jevProvider === "typesafe" ? config.jevApiKey : config.openRouterApiKey);

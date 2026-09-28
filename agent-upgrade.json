@@ -1,11 +1,11 @@
 {
-  "id": "release-4.21.0",
-  "version": "4.21.0",
+  "id": "release-4.22.0",
+  "version": "4.22.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
-    "Personal and business watches are isolated by mode, and only confirmed successful tool calls count as handling; paused work and future waits remain untouched.",
-    "The pulse builds bounded decision context, lets Jev propose the specialist and exact connected-app action, and preserves deterministic authority, account, and verification gates while preserving approval boundaries."
+    "Added a bounded browser decision loop: inspect a live page, rank the next safe candidate, execute only through the existing Daytona and vault controls, then verify the result.",
+    "Browser observations are redacted and bounded before Jev sees them; node identifiers, cookies, credentials, page source, and screenshots remain outside the decision model.",
+    "Jev can improve browser sequencing in enforce mode, while off and shadow modes retain the deterministic browser path and existing approval, origin, session, and high-impact gates."
   ],
-  "createdAt": "2026-09-28T03:03:31.534Z"
+  "createdAt": "2026-09-28T04:00:00.000Z"
 }

@@ -39,7 +39,7 @@ const APP_SCAFFOLD_MAX_REGISTRY_ATTEMPTS = 3;
 const TRANSIENT_NPM_REGISTRY_FAILURE = /\b(?:EAI_AGAIN|ENOTFOUND|ECONNRESET|ETIMEDOUT|getaddrinfo)\b|network\s+(?:request|error)/i;
 const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and cannot be overridden|tier[- ]based network restriction/i;
 const DAYTONA_RENDERER_CAPACITY_RESTRICTION = /total disk limit exceeded|concurrency limits|insufficient (?:disk|storage|capacity)|resource quota/i;
-const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|connection reset|transport.*closed/i;
+const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|browser is temporarily reconnecting|connection reset|transport.*closed/i;
 const DAYTONA_TRANSIENT_CODE_CONNECTION = /websocket\s+closed(?:\s+with\s+code\s+1006)?|websocket.*(?:eof|reset|closed)|connection is shut down|connection reset|transport.*closed/i;
 
 function isTransientComputerConnection(error: unknown): boolean {
@@ -1519,6 +1519,17 @@ export class DaytonaEngine {
     const creation = (async () => {
       const client = this.clientFactory();
       const stored = await getDaytonaWorkspace(userId);
+      const requestedResources = {
+        ...(config.daytonaCpu !== undefined ? { cpu: config.daytonaCpu } : {}),
+        ...(config.daytonaMemoryGib !== undefined ? { memory: config.daytonaMemoryGib } : {}),
+        ...(config.daytonaDiskGib !== undefined ? { disk: config.daytonaDiskGib } : {}),
+      };
+      if (Object.keys(requestedResources).length && !config.daytonaImage) {
+        throw new DaytonaInputError("DAYTONA_CPU, DAYTONA_MEMORY_GIB, and DAYTONA_DISK_GIB require DAYTONA_IMAGE. The current browser snapshot/code-toolbox creation path rejects inline resources; set a compatible Daytona image or leave resource overrides empty.");
+      }
+      if (config.daytonaImage && config.daytonaSnapshot) {
+        throw new DaytonaInputError("DAYTONA_IMAGE and DAYTONA_SNAPSHOT are mutually exclusive; choose one Daytona workspace source.");
+      }
       const volumeMounts: VolumeMount[] = (stored?.volumes ?? [])
         .filter((volume) => Boolean(volume.mountPath))
         .map((volume) => ({
@@ -1527,9 +1538,11 @@ export class DaytonaEngine {
           ...(volume.subpath ? { subpath: volume.subpath } : {}),
         }));
       const createParams = {
-        ...(config.daytonaSnapshot ? { snapshot: config.daytonaSnapshot } : {}),
+        ...(config.daytonaImage
+          ? { image: config.daytonaImage }
+          : { ...(config.daytonaSnapshot ? { snapshot: config.daytonaSnapshot } : {}), language: "typescript" }),
         name: `chusky-${userId}`,
-        language: "typescript",
+        ...(Object.keys(requestedResources).length ? { resources: requestedResources } : {}),
         ...(config.daytonaDomainAllowList ? { domainAllowList: config.daytonaDomainAllowList } : { networkBlockAll: config.daytonaNetworkBlockAll }),
         labels: { agent: "chusky", user_id: String(userId) },
         ...(volumeMounts.length ? { volumes: volumeMounts } : {}),
@@ -1708,7 +1721,15 @@ export class DaytonaEngine {
         }
       }
       if (!Object.keys(resources).length) throw new DaytonaInputError("resize requires cpu, memory, or disk");
-      await sandbox.resize(resources, 120);
+      try {
+        await sandbox.resize(resources, 120);
+      } catch (error) {
+        const message = String((error as { message?: unknown })?.message ?? error);
+        if (/cannot post .*\/resize|not found|404/i.test(message)) {
+          throw new DaytonaInputError("Daytona could not resize this retained sandbox through the configured target. Set DAYTONA_CPU/DAYTONA_MEMORY_GIB/DAYTONA_DISK_GIB for the next workspace, or explicitly recreate this workspace; no files were deleted.");
+        }
+        throw error;
+      }
       await sandbox.waitForResizeComplete(120);
       await sandbox.refreshData();
       return workspaceInfo(sandbox);
@@ -2039,11 +2060,25 @@ export class DaytonaEngine {
     }));
   }
 
-  async readFile(userId: number, path: string, maxChars?: number): Promise<{ path: string; content: string; truncated: boolean }> {
+  async readFile(userId: number, path: string, maxChars?: number): Promise<{ path: string; content: string; truncated: boolean; exists?: boolean; nextAction?: string }> {
     const sandbox = await this.getOrCreateWorkspace(userId);
     const normalizedPath = safeDaytonaPath(path);
     await guardVaultWorkspaceAccess(userId, sandbox.id, normalizedPath, "file path");
-    const bytes = await sandbox.fs.downloadFile(normalizedPath);
+    let bytes: Buffer;
+    try {
+      bytes = await sandbox.fs.downloadFile(normalizedPath);
+    } catch (error) {
+      if (isMissingDaytonaFile(error)) {
+        return {
+          path: normalizedPath,
+          content: "",
+          truncated: false,
+          exists: false,
+          nextAction: "Use CHUCK_DAYTONA_LIST_FILES or CHUCK_DAYTONA_FIND_FILES to discover the actual workspace path before reading it again.",
+        };
+      }
+      throw error;
+    }
     const binaryKind = isBinaryFile(normalizedPath, bytes);
     if (binaryKind) throw new DaytonaInputError(`${normalizedPath} is a ${binaryKind} file and cannot be read as text. Register it with CHUCK_ARTIFACT or inspect it with the Daytona computer tool.`);
     const limit = boundedInt(maxChars, DAYTONA_MAX_OUTPUT_CHARS, DAYTONA_MAX_OUTPUT_CHARS);
@@ -2420,13 +2455,38 @@ export class DaytonaEngine {
       const guardAction = action === "mouse_click" ? "click" : action === "keyboard_type" ? "type" : action === "keyboard_press" ? "press" : action === "accessibility_invoke" ? "accessibility_invoke" : action === "accessibility_set_value" ? "accessibility_set_value" : action;
       await guardVaultBrowserAction(userId, sandbox.id, { ...args, action: guardAction, currentUrl: stored?.browser?.lastUrl });
     }
-    const computer = sandbox.computerUse;
-    if (action === "status") return computer.getStatus();
+    let activeSandbox = sandbox;
+    let computer = activeSandbox.computerUse;
+    const refreshComputer = async (): Promise<void> => {
+      const refreshed = await this.getSandbox(userId, true);
+      if (!refreshed) throw new DaytonaInputError("Daytona workspace disappeared while recovering the desktop connection. Retry to create a fresh workspace.");
+      activeSandbox = refreshed;
+      computer = activeSandbox.computerUse;
+      await computer.start();
+    };
+    const readOnly = async <T>(operation: () => Promise<T>): Promise<T> => {
+      try {
+        return await operation();
+      } catch (error) {
+        if (!isTransientComputerConnection(error)) throw error;
+        await sleep(350);
+        try {
+          await refreshComputer();
+          return await operation();
+        } catch (retryError) {
+          if (isTransientComputerConnection(retryError)) {
+            throw new DaytonaInputError("Daytona's desktop connection is recovering. No browser or computer action was performed; retry in a few seconds.");
+          }
+          throw retryError;
+        }
+      }
+    };
+    if (action === "status") return readOnly(() => computer.getStatus());
     if (action === "stop") return computer.stop();
-    if (action === "process_status") return computer.getProcessStatus(computerProcessName(args.processName, "novnc"));
+    if (action === "process_status") return readOnly(() => computer.getProcessStatus(computerProcessName(args.processName, "novnc")));
     if (action === "process_logs" || action === "process_errors") await guardVaultWorkspaceAccess(userId, sandbox.id, action, "desktop diagnostics");
-    if (action === "recording_list") return computer.recording.list();
-    if (action === "recording_get") return computer.recording.get(boundedText(args.recordingId, "recordingId", 200));
+    if (action === "recording_list") return readOnly(() => computer.recording.list());
+    if (action === "recording_get") return readOnly(() => computer.recording.get(boundedText(args.recordingId, "recordingId", 200)));
     if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
     if (action === "recording_delete") { await computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)); return { deleted: true }; }
     // Daytona's Computer Use transport can occasionally be closed while the
@@ -2439,7 +2499,7 @@ export class DaytonaEngine {
       if (!isTransientComputerConnection(error)) throw error;
       await sleep(350);
       try {
-        await computer.start();
+        await refreshComputer();
       } catch (retryError) {
         if (isTransientComputerConnection(retryError)) {
           throw new DaytonaInputError("Daytona's browser is temporarily reconnecting. No browser action was performed; retry in a few seconds.");
@@ -2449,13 +2509,13 @@ export class DaytonaEngine {
     }
     switch (action) {
       case "start": return { started: true, status: await computer.getStatus() };
-      case "display": return computer.display.getInfo();
-      case "display_info": return computer.display.getInfo();
-      case "windows": return computer.display.getWindows();
+      case "display": return readOnly(() => computer.display.getInfo());
+      case "display_info": return readOnly(() => computer.display.getInfo());
+      case "windows": return readOnly(() => computer.display.getWindows());
       case "process_restart": return computer.restartProcess(computerProcessName(args.processName));
-      case "process_logs": return computer.getProcessLogs(computerProcessName(args.processName));
-      case "process_errors": return computer.getProcessErrors(computerProcessName(args.processName));
-      case "mouse_position": return computer.mouse.getPosition();
+      case "process_logs": return readOnly(() => computer.getProcessLogs(computerProcessName(args.processName)));
+      case "process_errors": return readOnly(() => computer.getProcessErrors(computerProcessName(args.processName)));
+      case "mouse_position": return readOnly(() => computer.mouse.getPosition());
       case "recording_start": return computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined);
       case "recording_download": {
         const recordingId = boundedText(args.recordingId, "recordingId", 200);
@@ -2464,26 +2524,26 @@ export class DaytonaEngine {
         return { recordingId, path, downloaded: true };
       }
       case "screenshot_full": {
-        const result = await computer.screenshot.takeFullScreen(args.showCursor === true);
+        const result = await readOnly(() => computer.screenshot.takeFullScreen(args.showCursor === true));
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/png", base64: result.screenshot, sizeBytes: result.sizeBytes } satisfies DaytonaScreenshotResult & { __daytonaScreenshot: true };
       }
       case "screenshot_region_full": {
         const width = boundedInt(args.width, 1, 7680);
         const height = boundedInt(args.height, 1, 4320);
-        const result = await computer.screenshot.takeRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, args.showCursor === true);
+        const result = await readOnly(() => computer.screenshot.takeRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, args.showCursor === true));
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/png", base64: result.screenshot, sizeBytes: result.sizeBytes, region: { x: args.x, y: args.y, width, height } };
       }
       case "screenshot": {
-        const result = await computer.screenshot.takeCompressed({ format: "jpeg", quality: Math.min(Math.max(Number(args.quality ?? 70), 20), 95), scale: Math.min(Math.max(Number(args.scale ?? 0.75), 0.25), 1), showCursor: args.showCursor === true });
+        const result = await readOnly(() => computer.screenshot.takeCompressed({ format: "jpeg", quality: Math.min(Math.max(Number(args.quality ?? 70), 20), 95), scale: Math.min(Math.max(Number(args.scale ?? 0.75), 0.25), 1), showCursor: args.showCursor === true }));
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes } satisfies DaytonaScreenshotResult & { __daytonaScreenshot: true };
       }
       case "screenshot_region": {
         const width = boundedInt(args.width, 1, 7680);
         const height = boundedInt(args.height, 1, 4320);
-        const result = await computer.screenshot.takeCompressedRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, { format: "jpeg", quality: 70, scale: 0.75, showCursor: args.showCursor === true });
+        const result = await readOnly(() => computer.screenshot.takeCompressedRegion({ x: coordinate(args.x, "x"), y: coordinate(args.y, "y"), width, height }, { format: "jpeg", quality: 70, scale: 0.75, showCursor: args.showCursor === true }));
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes, region: { x: args.x, y: args.y, width, height } };
       }
@@ -2494,7 +2554,7 @@ export class DaytonaEngine {
       case "keyboard_type": await computer.keyboard.type(boundedText(args.text, "text", 4000), Math.min(Math.max(Math.floor(Number(args.delayMs ?? 0)), 0), 1000)); return { typed: true };
       case "keyboard_press": await computer.keyboard.press(boundedText(args.key, "key", 40), Array.isArray(args.modifiers) ? args.modifiers.map((m) => boundedText(m, "modifier", 20)) : []); return { pressed: true };
       case "keyboard_hotkey": await computer.keyboard.hotkey(boundedText(args.keys, "keys", 100)); return { pressed: true };
-      case "accessibility_tree": return redactBrowserData(await computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) }));
+      case "accessibility_tree": return redactBrowserData(await readOnly(() => computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) })));
       case "accessibility_find": {
         const nameMatch = args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined;
         if (nameMatch && !["exact", "substring", "regex"].includes(nameMatch)) throw new DaytonaInputError("nameMatch must be exact, substring, or regex");
@@ -2505,7 +2565,7 @@ export class DaytonaEngine {
         const states = Array.isArray(args.states) ? args.states.map((state) => boundedText(state, "state", 60)).slice(0, 20) : undefined;
         const findOptions: Record<string, unknown> = { scope: requestedScope, role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, ...(states?.length ? { states } : {}), limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) };
         if (pid !== undefined) findOptions.pid = pid;
-        const result = await computer.accessibility.findNodes(findOptions as Parameters<typeof computer.accessibility.findNodes>[0]);
+        const result = await readOnly(() => computer.accessibility.findNodes(findOptions as Parameters<typeof computer.accessibility.findNodes>[0]));
         await rememberVaultBrowserNodes(userId, sandbox.id, result, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
         return redactBrowserData(result);
       }

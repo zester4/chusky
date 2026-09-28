@@ -24,6 +24,12 @@ async function main(): Promise<void> {
   try {
     const workspace = await engine.workspace(userId, "create");
     created = true;
+    const computer = await engine.computer(userId, { action: "status" }) as { status?: string };
+    const browser = await engine.browser(userId, { action: "state", maxDepth: 2 }) as { action?: string; loadState?: string; sandboxId?: string };
+    const screenshot = await engine.computer(userId, { action: "screenshot" }) as { __daytonaScreenshot?: boolean; sizeBytes?: number };
+    if (!computer || typeof computer !== "object" || !browser || browser.action !== "state" || !screenshot.__daytonaScreenshot) {
+      throw new Error("Live Daytona Computer Use/browser verification failed.");
+    }
     await engine.writeFile(userId, probePath, probeContent);
     const read = await engine.readFile(userId, probePath, 200);
     const files = await engine.listFiles(userId, "workspace/.chusky", 2);
@@ -88,7 +94,7 @@ async function main(): Promise<void> {
       }
       artifactResults[probe.extension] = "create+qa+register+download passed";
     }
-    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", writeReadList: "passed", artifacts: artifactResults, cleanup: "pending" }));
+    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", computerUse: computer.status ?? "available", browserState: browser.loadState ?? "unknown", screenshotBytes: screenshot.sizeBytes ?? 0, writeReadList: "passed", artifacts: artifactResults, cleanup: "pending" }));
   } finally {
     if (created) await engine.workspace(userId, "delete");
   }

@@ -1,6 +1,7 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import JSZip from "jszip";
+import { config } from "../src/config.js";
 import { appScaffoldCommand, DaytonaEngine } from "../src/lib/daytona/engine.js";
 import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 
@@ -161,6 +162,23 @@ test("creates one workspace and persists its provider ID", async () => {
   assert.equal(lastCreateParams?.autoPauseInterval, undefined);
 });
 
+test("passes explicitly configured resources only when creating a new workspace", async () => {
+  const previous = { image: config.daytonaImage, cpu: config.daytonaCpu, memory: config.daytonaMemoryGib, disk: config.daytonaDiskGib };
+  config.daytonaImage = "debian:12.9";
+  config.daytonaCpu = 2;
+  config.daytonaMemoryGib = 8;
+  config.daytonaDiskGib = 10;
+  try {
+    await engine().getOrCreateWorkspace(8200011);
+    assert.deepEqual(lastCreateParams?.resources, { cpu: 2, memory: 8, disk: 10 });
+  } finally {
+    config.daytonaImage = previous.image;
+    config.daytonaCpu = previous.cpu;
+    config.daytonaMemoryGib = previous.memory;
+    config.daytonaDiskGib = previous.disk;
+  }
+});
+
 test("restores npm access for a retained workspace that was previously network-blocked", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820001) as any;
@@ -295,6 +313,16 @@ test("reports a missing file detail as a recoverable workspace observation", asy
   assert.match(result.nextAction, /CHUCK_DAYTONA_LIST_FILES/);
 });
 
+test("reports a missing text file as a recoverable workspace observation", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200631) as any;
+  sandbox.fs.downloadFile = async () => { throw new Error("file not found: workspace/diag.txt"); };
+  const result = await e.readFile(8200631, "workspace/diag.txt") as any;
+  assert.equal(result.exists, false);
+  assert.equal(result.content, "");
+  assert.match(result.nextAction, /CHUCK_DAYTONA_LIST_FILES/);
+});
+
 test("reports sandbox health and capability evidence", async () => {
   const result = await engine().sandbox(820064, { action: "health" }) as any;
   assert.equal(result.healthy, true);
@@ -425,6 +453,19 @@ test("retries only the Computer Use startup handshake after a transient transpor
   const screenshot = await e.computer(820071, { action: "screenshot" }) as any;
   assert.equal(starts, 2);
   assert.equal(screenshot.__daytonaScreenshot, true);
+});
+
+test("recovers read-only Computer Use status after a dead transport connection", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200711) as any;
+  let statusCalls = 0;
+  sandbox.computerUse.getStatus = async () => {
+    statusCalls++;
+    if (statusCalls === 1) throw new Error("connection is shut down");
+    return { status: "running" };
+  };
+  assert.deepEqual(await e.computer(8200711, { action: "status" }), { status: "running" });
+  assert.equal(statusCalls, 2);
 });
 
 test("vault login falls back to standard accessibility labels or requests owner interaction without typing", async () => {

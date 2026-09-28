@@ -39,6 +39,11 @@ and Treg spend guards are unchanged.
   follow-up timing/channel, memory retention, delegation, and failure recovery.
   It validates every proposal against deterministic authority before a caller
   may execute or persist anything.
+- `src/decisions/browserRouter.ts` and `src/vault/browserObservation.ts` —
+  redact live Daytona accessibility observations, generate synthetic
+  server-side candidate IDs, and let Jev rank only those bounded candidates.
+  The router never executes the selected action; `CHUCK_DAYTONA_BROWSER` and
+  the vault guard remain the execution and approval boundary.
 
 ## Modes
 
@@ -56,12 +61,19 @@ start together and share one per-turn deadline (`JEV_TURN_BUDGET_MS`). Its
 signal aborts in-flight Jev and catalogue requests, so routing adds at most
 that budget to the critical path. Deadline aborts do not open the breaker.
 
+Browser routing is used only when `CHUCK_BROWSER_NEXT` is called for an
+inspected Daytona page. It does not add a Jev request to ordinary chat or
+public web search. In shadow mode the Jev result is telemetry only; in enforce
+mode it may select an inspected low-risk candidate. Low confidence, unavailable
+Jev, or any high-impact candidate falls back to deterministic guidance and the
+existing approval policy.
+
 Jev is additive. A Jev answer, including a confident `__none__`, never
 removes keyword skill routes or the keyword Composio domain route. Fuzzy
 skill search stays available unless the user explicitly selected a skill.
 
-`JEV_SURFACES` limits routing to `skills`, `composio`, `treg`, and/or
-`autonomy`. `JEV_MODE=off` disables every Jev surface and preserves the
+`JEV_SURFACES` limits routing to `skills`, `composio`, `treg`, `autonomy`,
+and/or `browser`. `JEV_MODE=off` disables every Jev surface and preserves the
 deterministic behavior used before Jev. Autonomy decisions are applied only
 in `enforce`; `shadow` and `off` preserve the existing runtime path. Autonomy
 calls are only made for durable/proactive work; ordinary chat does not incur

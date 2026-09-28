@@ -14,6 +14,9 @@ import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "..
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
+  // SDK transport tests exercise progress delivery, not live Jev routing.
+  // Keep them deterministic when a developer's .env enables Jev globally.
+  (config as { jevMode: "off" | "shadow" | "enforce" }).jevMode = "off";
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = false;
   (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "provider-smoke-secret";
   setWebAuthSessionResolverForTests();

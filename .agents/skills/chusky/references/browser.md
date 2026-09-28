@@ -44,12 +44,17 @@ because a user asks to connect a website account.
 2. Open only an explicit `http://` or `https://` URL. Never put credentials,
    cookies, access tokens, or secrets in a URL.
 3. Inspect the page with `snapshot` or `find` before interacting.
-4. Prefer accessible node actions (`focus`, `invoke`, `fill`) over guessed
+4. For a non-trivial task, call `CHUCK_BROWSER_NEXT` after the observation.
+   It creates bounded candidates from the live accessibility tree, redacts
+   private values, and may use Jev to rank those server-generated candidates.
+   Jev sees safe labels only; it never sees node IDs, credentials, cookies,
+   screenshots, or raw page text. Jev is guidance, not authority.
+5. Prefer accessible node actions (`focus`, `invoke`, `fill`) over guessed
    coordinates. Do not claim an interaction succeeded without inspecting the
    resulting page or state.
-5. Re-check the page after navigation, form submission, or any consequential
+6. Re-check the page after navigation, form submission, or any consequential
    action. Keep browser state in the retained Daytona workspace.
-6. If CAPTCHA, MFA/2FA, consent, or a site-specific challenge appears, pause
+7. If CAPTCHA, MFA/2FA, consent, or a site-specific challenge appears, pause
    the affected workflow and use `CHUCK_DAYTONA_BROWSER_HANDOFF`. It creates a
    short-lived signed noVNC link into the same retained private desktop, so the
    user completes the step without losing browser state. Deliver it only to the
@@ -60,7 +65,8 @@ During a vault-authenticated session, normal browser tools must not receive a
 password or cookie. The browser policy requires a matching `vaultAction` for
 high-impact operations such as checkout, purchase, changing an address, or
 adding a payment method. Account deletion, password changes, and email changes
-are blocked by policy.
+are blocked by policy. `CHUCK_BROWSER_NEXT` cannot approve or execute any of
+these actions; the existing browser guard remains the final authority.
 
 ## Credential safety
 
@@ -126,6 +132,10 @@ calling the feature live.
   pause behavior, group denial, and high-impact action policy.
 - Inspect logs for metadata only and confirm no credential or raw tool argument
   appears.
+- With `JEV_MODE=off`, confirm `CHUCK_BROWSER_NEXT` returns deterministic
+  guidance without a Jev request. With `shadow`, confirm the guidance is
+  unchanged. With `enforce`, confirm only inspected candidate IDs can be
+  selected and high-impact candidates still reach the approval boundary.
 
 ## Change rules
 

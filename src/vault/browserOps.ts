@@ -55,6 +55,8 @@ export type BrowserAuditEvent =
   | "handoff_completed"
   | "playbook_saved"
   | "playbook_used"
+  | "decision_proposed"
+  | "decision_fallback"
   | "session_revoked";
 
 export type BrowserAuditRecord = {
