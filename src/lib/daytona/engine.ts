@@ -41,6 +41,11 @@ const DAYTONA_TIER_NETWORK_RESTRICTION = /network access is restricted and canno
 const DAYTONA_RENDERER_CAPACITY_RESTRICTION = /total disk limit exceeded|concurrency limits|insufficient (?:disk|storage|capacity)|resource quota/i;
 const DAYTONA_TRANSIENT_COMPUTER_CONNECTION = /unexpected eof|connection is shut down|failed to start computer use|browser is temporarily reconnecting|connection reset|transport.*closed/i;
 const DAYTONA_TRANSIENT_CODE_CONNECTION = /websocket\s+closed(?:\s+with\s+code\s+1006)?|websocket.*(?:eof|reset|closed)|connection is shut down|connection reset|transport.*closed/i;
+const DAYTONA_COMPUTER_START_TIMEOUT_MS = 30_000;
+const DAYTONA_COMPUTER_READ_TIMEOUT_MS = 8_000;
+const DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS = 15_000;
+const DAYTONA_BROWSER_INSPECTION_TIMEOUT_MS = 2_000;
+const DAYTONA_BROWSER_LAUNCH_COMMAND = `sh -lc 'SELF=$$; for PID in $(ps -eo pid=,args= | grep -E "[c]hromium|[g]oogle-chrome" | grep "chusky-browser" | grep -v "^ *$SELF " | grep -oE "^[ ]*[0-9]+" | tr -d " "); do kill "$PID" 2>/dev/null || true; done; BROWSER=$(command -v chromium || command -v chromium-browser || command -v google-chrome || true); if [ -z "$BROWSER" ]; then echo chromium-executable-not-found; exit 127; fi; DISPLAY=$(ps -eo args | grep -E "[X]vfb" | grep -oE ":[0-9]+" | head -1); DISPLAY=\${DISPLAY:-:0}; echo browser=$BROWSER display=$DISPLAY; nohup "$BROWSER" --no-sandbox --disable-dev-shm-usage --disable-gpu --no-first-run --no-default-browser-check --user-data-dir=/home/user/.chusky-browser about:blank >/tmp/chusky-chromium.log 2>&1 </dev/null & PID=$!; sleep 1; if ! kill -0 "$PID" 2>/dev/null; then echo chromium-process-exited; tail -40 /tmp/chusky-chromium.log 2>/dev/null || true; exit 42; fi'`;
 
 function isTransientComputerConnection(error: unknown): boolean {
   return DAYTONA_TRANSIENT_COMPUTER_CONNECTION.test(String((error as { message?: unknown })?.message ?? error));
@@ -57,6 +62,20 @@ function isMissingDaytonaFile(error: unknown): boolean {
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function boundedPromise<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new DaytonaInputError(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -103,6 +122,9 @@ function boundedInt(value: unknown, fallback: number, max: number): number {
 export function safeDaytonaPath(value: unknown, label = "path"): string {
   let path = String(value ?? "").trim().replace(/\\/g, "/");
   const daytonaHome = "/home/user/";
+  if (/^\/home\/user\/?$/i.test(path) || /^home\/user\/?$/i.test(path)) {
+    throw new DaytonaInputError(`${label} points to the Daytona workspace root; provide a file or subdirectory such as workspace/project/file.txt`);
+  }
   if (path.toLowerCase().startsWith(daytonaHome)) path = path.slice(daytonaHome.length);
   if (path.toLowerCase().startsWith("home/user/")) path = path.slice("home/user/".length);
   // Tool results already contain the workspace-relative root. Models and
@@ -221,6 +243,69 @@ function observedWindowTitle(value: unknown): string | undefined {
   const focused = windows.find((item) => item && typeof item === "object" && ((item as Record<string, unknown>).focused === true || (item as Record<string, unknown>).active === true)) ?? windows[0];
   const title = focused && typeof focused === "object" ? (focused as Record<string, unknown>).title : undefined;
   return typeof title === "string" && title.trim() ? title.trim().slice(0, 300) : undefined;
+}
+
+/**
+ * Some Daytona desktop images report a visible Chromium window with a 0x0
+ * accessibility surface. Screenshots and keyboard navigation can still work,
+ * but querying the accessibility tree can block the Computer Use transport.
+ * Detect that provider state before issuing a probe that cannot be useful.
+ */
+function browserAccessibilityUnavailable(value: unknown): boolean {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const windows = Array.isArray(record.windows) ? record.windows : [];
+  return windows.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    const window = item as Record<string, unknown>;
+    const title = String(window.title ?? "");
+    if (!/chromium|chrome/i.test(title)) return false;
+    const bounds = window.bounds && typeof window.bounds === "object" ? window.bounds as Record<string, unknown> : window;
+    const width = Number(bounds.width);
+    const height = Number(bounds.height);
+    return Number.isFinite(width) && Number.isFinite(height) && width === 0 && height === 0;
+  });
+}
+
+function browserWindowBounds(value: unknown): { x: number; y: number; width: number; height: number } | undefined {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const windows = Array.isArray(record.windows) ? record.windows : [];
+  const item = windows.find((candidate) => candidate && typeof candidate === "object" && /chromium|chrome/i.test(String((candidate as Record<string, unknown>).title ?? ""))) as Record<string, unknown> | undefined;
+  if (!item) return undefined;
+  const bounds = item.bounds && typeof item.bounds === "object" ? item.bounds as Record<string, unknown> : item;
+  const x = Number(bounds.x ?? 0);
+  const y = Number(bounds.y ?? 0);
+  const width = Number(bounds.width);
+  const height = Number(bounds.height);
+  return [x, y, width, height].every(Number.isFinite) && width > 0 && height > 0 ? { x, y, width, height } : undefined;
+}
+
+function browserWindowPresent(value: unknown): boolean {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const windows = Array.isArray(record.windows) ? record.windows : [];
+  return windows.some((candidate) => candidate && typeof candidate === "object" && /chromium|chrome/i.test(String((candidate as Record<string, unknown>).title ?? "")));
+}
+
+function browserWindowTitles(value: unknown): string[] {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const windows = Array.isArray(record.windows) ? record.windows : [];
+  return windows
+    .filter((candidate) => candidate && typeof candidate === "object")
+    .map((candidate) => String((candidate as Record<string, unknown>).title ?? "untitled").slice(0, 120))
+    .slice(0, 10);
+}
+
+function displayGeometry(value: unknown): { width: number; height: number } | undefined {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const displays = Array.isArray(record.displays) ? record.displays : [];
+  const first = displays.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+  const primary = record.primary_display && typeof record.primary_display === "object"
+    ? record.primary_display as Record<string, unknown>
+    : undefined;
+  const width = Number(primary?.width ?? first?.width ?? record.width);
+  const height = Number(primary?.height ?? first?.height ?? record.height);
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? { width, height }
+    : undefined;
 }
 
 function boundedEnvironment(value: unknown): Record<string, string> | undefined {
@@ -1444,8 +1529,34 @@ async function brieflyCollect(handle: PtyHandle, milliseconds = 250): Promise<vo
 
 export class DaytonaEngine {
   private networkPolicyOverrideUnavailable = false;
+  private readonly startedComputerUse = new Set<string>();
+  private readonly computerUseStartPromises = new Map<string, Promise<void>>();
 
   constructor(private readonly clientFactory: typeof getDaytonaClient = getDaytonaClient) {}
+
+  private async ensureComputerUseStarted(sandbox: Sandbox, computer: Sandbox["computerUse"]): Promise<void> {
+    if (this.startedComputerUse.has(sandbox.id)) return;
+    const existing = this.computerUseStartPromises.get(sandbox.id);
+    if (existing) return existing;
+    const start = boundedPromise(
+      computer.start(),
+      DAYTONA_COMPUTER_START_TIMEOUT_MS,
+      "Daytona's desktop startup handshake timed out. No browser or computer action was performed; retry after the desktop reconnects.",
+    ).then(() => {
+      this.startedComputerUse.add(sandbox.id);
+    }).catch((error) => {
+      this.startedComputerUse.delete(sandbox.id);
+      throw error;
+    }).finally(() => {
+      this.computerUseStartPromises.delete(sandbox.id);
+    });
+    this.computerUseStartPromises.set(sandbox.id, start);
+    return start;
+  }
+
+  private forgetComputerUseStarted(sandboxId: string): void {
+    this.startedComputerUse.delete(sandboxId);
+  }
 
   async workspaceId(userId: number): Promise<string> {
     return (await this.getOrCreateWorkspace(userId)).id;
@@ -1773,7 +1884,7 @@ export class DaytonaEngine {
       const sessions = await sandbox.process.listSessions();
       return { sandboxId: sandbox.id, sessions: sessions.filter((item) => known.has(String((item as { sessionId?: unknown }).sessionId ?? ""))).map((item) => safeSessionSummary(item)) };
     }
-    if (!id || !known.has(id)) throw new DaytonaInputError("Process session not found or not owned by you");
+    if (!id || !known.has(id)) throw new DaytonaInputError("Process session not found or not owned by you. Use action=list to inspect this account's sessions, or action=create to start a new one; do not reuse a stale session ID.");
     if (action === "get") return { sandboxId: sandbox.id, sessionId: id, session: safeSessionSummary(await sandbox.process.getSession(id)) };
     if (action === "execute") {
       const command = boundedText(args.command, "command", DAYTONA_MAX_COMMAND_LENGTH);
@@ -1783,6 +1894,7 @@ export class DaytonaEngine {
       return { sandboxId: sandbox.id, sessionId: id, commandId: result.cmdId, output: output.slice(0, DAYTONA_MAX_OUTPUT_CHARS), stdout: String(result.stdout ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), stderr: String(result.stderr ?? "").slice(0, DAYTONA_MAX_OUTPUT_CHARS), exitCode: result.exitCode };
     }
     if (action === "logs" || action === "stream_logs") {
+      if (!args.commandId) throw new DaytonaInputError("commandId is required for logs; use the commandId returned by the matching execute action.");
       const commandId = boundedIdentifier(args.commandId, "commandId");
       if (action === "stream_logs") {
         const stdout: string[] = [];
@@ -1803,6 +1915,7 @@ export class DaytonaEngine {
       return { sandboxId: sandbox.id, sessionId: id, commandId, output: String(logs.output ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS), stdout: String(logs.stdout ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS), stderr: String(logs.stderr ?? "").slice(-DAYTONA_MAX_OUTPUT_CHARS) };
     }
     if (action === "input") {
+      if (!args.commandId) throw new DaytonaInputError("commandId is required for input; use the commandId returned by the matching execute action.");
       const commandId = boundedIdentifier(args.commandId, "commandId");
       const input = boundedText(args.input, "input", 8000);
       await guardVaultWorkspaceAccess(userId, sandbox.id, input, "session input");
@@ -2457,22 +2570,41 @@ export class DaytonaEngine {
     }
     let activeSandbox = sandbox;
     let computer = activeSandbox.computerUse;
+    const startComputer = async (): Promise<void> => {
+      await this.ensureComputerUseStarted(activeSandbox, computer);
+    };
     const refreshComputer = async (): Promise<void> => {
+      const previousSandboxId = activeSandbox.id;
       const refreshed = await this.getSandbox(userId, true);
       if (!refreshed) throw new DaytonaInputError("Daytona workspace disappeared while recovering the desktop connection. Retry to create a fresh workspace.");
+      this.forgetComputerUseStarted(previousSandboxId);
       activeSandbox = refreshed;
       computer = activeSandbox.computerUse;
-      await computer.start();
+      this.forgetComputerUseStarted(activeSandbox.id);
+      await startComputer();
     };
-    const readOnly = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const readOnly = async <T>(operation: () => Promise<T>, timeoutMs = DAYTONA_COMPUTER_READ_TIMEOUT_MS): Promise<T> => {
+      const run = async (): Promise<T> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          return await Promise.race([
+            operation(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new DaytonaInputError("Daytona's read-only desktop operation timed out. No browser action was performed; retry after the desktop reconnects.")), timeoutMs);
+            }),
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
       try {
-        return await operation();
+        return await run();
       } catch (error) {
         if (!isTransientComputerConnection(error)) throw error;
         await sleep(350);
         try {
           await refreshComputer();
-          return await operation();
+          return await run();
         } catch (retryError) {
           if (isTransientComputerConnection(retryError)) {
             throw new DaytonaInputError("Daytona's desktop connection is recovering. No browser or computer action was performed; retry in a few seconds.");
@@ -2481,20 +2613,26 @@ export class DaytonaEngine {
         }
       }
     };
+    const mutation = <T>(operation: () => Promise<T>, description: string, timeoutMs = DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS): Promise<T> =>
+      boundedPromise(operation(), timeoutMs, `Daytona ${description} timed out. No further browser action was performed; retry after the desktop reconnects.`);
     if (action === "status") return readOnly(() => computer.getStatus());
-    if (action === "stop") return computer.stop();
+    if (action === "stop") {
+      const result = await mutation(() => computer.stop(), "desktop stop");
+      this.forgetComputerUseStarted(sandbox.id);
+      return result;
+    }
     if (action === "process_status") return readOnly(() => computer.getProcessStatus(computerProcessName(args.processName, "novnc")));
     if (action === "process_logs" || action === "process_errors") await guardVaultWorkspaceAccess(userId, sandbox.id, action, "desktop diagnostics");
     if (action === "recording_list") return readOnly(() => computer.recording.list());
     if (action === "recording_get") return readOnly(() => computer.recording.get(boundedText(args.recordingId, "recordingId", 200)));
-    if (action === "recording_stop") return computer.recording.stop(boundedText(args.recordingId, "recordingId", 200));
-    if (action === "recording_delete") { await computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)); return { deleted: true }; }
+    if (action === "recording_stop") return mutation(() => computer.recording.stop(boundedText(args.recordingId, "recordingId", 200)), "recording stop");
+    if (action === "recording_delete") { await mutation(() => computer.recording.delete(boundedText(args.recordingId, "recordingId", 200)), "recording delete"); return { deleted: true }; }
     // Daytona's Computer Use transport can occasionally be closed while the
     // sandbox itself remains healthy. Retry only this idempotent startup
     // handshake, before any click/type/invoke action is issued, so a recovery
     // can never duplicate a user-visible browser action.
     try {
-      await computer.start();
+      await startComputer();
     } catch (error) {
       if (!isTransientComputerConnection(error)) throw error;
       await sleep(350);
@@ -2512,15 +2650,15 @@ export class DaytonaEngine {
       case "display": return readOnly(() => computer.display.getInfo());
       case "display_info": return readOnly(() => computer.display.getInfo());
       case "windows": return readOnly(() => computer.display.getWindows());
-      case "process_restart": return computer.restartProcess(computerProcessName(args.processName));
+      case "process_restart": return mutation(() => computer.restartProcess(computerProcessName(args.processName)), "desktop process restart");
       case "process_logs": return readOnly(() => computer.getProcessLogs(computerProcessName(args.processName)));
       case "process_errors": return readOnly(() => computer.getProcessErrors(computerProcessName(args.processName)));
       case "mouse_position": return readOnly(() => computer.mouse.getPosition());
-      case "recording_start": return computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined);
+      case "recording_start": return mutation(() => computer.recording.start(args.label ? boundedText(args.label, "label", 200) : undefined), "recording start");
       case "recording_download": {
         const recordingId = boundedText(args.recordingId, "recordingId", 200);
         const path = safeDaytonaPath(args.path ?? `recordings/${recordingId}.mp4`, "path");
-        await computer.recording.download(recordingId, path);
+        await mutation(() => computer.recording.download(recordingId, path), "recording download", 30_000);
         return { recordingId, path, downloaded: true };
       }
       case "screenshot_full": {
@@ -2547,14 +2685,18 @@ export class DaytonaEngine {
         if (!result.screenshot) throw new DaytonaInputError("Daytona returned an empty screenshot");
         return { __daytonaScreenshot: true, sandboxId: sandbox.id, mediaType: "image/jpeg", base64: result.screenshot, sizeBytes: result.sizeBytes, region: { x: args.x, y: args.y, width, height } };
       }
-      case "mouse_move": return computer.mouse.move(coordinate(args.x, "x"), coordinate(args.y, "y"));
-      case "mouse_click": return computer.mouse.click(coordinate(args.x, "x"), coordinate(args.y, "y"), args.button ? boundedText(args.button, "button", 10) : "left", args.double === true);
-      case "mouse_drag": return computer.mouse.drag(coordinate(args.startX, "startX"), coordinate(args.startY, "startY"), coordinate(args.endX, "endX"), coordinate(args.endY, "endY"), args.button ? boundedText(args.button, "button", 10) : "left");
-      case "mouse_scroll": return computer.mouse.scroll(coordinate(args.x, "x"), coordinate(args.y, "y"), args.direction === "up" ? "up" : "down", Math.min(Math.max(Math.floor(Number(args.amount ?? 1)), 1), 20));
-      case "keyboard_type": await computer.keyboard.type(boundedText(args.text, "text", 4000), Math.min(Math.max(Math.floor(Number(args.delayMs ?? 0)), 0), 1000)); return { typed: true };
-      case "keyboard_press": await computer.keyboard.press(boundedText(args.key, "key", 40), Array.isArray(args.modifiers) ? args.modifiers.map((m) => boundedText(m, "modifier", 20)) : []); return { pressed: true };
-      case "keyboard_hotkey": await computer.keyboard.hotkey(boundedText(args.keys, "keys", 100)); return { pressed: true };
-      case "accessibility_tree": return redactBrowserData(await readOnly(() => computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) })));
+      case "mouse_move": return mutation(() => computer.mouse.move(coordinate(args.x, "x"), coordinate(args.y, "y")), "mouse move");
+      case "mouse_click": return mutation(() => computer.mouse.click(coordinate(args.x, "x"), coordinate(args.y, "y"), args.button ? boundedText(args.button, "button", 10) : "left", args.double === true), "mouse click");
+      case "mouse_drag": return mutation(() => computer.mouse.drag(coordinate(args.startX, "startX"), coordinate(args.startY, "startY"), coordinate(args.endX, "endX"), coordinate(args.endY, "endY"), args.button ? boundedText(args.button, "button", 10) : "left"), "mouse drag");
+      case "mouse_scroll": return mutation(() => computer.mouse.scroll(coordinate(args.x, "x"), coordinate(args.y, "y"), args.direction === "up" ? "up" : "down", Math.min(Math.max(Math.floor(Number(args.amount ?? 1)), 1), 20)), "mouse scroll");
+      case "keyboard_type": {
+        const text = boundedText(args.text, "text", 4000);
+        const delayMs = Math.min(Math.max(Math.floor(Number(args.delayMs ?? 0)), 0), 1000);
+        return mutation(async () => { await computer.keyboard.type(text, delayMs); return { typed: true }; }, "keyboard typing", Math.max(DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS, Math.min(60_000, 5_000 + text.length * Math.max(delayMs, 1))));
+      }
+      case "keyboard_press": return mutation(async () => { await computer.keyboard.press(boundedText(args.key, "key", 40), Array.isArray(args.modifiers) ? args.modifiers.map((m) => boundedText(m, "modifier", 20)) : []); return { pressed: true }; }, "keyboard press");
+      case "keyboard_hotkey": return mutation(async () => { await computer.keyboard.hotkey(boundedText(args.keys, "keys", 100)); return { pressed: true }; }, "keyboard shortcut");
+      case "accessibility_tree": return redactBrowserData(await readOnly(() => computer.accessibility.getTree({ scope: args.scope ? boundedText(args.scope, "scope", 20) : "all", maxDepth: Math.min(Math.max(Math.floor(Number(args.maxDepth ?? 4)), 0), 8) }), DAYTONA_BROWSER_INSPECTION_TIMEOUT_MS));
       case "accessibility_find": {
         const nameMatch = args.nameMatch ? boundedText(args.nameMatch, "nameMatch", 30) : undefined;
         if (nameMatch && !["exact", "substring", "regex"].includes(nameMatch)) throw new DaytonaInputError("nameMatch must be exact, substring, or regex");
@@ -2565,13 +2707,13 @@ export class DaytonaEngine {
         const states = Array.isArray(args.states) ? args.states.map((state) => boundedText(state, "state", 60)).slice(0, 20) : undefined;
         const findOptions: Record<string, unknown> = { scope: requestedScope, role: args.role ? boundedText(args.role, "role", 60) : undefined, name: args.name ? boundedText(args.name, "name", 200) : undefined, nameMatch, ...(states?.length ? { states } : {}), limit: Math.min(Math.max(Math.floor(Number(args.limit ?? 20)), 1), 50) };
         if (pid !== undefined) findOptions.pid = pid;
-        const result = await readOnly(() => computer.accessibility.findNodes(findOptions as Parameters<typeof computer.accessibility.findNodes>[0]));
+        const result = await readOnly(() => computer.accessibility.findNodes(findOptions as Parameters<typeof computer.accessibility.findNodes>[0]), DAYTONA_BROWSER_INSPECTION_TIMEOUT_MS);
         await rememberVaultBrowserNodes(userId, sandbox.id, result, (await getDaytonaWorkspace(userId))?.browser?.lastUrl);
         return redactBrowserData(result);
       }
-      case "accessibility_focus": await computer.accessibility.focusNode(boundedText(args.nodeId, "nodeId", 200)); return { focused: true };
-      case "accessibility_invoke": await computer.accessibility.invokeNode(boundedText(args.nodeId, "nodeId", 200), args.nodeAction ? boundedText(args.nodeAction, "nodeAction", 80) : undefined); return { invoked: true };
-      case "accessibility_set_value": await computer.accessibility.setNodeValue(boundedText(args.nodeId, "nodeId", 200), boundedText(args.value, "value", 4000)); return { updated: true };
+      case "accessibility_focus": await mutation(() => computer.accessibility.focusNode(boundedText(args.nodeId, "nodeId", 200)), "accessibility focus"); return { focused: true };
+      case "accessibility_invoke": await mutation(() => computer.accessibility.invokeNode(boundedText(args.nodeId, "nodeId", 200), args.nodeAction ? boundedText(args.nodeAction, "nodeAction", 80) : undefined), "accessibility invoke"); return { invoked: true };
+      case "accessibility_set_value": await mutation(() => computer.accessibility.setNodeValue(boundedText(args.nodeId, "nodeId", 200), boundedText(args.value, "value", 4000)), "accessibility value update"); return { updated: true };
       default: throw new DaytonaInputError(`Unsupported computer action: ${action}`);
     }
   }
@@ -2701,6 +2843,72 @@ export class DaytonaEngine {
       const observedUrl = observedBrowserUrl(tree);
       return observedUrl ? { observedUrl, method: "address_bar" } : { method: "unavailable" };
     };
+    const waitForDesktop = async (): Promise<{ width: number; height: number }> => {
+      let lastInfo: unknown;
+      for (const delayMs of [0, 250, 500, 1_000, 1_500]) {
+        if (delayMs) await sleep(delayMs);
+        lastInfo = await this.computer(userId, { action: "display_info" }, { trustedVaultFlow: true });
+        const geometry = displayGeometry(lastInfo);
+        if (geometry) return geometry;
+      }
+      throw new DaytonaInputError("Daytona desktop is not usable: its display reported 0×0 or no display. No browser action was performed; recreate the retained workspace or retry after the desktop finishes starting.");
+    };
+    const waitForNavigation = async (): Promise<{ observedUrl?: string; method: "address_bar" | "unavailable" }> => {
+      let observation = await observeAddressBar();
+      for (const delayMs of [350, 700, 1_200]) {
+        if (observation.observedUrl) return observation;
+        await sleep(delayMs);
+        observation = await observeAddressBar();
+      }
+      return observation;
+    };
+    const ensureBrowserWindow = async (): Promise<unknown> => {
+      let windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+      let launchDetail = "";
+      if (!browserWindowPresent(windows)) {
+        // Daytona's documented Computer Use flow opens the bundled browser
+        // through the desktop launcher. A browser started through the sandbox
+        // process API may not share the Computer Use display/X authority.
+        const geometry = displayGeometry(await this.computer(userId, { action: "display_info" }, { trustedVaultFlow: true }));
+        const launcherPoints = [
+          { x: 50, y: 50 },
+          ...(geometry ? [{ x: Math.round(geometry.width * 0.525), y: Math.max(1, geometry.height - 40) }, { x: Math.round(geometry.width / 2), y: Math.max(1, geometry.height - 40) }] : []),
+        ];
+        for (const point of launcherPoints) {
+          await this.computer(userId, { action: "mouse_click", x: point.x, y: point.y, button: "left" }, { trustedVaultFlow: true });
+          for (const delayMs of [250, 500, 1_000, 1_500, 2_500]) {
+            await sleep(delayMs);
+            windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+            if (browserWindowPresent(windows)) break;
+          }
+          if (browserWindowPresent(windows)) break;
+        }
+      }
+      if (!browserWindowPresent(windows)) {
+        const launchResult = await boundedPromise(
+          sandbox.process.executeCommand(DAYTONA_BROWSER_LAUNCH_COMMAND, undefined, undefined, 15),
+          15_000,
+          "Chromium startup timed out. No browser action was performed; retry after the desktop reconnects.",
+        );
+        if (Number((launchResult as { exitCode?: unknown }).exitCode ?? 0) !== 0) {
+          const detail = JSON.stringify(launchResult).slice(0, 500);
+          throw new DaytonaInputError(`Chromium could not start in the Daytona workspace${detail ? `: ${detail}` : "."}`);
+        }
+        launchDetail = String((launchResult as { result?: unknown }).result ?? "").slice(0, 300);
+        for (const delayMs of [250, 500, 1_000, 1_500, 2_500]) {
+          await sleep(delayMs);
+          windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+          if (browserWindowBounds(windows)) break;
+        }
+      }
+      if (!browserWindowPresent(windows)) throw new DaytonaInputError(`Daytona Computer Use is running, but no Chromium window is available. The browser image is missing Chromium or it failed to start. Visible windows: ${browserWindowTitles(windows).join(" | ") || "none"}${launchDetail ? `; launch: ${launchDetail}` : ""}`);
+      return windows;
+    };
+    const focusBrowserWindow = async (windows: unknown): Promise<void> => {
+      const bounds = browserWindowBounds(windows);
+      if (!bounds) return;
+      await this.computer(userId, { action: "mouse_click", x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + Math.min(bounds.height / 2, 240)), button: "left" }, { trustedVaultFlow: true });
+    };
     if (action === "session_list") return { sandboxId: sandbox.id, action, sessions: browserSessions.map((session) => safeBrowserSession(session)) } satisfies DaytonaBrowserSessionResult;
     if (action === "session_acquire") {
       const requested = args.sessionId ? boundedIdentifier(args.sessionId, "sessionId", 120) : undefined;
@@ -2738,12 +2946,13 @@ export class DaytonaEngine {
       return { sandboxId: sandbox.id, lastUrl: stored?.browser?.lastUrl, session: stored?.browser?.sessionId ? browserSessions.find((item) => item.id === stored.browser?.sessionId) : undefined, computer: await this.computer(userId, { action: "status" }, { trustedVaultFlow: true }), windows: await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true }) };
     }
     if (action === "state") {
-      const observation = await observeAddressBar();
+      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+      const accessibilityUnavailable = browserAccessibilityUnavailable(windows);
+      const observation = accessibilityUnavailable ? { method: "unavailable" as const } : await observeAddressBar();
       const current = await getDaytonaWorkspace(userId);
       if (current && observation.observedUrl) {
         await saveDaytonaWorkspace(userId, { ...current, browser: { ...(current.browser ?? {}), lastUrl: observation.observedUrl, observedAt: Date.now(), observationMethod: "address_bar", updatedAt: Date.now() }, updatedAt: Date.now() });
       }
-      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
       return {
         sandboxId: sandbox.id,
         action,
@@ -2751,7 +2960,9 @@ export class DaytonaEngine {
         ...(observation.observedUrl ? { observedUrl: observation.observedUrl, observationMethod: "address_bar" as const } : { observationMethod: "unavailable" as const }),
         ...(observedWindowTitle(windows) ? { title: observedWindowTitle(windows) } : {}),
         loadState: observation.observedUrl ? "settled" as const : "unknown" as const,
-        accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }, { trustedVaultFlow: true }),
+        accessibility: accessibilityUnavailable
+          ? { unavailable: true, reason: "Daytona reported a zero-sized Chromium accessibility surface; use screenshot or retry after the desktop reconnects." }
+          : await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }, { trustedVaultFlow: true }),
         windows,
       } satisfies DaytonaBrowserSessionResult & { accessibility: unknown; windows: unknown };
     }
@@ -2761,11 +2972,15 @@ export class DaytonaEngine {
       try { parsed = new URL(url); } catch { throw new DaytonaInputError("Browser URL must be a valid http(s) URL"); }
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new DaytonaInputError("Browser URL must use http:// or https://");
       if (parsed.username || parsed.password) throw new DaytonaInputError("Browser URLs cannot contain embedded credentials");
+      await waitForDesktop();
+      const browserWindows = await ensureBrowserWindow();
+      await focusBrowserWindow(browserWindows);
       await this.computer(userId, { action: "keyboard_hotkey", keys: "CTRL+L" }, { trustedVaultFlow: true });
       await this.computer(userId, { action: "keyboard_type", text: url }, { trustedVaultFlow: true });
       await this.computer(userId, { action: "keyboard_press", key: "ENTER" }, { trustedVaultFlow: true });
-      await sleep(350);
-      const observation = await observeAddressBar();
+      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+      const accessibilityUnavailable = browserAccessibilityUnavailable(windows);
+      const observation = accessibilityUnavailable ? { method: "unavailable" as const } : await waitForNavigation();
       const current = await getDaytonaWorkspace(userId);
       const observed = observation.observedUrl;
       if (current) await saveDaytonaWorkspace(userId, {
@@ -2774,8 +2989,9 @@ export class DaytonaEngine {
         ...(lease ? { browserSessions: browserSessions.map((item) => item.id === lease.id ? { ...item, currentOrigin: observed ? new URL(observed).origin : parsed.origin, updatedAt: Date.now() } : item) } : {}),
         updatedAt: Date.now(),
       });
-      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
-      return { sandboxId: sandbox.id, opened: url, requestedUrl: url, ...(observed ? { observedUrl: observed, observationMethod: "address_bar" as const, loadState: "settled" as const, ...(observedWindowTitle(windows) ? { title: observedWindowTitle(windows) } : {}) } : { observationMethod: "requested_only" as const, loadState: "unknown" as const }), verificationRequired: true, inspection: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
+      return { sandboxId: sandbox.id, opened: url, requestedUrl: url, ...(observed ? { observedUrl: observed, observationMethod: "address_bar" as const, loadState: "settled" as const, ...(observedWindowTitle(windows) ? { title: observedWindowTitle(windows) } : {}) } : { observationMethod: "requested_only" as const, loadState: "unknown" as const }), verificationRequired: true, inspection: accessibilityUnavailable
+        ? { unavailable: true, reason: "Daytona reported a zero-sized Chromium accessibility surface; the URL was sent to the browser but page contents were not verified. Use screenshot or retry after the desktop reconnects." }
+        : await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
     }
     if (action === "snapshot") {
       return { sandboxId: sandbox.id, accessibility: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: boundedNumber(args.maxDepth, 6, 10) }, { trustedVaultFlow: true }) };
@@ -2818,7 +3034,10 @@ export class DaytonaEngine {
       const contentType = args.contentType ? boundedText(args.contentType, "contentType", 120) : ARTIFACT_MIME[type];
       return this.registerArtifact(userId, sandbox, path, String(args.name ?? path.split("/").pop() ?? "download"), type, contentType);
     }
-    if (action === "screenshot") return this.computer(userId, { action: "screenshot", showCursor: false }, { trustedVaultFlow: true });
+    if (action === "screenshot") {
+      await waitForDesktop();
+      return this.computer(userId, { action: "screenshot", showCursor: false }, { trustedVaultFlow: true });
+    }
     if (action === "click") return this.computer(userId, { action: "mouse_click", x: args.x, y: args.y, button: "left" }, { trustedVaultFlow: true });
     if (action === "move") return this.computer(userId, { action: "mouse_move", x: args.x, y: args.y }, { trustedVaultFlow: true });
     if (action === "drag") return this.computer(userId, { action: "mouse_drag", startX: args.startX, startY: args.startY, endX: args.endX, endY: args.endY, button: args.button ?? "left" }, { trustedVaultFlow: true });
@@ -2829,11 +3048,14 @@ export class DaytonaEngine {
       const key = action === "back" ? "ALT+LEFT" : action === "forward" ? "ALT+RIGHT" : "CTRL+R";
       await this.computer(userId, { action: "keyboard_hotkey", keys: key }, { trustedVaultFlow: true });
       await sleep(350);
-      const observation = await observeAddressBar();
+      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
+      const accessibilityUnavailable = browserAccessibilityUnavailable(windows);
+      const observation = accessibilityUnavailable ? { method: "unavailable" as const } : await observeAddressBar();
       const current = await getDaytonaWorkspace(userId);
       if (current && observation.observedUrl) await saveDaytonaWorkspace(userId, { ...current, browser: { ...(current.browser ?? {}), lastUrl: observation.observedUrl, observedAt: Date.now(), observationMethod: "address_bar", updatedAt: Date.now() }, updatedAt: Date.now() });
-      const windows = await this.computer(userId, { action: "windows" }, { trustedVaultFlow: true });
-      return { sandboxId: sandbox.id, action, ...(observation.observedUrl ? { observedUrl: observation.observedUrl, observationMethod: "address_bar" as const, loadState: "settled" as const, ...(observedWindowTitle(windows) ? { title: observedWindowTitle(windows) } : {}) } : { observationMethod: "unavailable" as const, loadState: "unknown" as const }), verificationRequired: true, inspection: await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
+      return { sandboxId: sandbox.id, action, ...(observation.observedUrl ? { observedUrl: observation.observedUrl, observationMethod: "address_bar" as const, loadState: "settled" as const, ...(observedWindowTitle(windows) ? { title: observedWindowTitle(windows) } : {}) } : { observationMethod: "unavailable" as const, loadState: "unknown" as const }), verificationRequired: true, inspection: accessibilityUnavailable
+        ? { unavailable: true, reason: "Daytona reported a zero-sized Chromium accessibility surface; navigation was sent but page contents were not verified. Use screenshot or retry after the desktop reconnects." }
+        : await this.computer(userId, { action: "accessibility_tree", scope: "focused", maxDepth: 3 }, { trustedVaultFlow: true }) };
     }
     throw new DaytonaInputError(`Unsupported browser action: ${action}`);
   }

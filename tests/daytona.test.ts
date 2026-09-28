@@ -88,6 +88,8 @@ test("Daytona paths reject traversal and NUL bytes", () => {
   assert.throws(() => safeDaytonaPath("workspace/\0file"), /without/);
   assert.equal(safeDaytonaPath("/home/user/resume.html"), "resume.html");
   assert.equal(safeDaytonaPath("/home/user/workspace/resume.html"), "workspace/resume.html");
+  assert.throws(() => safeDaytonaPath("/home/user"), /workspace root/);
+  assert.throws(() => safeDaytonaPath("/home/user/"), /workspace root/);
   assert.throws(() => safeDaytonaPath("/tmp/resume.html"), /workspace-relative/);
   assert.throws(() => safeDaytonaPath("C:\\Users\\user\\resume.html"), /workspace-relative/);
 });

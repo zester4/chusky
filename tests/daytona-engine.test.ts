@@ -96,7 +96,7 @@ function fakeSandbox(id: string, state = "started") {
       start: async () => undefined,
       getStatus: async () => ({ status: "running" }),
       getProcessStatus: async (name: string) => ({ name, status: "running" }),
-      display: { getInfo: async () => ({ displays: [{ width: 800, height: 600 }] }), getWindows: async () => ({ windows: [] }) },
+      display: { getInfo: async () => ({ displays: [{ width: 800, height: 600 }] }), getWindows: async () => ({ windows: [{ title: "New Tab - Chromium", x: 0, y: 0, width: 800, height: 600 }] }) },
       screenshot: { takeCompressed: async () => ({ screenshot: Buffer.from("image").toString("base64"), sizeBytes: 5 }), takeFullScreen: async () => ({ screenshot: Buffer.from("png").toString("base64"), sizeBytes: 3 }), takeRegion: async () => ({ screenshot: Buffer.from("png").toString("base64"), sizeBytes: 3 }) },
       mouse: { move: async (x: number, y: number) => ({ x, y }), click: async () => ({ x: 1, y: 2 }), drag: async () => ({ x: 3, y: 4 }), scroll: async () => true },
       keyboard: { type: async () => undefined, press: async () => undefined, hotkey: async () => undefined },
@@ -417,6 +417,31 @@ test("computer-use actions start the desktop and return screenshots or structure
   assert.equal(screenshot.mediaType, "image/jpeg");
 });
 
+test("reuses one Computer Use startup handshake for a sandbox", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200061) as any;
+  let starts = 0;
+  sandbox.computerUse.start = async () => { starts += 1; };
+
+  await e.computer(8200061, { action: "display_info" });
+  await e.computer(8200061, { action: "windows" });
+
+  assert.equal(starts, 1);
+});
+
+test("accepts Daytona's documented primary display geometry", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(8200062) as any;
+  sandbox.computerUse.display.getInfo = async () => ({
+    primary_display: { width: 1024, height: 768 },
+    total_displays: 1,
+    displays: [],
+  });
+
+  const result = await e.browser(8200062, { action: "open", url: "https://api.github.com" }) as any;
+  assert.equal(result.opened, "https://api.github.com");
+});
+
 test("computer-use accessibility output redacts credential-shaped fields and values", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(820006) as any;
@@ -504,6 +529,19 @@ test("persists and reuses owned PTY sessions", async () => {
   assert.equal((await getDaytonaWorkspace(820008))?.ptySessions?.length, 0);
 });
 
+test("durable process-session errors explain how to recover stale identifiers", async () => {
+  const e = engine();
+  await e.session(8200081, { action: "create", id: "dev" });
+  await assert.rejects(
+    () => e.session(8200081, { action: "logs", id: "dev" }),
+    /commandId is required for logs.*matching execute action/,
+  );
+  await assert.rejects(
+    () => e.session(8200081, { action: "get", id: "missing" }),
+    /Use action=list.*action=create.*stale session ID/,
+  );
+});
+
 test("uses Daytona Git operations and returns bounded workflow results", async () => {
   const e = engine();
   const cloned = await e.git(820009, { action: "clone", repoUrl: "https://github.com/example/repo.git", path: "workspace/repo" });
@@ -529,6 +567,29 @@ test("browser navigation captures a sanitized address-bar redirect observation w
   assert.equal(opened.observedUrl, "https://redirect.example/final");
   assert.equal(opened.observationMethod, "address_bar");
   assert.equal((await getDaytonaWorkspace(8200101))?.browser?.lastUrl, "https://redirect.example/final");
+});
+
+test("browser open does not hang on Daytona's zero-sized Chromium accessibility surface", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(82001012) as any;
+  sandbox.computerUse.display.getWindows = async () => ({ windows: [{ title: "New Tab - Chromium", width: 0, height: 0 }] });
+  sandbox.computerUse.accessibility.getTree = () => new Promise(() => undefined);
+  const opened = await e.browser(82001012, { action: "open", url: "https://api.github.com" }) as any;
+  assert.equal(opened.opened, "https://api.github.com");
+  assert.equal(opened.observationMethod, "requested_only");
+  assert.equal(opened.verificationRequired, true);
+  assert.equal(opened.inspection.unavailable, true);
+});
+
+test("browser navigation refuses to steer a zero-sized desktop", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(82001011) as any;
+  sandbox.computerUse.display.getInfo = async () => ({ displays: [{ width: 0, height: 0 }] });
+  await assert.rejects(
+    () => e.browser(82001011, { action: "open", url: "https://example.com" }),
+    /display reported 0×0|no display/,
+  );
+  assert.equal((await getDaytonaWorkspace(82001011))?.browser, undefined);
 });
 
 test("browser wait_download only returns after a file has a stable non-zero size", async () => {
