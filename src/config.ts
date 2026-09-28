@@ -212,6 +212,12 @@ export const config = {
   // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
   jevModel: optional("JEV_MODEL", ""),
   jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg,autonomy,browser").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  // Native-tool schema reduction is separately opt-in. When false, Jev does
+  // not change the existing model-facing native catalog.
+  jevNativeToolRouting: optional("JEV_NATIVE_TOOL_ROUTING", "false") === "true",
+  jevNativeToolMaxCandidates: boundedInt("JEV_NATIVE_TOOL_MAX_CANDIDATES", 16, 4, 32),
+  jevNativeToolMinConfidence: unitInterval("JEV_NATIVE_TOOL_MIN_CONFIDENCE", 0.6),
+  jevNativeToolMinProbability: unitInterval("JEV_NATIVE_TOOL_MIN_PROBABILITY", 0.12),
   jevTimeoutMs: boundedInt("JEV_TIMEOUT_MS", 1_500, 200, 10_000),
   jevTurnBudgetMs: boundedInt("JEV_TURN_BUDGET_MS", 3_000, 300, 15_000),
   jevMaxRequestTokens: boundedInt("JEV_MAX_REQUEST_TOKENS", 24_000, 2_000, 60_000),

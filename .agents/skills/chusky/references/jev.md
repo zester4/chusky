@@ -31,6 +31,11 @@ and Treg spend guards are unchanged.
   endpoints are equally valid; mode is described neutrally) and replaces the
   keyword category boost in `rankHits()`; price, reliability, latency, input coverage, BYOK/own-account
   filters, and budgets stay deterministic.
+- `src/decisions/nativeToolRouter.ts` — builds a compact metadata index for
+  native `CHUCK_*` tools and, when explicitly enabled, lets Jev select the
+  schemas exposed to the main model. Full schemas never go to Jev. The native
+  dispatcher, argument validation, account scope, and approvals remain the
+  authority.
 - `src/decisions/telemetry.ts` — `jev.shadow` / `jev.enforce` log events with
   identifiers, probabilities, agreement with keyword routing, latency, and
   cost. User text, arguments, and provider payloads are never logged.
@@ -67,6 +72,14 @@ public web search. In shadow mode the Jev result is telemetry only; in enforce
 mode it may select an inspected low-risk candidate. Low confidence, unavailable
 Jev, or any high-impact candidate falls back to deterministic guidance and the
 existing approval policy.
+
+Native-tool routing is separately opt-in with `JEV_NATIVE_TOOL_ROUTING=true`
+and `native` added to `JEV_SURFACES`. In `shadow`, the full native catalog is
+still sent to the main model and Jev only records a comparison. In `enforce`,
+only a bounded set of native schemas is exposed after Jev returns a valid,
+high-confidence selection. Non-native tools remain available, and timeouts,
+low confidence, no-match requests, or disabled routing fall back to the full
+catalog. Turning Jev off therefore preserves the pre-routing behavior exactly.
 
 Jev is additive. A Jev answer, including a confident `__none__`, never
 removes keyword skill routes or the keyword Composio domain route. Fuzzy

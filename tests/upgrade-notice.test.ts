@@ -140,6 +140,14 @@ test("Jev routing upgrade preset describes semantic routing and connection safet
   assert.match(bullets[2], /deterministic fallback/);
 });
 
+test("native-tool routing upgrade preset describes bounded schema exposure and fallback", () => {
+  const bullets = getAgentUpgradePreset("nativeToolRouting");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /compact, task-relevant set/);
+  assert.match(bullets[1], /argument validation, account scope, execution, and approvals/);
+  assert.match(bullets[2], /existing full native-tool behavior/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -153,14 +161,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the Link Agent Wallet release", async () => {
+test("current upgrade manifest announces the native-tool routing release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.25.0");
-  assert.equal(notice?.version, "4.25.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /E2B Playwright\/Chromium/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Stripe Link purchase requests/);
-  assert.match(formatAgentUpgradeNotice(notice!), /approval notification/);
-  assert.match(formatAgentUpgradeNotice(notice!), /merchant confirm/);
+  assert.equal(notice?.id, "release-4.26.0");
+  assert.equal(notice?.version, "4.26.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /compact, task-relevant set/);
+  assert.match(formatAgentUpgradeNotice(notice!), /full schemas/);
+  assert.match(formatAgentUpgradeNotice(notice!), /existing full native-tool behavior/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

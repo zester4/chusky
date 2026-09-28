@@ -87,6 +87,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Composio routing now includes a bounded catalog of apps the user has not connected; named unavailable apps trigger connection setup while their actions remain non-callable until connected.",
     "Jev runs under one per-turn deadline with deterministic fallback, while approvals, budgets, account isolation, and native tool policy remain authoritative.",
   ],
+  nativeToolRouting: [
+    "Added opt-in Jev native-tool routing that selects a compact, task-relevant set of CHUCK_* schemas instead of sending the full catalog on every model turn.",
+    "Native-tool metadata is bounded and private before Jev sees it; full schemas, argument validation, account scope, execution, and approvals remain in Chusky's trusted runtime.",
+    "Turning Jev off, leaving native routing disabled, using shadow mode, or hitting a timeout or low-confidence decision preserves the existing full native-tool behavior.",
+  ],
   browserAutonomy: [
     "Added a bounded browser decision loop and an owner-scoped E2B Playwright/Chromium browser with headed sessions, accessible controls, tabs, scrolling, drag/drop, forms, keyboard actions, navigation, and screenshots.",
     "CAPTCHA, 2FA, passkeys, security keys, and other human-only challenges can hand the same E2B browser session to the owner through a short-lived private noVNC link; ordinary browsing remains autonomous.",

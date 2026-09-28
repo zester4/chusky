@@ -357,7 +357,7 @@ export async function verifyCandidates(client: JevClient, input: {
 
 let sharedClient: JevClient | undefined;
 
-export function jevEnabled(surface?: "skills" | "composio" | "treg" | "autonomy" | "browser"): boolean {
+export function jevEnabled(surface?: "skills" | "composio" | "treg" | "autonomy" | "browser" | "native"): boolean {
   if (config.jevMode === "off") return false;
   if (surface && !config.jevSurfaces.has(surface)) return false;
   return Boolean(config.jevProvider === "typesafe" ? config.jevApiKey : config.openRouterApiKey);

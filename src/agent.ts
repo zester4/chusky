@@ -51,6 +51,7 @@ import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline } from "./decisions/jev.js";
+import { routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -2342,7 +2343,6 @@ export async function runAgent(
     return undefined;
   });
   const [skillRoute, tregRoute, routedAccounts, composioDecision] = await Promise.all([skillRoutePromise, tregRoutePromise, accountsPromise, composioRoutePromise]);
-  routingDeadline.dispose();
   let accountContext = "";
   let composioRouteContext = "";
   let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
@@ -2369,6 +2369,17 @@ export async function runAgent(
       }
     }
   }
+  // Native schemas are routed after Composio's direct actions have been added
+  // so the model receives the right local tools plus any exact connected-app
+  // actions. The same deadline is reused; native routing can never add another
+  // full Jev budget to the turn.
+  const nativeToolRoute = await routeNativeToolsForTurn(availableTools, routingQuery, {
+    signal,
+    deadline: routingDeadline,
+    recentContext: routingRecentContext,
+    sessionId: durableRunId,
+  });
+  routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
   // relevant subset before the first model call so the agent does not have to
   // remember to search for a workflow when creating a deliverable or changing
@@ -2476,8 +2487,9 @@ export async function runAgent(
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     const roundMediaSelection = selectMediaForAction(generatedReferenceImages.length);
+    const routedTools = nativeToolRoute.tools;
     const modelAvailableTools = roundMediaSelection
-      ? availableTools.map((tool) => {
+      ? routedTools.map((tool) => {
         const slug = toolSchemaName(tool);
         const schema = tool?.function?.parameters;
         if (!slug || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_")
@@ -2490,7 +2502,7 @@ export async function runAgent(
           },
         };
       })
-      : availableTools;
+      : routedTools;
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
@@ -2620,7 +2632,7 @@ export async function runAgent(
         // A tool must be in the exact tool list shown to the model. In
         // particular, meta-tools are not implicit grants when an allowlist is
         // supplied (an empty allowlist means no tools at all).
-        const toolIsAllowed = availableTools.some((tool) => String(tool?.function?.name ?? tool?.name ?? "") === slug)
+        const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
         if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
         const previousResult = toolResultsByCallId.get(call.id);

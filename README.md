@@ -1339,9 +1339,13 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `TREG_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost of one Treg call |
 | `TREG_RATE_LIMIT_PER_MINUTE` | — | `30` | Per-owner Treg call-attempt limit per minute |
 | `TREG_ORG_TOKENS_JSON` | Treg | `{}` | Server-only organization-to-token map; never put this in client config |
-| `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, and Treg: `off`, `shadow` (log only), or `enforce` (apply with keyword fallback). See `.agents/skills/chusky/references/jev.md` |
+| `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, Treg, and optional native-tool exposure: `off`, `shadow` (log only), or `enforce` (apply with deterministic fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
-| `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy decisions, and inspected browser next-step proposals |
+| `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |
+| `JEV_NATIVE_TOOL_ROUTING` | — | `false` | With `native` enabled, select a compact native-tool schema set in enforce mode; false preserves the existing full native catalog |
+| `JEV_NATIVE_TOOL_MAX_CANDIDATES` | — | `16` | Maximum compact native candidates considered by Jev (4-32) |
+| `JEV_NATIVE_TOOL_MIN_CONFIDENCE` | — | `0.6` | Minimum Jev confidence required before native schemas are reduced |
+| `JEV_NATIVE_TOOL_MIN_PROBABILITY` | — | `0.12` | Minimum per-tool probability for a selected native schema |
 | `JEV_COMPOSIO_ROUTE_UNCONNECTED` | — | `true` | Route across Composio's full toolkit catalogue so requests can target apps that are not connected yet (connect-first hint, never executable until connected) |
 | `JEV_COMPOSIO_CATALOG_LIMIT` | — | `500` | Most-used Composio toolkits considered for routing (cached 6h) |
 | `JEV_TURN_BUDGET_MS` | — | `3000` | One shared per-turn deadline for all routing before the first model call; slower routes fall back to keywords |
