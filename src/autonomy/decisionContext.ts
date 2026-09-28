@@ -27,7 +27,7 @@ export type AutonomyDecisionItem = {
 
 export type AutonomyDecisionContext = {
   version: 1;
-  trigger: "attention_pulse";
+  trigger: "attention_pulse" | "mission" | "task" | "signal" | "follow_up" | "memory" | "recovery";
   currentTime: string;
   objective: string;
   items: AutonomyDecisionItem[];

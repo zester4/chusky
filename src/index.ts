@@ -81,6 +81,7 @@ import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
 import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
+import { decideAutonomyStep, decideFollowUp, decideRecovery } from "./autonomy/decisionLoop.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -2303,8 +2304,32 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               }
               const activeMission = mission;
               const currentMissionStep = activeMission ? activeMission.steps.find((step) => step.id === task.missionStepId && activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => activeMission.activeStepIds?.includes(step.id)) ?? activeMission.steps.find((step) => step.id === activeMission.currentStepId) : undefined;
+              const autonomyDecision = await decideAutonomyStep({
+                objective: mission?.objective ?? task.objective,
+                items: [{
+                  kind: mission ? "mission" : "task",
+                  id: mission?.id ?? task.id,
+                  title: mission ? mission.title : task.title,
+                  status: mission?.status ?? task.status,
+                  ...(mission?.nextAction ?? task.nextAction ? { nextAction: mission?.nextAction ?? task.nextAction } : {}),
+                }],
+                context: {
+                  objective: mission?.objective ?? task.objective,
+                  status: mission?.status ?? task.status,
+                  checkpoint: mission?.checkpoint ?? task.checkpoint,
+                  nextAction: mission?.nextAction ?? task.nextAction,
+                  definitionOfDone: mission?.definitionOfDone,
+                  currentStep: currentMissionStep?.objective,
+                },
+                authority: { level: mission ? "execute_reversible" : "prepare" },
+                allowedActions: mission
+                  ? ["act_now", "wait", "replan", "retry", "ask_owner", "close_loop"]
+                  : ["act_now", "wait", "retry", "ask_owner", "close_loop"],
+                maxItems: 1,
+              });
+              const autonomyGuidance = `\n\nTyped autonomy proposal (not authority): ${autonomyDecision.proposedAction}; effective policy action: ${autonomyDecision.effectiveAction}. Continue only within the current checkpoint, budget, account scope, approval state, and verification rules. If the proposal is wait, replan, retry, or ask_owner, follow the matching durable lifecycle control rather than improvising.`;
               const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\nCurrent executable step: ${currentMissionStep ? `${currentMissionStep.title} — ${currentMissionStep.objective}` : "Verify the mission definition of done"}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nNext action: ${mission.nextAction ?? "determine the safest next bounded action"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.` : undefined;
-              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt) : missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`;
+              const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt + autonomyGuidance) : (missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`) + autonomyGuidance;
               const session = await getSession(task.userId);
               const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
               const missionRemainingTools = mission ? mission.budget.maxToolCalls - mission.toolCalls : undefined;
@@ -3091,7 +3116,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               ...(profile.enabled && effectiveNativeTools.includes("CHUCK_MEETING_FOLLOWUP_SCHEDULE") && effectiveComposioTools.some(isMeetingRepresentativeEmailTool) ? ["CHUCK_MEETING_FOLLOWUP_SCHEDULE"] : []),
             ])];
             if (!tools.length) return {};
-            const followThroughPrompt = buildMeetingFollowThroughPrompt({ meeting, outcome, profile, notionTool: effectiveNotionTool, contacts });
+            const followUpDecision = await decideFollowUp({
+              summary: `${outcome.summary} ${outcome.actionItems.length} structured action items; ${contacts.length} captured participant cards.`,
+              preferredChannel: contacts.some((contact) => contact.email && contact.contactPreference !== "phone") ? "email" : undefined,
+              hasAgreedNextStep: outcome.actionItems.length > 0 || contacts.some((contact) => Boolean(contact.nextStep)),
+            });
+            const followUpGuidance = followUpDecision.source === "jev"
+              ? `\n\nTyped follow-up proposal (not authority): relevant=${followUpDecision.relevant}; channel=${followUpDecision.channel}; timing=${followUpDecision.timing}; message=${followUpDecision.messageType}. Use it only to prioritize the explicit structured outcome; do not contact anyone or create commitments outside the granted tools and agreed facts.`
+              : "";
+            const followThroughPrompt = buildMeetingFollowThroughPrompt({ meeting, outcome, profile, notionTool: effectiveNotionTool, contacts }) + followUpGuidance;
             const session = await getSession(ownerId);
             const result = await withCliLock(ownerId, undefined, () => runAgent(
               ownerId,

@@ -1,5 +1,6 @@
 import { claimTask, getTask, renewTaskLease, settleTaskRun, type TaskRecord } from "./store.js";
 import { logger } from "./logger.js";
+import { decideRecovery } from "./autonomy/decisionLoop.js";
 
 export interface TaskRunPayload { userId: number; taskId: string; }
 
@@ -86,11 +87,19 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
       });
       return { claimed: true, task: settled };
     }
+    const recovery = await decideRecovery({
+      operation: task.objective,
+      error: message,
+      retryable: task.attempt < task.maxAttempts,
+    }).catch(() => undefined);
+    const recoveryNextAction = recovery?.source === "jev"
+      ? `Autonomy recovery proposal: ${recovery.action}. Re-read the task and apply the normal idempotency, approval, and verification rules before continuing.`
+      : "Retry the task after the transient failure is resolved.";
     const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, {
       status: "failed",
       message: message.slice(0, 1000),
       checkpoint: task.checkpoint,
-      nextAction: "Retry the task after the transient failure is resolved.",
+      nextAction: recoveryNextAction,
     });
     const failureContext = { userId: payload.userId, taskId: task.id, attempt: task.attempt, status: settled?.status, errorClass: error instanceof Error ? error.name : "unknown" };
     // A queued settlement is an intentional bounded retry, not a terminal

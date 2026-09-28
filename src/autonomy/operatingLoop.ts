@@ -5,6 +5,7 @@ import {
   type OpenLoopRecord,
   type StandingOrderRecord,
 } from "../store.js";
+import { decideAutonomySignal, type AutonomySignalDecision } from "./decisionLoop.js";
 
 /** The bounded outcomes the operating loop may assign to a verified signal. */
 export type OperatingAction =
@@ -34,6 +35,7 @@ export interface OperatingLoopPlan {
 export interface OperatingLoopResult extends OperatingLoopPlan {
   observationId: string;
   commitmentId?: string;
+  signalDecision?: AutonomySignalDecision;
 }
 
 /**
@@ -44,12 +46,14 @@ export interface OperatingLoopResult extends OperatingLoopPlan {
  */
 export const AUTONOMY_OPERATING_KERNEL = `UNIVERSAL OPERATING KERNEL
 You are Chusky, the owner's accountable operating agent. You are not a passive chat responder. For every meaningful request, event, or tool result:
-1. Establish the intended outcome, constraints, current state, and the smallest authority required.
-2. Choose the right capability: connected app or web tool, native tool, MCP, browser/computer, artifact/media pipeline, memory/context, communication, meeting/call, reminder/job, durable task, or mission.
-3. Execute safe in-scope work now. For multi-step, delayed, restartable, or externally pending work, create or resume the correct durable task/mission and checkpoint it.
-4. Verify the result using a provider receipt, artifact validation, browser inspection, tool result, or other concrete evidence. Never treat an intention, draft, stale snapshot, or model statement as completion.
-5. Close the loop: report what changed, what was verified, what remains, the exact next action, and who/what owns it. If work is waiting, record the condition and schedule the correct re-check; do not merely say “I’ll handle it later.”
-6. If no useful action is needed, say so briefly or return exactly NO_ACTION for a verified background trigger.
+1. Observe the intended outcome, constraints, current state, existing work, and smallest authority required.
+2. Prioritize the highest-value valid next step; when a typed autonomy proposal is supplied, use it as a proposal, not permission.
+3. Choose the right capability: connected app or web tool, native tool, MCP, browser/computer, artifact/media pipeline, memory/context, communication, meeting/call, reminder/job, durable task, or mission.
+4. Validate authority in code before acting. Approvals, budgets, account scope, destructive blocks, and verification cannot be weakened by model or Jev output.
+5. Execute safe in-scope work now. For multi-step, delayed, restartable, or externally pending work, create or resume the correct durable task/mission and checkpoint it.
+6. Verify the result using a provider receipt, artifact validation, browser inspection, tool result, or other concrete evidence. Never treat an intention, draft, stale snapshot, or model statement as completion.
+7. Close the loop: report what changed, what was verified, what remains, the exact next action, and who/what owns it. If work is waiting, record the condition and schedule the correct re-check; do not merely say “I’ll handle it later.”
+8. If no useful action is needed, say so briefly or return exactly NO_ACTION for a verified background trigger.
 
 Continuity rules: search narrowly relevant memory/context and existing tasks, missions, reminders, jobs, open loops, standing orders, and prior outcomes before starting duplicate work. Preserve their owner, scope, budget, checkpoint, approval state, and definition of done. Use the narrowest tool grant that can finish the objective. Ask one concise question only when a missing fact, connection, decision, or authority genuinely blocks safe progress.
 
@@ -124,6 +128,13 @@ export async function recordOperatingSignal(userId: number, signal: OperatingSig
     listAttentionRecords(userId, "open_loop", { limit: 200 }),
   ]);
   const plan = planOperatingLoop(signal, orders as StandingOrderRecord[]);
+  const previous = existingCommitment(existingLoops, signal.eventId);
+  const signalDecision = await decideAutonomySignal({
+    source: signal.triggerSlug || "verified_signal",
+    kind: signal.calendarMeeting ? "calendar_meeting" : "provider_trigger",
+    summary: signal.summary,
+    duplicate: Boolean(previous),
+  }, { sessionId: `signal:${signal.eventId}` });
   const observation = await createAttentionRecord(userId, "observation", {
     source: "composio_trigger",
     eventType: signal.triggerSlug || "event",
@@ -135,13 +146,17 @@ export async function recordOperatingSignal(userId: number, signal: OperatingSig
     confidence: 1,
     privacyScope: "private",
     status: "processed",
+    metadata: {
+      autonomyTriage: signalDecision.triage,
+      autonomyPriority: signalDecision.priority,
+      autonomyDecisionSource: signalDecision.source,
+    },
   });
 
   if (!plan.standingOrder || (plan.action !== "create_follow_up" && plan.action !== "prepare_meeting")) {
-    return { ...plan, observationId: observation.id };
+    return { ...plan, observationId: observation.id, signalDecision };
   }
-  const previous = existingCommitment(existingLoops, signal.eventId);
-  if (previous) return { ...plan, observationId: observation.id, commitmentId: previous.id };
+  if (previous) return { ...plan, observationId: observation.id, commitmentId: previous.id, signalDecision };
   const commitment = await createAttentionRecord(userId, "open_loop", {
     title: commitmentTitle(signal, plan.standingOrder),
     objective: `Handle the verified ${signal.triggerSlug || "provider"} signal within the owner-authorized standing order “${plan.standingOrder.name}”.`,
@@ -154,5 +169,5 @@ export async function recordOperatingSignal(userId: number, signal: OperatingSig
     relatedEntityIds: [signal.eventId, observation.id, plan.standingOrder.id],
     status: "open",
   }) as OpenLoopRecord;
-  return { ...plan, observationId: observation.id, commitmentId: commitment.id };
+  return { ...plan, observationId: observation.id, commitmentId: commitment.id, signalDecision };
 }

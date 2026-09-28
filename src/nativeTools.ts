@@ -66,6 +66,7 @@ import { diagnoseMissionRepair } from "./reliability/repair.js";
 import { TregGateway } from "./treg/gateway.js";
 import { TregSpendGuard } from "./treg/spend.js";
 import { TregOAuth } from "./treg/oauth.js";
+import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -1048,31 +1049,47 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_SAVE_MEMORY": {
       if (args.sensitivity !== "normal" && args.sensitivity !== "sensitive") throw new Error("sensitivity is required when saving memory");
       const category = (args.category as string) ?? "fact";
+      const key = text(args.key);
+      const value = text(args.value);
+      const source = args.source ? text(args.source) : "CHUCK_SAVE_MEMORY";
+      const explicit = /(?:^|[^a-z])(user|owner|explicit)(?:$|[^a-z])/i.test(source);
+      const memoryDecision = await decideMemoryDisposition({
+        key,
+        value,
+        explicit,
+        sensitive: args.sensitivity === "sensitive",
+      }, { signal: runtime.signal, sessionId: `memory:${userId}:${key}` });
+      if (!explicit && memoryDecision.source === "jev" && (memoryDecision.disposition === "do_not_save" || memoryDecision.disposition === "forget")) {
+        return { saved: false, skipped: true, reason: memoryDecision.reason, autonomyDecision: memoryDecision.disposition };
+      }
+      const reviewAt = args.reviewAt === undefined && args.expiresAt === undefined && !explicit && memoryDecision.source === "jev" && memoryDecision.disposition === "remember_until_review" && memoryDecision.reviewAtDays
+        ? Date.now() + memoryDecision.reviewAtDays * 24 * 60 * 60 * 1000
+        : args.reviewAt === undefined ? undefined : Number(args.reviewAt);
       const contextKind = ["preference", "relationship", "fact", "decision", "objective", "open_loop"].includes(category) ? category : "memory";
       const saved = await upsertMemoryAndContext(userId, {
         category: category as any,
-        key: text(args.key),
-        value: text(args.value),
-        source: args.source ? text(args.source) : undefined,
+        key,
+        value,
+        source,
         confidence: Number(args.confidence ?? 1),
         sensitivity: args.sensitivity,
         projectId: args.projectId ? text(args.projectId) : undefined,
         personKey: args.personKey ? text(args.personKey) : undefined,
-        reviewAt: args.reviewAt === undefined ? undefined : Number(args.reviewAt),
+        reviewAt,
         expiresAt: args.expiresAt === undefined ? undefined : Number(args.expiresAt),
       }, {
         scope: args.projectId ? "project" : "user",
         ...(args.projectId ? { scopeId: text(args.projectId) } : {}),
         kind: contextKind as never,
-        key: text(args.key),
-        value: text(args.value),
-        source: args.source ? text(args.source) : "CHUCK_SAVE_MEMORY",
+        key,
+        value,
+        source,
         sensitivity: args.sensitivity,
         confidence: Number(args.confidence ?? 1),
-        ...(args.reviewAt !== undefined ? { reviewAt: Number(args.reviewAt) } : {}),
+        ...(reviewAt !== undefined ? { reviewAt } : {}),
         ...(args.expiresAt !== undefined ? { expiresAt: Number(args.expiresAt) } : {}),
       });
-      return { ...saved.memory, contextNodeId: saved.context.id, contextIndexed: true };
+      return { ...saved.memory, contextNodeId: saved.context.id, contextIndexed: true, autonomyDecision: memoryDecision.disposition };
     }
     case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
     case "CHUCK_UPDATE_MEMORY": {

@@ -14,6 +14,7 @@ import {
 } from "./store.js";
 import { createHash } from "node:crypto";
 import { buildAutonomyDecisionContext, type AutonomyDecisionContext } from "./autonomy/decisionContext.js";
+import { decideAutonomyStep, type AutonomyDecision } from "./autonomy/decisionLoop.js";
 
 const MAX_LOOPS = 12;
 const MAX_CANDIDATES = 12;
@@ -26,6 +27,7 @@ const MAX_PROMPT_CHARS = 12_000;
 export interface AttentionPulsePlan {
   prompt: string;
   decisionContext: AutonomyDecisionContext;
+  decision?: AutonomyDecision;
   candidateIds: string[];
   hasWork: boolean;
   dedupeKey: string;
@@ -239,6 +241,17 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
     profiles: [utcDay(now), ...relevantProfiles.map((item) => [item.mode, item.updatedAt, item.enabled, item.defaultAuthority, item.maxChecksPerDay, item.maxAutonomousActionsPerDay, item.checksToday, item.checksDayUtc, item.allowedDomains, item.deniedDomains])],
     orders: activeOrders.map((item) => [item.id, item.updatedAt, item.status, item.authority]),
   })).digest("hex").slice(0, 32);
+  const decision = await decideAutonomyStep({
+    objective: "Choose the most valuable owner-scoped attention item and the next bounded step for this pulse.",
+    items: decisionContext.items,
+    context: decisionContext,
+    authority: { level: activeOrders.some((order) => order.authority === "execute_reversible") ? "execute_reversible" : activeOrders.some((order) => order.authority === "prepare") ? "prepare" : "observe" },
+    maxItems: MAX_LOOPS + MAX_CANDIDATES + MAX_DURABLE_TASKS + MAX_MISSIONS,
+    allowedActions: ["act_now", "delegate", "ask_owner", "wait", "close_loop", "replan", "retry", "schedule"],
+  });
+  const decisionLine = decision.selectedItemId
+    ? `Typed autonomy proposal (not authorization): focus on ${decision.selectedItemId}; propose ${decision.proposedAction}; effective policy action ${decision.effectiveAction}; priority ${decision.priority.toFixed(2)}. Preserve normal approvals and verify the result.`
+    : "Typed autonomy proposal found no single focus; use the existing bounded ordering and normal policy.";
   const prompt = [
     "Run one owner-configured Chusky attention pulse now.",
     "Review the bounded attention state below and use the narrowest available tools.",
@@ -249,6 +262,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
     "Respect each autonomy profile's current enabled state, limits, domain scope, and authority. A profile change is material state and should be reconsidered on the next pulse; do not infer permission from a watch objective.",
     "Observations are intermediate context and do not wake this pulse on their own. Actionable open loops, pending candidates, blocked/failed tasks or missions, expired non-timer mission waits, and due watches can wake it.",
     "If an item needs the owner, prepare a concise actionable digest. If no owner-visible action is needed, reply exactly NO_ACTION. Do not invent facts or claim an external action succeeded without tool confirmation.",
+    decisionLine,
     `Current time: ${new Date(now).toISOString()}`,
     // Recovery state is deliberately first: the prompt has a hard size limit,
     // so lower-priority loops/candidates must never crowd out durable blockers.
@@ -261,7 +275,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
     "\nPending attention candidates:", actionableCandidates.length ? actionableCandidates.map(candidateLine).join("\n") : "- none",
     "\nActive standing orders:", activeOrders.length ? activeOrders.map(orderLine).join("\n") : "- none",
   ].join("\n").slice(0, MAX_PROMPT_CHARS);
-  return { prompt, decisionContext, candidateIds: actionableCandidates.map((item) => item.id), hasWork: true, dedupeKey };
+  return { prompt, decisionContext, decision, candidateIds: actionableCandidates.map((item) => item.id), hasWork: true, dedupeKey };
 }
 
 export async function markAttentionPulseDelivered(userId: number, candidateIds: string[], now = Date.now()): Promise<void> {
