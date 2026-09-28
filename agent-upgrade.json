@@ -1,11 +1,11 @@
 {
-  "id": "release-4.19.0",
-  "version": "4.19.0",
+  "id": "release-4.20.0",
+  "version": "4.20.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Treg as Chusky's first-class live-data gateway with bounded native tools for provider catalog search, endpoint inspection, provider comparison, enrichment, data resolution, organization-tool discovery, usage, and balance checks.",
-    "Treg calls use server-only organization credentials, rate limits, source-backed provider data, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",
-    "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work."
+    "Added Jev decision routing for skills, Composio toolkits and actions, and Treg endpoint selection, layered on top of Chusky's existing deterministic routes.",
+    "Composio routing now includes a bounded catalog of apps the user has not connected; named unavailable apps trigger connection setup while their actions remain non-callable until connected.",
+    "Jev runs under one per-turn deadline with deterministic fallback, while approvals, budgets, account isolation, and native tool policy remain authoritative."
   ],
-  "createdAt": "2026-09-27T03:30:00.000Z"
+  "createdAt": "2026-09-28T00:00:00.000Z"
 }

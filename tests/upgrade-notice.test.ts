@@ -120,6 +120,15 @@ test("Treg upgrade preset describes live provider data and spend controls", () =
   assert.match(bullets[2], /Composio apps/);
 });
 
+test("Jev routing upgrade preset describes semantic routing and connection safety", () => {
+  const bullets = getAgentUpgradePreset("jevRouting");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.jevRouting]);
+  assert.match(bullets[0], /Composio toolkits and actions/);
+  assert.match(bullets[1], /remain non-callable until connected/);
+  assert.match(bullets[2], /deterministic fallback/);
+});
+
 test("loads and writes the release manifest", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "chusky-upgrade-"));
   const manifest = path.join(directory, "agent-upgrade.json");
@@ -133,13 +142,12 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Treg intelligence", async () => {
+test("current upgrade manifest announces Jev decision routing", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.19.0");
-  assert.equal(notice?.version, "4.19.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Treg as Chusky's first-class live-data gateway/);
-  assert.match(formatAgentUpgradeNotice(notice!), /atomic owner and mission spend/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Composio apps/);
+  assert.equal(notice?.id, "release-4.20.0");
+  assert.equal(notice?.version, "4.20.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Jev decision routing/);
+  assert.match(formatAgentUpgradeNotice(notice!), /remain non-callable until connected/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {
