@@ -48,7 +48,7 @@ import { assertComposioImageUploadField, buildComposioFileUploadArguments, build
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { ROUTED_SKILL_REFERENCES, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
-import { composioDecisionContext, routeComposioForTurn, toComposioAction, type ComposioAction } from "./decisions/composioRouter.js";
+import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline } from "./decisions/jev.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
@@ -2329,6 +2329,7 @@ export async function runAgent(
     ? routeComposioForTurn(routingQuery, {
       accounts,
       listActions: listComposioToolkitActions,
+      listToolkits: listComposioToolkitCatalogue,
       signal,
       deadline: routingDeadline,
       recentContext: routingRecentContext,
@@ -3193,6 +3194,23 @@ export async function getConnectionUrl(
 }
 
 /** Return safe connected-account metadata; credential fields are never exposed. */
+/**
+ * Composio's public toolkit catalogue (most used first), used by decision
+ * routing so requests can target apps the user has not connected yet.
+ */
+async function listComposioToolkitCatalogue(signal?: AbortSignal): Promise<ComposioToolkitInfo[]> {
+  const out: ComposioToolkitInfo[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10 && out.length < config.jevComposioCatalogLimit; page += 1) {
+    const response = await abortable(composio.toolkits.get({ sortBy: "usage", limit: Math.min(500, config.jevComposioCatalogLimit - out.length), ...(cursor ? { cursor } : {}) }), signal) as unknown;
+    const rows = Array.isArray(response) ? response : Array.isArray((response as { items?: unknown[] })?.items) ? (response as { items: unknown[] }).items : [];
+    for (const row of rows) { const info = toComposioToolkitInfo(row); if (info) out.push(info); }
+    cursor = Array.isArray(response) ? undefined : String((response as { nextCursor?: unknown; next_cursor?: unknown })?.nextCursor ?? (response as { next_cursor?: unknown })?.next_cursor ?? "") || undefined;
+    if (!cursor || !rows.length) break;
+  }
+  return out;
+}
+
 /**
  * Action catalogue for one toolkit, used by decision routing. This is public
  * Composio metadata (slugs, descriptions, input schemas), not user data.

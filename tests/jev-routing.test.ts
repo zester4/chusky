@@ -6,7 +6,7 @@ import path from "node:path";
 import { config } from "../src/config.js";
 import { JevClient, JevUnavailableError, NONE_OPTION, createRoutingDeadline, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
 import { explicitlyNamedSkills, routeSkillsForTurn } from "../src/decisions/skillRouter.js";
-import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, type ComposioAction } from "../src/decisions/composioRouter.js";
+import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "../src/decisions/composioRouter.js";
 import { createTregEndpointJudge } from "../src/decisions/tregRouter.js";
 import { rankHits } from "../src/treg/gateway.js";
 import { clearSkillCatalogCache } from "../src/skills/catalog.js";
@@ -232,8 +232,10 @@ test("Composio routing picks the connected toolkit, then the exact action from a
     assert.ok(!decision.actions.some((action) => action.id === "GMAIL_OLD_SEND"), "deprecated actions are never routed");
     assert.equal((decision.directTools[0] as any).function.name, "GMAIL_SEND_EMAIL");
     assert.equal((decision.directTools[0] as any).function.parameters.type, "object");
-    const toolkitQuestion = captured[0].body.questions.toolkit;
-    assert.ok(!("slack" in toolkitQuestion.criteria), "inactive connections are not offered");
+    const toolkitQuestion = captured.map((item) => item.body.questions.rank).find((question) => question && "gmail" in question.criteria);
+    assert.ok(toolkitQuestion, "toolkits are ranked");
+    assert.match(toolkitQuestion.criteria.gmail, /CONNECTED/);
+    assert.ok(!("slack" in toolkitQuestion.criteria), "inactive connections are not offered as connected apps without the catalogue");
     assert.ok(!JSON.stringify(captured.map((item) => item.body)).includes("alias"), "account aliases never leave Chusky");
     const context = composioDecisionContext(decision);
     assert.match(context, /GMAIL_SEND_EMAIL \[gmail\].*loaded as a direct tool/);
@@ -360,4 +362,66 @@ test("Treg judge scores task fit without preferring synchronous endpoints", asyn
     assert.match(captured[0].body.questions.endpoint.criteria["bulk-email"], /mode: bulk/);
     assert.ok(fit && fit["bulk-email"] > fit["single-email"], "a bulk need routes to the bulk endpoint");
   } finally { restore(); }
+});
+
+const TOOLKIT_CATALOGUE: ComposioToolkitInfo[] = [
+  { slug: "gmail", name: "Gmail", description: "Send and read email messages", categories: ["communication"] },
+  { slug: "slack", name: "Slack", description: "Post messages to Slack channels and direct messages", categories: ["communication"] },
+  { slug: "hubspot", name: "HubSpot", description: "CRM contacts, deals, and pipeline", categories: ["crm"] },
+  { slug: "notion", name: "Notion", description: "Pages, databases, and notes", categories: ["productivity"] },
+];
+
+function slackCatalogue(): ComposioAction[] {
+  return [
+    { slug: "SLACK_SEND_MESSAGE", name: "Send message", description: "Post a message to a Slack channel", toolkit: "slack", inputParameters: { type: "object", properties: { channel: { type: "string" }, text: { type: "string" } } } },
+    { slug: "SLACK_LIST_CHANNELS", name: "List channels", description: "List workspace channels", toolkit: "slack" },
+  ];
+}
+
+test("Composio routing reaches apps the user has not connected and asks to connect first", async () => {
+  clearComposioActionCache();
+  const restore = withConfig({ jevComposioRouteUnconnected: true });
+  try {
+    const decision = await computeJevComposioDecision("Post a message to the Slack sales channel about the launch", {
+      accounts: [{ toolkit: "hubspot", status: "ACTIVE" }],
+      listActions: async (toolkit) => toolkit === "slack" ? slackCatalogue() : [],
+      listToolkits: async () => TOOLKIT_CATALOGUE,
+      client: new JevClient({ apiKey: "k", fetchImpl: fakeJev() }),
+    });
+    assert.equal(decision.toolkits[0].id, "slack");
+    assert.equal(decision.toolkits[0].connected, false);
+    assert.deepEqual(decision.unconnectedToolkits, ["slack"]);
+    assert.equal(decision.actions[0].id, "SLACK_SEND_MESSAGE");
+    assert.equal(decision.actions[0].connected, false);
+    assert.equal(decision.directTools.length, 0, "unconnected actions are never exposed as executable tools");
+    const context = composioDecisionContext(decision);
+    assert.match(context, /slack is not connected yet\. Call COMPOSIO_MANAGE_CONNECTIONS for slack/);
+    assert.match(context, /SLACK_SEND_MESSAGE \[slack\].*app not connected; connect first/);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("unconnected routing can be disabled and the catalogue is cached", async () => {
+  clearComposioActionCache();
+  let listed = 0;
+  const listToolkits = async () => { listed += 1; return TOOLKIT_CATALOGUE; };
+  let restore = withConfig({ jevComposioRouteUnconnected: false });
+  try {
+    const captured: Captured[] = [];
+    await computeJevComposioDecision("Post a Slack message", { accounts: [{ toolkit: "hubspot", status: "ACTIVE" }], listActions: async () => [], listToolkits, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }) });
+    assert.equal(listed, 0);
+    const rank = captured.map((item) => item.body.questions.rank).find(Boolean);
+    assert.deepEqual(Object.keys(rank.criteria).sort(), ["__none__", "hubspot"]);
+  } finally { restore(); }
+  restore = withConfig({ jevComposioRouteUnconnected: true });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev() });
+    await computeJevComposioDecision("Post a Slack message", { accounts: [], listActions: async () => [], listToolkits, client });
+    await computeJevComposioDecision("Write a Notion page", { accounts: [], listActions: async () => [], listToolkits, client });
+    assert.equal(listed, 1);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("raw Composio toolkits map to catalogue entries safely", () => {
+  assert.equal(toComposioToolkitInfo({ slug: "bad slug!" }), undefined);
+  assert.deepEqual(toComposioToolkitInfo({ slug: "Gmail", name: "Gmail", meta: { description: "Mail\u0000 app", categories: [{ slug: "comm", name: "Communication" }] } }), { slug: "gmail", name: "Gmail", description: "Mail app", categories: ["Communication"] });
 });

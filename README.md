@@ -1248,7 +1248,9 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, and Treg: `off`, `shadow` (log only), or `enforce` (apply with keyword fallback). See `.agents/skills/chusky/references/jev.md` |
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
 | `JEV_SURFACES` | — | `skills,composio,treg` | Surfaces routed by Jev |
-| `JEV_TURN_BUDGET_MS` | — | `3000` | Maximum time routing may add before the first model call; slower routes fall back to keywords |
+| `JEV_COMPOSIO_ROUTE_UNCONNECTED` | — | `true` | Route across Composio's full toolkit catalogue so requests can target apps that are not connected yet (connect-first hint, never executable until connected) |
+| `JEV_COMPOSIO_CATALOG_LIMIT` | — | `500` | Most-used Composio toolkits considered for routing (cached 6h) |
+| `JEV_TURN_BUDGET_MS` | — | `3000` | One shared per-turn deadline for all routing before the first model call; slower routes fall back to keywords |
 
 ---
 
