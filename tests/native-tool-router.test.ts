@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, routeNativeToolsForTurn } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -41,6 +41,14 @@ test("native routing is inert when Jev native routing is disabled", async () => 
     assert.equal(route.source, "fallback");
     assert.equal(route.tools, all);
   } finally { restore(); }
+});
+
+test("Link outcome reporting is published to native routing as a shopping write tool", () => {
+  const descriptor = nativeToolManifest.find((item) => item.slug === "CHUCK_LINK_REPORT_OUTCOME");
+  assert.ok(descriptor);
+  assert.equal(descriptor.bundle, "shopping");
+  assert.equal(descriptor.risk, "write");
+  assert.equal(descriptor.alwaysAvailable, false);
 });
 
 test("enforce mode exposes only Jev-selected native schemas and preserves non-native tools", async () => {

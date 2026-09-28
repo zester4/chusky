@@ -92,7 +92,7 @@ function inferBundle(slug: string, description: string): NativeToolBundle {
   if (/browser|vault|checkout|login|webpage|website/.test(text)) return "browser";
   if (/meeting|zoom|teams|webex|transcript|phone|call/.test(text)) return "meetings";
   if (/pdf|document|spreadsheet|presentation|artifact|image|video/.test(text)) return "artifacts";
-  if (/daytona|code|file|folder|sandbox|workspace|terminal|git|repository|app/.test(text)) return "code";
+  if (/daytona|code|file|folder|sandbox|workspace|terminal|git|repository|\bapp\b/.test(text)) return "code";
   if (/mission|task|reminder|attention|autonomy|subagent|delegate|follow.?up|schedule/.test(text)) return "autonomy";
   if (/shopping|order|payment|merchant|wallet|cart/.test(text)) return "shopping";
   if (/email|calendar|slack|github|notion|trigger|webhook|account|connection|message/.test(text)) return "workspace";
