@@ -1,5 +1,31 @@
 import { config } from "../../config.js";
 
+const VECTOR_REQUEST_TIMEOUT_MS = 2_500;
+const VECTOR_MAX_ATTEMPTS = 2;
+const VECTOR_RETRY_BASE_DELAY_MS = 100;
+const VECTOR_DEGRADED_COOLDOWN_MS = 30_000;
+const vectorDegradedUntil = new Map<string, number>();
+
+export class UpstashVectorRequestError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+    this.name = "UpstashVectorRequestError";
+  }
+}
+
+function retryableStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function retryDelay(attempt: number): number {
+  const exponential = VECTOR_RETRY_BASE_DELAY_MS * (2 ** attempt);
+  return exponential + Math.floor(Math.random() * VECTOR_RETRY_BASE_DELAY_MS);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 export interface KnowledgeMetadata { userId: string; projectId?: string; documentId: string; sourceType: string; contentType?: string; chunkIndex: number; visibility: "private" | "project"; [key: string]: string | number | boolean | undefined; }
 export interface KnowledgeMatch { id: string; score?: number; data?: string; metadata?: KnowledgeMetadata; }
 
@@ -22,10 +48,47 @@ export class UpstashKnowledgeStore {
   }
   private readonly token: string;
   private async call<T>(path: string, body: unknown, method: "POST" | "DELETE" = "POST"): Promise<T> {
-    const response = await fetch(`${this.url}${path}`, { method, headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
-    if (!response.ok) throw new Error(`Upstash Vector request failed (${response.status})`);
-    const payload = await response.json() as { result: T };
-    return payload.result;
+    const degradedUntil = vectorDegradedUntil.get(this.url) ?? 0;
+    if (degradedUntil > Date.now()) {
+      throw new UpstashVectorRequestError("Upstash Vector is temporarily unavailable; use structured search until it recovers");
+    }
+    if (degradedUntil) vectorDegradedUntil.delete(this.url);
+
+    const requestUrl = `${this.url}${path}`;
+    for (let attempt = 0; attempt < VECTOR_MAX_ATTEMPTS; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), VECTOR_REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(requestUrl, {
+          method,
+          headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (response.ok) {
+          vectorDegradedUntil.delete(this.url);
+          const payload = await response.json() as { result: T };
+          return payload.result;
+        }
+        await response.body?.cancel();
+        if (attempt + 1 < VECTOR_MAX_ATTEMPTS && retryableStatus(response.status)) {
+          await wait(retryDelay(attempt));
+          continue;
+        }
+        if (retryableStatus(response.status)) vectorDegradedUntil.set(this.url, Date.now() + VECTOR_DEGRADED_COOLDOWN_MS);
+        throw new UpstashVectorRequestError(`Upstash Vector request failed (${response.status})`, response.status);
+      } catch (error) {
+        if (error instanceof UpstashVectorRequestError) throw error;
+        if (attempt + 1 >= VECTOR_MAX_ATTEMPTS) {
+          vectorDegradedUntil.set(this.url, Date.now() + VECTOR_DEGRADED_COOLDOWN_MS);
+          throw new UpstashVectorRequestError("Upstash Vector request failed before a response", undefined);
+        }
+        await wait(retryDelay(attempt));
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    throw new UpstashVectorRequestError("Upstash Vector request failed before a response", undefined);
   }
   async upsert(chunks: Array<{ id: string; data: string; metadata: KnowledgeMetadata }>): Promise<void> {
     if (!chunks.length) return;

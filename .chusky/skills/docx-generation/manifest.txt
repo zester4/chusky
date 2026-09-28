@@ -1,4 +1,6 @@
 SKILL.md
+docx/advanced-reference.md
+docx/editing.md
 examples/end_to_end_smoke_test.md
 ooxml/comments.md
 ooxml/content_controls.md

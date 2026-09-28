@@ -259,6 +259,90 @@
       "sourceType": "github",
       "skillPath": "better-auth/twoFactor/SKILL.md",
       "computedHash": "cfe69aad10d4d7b397fbc101630afd9361b385b5f6f83056f33f36ab3b736fcb"
+    },
+    "upstash": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash/SKILL.md",
+      "computedHash": "72f8d2a511949de3d64178215fc0a7902c1a620c47b0dfc7233e50521e07939f"
+    },
+    "upstash-blob-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-blob-js/SKILL.md",
+      "computedHash": "9b0298f150d9e2d4ea59acdc296ed9063e0c6a695b48727f48fbb7e60d07472c"
+    },
+    "upstash-box-cli": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-box-cli/SKILL.md",
+      "computedHash": "6412ef7cf9e6cc2befa359a31322846342ec6f4ed6ad5f5dde6902441a7c506c"
+    },
+    "upstash-box-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-box-js/SKILL.md",
+      "computedHash": "3d899659979196f86f3ea90993bba3b8abf374e3239eeac8d903ee7a9c2d4b7b"
+    },
+    "upstash-box-py": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-box-py/SKILL.md",
+      "computedHash": "536dcf5daeb558523d4ce3b819b5c28db2e1d82418e3bbf2200e74c3975be870"
+    },
+    "upstash-box-remote-work": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-box-remote-work/SKILL.md",
+      "computedHash": "181b83232779be5313cd8f15a09d8333a49251de6eab6f4ad58ba70c342071e6"
+    },
+    "upstash-cli": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-cli/SKILL.md",
+      "computedHash": "3b572f60cf98f24e1d86e2eb439003db045395260e2a1c753c60119ba7830671"
+    },
+    "upstash-qstash-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-qstash-js/SKILL.md",
+      "computedHash": "667d04391dd04a5d4dbfa7800ff0cc7989136698cfd5c125181b8ee5f318c138"
+    },
+    "upstash-ratelimit-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-ratelimit-js/SKILL.md",
+      "computedHash": "3833ff63ef2e339ffd8d173d484d5cb0c28dfdcea4bc18d2b7286e7ae311e768"
+    },
+    "upstash-redis-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-redis-js/SKILL.md",
+      "computedHash": "907c7482c24b253174de2d1c1599901e7984caa3696c38e6eb927c059a6fa0f0"
+    },
+    "upstash-redis-start": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-redis-start/SKILL.md",
+      "computedHash": "7f41196f3e37d1e05fd5b2348280b55a1ca9813598fb7b71cb39be57a2c8f47e"
+    },
+    "upstash-search-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-search-js/SKILL.md",
+      "computedHash": "665404b134be1c2aa1b7103aee0b76274a92922d4bab000899ae459ca96df255"
+    },
+    "upstash-vector-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-vector-js/SKILL.md",
+      "computedHash": "ce90022eecdba2202dfae7fed93777c732ca257ed35616ab3626e493088e4e80"
+    },
+    "upstash-workflow-js": {
+      "source": "upstash/skills",
+      "sourceType": "github",
+      "skillPath": "skills/upstash-workflow-js/SKILL.md",
+      "computedHash": "c3d813a184171fcfeae2233c6bd906c3146f68b99d91133dea90759bfbd0c64e"
     }
   }
 }

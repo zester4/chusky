@@ -1,6 +1,6 @@
 ---
 name: docx-generation
-description: "Create, edit, review, redline, comment on, merge, validate, render, and visually verify professional Microsoft Word DOCX artifacts. Use whenever the user asks to create or modify a Word document, report, proposal, contract, letter, manual, template, form, redline, tracked-change document, or DOCX conversion."
+description: "Create, read, edit, review, redline, comment on, merge, validate, render, and visually verify professional Microsoft Word DOCX and DOTX artifacts. Use whenever the user mentions a Word document, DOCX, DOTX, report, proposal, contract, letter, manual, template, form, redline, tracked change, comment, conversion, or document extraction task."
 ---
 
 # DOCX Generation and Verification
@@ -18,6 +18,11 @@ For normal Word documents:
 6. Inspect every rendered page for layout defects.
 7. Fix and re-render until clean.
 8. Register/deliver only the latest verified DOCX.
+
+For detailed Word authoring, extraction, OOXML, template, and conversion
+guidance, read `docx/advanced-reference.md` in addition to the task reference
+that matches the request. This reference is part of this skill; it is not a
+separate routed skill.
 
 For comments, tracked changes, content controls, true fields, advanced hyperlinks, or other unsupported Word features, use targeted OOXML patches only after ordinary `python-docx` editing is complete.
 
@@ -43,6 +48,10 @@ For comments, tracked changes, content controls, true fields, advanced hyperlink
 - Templates/style packs: `tasks/templates.md`
 - Watermarks/protection: `tasks/watermarks_protection.md`
 - Footnotes/endnotes: `tasks/footnotes_endnotes.md`
+
+Advanced reference:
+- Detailed DOCX/DOTX creation, reading, editing, conversion, and OOXML guidance: `docx/advanced-reference.md`
+- Template editing notes: `docx/editing.md`
 
 OOXML notes live under `ooxml/`. Helper scripts live under `scripts/`.
 
