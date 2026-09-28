@@ -1,5 +1,6 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
+import { config } from "../src/config.js";
 import {
   addHistorySummary, appendMessages, acquireUserLock, addReminder, addJob, claimTriggerEvent, clearHistory, clearSession,
   createApproval, createCliDevice, createCliPairing, getApproval, getDaytonaWorkspace, getSession, initStore,
@@ -401,7 +402,7 @@ test("history trimming creates bounded summaries", async () => {
   const messages = Array.from({ length: 44 }, (_, i) => ({ role: i % 2 ? "assistant" as const : "user" as const, content: `message-${i}` }));
   await appendMessages(userId, messages);
   const session = await getSession(userId);
-  assert.equal(session.history.length, 40);
+  assert.equal(session.history.length, config.maxHistory * 2);
   assert.equal(session.summaries.length, 1);
   assert.match(session.summaries[0], /message-0/);
 });
