@@ -16,14 +16,20 @@ policy (`src/policy.ts`), idempotency, and Treg spend guards are unchanged.
 - `src/decisions/skillRouter.ts` — ranks every installed skill, then verifies
   the top candidates independently so a turn can bind several skills.
   Explicit invocations (`/seo-audit`, "use the pdf skill") always bind.
-- `src/decisions/composioRouter.ts` — stage 1: domain, connected toolkit, and
-  "needs an app action" in one request. Stage 2: ranks all actions of the
-  chosen toolkit(s) (cached catalogue, deprecated actions removed) and
-  verifies the top candidates. Confident actions are exposed to the model as
-  direct tools with their real Composio schema; the rest are listed in context.
+- `src/decisions/composioRouter.ts` — stage 1 (parallel): domain and
+  "needs an app" triage, plus a ranking of every connected toolkit and, with
+  `JEV_COMPOSIO_ROUTE_UNCONNECTED=true`, Composio's full toolkit catalogue
+  (connected apps are marked and preferred when they can do the job). Stage 2:
+  ranks all actions of the chosen toolkit(s) (cached catalogue, deprecated
+  actions removed) and verifies the top candidates. Confident actions on
+  connected apps are exposed as direct tools with their real schema. A routed
+  app that is not connected yields a connect-first hint (call
+  `COMPOSIO_MANAGE_CONNECTIONS`, then continue); its actions are listed but
+  never executable until connected.
 - `src/decisions/tregRouter.ts` — turn-level native Treg tool hint and an
-  endpoint judge that replaces the keyword category boost in
-  `rankHits()`; price, reliability, latency, input coverage, BYOK/own-account
+  endpoint judge that scores task fit (synchronous, asynchronous, and bulk
+  endpoints are equally valid; mode is described neutrally) and replaces the
+  keyword category boost in `rankHits()`; price, reliability, latency, input coverage, BYOK/own-account
   filters, and budgets stay deterministic.
 - `src/decisions/telemetry.ts` — `jev.shadow` / `jev.enforce` log events with
   identifiers, probabilities, agreement with keyword routing, latency, and
@@ -34,9 +40,18 @@ policy (`src/policy.ts`), idempotency, and Treg spend guards are unchanged.
 - `JEV_MODE=off` (default): keyword routing only.
 - `JEV_MODE=shadow`: behaviour is unchanged; Jev runs in the background and
   logs agreement with the keyword baseline.
-- `JEV_MODE=enforce`: confident Jev routes are applied. Timeouts
-  (`JEV_TURN_BUDGET_MS`), HTTP errors, invalid answers, an open breaker, or
-  low confidence fall back to keyword routing for that turn.
+- `JEV_MODE=enforce`: confident Jev routes are applied. Timeouts, HTTP
+  errors, invalid answers, an open breaker, or low confidence fall back to
+  keyword routing for that turn.
+
+Skill, Treg, and Composio routing (including the connected-account lookup)
+start together and share one per-turn deadline (`JEV_TURN_BUDGET_MS`). Its
+signal aborts in-flight Jev and catalogue requests, so routing adds at most
+that budget to the critical path. Deadline aborts do not open the breaker.
+
+Jev is additive. A Jev answer, including a confident `__none__`, never
+removes keyword skill routes or the keyword Composio domain route. Fuzzy
+skill search stays available unless the user explicitly selected a skill.
 
 `JEV_SURFACES` limits routing to `skills`, `composio`, and/or `treg`.
 

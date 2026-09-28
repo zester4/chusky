@@ -48,8 +48,9 @@ import { assertComposioImageUploadField, buildComposioFileUploadArguments, build
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
 import { ROUTED_SKILL_REFERENCES, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
-import { composioDecisionContext, routeComposioForTurn, toComposioAction, type ComposioAction } from "./decisions/composioRouter.js";
+import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
+import { createRoutingDeadline } from "./decisions/jev.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -2293,51 +2294,70 @@ export async function runAgent(
       ? `Recently available private image assets (metadata only; call CHUCK_GET_IMAGE_ASSET with the exact ID when an image is needed):\n${durable.imageAssets.slice(-8).reverse().map((asset) => `- ${asset.id} | ${asset.name} | ${asset.purpose} | tags: ${asset.tags.join(", ")}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n\n");
-  // Decision routing (skills, Composio toolkit/action, Treg) runs in
-  // parallel before the first model call. Jev only proposes routes; every
-  // tool call still passes allowlists, account scope, and approval policy.
+  // Decision routing (skills, Composio toolkit/action, Treg). All three
+  // routes, including the connected-account lookup Composio routing needs,
+  // start here concurrently and share one per-turn deadline, so routing adds
+  // at most JEV_TURN_BUDGET_MS to the critical path. Jev only proposes
+  // routes; every tool call still passes allowlists, account scope, and
+  // approval policy.
   const routingQuery = typeof userMessage === "string"
     ? userMessage
     : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
     .join("\n");
+  const routingDeadline = createRoutingDeadline(config.jevTurnBudgetMs, signal);
   const skillsRoutable = (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
   const skillRoutePromise = skillsRoutable
-    ? routeSkillsForTurn(routingQuery, { signal, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
+    ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
       logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
       return undefined;
     })
     : Promise.resolve(undefined);
   const tregRoutePromise = !sharedScope && !voiceTurn && !toolsDisabled
-    ? routeTregForTurn(routingQuery, { signal, sessionId: durableRunId }).catch(() => undefined)
+    ? routeTregForTurn(routingQuery, { signal, deadline: routingDeadline, sessionId: durableRunId }).catch(() => undefined)
     : Promise.resolve(undefined);
+  // Connected-account metadata is private context. Never expose a user's
+  // account aliases or tool access to a shared channel conversation.
+  const accountsPromise: Promise<ConnectedComposioAccount[] | undefined> = sharedScope
+    ? Promise.resolve(undefined)
+    : listConnectedAccounts(userId).catch((error) => {
+      logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
+      return undefined;
+    });
+  const composioRoutePromise = accountsPromise.then((accounts) => accounts
+    ? routeComposioForTurn(routingQuery, {
+      accounts,
+      listActions: listComposioToolkitActions,
+      listToolkits: listComposioToolkitCatalogue,
+      signal,
+      deadline: routingDeadline,
+      recentContext: routingRecentContext,
+      sessionId: durableRunId,
+    })
+    : undefined).catch((error) => {
+    logger.debug({ err: error, userId }, "Composio routing unavailable for this run");
+    return undefined;
+  });
+  const [skillRoute, tregRoute, routedAccounts, composioDecision] = await Promise.all([skillRoutePromise, tregRoutePromise, accountsPromise, composioRoutePromise]);
+  routingDeadline.dispose();
   let accountContext = "";
   let composioRouteContext = "";
   let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
-  // Connected-account metadata is private context. Never expose a user's
-  // account aliases or tool access to a shared channel conversation.
-  if (!sharedScope) {
-    try {
-      const accounts = await listConnectedAccounts(userId);
-      connectedAccountSnapshot = accounts;
-      if (accounts.length) {
-        accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
-      }
-      const decision = await routeComposioForTurn(routingQuery, {
-        accounts,
-        listActions: listComposioToolkitActions,
-        signal,
-        recentContext: routingRecentContext,
-        sessionId: durableRunId,
-      });
-      composioRouteContext = composioDecisionContext(decision);
+  if (!sharedScope && routedAccounts) {
+    const accounts = routedAccounts;
+    connectedAccountSnapshot = accounts;
+    if (accounts.length) {
+      accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
+    }
+    if (composioDecision) {
+      composioRouteContext = composioDecisionContext(composioDecision);
       // Expose routed actions with their real schema so the model can call the
       // exact action without a broad search round. Only for the owner's full
       // private tool surface; explicit allowlists are never widened here.
-      if (decision.directTools.length && sessionObj && !allow && fullComposioTools.length > 80) {
+      if (composioDecision.directTools.length && sessionObj && !allow && fullComposioTools.length > 80) {
         const present = new Set(availableTools.map((tool) => toolName(tool)));
-        for (const tool of decision.directTools) {
+        for (const tool of composioDecision.directTools) {
           const slug = toolName(tool);
           if (!slug || present.has(slug) || deny.has(slug) || slug.startsWith("COMPOSIO_") || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
           registerComposioToolMetadata(tool);
@@ -2345,8 +2365,6 @@ export async function runAgent(
           present.add(slug);
         }
       }
-    } catch (error) {
-      logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
     }
   }
   // Project skills are trusted, versioned operating guidance. Select a small
@@ -2356,7 +2374,6 @@ export async function runAgent(
   let skillContext = "";
   if (skillsRoutable) {
     try {
-      const skillRoute = await skillRoutePromise;
       skillContext = skillRoute
         ? await skillContextForBinding({ ...skillRoute.binding, requiredReferences: ROUTED_SKILL_REFERENCES }, skillRoute.allowSearchFallback ? routingQuery : "")
         : await routedSkillContext(routingQuery);
@@ -2364,7 +2381,7 @@ export async function runAgent(
       logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
     }
   }
-  const tregRouteContext = tregTurnContext(await tregRoutePromise);
+  const tregRouteContext = tregTurnContext(tregRoute);
   if (tregRouteContext) composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${tregRouteContext}` : tregRouteContext;
   const upgradeContext = announceUpgrade && pendingUpgrade
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
@@ -3177,6 +3194,23 @@ export async function getConnectionUrl(
 }
 
 /** Return safe connected-account metadata; credential fields are never exposed. */
+/**
+ * Composio's public toolkit catalogue (most used first), used by decision
+ * routing so requests can target apps the user has not connected yet.
+ */
+async function listComposioToolkitCatalogue(signal?: AbortSignal): Promise<ComposioToolkitInfo[]> {
+  const out: ComposioToolkitInfo[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 10 && out.length < config.jevComposioCatalogLimit; page += 1) {
+    const response = await abortable(composio.toolkits.get({ sortBy: "usage", limit: Math.min(500, config.jevComposioCatalogLimit - out.length), ...(cursor ? { cursor } : {}) }), signal) as unknown;
+    const rows = Array.isArray(response) ? response : Array.isArray((response as { items?: unknown[] })?.items) ? (response as { items: unknown[] }).items : [];
+    for (const row of rows) { const info = toComposioToolkitInfo(row); if (info) out.push(info); }
+    cursor = Array.isArray(response) ? undefined : String((response as { nextCursor?: unknown; next_cursor?: unknown })?.nextCursor ?? (response as { next_cursor?: unknown })?.next_cursor ?? "") || undefined;
+    if (!cursor || !rows.length) break;
+  }
+  return out;
+}
+
 /**
  * Action catalogue for one toolkit, used by decision routing. This is public
  * Composio metadata (slugs, descriptions, input schemas), not user data.

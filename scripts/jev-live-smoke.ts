@@ -4,6 +4,7 @@
  *
  *   JEV_MODE=enforce npm run jev:live-smoke
  *   JEV_MODE=enforce npm run jev:live-smoke -- --toolkit gmail "Send Ama the pricing email"
+ *   (--toolkit marks that app as connected; every other catalogue app is routed as unconnected)
  *
  * Prints routing decisions (identifiers and probabilities only) so thresholds
  * can be tuned before switching production to enforce.
@@ -12,7 +13,7 @@ import { Composio } from "@composio/core";
 import { config } from "../src/config.js";
 import { jevClient } from "../src/decisions/jev.js";
 import { computeJevSkillRoute } from "../src/decisions/skillRouter.js";
-import { computeJevComposioDecision, toComposioAction, type ComposioAction } from "../src/decisions/composioRouter.js";
+import { computeJevComposioDecision, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "../src/decisions/composioRouter.js";
 import { computeTregTurnRoute } from "../src/decisions/tregRouter.js";
 
 const args = process.argv.slice(2);
@@ -36,19 +37,25 @@ const listActions = async (slug: string): Promise<ComposioAction[]> => {
 };
 
 async function main(): Promise<void> {
+const listToolkits = async (): Promise<ComposioToolkitInfo[]> => {
+  const rows = await (composio as any).toolkits.get({ sortBy: "usage", limit: config.jevComposioCatalogLimit }) as unknown;
+  const items = Array.isArray(rows) ? rows : ((rows as { items?: unknown[] })?.items ?? []);
+  return items.map(toComposioToolkitInfo).filter((row): row is ComposioToolkitInfo => Boolean(row));
+};
+
 for (const prompt of samples) {
   const started = Date.now();
   const [skills, treg, composioDecision] = await Promise.all([
     computeJevSkillRoute(prompt, { client }),
     computeTregTurnRoute(prompt, { client }).catch((error) => ({ error: String(error) })),
-    toolkit ? computeJevComposioDecision(prompt, { accounts: [{ toolkit, status: "ACTIVE" }], listActions, client }) : Promise.resolve(undefined),
+    toolkit ? computeJevComposioDecision(prompt, { accounts: [{ toolkit, status: "ACTIVE" }], listActions, listToolkits, client }) : Promise.resolve(undefined),
   ]);
   console.log(JSON.stringify({
     prompt,
     wallMs: Date.now() - started,
     skills: { primary: skills.binding.primary, supporting: skills.binding.supporting, ranked: skills.ranked?.slice(0, 5), verified: skills.verified, telemetry: skills.telemetry },
     treg,
-    ...(composioDecision ? { composio: { toolkits: composioDecision.toolkits, actions: composioDecision.actions.map((action) => ({ id: action.id, p: action.probability, verified: action.verified })), direct: composioDecision.directTools.length, telemetry: composioDecision.telemetry } } : {}),
+    ...(composioDecision ? { composio: { toolkits: composioDecision.toolkits, unconnected: composioDecision.unconnectedToolkits, actions: composioDecision.actions.map((action) => ({ id: action.id, p: action.probability, verified: action.verified })), direct: composioDecision.directTools.length, telemetry: composioDecision.telemetry } } : {}),
   }, null, 2));
 }
 }

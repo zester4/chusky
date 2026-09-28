@@ -12,7 +12,7 @@
  */
 import { config } from "../config.js";
 import type { TregEndpointHit } from "../treg/types.js";
-import { NONE_OPTION, jevClient, jevEnabled, jevText, type JevChoiceAnswer, type JevClient, type JevNoulAnswer } from "./jev.js";
+import { NONE_OPTION, awaitRoute, jevClient, jevEnabled, jevText, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type RoutingDeadline } from "./jev.js";
 import { recordDecision } from "./telemetry.js";
 
 export const TREG_TOOL_CRITERIA: Record<string, string> = {
@@ -55,16 +55,14 @@ export function tregTurnContext(route: TregTurnRoute | undefined): string {
 }
 
 /** Enforce-mode turn hint; shadow mode records the decision and returns nothing. */
-export async function routeTregForTurn(objective: string, options: { client?: JevClient; signal?: AbortSignal; sessionId?: string; budgetMs?: number } = {}): Promise<TregTurnRoute | undefined> {
+export async function routeTregForTurn(objective: string, options: { client?: JevClient; signal?: AbortSignal; sessionId?: string; budgetMs?: number; deadline?: RoutingDeadline } = {}): Promise<TregTurnRoute | undefined> {
   if (!config.tregEnabled || !objective.trim() || !jevEnabled("treg")) return undefined;
   const client = options.client ?? jevClient();
   if (!client.available()) return undefined;
-  const run = computeTregTurnRoute(objective, { ...options, client });
-  if (config.jevMode === "shadow") { run.catch(() => undefined); return undefined; }
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([run, new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), options.budgetMs ?? config.jevTurnBudgetMs); })]);
-  } catch { return undefined; } finally { if (timer) clearTimeout(timer); }
+  const enforce = config.jevMode === "enforce";
+  const run = computeTregTurnRoute(objective, { ...options, client, signal: enforce && options.deadline ? options.deadline.signal : options.signal });
+  if (!enforce) { run.catch(() => undefined); return undefined; }
+  return (await awaitRoute(run, options.deadline ? options.deadline.remaining() : options.budgetMs ?? config.jevTurnBudgetMs)).value;
 }
 
 export type TregEndpointJudgeInput = { intent: string; need: string; hits: TregEndpointHit[]; availableFields?: string[]; requiredFields?: string[] };
@@ -79,13 +77,15 @@ function describeHit(hit: TregEndpointHit): string {
     hit.inputFields?.length ? `inputs ${hit.inputFields.slice(0, 12).join(", ")}` : "",
     hit.priceUsd === undefined ? "" : `price $${hit.priceUsd}`,
     hit.successRate === undefined ? "" : `success ${Math.round(hit.successRate * 100)}%`,
-    /bulk|status|job/i.test(`${hit.id} ${hit.title}`) ? "asynchronous or bulk job endpoint" : "",
+    /bulk|batch/i.test(`${hit.id} ${hit.title}`) ? "mode: bulk" : /status|job|async/i.test(`${hit.id} ${hit.title}`) ? "mode: asynchronous job" : "",
   ].filter(Boolean).join("; "), 360);
 }
 
 /**
  * Jev endpoint judge. One Choice over the candidate endpoints gives a
- * comparable fit distribution; ties and numbers stay with the gateway.
+ * comparable task-fit distribution. The endpoint mode (synchronous,
+ * asynchronous job, bulk) is described neutrally; the judge must not prefer
+ * one mode over another. Numbers and ties stay with the gateway.
  */
 export function createTregEndpointJudge(options: { client?: JevClient } = {}): TregEndpointJudge {
   return async (input) => {
@@ -103,7 +103,7 @@ export function createTregEndpointJudge(options: { client?: JevClient } = {}): T
         available_inputs: input.availableFields ?? [],
         required_output_fields: input.requiredFields ?? [],
       }, {
-        endpoint: { type: "choice", instructions: "Which provider endpoint best performs `job` for `need`, returning `required_output_fields` from `available_inputs` in a single synchronous call?", criteria },
+        endpoint: { type: "choice", instructions: "Which provider endpoint best fits `job` for `need`, returning `required_output_fields` from `available_inputs`? Judge task fit only; synchronous, asynchronous, and bulk endpoints are all valid when their mode suits the need.", criteria },
       });
       const answer = result.answers.endpoint as JevChoiceAnswer;
       const fit: Record<string, number> = {};

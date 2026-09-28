@@ -197,7 +197,9 @@ export class JevClient {
       };
     } catch (error) {
       if (error instanceof JevUnavailableError) throw error;
-      this.fail();
+      // A caller cancellation (turn deadline or user abort) is not a Jev
+      // service failure and must not open the breaker.
+      if (!options.signal?.aborted) this.fail();
       if (controller.signal.aborted) throw new JevUnavailableError("Jev request timed out or was cancelled", "timeout");
       throw new JevUnavailableError(`Jev request failed: ${jevText(error instanceof Error ? error.message : error, 200)}`, "network");
     } finally {
@@ -377,4 +379,42 @@ export async function withinBudget<T>(promise: Promise<T>, ms: number, onError?:
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * One shared deadline for every routing surface in a turn. All enforce-mode
+ * routes race the same wall-clock instant, and the signal aborts in-flight
+ * Jev and catalogue requests when it passes, so routing can never add more
+ * than the configured budget to the critical path.
+ */
+export type RoutingDeadline = {
+  at: number;
+  signal: AbortSignal;
+  remaining(): number;
+  dispose(): void;
+};
+
+export function createRoutingDeadline(budgetMs = config.jevTurnBudgetMs, parent?: AbortSignal, now: () => number = Date.now): RoutingDeadline {
+  const controller = new AbortController();
+  const at = now() + Math.max(0, budgetMs);
+  const timer = setTimeout(() => controller.abort(), Math.max(0, budgetMs));
+  const onParentAbort = () => controller.abort();
+  if (parent?.aborted) controller.abort();
+  else parent?.addEventListener("abort", onParentAbort, { once: true });
+  return {
+    at,
+    signal: controller.signal,
+    remaining: () => Math.max(0, at - now()),
+    dispose: () => { clearTimeout(timer); parent?.removeEventListener("abort", onParentAbort); },
+  };
+}
+
+/** Wait for a route until the deadline; never rejects. */
+export async function awaitRoute<T>(run: Promise<T>, ms: number): Promise<{ value?: T; failure?: string }> {
+  if (ms <= 0) { run.catch(() => undefined); return { failure: "timeout" }; }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ failure: "timeout" }), ms);
+    run.then((value) => { clearTimeout(timer); resolve({ value }); })
+      .catch((error) => { clearTimeout(timer); resolve({ failure: (error as { reason?: string })?.reason ?? (error instanceof Error ? error.name : "error") }); });
+  });
 }

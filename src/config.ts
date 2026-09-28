@@ -192,6 +192,11 @@ export const config = {
   jevActionVerifyThreshold: unitInterval("JEV_ACTION_VERIFY_THRESHOLD", 0.5),
   jevInjectActionMinProbability: unitInterval("JEV_INJECT_ACTION_MIN_PROBABILITY", 0.55),
   jevToolkitMinProbability: unitInterval("JEV_TOOLKIT_MIN_PROBABILITY", 0.25),
+  // Route across Composio's full toolkit catalogue, not only connected apps.
+  // Unconnected picks produce a connect-first hint (COMPOSIO_MANAGE_CONNECTIONS)
+  // and are never exposed as direct executable tools.
+  jevComposioRouteUnconnected: optional("JEV_COMPOSIO_ROUTE_UNCONNECTED", "true") === "true",
+  jevComposioCatalogLimit: boundedInt("JEV_COMPOSIO_CATALOG_LIMIT", 500, 20, 2_000),
 
   // ── Channel adapters ──────────────────────────────────────────────
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",

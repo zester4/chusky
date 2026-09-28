@@ -4,9 +4,9 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "../src/config.js";
-import { JevClient, JevUnavailableError, NONE_OPTION, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
+import { JevClient, JevUnavailableError, NONE_OPTION, createRoutingDeadline, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
 import { explicitlyNamedSkills, routeSkillsForTurn } from "../src/decisions/skillRouter.js";
-import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, type ComposioAction } from "../src/decisions/composioRouter.js";
+import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "../src/decisions/composioRouter.js";
 import { createTregEndpointJudge } from "../src/decisions/tregRouter.js";
 import { rankHits } from "../src/treg/gateway.js";
 import { clearSkillCatalogCache } from "../src/skills/catalog.js";
@@ -31,11 +31,23 @@ function overlap(a: Set<string>, b: Set<string>): number { let n = 0; for (const
 type Captured = { url: string; body: Record<string, any> };
 
 /** Deterministic stand-in for Jev: lexical overlap -> softmax. */
-function fakeJev(captured: Captured[] = [], options: { delayMs?: number; status?: number; badChoice?: boolean } = {}): typeof fetch {
+function fakeJev(captured: Captured[] = [], options: { delayMs?: number; status?: number; badChoice?: boolean; forceNone?: boolean } = {}): typeof fetch {
   return (async (url: string | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     captured.push({ url: String(url), body });
-    if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    if (options.delayMs) await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, options.delayMs);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); });
+    });
+    if (options.forceNone) {
+      const answers: Record<string, unknown> = {};
+      for (const [key, question] of Object.entries<any>(body.questions)) {
+        answers[key] = question.type === "choice"
+          ? { type: "choice", choice: "__none__", confidence: 0.97, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.97 : 0.03 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
+          : { type: "noul", noul: 0.02 };
+      }
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
+    }
     if (options.status) return new Response("{}", { status: options.status });
     const stateWords = words(body.state?.request ?? body.state?.need ?? body.state);
     const answers: Record<string, unknown> = {};
@@ -220,8 +232,10 @@ test("Composio routing picks the connected toolkit, then the exact action from a
     assert.ok(!decision.actions.some((action) => action.id === "GMAIL_OLD_SEND"), "deprecated actions are never routed");
     assert.equal((decision.directTools[0] as any).function.name, "GMAIL_SEND_EMAIL");
     assert.equal((decision.directTools[0] as any).function.parameters.type, "object");
-    const toolkitQuestion = captured[0].body.questions.toolkit;
-    assert.ok(!("slack" in toolkitQuestion.criteria), "inactive connections are not offered");
+    const toolkitQuestion = captured.map((item) => item.body.questions.rank).find((question) => question && "gmail" in question.criteria);
+    assert.ok(toolkitQuestion, "toolkits are ranked");
+    assert.match(toolkitQuestion.criteria.gmail, /CONNECTED/);
+    assert.ok(!("slack" in toolkitQuestion.criteria), "inactive connections are not offered as connected apps without the catalogue");
     assert.ok(!JSON.stringify(captured.map((item) => item.body)).includes("alias"), "account aliases never leave Chusky");
     const context = composioDecisionContext(decision);
     assert.match(context, /GMAIL_SEND_EMAIL \[gmail\].*loaded as a direct tool/);
@@ -281,4 +295,133 @@ test("routing is inert when JEV_MODE is off", async () => {
     assert.equal(decision.source, "keyword");
     assert.equal(captured.length, 0);
   } finally { restore(); setJevClientForTests(undefined); }
+});
+
+test("a confident __none__ never removes keyword skill routes or search fallback", async () => {
+  const root = await skillRoot();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["skills"]) });
+  clearSkillCatalogCache();
+  try {
+    const route = await routeSkillsForTurn("Review overdue Stripe billing", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    const selected = [...route.binding.primary, ...route.binding.supporting];
+    assert.ok(selected.includes("billing-ops-pro"), `keyword route kept, got ${selected}`);
+    assert.equal(route.allowSearchFallback, true, "fuzzy search fallback stays available");
+    const explicit = await routeSkillsForTurn("use the seo-audit skill on this page", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    assert.ok(explicit.binding.primary.includes("seo-audit"));
+    assert.equal(explicit.allowSearchFallback, false, "an explicit skill selection disables fuzzy fallback");
+  } finally { restore(); clearSkillCatalogCache(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a confident no-app answer keeps the keyword Composio domain route", async () => {
+  clearComposioActionCache();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["composio"]) });
+  try {
+    const decision = await routeComposioForTurn("Qualify the HubSpot pipeline", { accounts: [{ toolkit: "hubspot", status: "ACTIVE" }], listActions: async () => [], client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    assert.equal(decision.route?.domain, "crm");
+    assert.deepEqual(decision.route?.connectedToolkits, ["hubspot"]);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("all routes share one per-turn deadline and run concurrently", async () => {
+  const root = await skillRoot();
+  clearSkillCatalogCache();
+  clearComposioActionCache();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["skills", "composio"]) });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { delayMs: 400 }) });
+    const deadline = createRoutingDeadline(120);
+    const started = Date.now();
+    const [skills, composio] = await Promise.all([
+      routeSkillsForTurn("Review overdue Stripe billing", { root, client, deadline }),
+      // Simulate the connected-account lookup running inside the same deadline.
+      new Promise((resolve) => setTimeout(resolve, 60)).then(() => routeComposioForTurn("Review overdue Stripe billing", { accounts: [{ toolkit: "stripe", status: "ACTIVE" }], listActions: async () => [], client, deadline })),
+    ]);
+    const elapsed = Date.now() - started;
+    deadline.dispose();
+    assert.ok(elapsed < 250, `routing stayed within the shared deadline (${elapsed}ms)`);
+    assert.equal(skills.source, "keyword");
+    assert.equal(composio.source, "keyword");
+    assert.equal(composio.route?.domain, "billing");
+    assert.equal(client.available(), true, "deadline aborts do not open the circuit breaker");
+  } finally { restore(); clearSkillCatalogCache(); clearComposioActionCache(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Treg judge scores task fit without preferring synchronous endpoints", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["treg"]) });
+  try {
+    const hits: TregEndpointHit[] = [
+      { id: "single-email", title: "Find one work email for a person", provider: "p1", category: "enrichment_person", priceUsd: 0.02 },
+      { id: "bulk-email", title: "Bulk work email enrichment for a list of people batch", provider: "p2", category: "enrichment_person", priceUsd: 0.02 },
+    ];
+    const judge = createTregEndpointJudge({ client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }) });
+    const fit = await judge({ intent: "enrich_person", need: "bulk enrich work email for a list of 500 people batch", hits });
+    const instructions = String(captured[0].body.questions.endpoint.instructions);
+    assert.doesNotMatch(instructions, /single synchronous call/);
+    assert.match(instructions, /synchronous, asynchronous, and bulk/);
+    assert.match(captured[0].body.questions.endpoint.criteria["bulk-email"], /mode: bulk/);
+    assert.ok(fit && fit["bulk-email"] > fit["single-email"], "a bulk need routes to the bulk endpoint");
+  } finally { restore(); }
+});
+
+const TOOLKIT_CATALOGUE: ComposioToolkitInfo[] = [
+  { slug: "gmail", name: "Gmail", description: "Send and read email messages", categories: ["communication"] },
+  { slug: "slack", name: "Slack", description: "Post messages to Slack channels and direct messages", categories: ["communication"] },
+  { slug: "hubspot", name: "HubSpot", description: "CRM contacts, deals, and pipeline", categories: ["crm"] },
+  { slug: "notion", name: "Notion", description: "Pages, databases, and notes", categories: ["productivity"] },
+];
+
+function slackCatalogue(): ComposioAction[] {
+  return [
+    { slug: "SLACK_SEND_MESSAGE", name: "Send message", description: "Post a message to a Slack channel", toolkit: "slack", inputParameters: { type: "object", properties: { channel: { type: "string" }, text: { type: "string" } } } },
+    { slug: "SLACK_LIST_CHANNELS", name: "List channels", description: "List workspace channels", toolkit: "slack" },
+  ];
+}
+
+test("Composio routing reaches apps the user has not connected and asks to connect first", async () => {
+  clearComposioActionCache();
+  const restore = withConfig({ jevComposioRouteUnconnected: true });
+  try {
+    const decision = await computeJevComposioDecision("Post a message to the Slack sales channel about the launch", {
+      accounts: [{ toolkit: "hubspot", status: "ACTIVE" }],
+      listActions: async (toolkit) => toolkit === "slack" ? slackCatalogue() : [],
+      listToolkits: async () => TOOLKIT_CATALOGUE,
+      client: new JevClient({ apiKey: "k", fetchImpl: fakeJev() }),
+    });
+    assert.equal(decision.toolkits[0].id, "slack");
+    assert.equal(decision.toolkits[0].connected, false);
+    assert.deepEqual(decision.unconnectedToolkits, ["slack"]);
+    assert.equal(decision.actions[0].id, "SLACK_SEND_MESSAGE");
+    assert.equal(decision.actions[0].connected, false);
+    assert.equal(decision.directTools.length, 0, "unconnected actions are never exposed as executable tools");
+    const context = composioDecisionContext(decision);
+    assert.match(context, /slack is not connected yet\. Call COMPOSIO_MANAGE_CONNECTIONS for slack/);
+    assert.match(context, /SLACK_SEND_MESSAGE \[slack\].*app not connected; connect first/);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("unconnected routing can be disabled and the catalogue is cached", async () => {
+  clearComposioActionCache();
+  let listed = 0;
+  const listToolkits = async () => { listed += 1; return TOOLKIT_CATALOGUE; };
+  let restore = withConfig({ jevComposioRouteUnconnected: false });
+  try {
+    const captured: Captured[] = [];
+    await computeJevComposioDecision("Post a Slack message", { accounts: [{ toolkit: "hubspot", status: "ACTIVE" }], listActions: async () => [], listToolkits, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }) });
+    assert.equal(listed, 0);
+    const rank = captured.map((item) => item.body.questions.rank).find(Boolean);
+    assert.deepEqual(Object.keys(rank.criteria).sort(), ["__none__", "hubspot"]);
+  } finally { restore(); }
+  restore = withConfig({ jevComposioRouteUnconnected: true });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev() });
+    await computeJevComposioDecision("Post a Slack message", { accounts: [], listActions: async () => [], listToolkits, client });
+    await computeJevComposioDecision("Write a Notion page", { accounts: [], listActions: async () => [], listToolkits, client });
+    assert.equal(listed, 1);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("raw Composio toolkits map to catalogue entries safely", () => {
+  assert.equal(toComposioToolkitInfo({ slug: "bad slug!" }), undefined);
+  assert.deepEqual(toComposioToolkitInfo({ slug: "Gmail", name: "Gmail", meta: { description: "Mail\u0000 app", categories: [{ slug: "comm", name: "Communication" }] } }), { slug: "gmail", name: "Gmail", description: "Mail app", categories: ["Communication"] });
 });
