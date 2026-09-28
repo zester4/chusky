@@ -15,7 +15,7 @@
 import { config } from "../config.js";
 import { composioDomainCatalog, resolveComposioRoute, toolkitKey, type ComposioDomain, type ComposioRoute } from "../composioRouting.js";
 import { logger } from "../logger.js";
-import { NONE_OPTION, jevClient, jevEnabled, jevText, rankOptions, verifyCandidates, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type JevQuestion, type RankedOption } from "./jev.js";
+import { NONE_OPTION, awaitRoute, jevClient, jevEnabled, jevText, rankOptions, verifyCandidates, type JevChoiceAnswer, type JevClient, type JevNoulAnswer, type JevQuestion, type RankedOption, type RoutingDeadline } from "./jev.js";
 import { recordDecision } from "./telemetry.js";
 
 export type ComposioAction = {
@@ -250,12 +250,14 @@ export async function routeComposioForTurn(objective: string, input: {
   recentContext?: string;
   sessionId?: string;
   budgetMs?: number;
+  deadline?: RoutingDeadline;
 }): Promise<ComposioDecision> {
   const baseline = keywordComposioDecision(objective, input.accounts);
   if (!objective.trim() || !jevEnabled("composio")) return baseline;
   const client = input.client ?? jevClient();
   if (!client.available()) return { ...baseline, fallbackReason: "jev_unavailable" };
-  const run = computeJevComposioDecision(objective, { ...input, client });
+  const enforce = config.jevMode === "enforce";
+  const run = computeJevComposioDecision(objective, { ...input, client, signal: enforce && input.deadline ? input.deadline.signal : input.signal });
   const log = (decision: ComposioDecision | undefined, applied: boolean, reason?: string) => {
     const mode = config.jevMode === "enforce" ? "enforce" : "shadow";
     recordDecision({
@@ -271,19 +273,15 @@ export async function routeComposioForTurn(objective: string, input: {
     run.then((decision) => log(decision, false, decision.fallbackReason)).catch((error) => log(undefined, false, (error as { reason?: string })?.reason ?? "error"));
     return baseline;
   }
-  let failure: string | undefined;
-  const decision = await new Promise<ComposioDecision | undefined>((resolve) => {
-    const timer = setTimeout(() => { failure = "timeout"; resolve(undefined); }, input.budgetMs ?? config.jevTurnBudgetMs);
-    run.then((value) => { clearTimeout(timer); resolve(value); })
-      .catch((error) => { clearTimeout(timer); failure = (error as { reason?: string })?.reason ?? "error"; resolve(undefined); });
-  });
+  const { value: decision, failure } = await awaitRoute(run, input.deadline ? input.deadline.remaining() : input.budgetMs ?? config.jevTurnBudgetMs);
   if (!decision || (decision.fallbackReason && !decision.actions.length && !decision.route)) {
     const reason = failure ?? decision?.fallbackReason ?? "unavailable";
     log(decision, false, reason);
     return { ...baseline, fallbackReason: reason };
   }
-  // Keep the deterministic "not connected" guard when Jev found no domain.
-  if (!decision.route && baseline.route?.needsConnection && (decision.needsAppAction ?? 0) >= 0.5) decision.route = baseline.route;
+  // Jev is additive: a keyword domain route (including the deterministic
+  // "not connected" guard) is kept when Jev produced no route of its own.
+  if (!decision.route && baseline.route) decision.route = baseline.route;
   log(decision, true);
   return decision;
 }

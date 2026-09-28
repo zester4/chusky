@@ -10,7 +10,7 @@
  */
 import { config } from "../config.js";
 import { listSkillSummaries, routedSkillNames, type SkillBinding } from "../skills/catalog.js";
-import { jevClient, jevEnabled, jevText, rankOptions, verifyCandidates, type JevClient, type RankedOption } from "./jev.js";
+import { awaitRoute, jevClient, jevEnabled, jevText, rankOptions, verifyCandidates, type JevClient, type RankedOption, type RoutingDeadline } from "./jev.js";
 import { recordDecision } from "./telemetry.js";
 
 export type SkillRoute = {
@@ -25,7 +25,7 @@ export type SkillRoute = {
 };
 
 const MAX_PRIMARY = 2;
-const MAX_TOTAL = 4;
+const MAX_TOTAL = 4; // Jev-selected skills; keyword routes are added on top.
 const VERIFY_CANDIDATES = 6;
 
 function keywordRoute(query: string, reason?: string): SkillRoute {
@@ -87,21 +87,23 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
     .filter((item) => (verification.scores[item.id] ?? 0) >= config.jevSkillVerifyThreshold)
     .map((item) => ({ ...item, score: item.probability * 0.5 + (verification.scores[item.id] ?? 0) * 0.5 }))
     .sort((a, b) => b.score - a.score);
-  const confidentNone = ranking.none >= 0.6 && ranking.confidence >= config.jevMinConfidence && !verified.length;
-  const primary = [...new Set([
-    ...explicit,
-    ...verified.filter((item, index) => index === 0 || item.probability >= config.jevSkillMinProbability).slice(0, MAX_PRIMARY).map((item) => item.id),
-  ])].slice(0, MAX_PRIMARY + explicit.length);
-  const supporting = verified.map((item) => item.id).filter((name) => !primary.includes(name)).slice(0, Math.max(0, MAX_TOTAL - primary.length));
+  const jevPrimary = verified.filter((item, index) => index === 0 || item.probability >= config.jevSkillMinProbability).slice(0, MAX_PRIMARY).map((item) => item.id);
+  const primary = [...new Set([...explicit, ...jevPrimary])];
+  const jevSupporting = verified.map((item) => item.id).filter((name) => !primary.includes(name));
+  // Jev is additive: deterministic keyword routes are never removed by a
+  // (possibly confident but wrong) Jev answer, including __none__.
+  const keyword = routedSkillNames(query).filter((name) => !primary.includes(name) && !jevSupporting.includes(name));
+  const supporting = [...jevSupporting.slice(0, Math.max(0, MAX_TOTAL - primary.length)), ...keyword];
   const route: SkillRoute = {
     binding: { primary, supporting },
     source: "jev",
-    // If Jev confidently found nothing, do not append fuzzy term matches.
-    allowSearchFallback: !confidentNone && !primary.length,
+    // Fuzzy term search stays as a fallback unless the user explicitly
+    // selected a skill.
+    allowSearchFallback: !explicit.length,
     ranked: ranking.ranked.slice(0, 8),
     verified: verification.scores,
   };
-  if (!primary.length && !confidentNone && ranking.confidence < config.jevMinConfidence) route.fallbackReason = "low_confidence";
+  if (!jevPrimary.length && !explicit.length && ranking.confidence < config.jevMinConfidence) route.fallbackReason = "low_confidence";
   route.telemetry = { latencyMs: ranking.latencyMs + verification.latencyMs, costUsd: ranking.costUsd + verification.costUsd };
   return route;
 }
@@ -114,12 +116,15 @@ export async function computeJevSkillRoute(query: string, options: { client?: Je
  *  - enforce: Jev's verified set is used; any failure, timeout, or low
  *             confidence falls back to keyword routing.
  */
-export async function routeSkillsForTurn(query: string, options: { root?: string; signal?: AbortSignal; recentContext?: string; sessionId?: string; client?: JevClient; budgetMs?: number } = {}): Promise<SkillRoute> {
+export async function routeSkillsForTurn(query: string, options: { root?: string; signal?: AbortSignal; recentContext?: string; sessionId?: string; client?: JevClient; budgetMs?: number; deadline?: RoutingDeadline } = {}): Promise<SkillRoute> {
   const baseline = keywordRoute(query);
   if (!query.trim() || !jevEnabled("skills")) return baseline;
   const client = options.client ?? jevClient();
   if (!client.available()) return keywordRoute(query, "jev_unavailable");
-  const run = computeJevSkillRoute(query, { ...options, client });
+  // Enforce mode is bound to the shared turn deadline; shadow mode runs in
+  // the background under the caller's signal only.
+  const enforce = config.jevMode === "enforce";
+  const run = computeJevSkillRoute(query, { ...options, client, signal: enforce && options.deadline ? options.deadline.signal : options.signal });
   const log = (route: SkillRoute | undefined, applied: boolean, reason?: string) => {
     const telemetry = route?.telemetry;
     recordDecision({
@@ -139,12 +144,7 @@ export async function routeSkillsForTurn(query: string, options: { root?: string
     return baseline;
   }
 
-  let failure: string | undefined;
-  const route = await new Promise<SkillRoute | undefined>((resolve) => {
-    const timer = setTimeout(() => { failure = "timeout"; resolve(undefined); }, options.budgetMs ?? config.jevTurnBudgetMs);
-    run.then((value) => { clearTimeout(timer); resolve(value); })
-      .catch((error) => { clearTimeout(timer); failure = error instanceof Error ? (error as Error & { reason?: string }).reason ?? error.name : "error"; resolve(undefined); });
-  });
+  const { value: route, failure } = await awaitRoute(run, options.deadline ? options.deadline.remaining() : options.budgetMs ?? config.jevTurnBudgetMs);
   if (!route || route.fallbackReason) {
     const reason = failure ?? route?.fallbackReason ?? "unavailable";
     log(route, false, reason);

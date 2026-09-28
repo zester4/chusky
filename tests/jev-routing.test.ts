@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { config } from "../src/config.js";
-import { JevClient, JevUnavailableError, NONE_OPTION, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
+import { JevClient, JevUnavailableError, NONE_OPTION, createRoutingDeadline, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
 import { explicitlyNamedSkills, routeSkillsForTurn } from "../src/decisions/skillRouter.js";
 import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, type ComposioAction } from "../src/decisions/composioRouter.js";
 import { createTregEndpointJudge } from "../src/decisions/tregRouter.js";
@@ -31,11 +31,23 @@ function overlap(a: Set<string>, b: Set<string>): number { let n = 0; for (const
 type Captured = { url: string; body: Record<string, any> };
 
 /** Deterministic stand-in for Jev: lexical overlap -> softmax. */
-function fakeJev(captured: Captured[] = [], options: { delayMs?: number; status?: number; badChoice?: boolean } = {}): typeof fetch {
+function fakeJev(captured: Captured[] = [], options: { delayMs?: number; status?: number; badChoice?: boolean; forceNone?: boolean } = {}): typeof fetch {
   return (async (url: string | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}"));
     captured.push({ url: String(url), body });
-    if (options.delayMs) await new Promise((resolve) => setTimeout(resolve, options.delayMs));
+    if (options.delayMs) await new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, options.delayMs);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); });
+    });
+    if (options.forceNone) {
+      const answers: Record<string, unknown> = {};
+      for (const [key, question] of Object.entries<any>(body.questions)) {
+        answers[key] = question.type === "choice"
+          ? { type: "choice", choice: "__none__", confidence: 0.97, probabilities: Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === "__none__" ? 0.97 : 0.03 / Math.max(1, Object.keys(question.criteria).length - 1)])) }
+          : { type: "noul", noul: 0.02 };
+      }
+      return new Response(JSON.stringify({ model: body.model, answers }), { status: 200 });
+    }
     if (options.status) return new Response("{}", { status: options.status });
     const stateWords = words(body.state?.request ?? body.state?.need ?? body.state);
     const answers: Record<string, unknown> = {};
@@ -281,4 +293,71 @@ test("routing is inert when JEV_MODE is off", async () => {
     assert.equal(decision.source, "keyword");
     assert.equal(captured.length, 0);
   } finally { restore(); setJevClientForTests(undefined); }
+});
+
+test("a confident __none__ never removes keyword skill routes or search fallback", async () => {
+  const root = await skillRoot();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["skills"]) });
+  clearSkillCatalogCache();
+  try {
+    const route = await routeSkillsForTurn("Review overdue Stripe billing", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    const selected = [...route.binding.primary, ...route.binding.supporting];
+    assert.ok(selected.includes("billing-ops-pro"), `keyword route kept, got ${selected}`);
+    assert.equal(route.allowSearchFallback, true, "fuzzy search fallback stays available");
+    const explicit = await routeSkillsForTurn("use the seo-audit skill on this page", { root, client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    assert.ok(explicit.binding.primary.includes("seo-audit"));
+    assert.equal(explicit.allowSearchFallback, false, "an explicit skill selection disables fuzzy fallback");
+  } finally { restore(); clearSkillCatalogCache(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a confident no-app answer keeps the keyword Composio domain route", async () => {
+  clearComposioActionCache();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["composio"]) });
+  try {
+    const decision = await routeComposioForTurn("Qualify the HubSpot pipeline", { accounts: [{ toolkit: "hubspot", status: "ACTIVE" }], listActions: async () => [], client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    assert.equal(decision.route?.domain, "crm");
+    assert.deepEqual(decision.route?.connectedToolkits, ["hubspot"]);
+  } finally { restore(); clearComposioActionCache(); }
+});
+
+test("all routes share one per-turn deadline and run concurrently", async () => {
+  const root = await skillRoot();
+  clearSkillCatalogCache();
+  clearComposioActionCache();
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["skills", "composio"]) });
+  try {
+    const client = new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { delayMs: 400 }) });
+    const deadline = createRoutingDeadline(120);
+    const started = Date.now();
+    const [skills, composio] = await Promise.all([
+      routeSkillsForTurn("Review overdue Stripe billing", { root, client, deadline }),
+      // Simulate the connected-account lookup running inside the same deadline.
+      new Promise((resolve) => setTimeout(resolve, 60)).then(() => routeComposioForTurn("Review overdue Stripe billing", { accounts: [{ toolkit: "stripe", status: "ACTIVE" }], listActions: async () => [], client, deadline })),
+    ]);
+    const elapsed = Date.now() - started;
+    deadline.dispose();
+    assert.ok(elapsed < 250, `routing stayed within the shared deadline (${elapsed}ms)`);
+    assert.equal(skills.source, "keyword");
+    assert.equal(composio.source, "keyword");
+    assert.equal(composio.route?.domain, "billing");
+    assert.equal(client.available(), true, "deadline aborts do not open the circuit breaker");
+  } finally { restore(); clearSkillCatalogCache(); clearComposioActionCache(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Treg judge scores task fit without preferring synchronous endpoints", async () => {
+  const captured: Captured[] = [];
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["treg"]) });
+  try {
+    const hits: TregEndpointHit[] = [
+      { id: "single-email", title: "Find one work email for a person", provider: "p1", category: "enrichment_person", priceUsd: 0.02 },
+      { id: "bulk-email", title: "Bulk work email enrichment for a list of people batch", provider: "p2", category: "enrichment_person", priceUsd: 0.02 },
+    ];
+    const judge = createTregEndpointJudge({ client: new JevClient({ apiKey: "k", fetchImpl: fakeJev(captured) }) });
+    const fit = await judge({ intent: "enrich_person", need: "bulk enrich work email for a list of 500 people batch", hits });
+    const instructions = String(captured[0].body.questions.endpoint.instructions);
+    assert.doesNotMatch(instructions, /single synchronous call/);
+    assert.match(instructions, /synchronous, asynchronous, and bulk/);
+    assert.match(captured[0].body.questions.endpoint.criteria["bulk-email"], /mode: bulk/);
+    assert.ok(fit && fit["bulk-email"] > fit["single-email"], "a bulk need routes to the bulk endpoint");
+  } finally { restore(); }
 });
