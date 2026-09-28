@@ -60,6 +60,20 @@ function boundedInt(key: string, fallback: number, min: number, max: number): nu
   return value;
 }
 
+function unitInterval(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) throw new Error(`${key} must be a number between 0 and 1, got: ${raw}`);
+  return n;
+}
+
+function oneOf<T extends string>(key: string, fallback: T, values: readonly T[]): T {
+  const raw = (process.env[key] ?? fallback).trim().toLowerCase();
+  if (!(values as readonly string[]).includes(raw)) throw new Error(`${key} must be one of ${values.join(", ")}, got: ${raw}`);
+  return raw as T;
+}
+
 const defaultModel = optional("DEFAULT_MODEL", "minimax/minimax-m3:free");
 
 export const config = {
@@ -153,6 +167,31 @@ export const config = {
   tregRateLimitPerMinute: positiveInt("TREG_RATE_LIMIT_PER_MINUTE", 30),
   tregOrganizationTokens: secretMap("TREG_ORG_TOKENS_JSON"),
   tregEnabled: optional("TREG_ENABLED", "false") === "true",
+
+  // ── Jev decision routing (TypeSafe System One) ────────────────────
+  // Jev answers typed routing questions (skill, Composio toolkit/action,
+  // Treg endpoint) with calibrated probabilities. It never authorizes an
+  // action: approval policy stays in src/policy.ts. "off" keeps keyword
+  // routing only; "shadow" computes Jev decisions in the background and logs
+  // agreement without changing behavior; "enforce" applies confident Jev
+  // decisions and falls back to keyword routing on timeout/low confidence.
+  jevMode: oneOf("JEV_MODE", "off", ["off", "shadow", "enforce"] as const),
+  jevProvider: oneOf("JEV_PROVIDER", "openrouter", ["openrouter", "typesafe"] as const),
+  // Only required for JEV_PROVIDER=typesafe; OpenRouter reuses OPENROUTER_API_KEY.
+  jevApiKey: optional("JEV_API_KEY", ""),
+  // Pin a versioned model. Defaults: typesafe/jev-1.13 (OpenRouter), jev-1.13.0 (TypeSafe).
+  jevModel: optional("JEV_MODEL", ""),
+  jevSurfaces: new Set(optional("JEV_SURFACES", "skills,composio,treg").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean)),
+  jevTimeoutMs: boundedInt("JEV_TIMEOUT_MS", 1_500, 200, 10_000),
+  jevTurnBudgetMs: boundedInt("JEV_TURN_BUDGET_MS", 3_000, 300, 15_000),
+  jevMaxRequestTokens: boundedInt("JEV_MAX_REQUEST_TOKENS", 24_000, 2_000, 60_000),
+  jevMaxOptionsPerQuestion: boundedInt("JEV_MAX_OPTIONS_PER_QUESTION", 120, 8, 255),
+  jevMinConfidence: unitInterval("JEV_MIN_CONFIDENCE", 0.45),
+  jevSkillMinProbability: unitInterval("JEV_SKILL_MIN_PROBABILITY", 0.2),
+  jevSkillVerifyThreshold: unitInterval("JEV_SKILL_VERIFY_THRESHOLD", 0.5),
+  jevActionVerifyThreshold: unitInterval("JEV_ACTION_VERIFY_THRESHOLD", 0.5),
+  jevInjectActionMinProbability: unitInterval("JEV_INJECT_ACTION_MIN_PROBABILITY", 0.55),
+  jevToolkitMinProbability: unitInterval("JEV_TOOLKIT_MIN_PROBABILITY", 0.25),
 
   // ── Channel adapters ──────────────────────────────────────────────
   slackEnabled: optional("SLACK_ENABLED", "false") === "true",

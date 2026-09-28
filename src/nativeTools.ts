@@ -1,5 +1,6 @@
 //src/nativeTools.ts
 import { Client as QStashClient } from "@upstash/qstash";
+import { createTregEndpointJudge } from "./decisions/tregRouter.js";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
@@ -172,6 +173,7 @@ function tregGateway(): TregGateway {
   tregGatewayForTests = new TregGateway({
     spend,
     recordReceipt: saveTregReceipt,
+    judge: createTregEndpointJudge(),
     recordMissionEvidence: async ({ userId, missionId, receipt, resultHash }) => Boolean(await recordTrustedMissionEvidence(userId, missionId, [{ id: `treg_${receipt.callId}`, kind: "tool_receipt", summary: `Treg ${receipt.endpointId} completed for $${receipt.costUsd.toFixed(4)} with provider status ${receipt.statusCode ?? "unknown"}.`, ref: `treg://receipts/${receipt.callId}`, hash: resultHash, verified: true, verifiedBy: "system" }])),
   });
   return tregGatewayForTests;

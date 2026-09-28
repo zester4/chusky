@@ -46,7 +46,10 @@ import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
-import { routedSkillContext } from "./skills/catalog.js";
+import { ROUTED_SKILL_REFERENCES, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
+import { routeSkillsForTurn } from "./decisions/skillRouter.js";
+import { composioDecisionContext, routeComposioForTurn, toComposioAction, type ComposioAction } from "./decisions/composioRouter.js";
+import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
@@ -2290,6 +2293,25 @@ export async function runAgent(
       ? `Recently available private image assets (metadata only; call CHUCK_GET_IMAGE_ASSET with the exact ID when an image is needed):\n${durable.imageAssets.slice(-8).reverse().map((asset) => `- ${asset.id} | ${asset.name} | ${asset.purpose} | tags: ${asset.tags.join(", ")}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n\n");
+  // Decision routing (skills, Composio toolkit/action, Treg) runs in
+  // parallel before the first model call. Jev only proposes routes; every
+  // tool call still passes allowlists, account scope, and approval policy.
+  const routingQuery = typeof userMessage === "string"
+    ? userMessage
+    : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+  const routingRecentContext = sharedScope ? undefined : history.slice(-4)
+    .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
+    .join("\n");
+  const skillsRoutable = (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
+  const skillRoutePromise = skillsRoutable
+    ? routeSkillsForTurn(routingQuery, { signal, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
+      logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
+      return undefined;
+    })
+    : Promise.resolve(undefined);
+  const tregRoutePromise = !sharedScope && !voiceTurn && !toolsDisabled
+    ? routeTregForTurn(routingQuery, { signal, sessionId: durableRunId }).catch(() => undefined)
+    : Promise.resolve(undefined);
   let accountContext = "";
   let composioRouteContext = "";
   let connectedAccountSnapshot: ConnectedComposioAccount[] | undefined;
@@ -2302,10 +2324,27 @@ export async function runAgent(
       if (accounts.length) {
         accountContext = `Connected Composio accounts (private metadata; credentials are never exposed):\n${accounts.map((account) => `- ${account.toolkit}: ${account.alias ?? account.id} (${account.status})`).join("\n")}\nWhen a direct app tool or a COMPOSIO_MULTI_EXECUTE_TOOL item supports account selection, use the alias above. For an explicit request to search all accounts, repeat only read-only actions once per relevant account.`;
       }
-      const route = resolveComposioRoute(typeof userMessage === "string" ? userMessage : "", accounts.map((account) => account.toolkit));
-      if (route) composioRouteContext = route.needsConnection
-        ? `Composio route: ${route.domain}; preferred app families: ${route.preferredToolkits.join(", ")}. None is connected, so explain how to connect the mapped app and do not substitute an unrelated toolkit.`
-        : `Composio route: ${route.domain}; use connected mapped toolkit(s): ${route.connectedToolkits.join(", ")}. Inspect the exact action schema before executing; broad search is last resort.`;
+      const decision = await routeComposioForTurn(routingQuery, {
+        accounts,
+        listActions: listComposioToolkitActions,
+        signal,
+        recentContext: routingRecentContext,
+        sessionId: durableRunId,
+      });
+      composioRouteContext = composioDecisionContext(decision);
+      // Expose routed actions with their real schema so the model can call the
+      // exact action without a broad search round. Only for the owner's full
+      // private tool surface; explicit allowlists are never widened here.
+      if (decision.directTools.length && sessionObj && !allow && fullComposioTools.length > 80) {
+        const present = new Set(availableTools.map((tool) => toolName(tool)));
+        for (const tool of decision.directTools) {
+          const slug = toolName(tool);
+          if (!slug || present.has(slug) || deny.has(slug) || slug.startsWith("COMPOSIO_") || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
+          registerComposioToolMetadata(tool);
+          availableTools.push(addAccountSelector(tool));
+          present.add(slug);
+        }
+      }
     } catch (error) {
       logger.debug({ err: error, userId }, "Connected-account metadata unavailable for this run");
     }
@@ -2315,16 +2354,18 @@ export async function runAgent(
   // remember to search for a workflow when creating a deliverable or changing
   // code. Supporting files remain on-demand through CHUCK_READ_SKILL_FILE.
   let skillContext = "";
-  if ((!options?.ephemeral || ownerPrivateRun) && !voiceTurn) {
+  if (skillsRoutable) {
     try {
-      const skillQuery = typeof userMessage === "string"
-        ? userMessage
-        : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
-      skillContext = await routedSkillContext(skillQuery);
+      const skillRoute = await skillRoutePromise;
+      skillContext = skillRoute
+        ? await skillContextForBinding({ ...skillRoute.binding, requiredReferences: ROUTED_SKILL_REFERENCES }, skillRoute.allowSearchFallback ? routingQuery : "")
+        : await routedSkillContext(routingQuery);
     } catch (error) {
       logger.warn({ err: error }, "Project skill discovery unavailable; continuing without skill context");
     }
   }
+  const tregRouteContext = tregTurnContext(await tregRoutePromise);
+  if (tregRouteContext) composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${tregRouteContext}` : tregRouteContext;
   const upgradeContext = announceUpgrade && pendingUpgrade
     ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
     : "";
@@ -3136,6 +3177,24 @@ export async function getConnectionUrl(
 }
 
 /** Return safe connected-account metadata; credential fields are never exposed. */
+/**
+ * Action catalogue for one toolkit, used by decision routing. This is public
+ * Composio metadata (slugs, descriptions, input schemas), not user data.
+ */
+async function listComposioToolkitActions(toolkit: string, signal?: AbortSignal): Promise<ComposioAction[]> {
+  const getRawTools = composio?.tools?.getRawComposioTools;
+  if (typeof getRawTools !== "function") return [];
+  let raw: unknown;
+  try {
+    raw = await abortable(getRawTools.call(composio.tools, { toolkits: [toolkit], limit: 500 }), signal);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    raw = await abortable(getRawTools.call(composio.tools, { toolkits: [toolkit] }), signal);
+  }
+  const rows = Array.isArray(raw) ? raw : Array.isArray((raw as { items?: unknown[] })?.items) ? (raw as { items: unknown[] }).items : [];
+  return rows.map((row) => toComposioAction(row, toolkit)).filter((action): action is ComposioAction => Boolean(action));
+}
+
 export async function listConnectedAccounts(userId: number, toolkit?: string): Promise<ConnectedComposioAccount[]> {
   const result = await composio.connectedAccounts.list({
     userIds: [composioUserId(userId)],

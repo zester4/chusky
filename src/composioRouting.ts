@@ -17,6 +17,16 @@ const ROUTES: Array<{ domain: ComposioDomain; terms: string[]; toolkits: string[
   { domain: "research", terms: ["research", "web search", "competitor", "sources", "evidence"], toolkits: ["tavily", "exa", "firecrawl"] },
 ];
 
+/** Sold-domain families, exposed for decision routers and tests. */
+export function composioDomainCatalog(): ReadonlyArray<{ domain: ComposioDomain; terms: readonly string[]; toolkits: readonly string[] }> {
+  return ROUTES;
+}
+
+/** Normalize a toolkit slug for comparison (lowercase alphanumerics). */
+export function toolkitKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function normal(value: string): string { return value.toLowerCase().replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim(); }
 
 /** Resolve the sold-domain app family before any long-tail Composio search. */

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import type { TregCallReceipt, TregCategory, TregEndpointHit, TregEvidenceBundle, TregEvidenceItem, TregOAuthConnection, TregOwnTool, TregPlatformOption } from "./types.js";
 import type { TregSpendGuard } from "./spend.js";
+import type { TregEndpointJudge } from "../decisions/tregRouter.js";
 
 export interface TregGatewayDeps {
   spend: TregSpendGuard;
@@ -9,6 +10,11 @@ export interface TregGatewayDeps {
   recordMissionEvidence?: (input: { userId: number; missionId: string; receipt: TregCallReceipt; resultHash: string }) => Promise<boolean>;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Optional semantic fit judge (Jev). It only reorders candidates; account,
+   * BYOK, spend, and budget filters are applied by the gateway regardless.
+   */
+  judge?: TregEndpointJudge;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -231,11 +237,14 @@ function emptyBundle(query: string, intent: string, warnings: string[]): TregEvi
   return { query, intent, items: [], endpointsUsed: [], totalCostUsd: 0, warnings, incomplete: true, generatedAt: new Date().toISOString() };
 }
 
-function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: number, availableFields?: string[]): TregEndpointHit[] {
+export function rankHits(hits: TregEndpointHit[], intent: string, maxSpendUsd?: number, availableFields?: string[], fit?: Record<string, number>): TregEndpointHit[] {
   const query = intent.toLowerCase();
+  const semantic = fit && Object.keys(fit).length ? fit : undefined;
   return [...hits].sort((a, b) => {
     const score = (hit: TregEndpointHit): number => {
-      const categoryBoost = query.includes("person") && hit.category === "enrichment_person" || query.includes("company") && hit.category === "enrichment_company" || query.includes("seo") && hit.category === "seo" || query.includes("social") && hit.category === "social_intel" || query.includes("ads") && hit.category === "ads_intel" || query.includes("web") && hit.category === "web_data" ? 50 : 0;
+      // With a semantic fit distribution, it replaces the keyword category
+      // boost (up to 80 points); economics and input coverage still apply.
+      const categoryBoost = semantic ? Math.max(0, Math.min(1, semantic[hit.id] ?? 0)) * 80 : query.includes("person") && hit.category === "enrichment_person" || query.includes("company") && hit.category === "enrichment_company" || query.includes("seo") && hit.category === "seo" || query.includes("social") && hit.category === "social_intel" || query.includes("ads") && hit.category === "ads_intel" || query.includes("web") && hit.category === "web_data" ? 50 : 0;
       const affordable = hit.priceUsd === undefined || maxSpendUsd === undefined || hit.priceUsd <= maxSpendUsd ? 20 : -100;
       const reliability = hit.successRate === undefined ? 0 : Math.max(0, Math.min(1, hit.successRate)) * 20;
       const latency = hit.latencyMs === undefined ? 0 : Math.max(-10, 10 - hit.latencyMs / 1000);
@@ -265,6 +274,15 @@ export class TregGateway {
   private readonly base = config.tregBaseUrl.replace(/\/$/, "");
   private readonly fetcher: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
+
+  private async rank(hits: TregEndpointHit[], intent: string, need: string, maxSpendUsd?: number, availableFields?: string[], requiredFields?: string[]): Promise<TregEndpointHit[]> {
+    const unique = [...new Map(hits.map((hit) => [hit.id, hit])).values()];
+    let fit: Record<string, number> | undefined;
+    if (this.deps.judge && unique.length > 1) {
+      try { fit = await this.deps.judge({ intent, need, hits: unique, availableFields, requiredFields }); } catch { fit = undefined; }
+    }
+    return rankHits(unique, intent, maxSpendUsd, availableFields, fit);
+  }
 
   constructor(private readonly deps: TregGatewayDeps) {
     if (!config.tregEnabled) throw new Error("Treg is disabled");
@@ -479,7 +497,8 @@ export class TregGateway {
     const initialHits = await this.search(query, 6, options.organizationId);
     const personHits = initialHits.filter((item) => item.category === "enrichment_person" || /email|person|people|enrich/i.test(`${item.id} ${item.title}`));
     const fallbackHits = personHits.length > 0 ? [] : await this.search("work email person enrichment", 15, options.organizationId);
-    const hit = rankHits([...initialHits, ...fallbackHits], "enrich_person", options.maxSpendUsd, ["full_name", "domain", "company", "linkedin_url"])
+    const personFields = [options.name ? "full_name" : "", options.domain ? "domain" : "", options.company ? "company" : "", options.linkedinUrl ? "linkedin_url" : ""].filter(Boolean);
+    const hit = (await this.rank([...initialHits, ...fallbackHits], "enrich_person", query, options.maxSpendUsd, ["full_name", "domain", "company", "linkedin_url"], ["email", "title", "company", "linkedin_url"].filter((field) => !personFields.includes(field))))
       .find((item) => !item.requiresOwnAccount && !item.requiresByok && !/bulk|status|job/i.test(`${item.id} ${item.title}`) && (item.category === "enrichment_person" || /email|person|people|enrich/i.test(`${item.id} ${item.title}`)));
     if (!hit) return emptyBundle(query, "enrich_person", ["No catalog endpoint matched"]);
     const estimateUsd = hit.priceUsd === undefined
@@ -495,7 +514,7 @@ export class TregGateway {
     const initialHits = await this.search(query, 8, options.organizationId);
     const initialCompanyHits = initialHits.filter((item) => item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`));
     const fallbackHits = initialCompanyHits.length > 0 ? [] : await this.search("company enrichment by domain", 10, options.organizationId);
-    const hit = rankHits([...initialHits, ...fallbackHits], "enrich_company", undefined, ["domain", "company", "name"])
+    const hit = (await this.rank([...initialHits, ...fallbackHits], "enrich_company", query, undefined, ["domain", "company", "name"], ["company_name", "domain", "industry", "employee_count", "description"]))
       .find((item) => !item.requiresOwnAccount && !item.requiresByok && (item.category === "enrichment_company" || /company|companies|firmographic|domain/i.test(`${item.id} ${item.title}`)));
     if (!hit) return emptyBundle(query, "enrich_company", ["No catalog endpoint matched"]);
     const response = await this.call({ userId: options.userId, endpointId: hit.id, body: { domain: options.domain, name: options.name }, missionId: options.missionId, organizationId: options.organizationId, estimateUsd: hit.priceUsd });
@@ -509,7 +528,8 @@ export class TregGateway {
     const items: TregEvidenceItem[] = [];
     const used: string[] = [];
     const warnings: string[] = [];
-    for (const hit of rankHits(await this.search(options.need, 10, options.organizationId), options.need, maxSpend).slice(0, maxCalls)) {
+    const ranked = await this.rank(await this.search(options.need, 10, options.organizationId), options.need, options.need, maxSpend, undefined, options.requiredFields);
+    for (const hit of ranked.slice(0, maxCalls)) {
       if (spent >= maxSpend) { warnings.push("Stopped: mission spend cap"); break; }
       if (hit.requiresOwnAccount || hit.requiresByok) { warnings.push(`Skipped ${hit.id}: requires an owner account or BYOK`); continue; }
       try {
