@@ -193,9 +193,9 @@ test("Daytona accessibility search exposes a valid matching mode", () => {
   validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
 });
 
-test("legacy Daytona browser aliases remain accepted only at validation boundaries", () => {
-  validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "status" });
-  validateNativeToolArguments("CHUCK_DAYTONA_BROWSER_HANDOFF", { reason: "user_requested" });
+test("Daytona browser tools are not exposed or accepted", () => {
+  assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "status" }), /unknown|not found|unsupported/i);
+  assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER_HANDOFF", { reason: "user_requested" }), /unknown|not found|unsupported/i);
   assert.equal(chuckTools.some((tool) => tool.function.name === "CHUCK_DAYTONA_BROWSER"), false);
   assert.equal(chuckTools.some((tool) => tool.function.name === "CHUCK_DAYTONA_BROWSER_HANDOFF"), false);
 });

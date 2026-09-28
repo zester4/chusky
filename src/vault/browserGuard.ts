@@ -104,7 +104,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   if (decision === "approval_required" && ownerPrivateRun && !ownerApprovedAction) throw new Error(`Vault action ${target.replaceAll("_", " ")} must pass the exact owner-approval check before execution.`);
 }
 
-/** Prevent generic Daytona tools from reading or changing browser credential stores. */
+/** Prevent generic computer tools from reading or changing browser credential stores. */
 export async function guardVaultWorkspaceAccess(userId: number, workspaceId: string, value: unknown, label = "workspace input"): Promise<void> {
   if (!config.vaultEnabled || !vaultBroker.enabled()) return;
   let sessions;

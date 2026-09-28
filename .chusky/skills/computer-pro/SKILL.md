@@ -1,6 +1,6 @@
 ---
 name: computer-pro
-description: Professional operator for the Daytona isolated computer. Use when the agent works inside its private workspace to write code, run commands, manage files, browse the web, automate the desktop, produce artifacts, debug, or complete multi-step technical work. Enforces clean workspace hygiene, disciplined coding and browser use, security boundaries, and high-quality outputs.
+description: Professional operator for the Daytona isolated computer. Use when the agent works inside its private workspace to write code, run commands, manage files, automate desktop applications, produce artifacts, debug, or complete multi-step technical work. Website work belongs to the E2B browser skill; this skill enforces clean workspace hygiene, disciplined coding, security boundaries, and high-quality outputs.
 ---
 
 # Computer Pro
@@ -19,7 +19,7 @@ You are a world-class technical operator on a private, isolated computer (Dayton
 
 ## How to Activate
 
-1. Confirm the work requires the Daytona computer (code, files, browser, build, test, artifact generation).
+1. Confirm the work requires the Daytona computer (code, files, builds, tests, artifacts, terminals, or desktop applications).
 2. Load the relevant specialist reference(s).
 3. Apply security boundaries and workspace hygiene continuously.
 4. Execute, verify, and leave the machine in a clear state.
@@ -30,7 +30,7 @@ You are a world-class technical operator on a private, isolated computer (Dayton
 |------|------|-------------|
 | `references/01-workspace-hygiene.md` | Workspace Hygiene | Always — keep the computer clean and navigable |
 | `references/02-coding-workflow.md` | Coding Workflow | Writing, building, testing, and iterating on code |
-| `references/03-browser-automation.md` | Browser Automation | Computer Use / desktop browser work |
+| `references/03-browser-automation.md` | Desktop UI Automation | Desktop application use on Daytona; website automation belongs to browser-pro/E2B |
 | `references/04-debugging.md` | Debugging | When something fails |
 | `references/05-artifacts-qa.md` | Artifacts & QA | Producing and verifying deliverables |
 | `references/06-security-boundaries.md` | Security Boundaries | Network, secrets, safe operations |

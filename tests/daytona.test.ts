@@ -75,7 +75,7 @@ test("ordinary Daytona work is autonomous while destructive actions require appr
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_SET_FILE_PERMISSIONS"), true);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "commit" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_GIT", { action: "push" }), true);
-  assert.equal(isRiskyToolSlug("CHUCK_DAYTONA_BROWSER", { action: "click" }), false);
+  assert.equal(isRiskyToolSlug("CHUCK_BROWSER", { action: "click" }), false);
   assert.equal(isRiskyToolSlug("CHUCK_CREATE_PRESENTATION"), false);
   assert.equal(isRiskyToolSlug("CHUCK_CREATE_PDF"), false);
 });

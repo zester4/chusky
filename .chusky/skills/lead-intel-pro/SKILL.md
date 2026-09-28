@@ -63,7 +63,7 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 |------|-----|
 | External people/company/SEO/social/web data | **Treg** (`CHUCK_TREG_*`) |
 | Create/update CRM, send/draft email, Slack, sheets | **Composio** |
-| Browse a page only when no API fits | Daytona browser (verification) |
+| Browse a page only when no API fits | E2B browser (verification) |
 | Remember owner ICP, voice, floors | Memory / scratchpad |
 
 ## Authority

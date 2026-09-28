@@ -20,7 +20,6 @@ export const SHARED_CHANNEL_TOOL_DENY = [
 const sharedChannelDeniedTools = new Set<string>(SHARED_CHANNEL_TOOL_DENY);
 
 export function isSharedChannelToolDenied(slug: string): boolean {
-  const canonical = slug === "CHUCK_DAYTONA_BROWSER" ? "CHUCK_BROWSER"
-    : slug === "CHUCK_DAYTONA_BROWSER_HANDOFF" ? "CHUCK_BROWSER_HANDOFF" : slug;
+  const canonical = slug;
   return sharedChannelDeniedTools.has(canonical);
 }

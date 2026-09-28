@@ -1,6 +1,6 @@
 # Browser Automation Specialist Mode
 
-Disciplined Computer Use and desktop browser work on Daytona.
+Disciplined Computer Use for desktop applications on Daytona. Website automation belongs to the E2B browser.
 
 ## Mindset
 

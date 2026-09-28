@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import { lookup } from "node:dns/promises";
-import { DaytonaInputError } from "../daytona/errors.js";
+import { E2BBrowserError } from "./errors.js";
 
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
@@ -37,17 +37,17 @@ export function isBlockedHostname(hostname: string): boolean {
 }
 
 export async function assertSafeBrowserUrl(value: unknown, options: { resolveDns?: boolean } = {}): Promise<URL> {
-  if (typeof value !== "string" || value.length < 1 || value.length > 2_000) throw new DaytonaInputError("Browser URL must be 1-2000 characters");
+  if (typeof value !== "string" || value.length < 1 || value.length > 2_000) throw new E2BBrowserError("Browser URL must be 1-2000 characters");
   let url: URL;
-  try { url = new URL(value); } catch { throw new DaytonaInputError("Browser URL must be a valid http(s) URL"); }
-  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port === "0") throw new DaytonaInputError("Browser URL must use http(s) without embedded credentials");
+  try { url = new URL(value); } catch { throw new E2BBrowserError("Browser URL must be a valid http(s) URL"); }
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port === "0") throw new E2BBrowserError("Browser URL must use http(s) without embedded credentials");
   const hostname = url.hostname.toLowerCase();
-  if (isBlockedHostname(hostname) || (isIP(hostname) !== 0 && isPrivateAddress(hostname))) throw new DaytonaInputError("Browser navigation to private or local network addresses is blocked");
+  if (isBlockedHostname(hostname) || (isIP(hostname) !== 0 && isPrivateAddress(hostname))) throw new E2BBrowserError("Browser navigation to private or local network addresses is blocked");
   if (options.resolveDns !== false && isIP(hostname) === 0) {
     let addresses: Array<{ address: string }>;
     try { addresses = await lookup(hostname, { all: true, verbatim: true }); }
-    catch { throw new DaytonaInputError("Browser hostname could not be resolved safely"); }
-    if (!addresses.length || addresses.some((item) => isPrivateAddress(item.address))) throw new DaytonaInputError("Browser navigation resolved to a private or local network address");
+    catch { throw new E2BBrowserError("Browser hostname could not be resolved safely"); }
+    if (!addresses.length || addresses.some((item) => isPrivateAddress(item.address))) throw new E2BBrowserError("Browser navigation resolved to a private or local network address");
   }
   return url;
 }

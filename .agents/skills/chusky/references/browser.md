@@ -43,7 +43,8 @@ because a user asks to connect a website account.
 ## Browser operating loop
 
 1. Confirm the E2B browser provider is available. Daytona remains the
-   computer, file/artifact, and app backend rather than the automated browser.
+   computer, file/artifact, terminal, and app backend; it is never an automated
+   web-browser provider.
 2. Open only an explicit `http://` or `https://` URL. Never put credentials,
    cookies, access tokens, or secrets in a URL.
 3. Inspect the page with `snapshot` or `find` before interacting.
@@ -109,8 +110,7 @@ Railway runtime variables:
 
 Browser handoff configuration (Railway):
 
-- `DAYTONA_VNC_PORT=6080` for the Computer Use snapshot’s noVNC port.
-- `DAYTONA_BROWSER_HANDOFF_TTL_SECONDS=300`, bounded to 60–900 seconds.
+- `E2B_BROWSER_HANDOFF_TTL_SECONDS=300`, bounded to 60–900 seconds.
 
 Never put `VAULT_MASTER_KEY` in Railway. Chusky signs broker requests with the
 HMAC secret and the Worker verifies timestamp, nonce, request ID, and body hash.

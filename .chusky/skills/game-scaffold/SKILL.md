@@ -25,7 +25,7 @@ A scaffold is **not done** until all are true:
 3. Input does something visible
 4. Score, timer, lives, or clear win/lose state
 5. Start or restart path exists
-6. You verified by running it (Daytona browser or local preview) — do not claim playable from prose alone
+6. You verified by running it (Daytona desktop app or local preview) — do not claim playable from prose alone
 
 ## Decision: which template
 

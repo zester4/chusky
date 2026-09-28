@@ -15,7 +15,7 @@ export const AGENT_UPGRADE_PRESETS = {
   autonomy: [
     "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",
-    "Extended the governed runtime across meetings, A2A, E2B browser and Daytona artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
+    "Extended the governed runtime across meetings, A2A, E2B browser, Daytona computer/artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
   ],
   attention: [
     "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",

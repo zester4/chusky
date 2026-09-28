@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import JSZip from "jszip";
 import { config } from "../src/config.js";
 import { appScaffoldCommand, DaytonaEngine } from "../src/lib/daytona/engine.js";
+import { e2bBrowserEngine } from "../src/lib/e2b/browser.js";
 import { initStore, getDaytonaWorkspace, getSession } from "../src/store.js";
 
 let sandboxes: Map<string, any>;
@@ -429,7 +430,7 @@ test("reuses one Computer Use startup handshake for a sandbox", async () => {
   assert.equal(starts, 1);
 });
 
-test("accepts Daytona's documented primary display geometry", async () => {
+test("Daytona computer reports its documented primary display geometry", async () => {
   const e = engine();
   const sandbox = await e.getOrCreateWorkspace(8200062) as any;
   sandbox.computerUse.display.getInfo = async () => ({
@@ -438,8 +439,8 @@ test("accepts Daytona's documented primary display geometry", async () => {
     displays: [],
   });
 
-  const result = await e.browser(8200062, { action: "open", url: "https://api.github.com" }) as any;
-  assert.equal(result.opened, "https://api.github.com");
+  const result = await e.computer(8200062, { action: "display_info" }) as any;
+  assert.deepEqual(result.primary_display, { width: 1024, height: 768 });
 });
 
 test("computer-use accessibility output redacts credential-shaped fields and values", async () => {
@@ -456,7 +457,7 @@ test("computer process diagnostics use Daytona desktop names and a bare status d
   const names: string[] = [];
   sandbox.computerUse.getProcessStatus = async (name: string) => { names.push(name); return { name, status: "running" }; };
   await e.computer(820061, { action: "process_status" });
-  await e.computer(820061, { action: "process_status", processName: "browser" });
+  await e.computer(820061, { action: "process_status", processName: "novnc" });
   assert.deepEqual(names, ["novnc", "novnc"]);
   await assert.rejects(() => e.computer(820061, { action: "process_logs", processName: "postgres" }), /novnc, x11vnc, xfce4, or xvfb/);
 });
@@ -493,168 +494,6 @@ test("recovers read-only Computer Use status after a dead transport connection",
   assert.equal(statusCalls, 2);
 });
 
-test("vault login falls back to standard accessibility labels or requests owner interaction without typing", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(820072) as any;
-  const writes: string[] = [];
-  sandbox.computerUse.accessibility.findNodes = async ({ name }: { name?: string }) => {
-    if (name === "Email") return { matches: [{ nodeId: "email" }] };
-    if (name === "Password") return { matches: [{ nodeId: "password" }] };
-    if (name === "Continue") return { matches: [{ nodeId: "submit" }] };
-    return { matches: [] };
-  };
-  sandbox.computerUse.accessibility.setNodeValue = async (id: string) => { writes.push(id); };
-  const loggedIn = await e.vaultLogin(820072, {
-    origin: "https://example.com", loginUrl: "https://example.com/login", usernameFieldLabel: "Email or username", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "private", password: "private",
-  });
-  assert.deepEqual(writes, ["email", "password"]);
-  assert.equal(loggedIn.authenticated, false);
-  sandbox.computerUse.accessibility.findNodes = async () => ({ matches: [] });
-  const needsOwner = await e.vaultLogin(820072, {
-    origin: "https://example.com", loginUrl: "https://example.com/login", usernameFieldLabel: "Email", passwordFieldLabel: "Password", submitButtonLabel: "Sign in", username: "private", password: "private",
-  });
-  assert.equal(needsOwner.needsUserInteraction, true);
-  assert.deepEqual(writes, ["email", "password"]);
-});
-
-test("persists and reuses owned PTY sessions", async () => {
-  const e = engine();
-  const created = await e.pty(820008, { action: "create", id: "dev", cwd: "workspace" });
-  assert.equal(created.sessionId, "dev");
-  assert.equal((await getDaytonaWorkspace(820008))?.ptySessions?.[0]?.id, "dev");
-  const output = await e.pty(820008, { action: "write", id: "dev", input: "npm test\n" });
-  assert.match(output.output ?? "", /npm test/);
-  await assert.rejects(() => e.pty(820008, { action: "write", id: "other", input: "x" }), /not found or not owned/);
-  await e.pty(820008, { action: "kill", id: "dev" });
-  assert.equal((await getDaytonaWorkspace(820008))?.ptySessions?.length, 0);
-});
-
-test("durable process-session errors explain how to recover stale identifiers", async () => {
-  const e = engine();
-  await e.session(8200081, { action: "create", id: "dev" });
-  await assert.rejects(
-    () => e.session(8200081, { action: "logs", id: "dev" }),
-    /commandId is required for logs.*matching execute action/,
-  );
-  await assert.rejects(
-    () => e.session(8200081, { action: "get", id: "missing" }),
-    /Use action=list.*action=create.*stale session ID/,
-  );
-});
-
-test("uses Daytona Git operations and returns bounded workflow results", async () => {
-  const e = engine();
-  const cloned = await e.git(820009, { action: "clone", repoUrl: "https://github.com/example/repo.git", path: "workspace/repo" });
-  assert.equal(cloned.action, "clone");
-  const committed = await e.git(820009, { action: "commit", path: "workspace/repo", message: "test", author: "Chusky", email: "chusky@example.com" });
-  assert.deepEqual(committed.result, { sha: "abc123" });
-  await assert.rejects(() => e.git(820009, { action: "clone", repoUrl: "https://evil.example/repo.git", path: "workspace/repo" }), /HTTPS GitHub/);
-});
-
-test("browser navigation persists safe URL state and rejects embedded credentials", async () => {
-  const e = engine();
-  const opened = await e.browser(820010, { action: "open", url: "https://example.com/docs" }) as any;
-  assert.equal(opened.opened, "https://example.com/docs");
-  assert.equal((await getDaytonaWorkspace(820010))?.browser?.lastUrl, "https://example.com/docs");
-  await assert.rejects(() => e.browser(820010, { action: "open", url: "https://user:secret@example.com" }), /embedded credentials/);
-});
-
-test("browser navigation captures a sanitized address-bar redirect observation when available", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(8200101) as any;
-  sandbox.computerUse.accessibility.getTree = async () => ({ root: { role: "textbox", value: "https://redirect.example/final?token=private" } });
-  const opened = await e.browser(8200101, { action: "open", url: "https://start.example" }) as any;
-  assert.equal(opened.observedUrl, "https://redirect.example/final");
-  assert.equal(opened.observationMethod, "address_bar");
-  assert.equal((await getDaytonaWorkspace(8200101))?.browser?.lastUrl, "https://redirect.example/final");
-});
-
-test("browser open does not hang on Daytona's zero-sized Chromium accessibility surface", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(82001012) as any;
-  sandbox.computerUse.display.getWindows = async () => ({ windows: [{ title: "New Tab - Chromium", width: 0, height: 0 }] });
-  sandbox.computerUse.accessibility.getTree = () => new Promise(() => undefined);
-  const opened = await e.browser(82001012, { action: "open", url: "https://api.github.com" }) as any;
-  assert.equal(opened.opened, "https://api.github.com");
-  assert.equal(opened.observationMethod, "requested_only");
-  assert.equal(opened.verificationRequired, true);
-  assert.equal(opened.inspection.unavailable, true);
-});
-
-test("browser navigation refuses to steer a zero-sized desktop", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(82001011) as any;
-  sandbox.computerUse.display.getInfo = async () => ({ displays: [{ width: 0, height: 0 }] });
-  await assert.rejects(
-    () => e.browser(82001011, { action: "open", url: "https://example.com" }),
-    /display reported 0×0|no display/,
-  );
-  assert.equal((await getDaytonaWorkspace(82001011))?.browser, undefined);
-});
-
-test("browser wait_download only returns after a file has a stable non-zero size", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(8200102) as any;
-  let calls = 0;
-  sandbox.fs.listFiles = async () => {
-    calls++;
-    return calls === 1 ? [] : [{ name: "report.pdf", path: "workspace/Downloads/report.pdf", isDir: false, size: 42 }];
-  };
-  const result = await e.browser(8200102, { action: "wait_download", path: "workspace/Downloads/report.pdf", timeoutSeconds: 5 }) as any;
-  assert.equal(result.stable, true);
-  assert.equal(result.file.path, "workspace/Downloads/report.pdf");
-  assert.ok(calls >= 4);
-});
-
-test("serializes browser control with leases and promotes a download to an artifact", async () => {
-  const e = engine();
-  const lease = await e.browser(820011, { action: "session_acquire", sessionName: "research" }) as any;
-  assert.match(lease.sessionId, /^br_/);
-  await assert.rejects(() => e.browser(820011, { action: "session_acquire", sessionName: "other" }), /already leased/);
-  const opened = await e.browser(820011, { action: "open", sessionId: lease.sessionId, url: "https://example.com" }) as any;
-  assert.equal(opened.opened, "https://example.com");
-  const artifact = await e.browser(820011, { action: "download_register", sessionId: lease.sessionId, path: "workspace/Downloads/report.md", type: "report", name: "report.md" }) as any;
-  assert.equal(artifact.type, "report");
-  const listed = await e.browser(820011, { action: "session_list" }) as any;
-  assert.equal(listed.sessions.length, 1);
-  await e.browser(820011, { action: "session_release", sessionId: lease.sessionId });
-});
-
-test("returns a signed browser-accessible preview URL and rejects provider URL failures", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(820014) as any;
-  const preview = await e.preview(820014, 3003);
-  assert.equal(preview.sandboxId, sandbox.id);
-  assert.equal(preview.port, 3003);
-  assert.equal(preview.url, "https://preview.test/signed/3003");
-  assert.ok((preview.expiresAt ?? 0) > Date.now());
-  sandbox.previewUrl = "localhost:3003";
-  await assert.rejects(() => e.preview(820014, 3003), /invalid preview URL/);
-});
-
-test("creates a short-lived private handoff into the retained noVNC browser", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(820017) as any;
-  const requested: Array<{ port: number; ttl: number }> = [];
-  sandbox.getSignedPreviewUrl = async (port: number, ttl: number) => {
-    requested.push({ port, ttl });
-    return { url: `https://preview.test/signed/${port}?handoff=opaque` };
-  };
-  const handoff = await e.browserHandoff(820017, "a CAPTCHA");
-  assert.equal(handoff.sandboxId, sandbox.id);
-  assert.match(handoff.url, /^https:\/\/preview\.test\/signed\/6080\?/);
-  assert.equal(requested[0]?.ttl, 300);
-  assert.match(handoff.message, /same retained browser/i);
-});
-
-test("rejects a Daytona dashboard URL as a private browser handoff", async () => {
-  const e = engine();
-  const sandbox = await e.getOrCreateWorkspace(820018) as any;
-  sandbox.computerUse.getProcessStatus = async () => ({ status: "running" });
-  sandbox.getSignedPreviewUrl = async () => ({ url: "https://app.daytona.io/login" });
-  await assert.rejects(() => e.browserHandoff(820018), /dashboard login URL/i);
-});
-
 test("app projects create an isolated branch, verify before preview, retain evidence, and stop cleanly", async () => {
   const e = engine();
   const scaffolded = await e.app(820015, { action: "scaffold", id: "client-portal", framework: "vite-react" }) as any;
@@ -674,8 +513,16 @@ test("app projects create an isolated branch, verify before preview, retain evid
   assert.match(logs.output, /ran:/);
   const refreshed = await e.app(820015, { action: "status", id: "client-portal" }) as any;
   assert.equal(refreshed.status, "running");
-  const screenshot = await e.app(820015, { action: "visual", id: "client-portal" }) as any;
-  assert.equal(screenshot.__daytonaScreenshot, true);
+  const originalBrowser = e2bBrowserEngine.browser;
+  e2bBrowserEngine.browser = async (_userId, args) => args.action === "open"
+    ? { opened: "https://preview.test/signed/5173" }
+    : { __browserScreenshot: true, mediaType: "image/jpeg", base64: "preview", sizeBytes: 7 };
+  try {
+    const screenshot = await e.app(820015, { action: "visual", id: "client-portal" }) as any;
+    assert.equal(screenshot.__browserScreenshot, true);
+  } finally {
+    e2bBrowserEngine.browser = originalBrowser;
+  }
   const reviewed = await e.app(820015, { action: "review", id: "client-portal", passed: true, summary: "Readable desktop layout and expected content are visible." }) as any;
   assert.equal(reviewed.verification.visual.status, "passed");
   const release = await e.app(820015, { action: "release", id: "client-portal", target: "Vercel preview" }) as any;

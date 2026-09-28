@@ -122,7 +122,7 @@ test("owner-private runs keep routine actions direct and preserve high-impact ap
     ["CHUCK_FORGET_MEMORY", {}],
     ["CHUCK_SCRATCHPAD_CLEAR", {}],
     ["CHUCK_DAYTONA_VOLUME", { action: "delete", volumeId: "vol_1" }],
-    ["CHUCK_DAYTONA_BROWSER", { action: "invoke", nodeId: "node_1", vaultAction: "delete_account" }],
+    ["CHUCK_BROWSER", { action: "invoke", nodeId: "node_1", vaultAction: "delete_account" }],
     ["COMPOSIO_EXECUTE_TOOL", { tool_slug: "GOOGLECALENDAR_DELETE_EVENT", arguments: { eventId: "evt_1" } }],
     ["COMPOSIO_MULTI_EXECUTE_TOOL", { tools: [{ tool_slug: "GITHUB_DELETE_REPOSITORY", arguments: { owner: "me", repo: "old" } }] }],
   ] as Array<[string, Record<string, unknown>]>) {

@@ -134,24 +134,6 @@ export interface DaytonaVolumeResult {
   deleted?: boolean;
 }
 
-export interface DaytonaBrowserSessionResult {
-  sandboxId: string;
-  sessionId?: string;
-  action: string;
-  sessions?: unknown[];
-  expiresAt?: number;
-  currentOrigin?: string;
-  released?: boolean;
-  requestedUrl?: string;
-  observedUrl?: string;
-  title?: string;
-  loadState?: "settled" | "unknown";
-  observationMethod?: "address_bar" | "requested_only" | "unavailable";
-  stable?: boolean;
-  file?: DaytonaFileInfo;
-  files?: DaytonaFileInfo[];
-}
-
 export interface DaytonaCodeResult {
   sandboxId: string;
   contextId?: string;

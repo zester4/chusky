@@ -58,7 +58,7 @@ const ROUTED_SKILLS: Array<{ name: string; triggers: string[] }> = [
   { name: "meeting-pro", triggers: ["meeting", "zoom", "teams", "google meet", "standup", "discovery call", "sales call"] },
   { name: "voice-call-pro", triggers: ["phone call", "outbound call", "inbound call", "twilio", "collections call"] },
   { name: "workspace-pro", triggers: ["inbox", "email triage", "calendar change", "github pr", "trello", "workspace"] },
-  { name: "computer-pro", triggers: ["daytona", "sandbox", "browser automation", "computer use", "desktop"] },
+  { name: "computer-pro", triggers: ["daytona", "sandbox", "computer use", "desktop"] },
   { name: "research-pro", triggers: ["research", "competitor analysis", "sources", "evidence brief"] },
   { name: "project-pro", triggers: ["project plan", "milestone", "status update", "roadmap"] },
   { name: "writing-pro", triggers: ["draft email", "rewrite", "copywriting", "proposal copy"] },

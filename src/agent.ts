@@ -2984,31 +2984,36 @@ export async function runAgent(
               execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, ...(artifact.verification ? { verification: artifact.verification } : {}), note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
             }
           }
-          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && "__daytonaScreenshot" in execResult) {
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
             const screenshotBytes = Buffer.from(screenshot.base64, "base64");
-            generatedImages.push({ data: screenshotBytes, mediaType: screenshot.mediaType });
+            const screenshotType = String(screenshot.mediaType).toLowerCase().split(";", 1)[0];
+            const validScreenshot = !channelContext || channelContext.scope !== "shared"
+              ? !options?.meetingId && ["image/jpeg", "image/png", "image/webp"].includes(screenshotType)
+                && screenshotBytes.length > 0 && screenshotBytes.length <= MAX_IMAGE_TRANSFER_BYTES
+                && sniffImageMime(screenshotBytes) === screenshotType && hasValidImageEnvelope(screenshotBytes, screenshotType)
+              : false;
+            let screenshotAssetId: string | undefined;
+            if (validScreenshot) {
+              try {
+                const saved = await mediaBridgeStorage.saveImageAsset(userId, {
+                    name: `${"__browserScreenshot" in execResult ? "browser" : "daytona"}-screenshot-${Date.now()}`,
+                    purpose: "Owner-requested browser or desktop screenshot",
+                    tags: ["screenshot", ...( "__browserScreenshot" in execResult ? ["browser"] : ["daytona"] )],
+                  contentType: screenshotType as "image/jpeg" | "image/png" | "image/webp",
+                }, screenshotBytes);
+                screenshotAssetId = saved.id;
+              } catch (error) {
+                logger.warn({ err: error, userId }, "Daytona screenshot could not be saved as a reusable image asset");
+              }
+            }
+            generatedImages.push({ data: screenshotBytes, mediaType: screenshotType, ...(screenshotAssetId ? { assetId: screenshotAssetId } : {}) });
             const requestedScreenshotTransfer = !channelContext || channelContext.scope !== "shared"
               ? !options?.meetingId && /\b(?:screenshot|screen capture)\b/i.test(mediaActionRequestText)
                 && /\b(?:post|publish|share|send|email|attach|include|upload)\b/i.test(mediaActionRequestText)
               : false;
-            const screenshotType = String(screenshot.mediaType).toLowerCase().split(";", 1)[0];
-            if (requestedScreenshotTransfer && ["image/jpeg", "image/png", "image/webp"].includes(screenshotType)
-              && screenshotBytes.length > 0 && screenshotBytes.length <= MAX_IMAGE_TRANSFER_BYTES
-              && sniffImageMime(screenshotBytes) === screenshotType && hasValidImageEnvelope(screenshotBytes, screenshotType)) {
-              let assetId: string | undefined;
-              try {
-                const saved = await mediaBridgeStorage.saveImageAsset(userId, {
-                  name: `daytona-screenshot-${Date.now()}`,
-                  purpose: "Owner-requested Daytona screenshot transfer",
-                  tags: ["daytona", "screenshot"],
-                  contentType: screenshotType as "image/jpeg" | "image/png" | "image/webp",
-                }, screenshotBytes);
-                assetId = saved.id;
-              } catch (error) {
-                logger.warn({ err: error, userId }, "Daytona screenshot could not be saved as a reusable image asset");
-              }
-              generatedReferenceImages.push({ data: screenshotBytes, mediaType: screenshotType, filename: `daytona-screenshot.${screenshotType === "image/jpeg" ? "jpg" : screenshotType.slice(6)}`, ...(assetId ? { assetId } : {}) });
+            if (requestedScreenshotTransfer && validScreenshot) {
+              generatedReferenceImages.push({ data: screenshotBytes, mediaType: screenshotType, filename: `daytona-screenshot.${screenshotType === "image/jpeg" ? "jpg" : screenshotType.slice(6)}`, ...(screenshotAssetId ? { assetId: screenshotAssetId } : {}) });
             }
             if (slug === "CHUCK_DAYTONA_APP") {
               // An app-QA screenshot must be visible to the model too so the

@@ -98,7 +98,7 @@ test("meeting profile accepts direct routine actions but rejects broad and high-
   assert.equal(isMeetingRepresentativeComposioTool("STRIPE_CREATE_SUBSCRIPTION"), false);
   assert.equal(isMeetingRepresentativeComposioTool("GITHUB_DELETE_REPOSITORY"), false);
   assert.throws(() => normalizeMeetingRepresentativeProfile({ allowedComposioTools: ["COMPOSIO_EXECUTE_TOOL"] }), /not permitted/);
-  assert.throws(() => normalizeMeetingRepresentativeProfile({ allowedNativeTools: ["CHUCK_DAYTONA_BROWSER"] }), /not permitted/);
+  assert.throws(() => normalizeMeetingRepresentativeProfile({ allowedNativeTools: ["CHUCK_BROWSER"] }), /not permitted/);
 });
 
 test("meeting run receives only configured actions and cannot leave on participant instruction", () => {

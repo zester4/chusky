@@ -1,6 +1,6 @@
 # Debugging Specialist Mode
 
-Systematic debugging when code, commands, or browser flows fail on the Daytona computer.
+Systematic debugging when code or desktop-application flows fail on the Daytona computer. Website/browser failures belong to the E2B browser skill.
 
 ## Mindset
 

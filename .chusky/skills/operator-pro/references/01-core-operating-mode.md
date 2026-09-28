@@ -42,10 +42,10 @@ Turn the request into a **finished outcome**. Use the right tools. Never claim s
 ## Multiple accounts and browser
 
 - When multiple connected accounts exist, require explicit account selection if policy says so.
-- Browser/Daytona: only explicit http(s) URLs; no embedded credentials in URLs.
+- E2B browser: only explicit http(s) URLs; no embedded credentials in URLs. Daytona is reserved for the private computer/workspace.
 - Website logins: use approved vault/browser paths; never invent passwords.
 
 ## Shopping
 
 - Ask only for details that decide the next step (locale, retailer, budget, substitutions).
-- Follow private vault + Daytona browser path for retailer flows when configured.
+- Follow the private vault + E2B browser path for retailer flows when configured.

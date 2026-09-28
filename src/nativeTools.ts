@@ -234,12 +234,11 @@ export function shouldUseE2BBrowser(action: unknown, enabled: boolean, apiKeyCon
   return enabled && apiKeyConfigured && (action === undefined || E2B_BROWSER_ACTIONS.has(String(action)));
 }
 
-async function automatedBrowserEngine(userId: number, action?: unknown) {
-  // Provider selection is global to the browser operation, not to an
-  // unrelated saved identity. A legacy Daytona vault session must not force
-  // public E2B browsing back onto Daytona; that identity simply needs a fresh
-  // E2B login before it can be reused there.
-  return shouldUseE2BBrowser(action, config.e2bEnabled, Boolean(config.e2bApiKey)) ? e2bBrowserEngine : daytonaEngine;
+function automatedBrowserEngine(action?: unknown) {
+  if (!shouldUseE2BBrowser(action, config.e2bEnabled, Boolean(config.e2bApiKey))) {
+    throw new Error("E2B is required for browser operations. Configure E2B_ENABLED=true and E2B_API_KEY; Daytona is only the computer and workspace runtime.");
+  }
+  return e2bBrowserEngine;
 }
 
 function fileContent(value: unknown): string {
@@ -298,9 +297,10 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
   const reason = browserHandoffReason(input.reason);
   const service = input.service ? normaliseVaultService(text(input.service)) : undefined;
   const origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
-  const handoff = config.e2bEnabled && config.e2bApiKey
-    ? await e2bBrowserEngine.browserHandoff(userId, reason.replaceAll("_", " "))
-    : await daytonaEngine.browserHandoff(userId, reason.replaceAll("_", " "));
+  if (!config.e2bEnabled || !config.e2bApiKey) {
+    throw new Error("E2B is required for browser handoff. Configure E2B_ENABLED=true and E2B_API_KEY; Daytona cannot provide browser handoffs.");
+  }
+  const handoff = await e2bBrowserEngine.browserHandoff(userId, reason.replaceAll("_", " "));
   const record = await saveBrowserHandoff(userId, {
     id: `bh_${randomUUID()}`,
     userId,
@@ -1631,7 +1631,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_BROWSER_NEXT": {
       const goal = text(args.goal, 1500);
-      const browser = await automatedBrowserEngine(userId, "state");
+      const browser = automatedBrowserEngine("state");
       const inspected = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
       const state = inspected && typeof inspected === "object" ? inspected as Record<string, unknown> : {};
       const page = state.page && typeof state.page === "object" ? state.page as Record<string, unknown> : state;
@@ -1706,14 +1706,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       // Never let model-authored metadata authorize a retained website session.
       // Read the live retained desktop and verify only its observed state.
-      const browser = await automatedBrowserEngine(userId, "state");
+      const browser = automatedBrowserEngine("state");
       const observed = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 })) as {
         observedUrl?: unknown; title?: unknown; accessibility?: unknown; observationMethod?: unknown;
       };
       const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
       const title = typeof observed.title === "string" ? observed.title : undefined;
       const liveText = JSON.stringify(observed.accessibility ?? "").slice(0, 5000);
-      if (handoff && (!currentUrl || (observed.observationMethod !== "address_bar" && !config.e2bEnabled))) {
+      if (handoff && (!currentUrl || observed.observationMethod !== "address_bar")) {
         throw new Error("The automated browser could not observe the live browser URL; the handoff remains unverified");
       }
       const result = verifyBrowserResult({
@@ -1724,7 +1724,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       });
       if (handoff?.origin && currentUrl) {
         let verifiedOrigin: string;
-        try { verifiedOrigin = new URL(currentUrl).origin; } catch { throw new Error("Daytona returned an invalid browser URL; the handoff remains unverified"); }
+        try { verifiedOrigin = new URL(currentUrl).origin; } catch { throw new Error("E2B returned an invalid browser URL; the handoff remains unverified"); }
         if (verifiedOrigin !== handoff.origin) {
           await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "verification_failed", origin: verifiedOrigin, status: "failed", summary: "Private browser handoff verification stopped because the live page origin did not match", createdAt: Date.now() });
           throw new Error("The live verification page is outside the website origin bound to this handoff");
@@ -1746,7 +1746,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
-        const browser = await automatedBrowserEngine(userId, args.action);
+        const browser = automatedBrowserEngine(args.action);
         const result = await daytonaCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
@@ -1791,10 +1791,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const origin = args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined;
       const saved = (await listVault(userId)).filter((credential) => credential.service === service && credential.accountAlias === accountAlias && (!origin || credential.origin === origin));
       const loginRecipe = saved.length === 1 ? await findBrowserPlaybook(userId, saved[0]!.origin, accountAlias) : undefined;
-      // E2B owns normal Playwright login when enabled. Its retained headed
-      // Chromium session is also the session exposed by the E2B handoff when
-      // a CAPTCHA/2FA challenge needs the owner. Daytona remains the fallback.
-      const browser = config.e2bEnabled && config.e2bApiKey ? e2bBrowserEngine : daytonaEngine;
+      // E2B owns normal Playwright login and the retained headed Chromium
+      // session exposed by the E2B handoff when a CAPTCHA/2FA challenge needs
+      // the owner. Daytona is never a browser or vault-login backend.
+      const browser = automatedBrowserEngine("open");
       const login = await loginWithVault(userId, service, { workspaceId: (owner) => browser.workspaceId(owner), login: (owner, input) => browser.vaultLogin(owner, input) }, accountAlias, origin, loginRecipe?.login);
       if (loginRecipe) {
         const verifiedAt = login.authenticated ? Date.now() : loginRecipe.login.lastVerifiedAt;
@@ -1818,7 +1818,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       let browserLogout: { attempted: boolean; completed?: boolean; note?: string } = { attempted: false, note: "No site logout URL was configured." };
       if (saved?.logoutUrl) {
         try {
-          await (await automatedBrowserEngine(userId, "open")).browser(userId, { action: "open", url: saved.logoutUrl });
+          await automatedBrowserEngine("open").browser(userId, { action: "open", url: saved.logoutUrl });
           browserLogout = { attempted: true, completed: true };
         } catch (error) {
           browserLogout = { attempted: true, completed: false, note: error instanceof Error ? error.message : "The site logout page could not be opened." };

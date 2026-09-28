@@ -173,7 +173,7 @@ export interface UserSession {
   totalCost: number;
   composioSessionId?: string; // persisted Composio ToolRouter session ID
   daytonaWorkspaceId?: string;
-  /** Owner-scoped automated browser sandbox. Daytona remains the desktop backend. */
+  /** Owner-scoped automated E2B browser sandbox. Daytona remains the desktop backend. */
   e2bBrowser?: E2BBrowserRecord;
   telegramChatId?: number;
   voiceReplies?: boolean;

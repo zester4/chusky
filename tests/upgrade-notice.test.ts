@@ -36,7 +36,7 @@ test("autonomy upgrade preset covers the current orchestration surfaces", () => 
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.autonomy]);
   assert.match(bullets[0], /personal and business autonomy queues/);
   assert.match(bullets[1], /dependency-graph workflow composer/);
-  assert.match(bullets[2], /E2B browser and Daytona artifact execution/);
+  assert.match(bullets[2], /E2B browser, Daytona computer\/artifact execution/);
 });
 
 test("owner autonomy preset documents private full-context access and scoped exceptions", () => {

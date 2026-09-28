@@ -21,8 +21,6 @@ const KNOWN_COMPOSIO_TOOLKIT_PATTERN = /^(GMAIL|GOOGLECALENDAR|CALENDLY|SLACK|X|
 export type ToolApprovalPolicy = "private" | "approval_required";
 
 function canonicalPolicySlug(slug: string): string {
-  if (slug === "CHUCK_DAYTONA_BROWSER") return "CHUCK_BROWSER";
-  if (slug === "CHUCK_DAYTONA_BROWSER_HANDOFF") return "CHUCK_BROWSER_HANDOFF";
   return slug;
 }
 

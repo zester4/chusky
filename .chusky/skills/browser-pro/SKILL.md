@@ -1,6 +1,6 @@
 ---
 name: browser-pro
-description: Operate authenticated websites through Chusky's vault and Daytona browser with adaptive login, origin binding, reusable playbooks, verification, safe approvals, and private human handoff.
+description: Operate authenticated websites through Chusky's vault and E2B browser with adaptive login, origin binding, reusable playbooks, verification, safe approvals, and private human handoff.
 ---
 
 # Browser Pro
@@ -31,7 +31,7 @@ adapt when a selector, label, layout, or login step changes.
 - Treat login as a state machine: identify the current step, fill only the
   matching accessible field, submit one transition, and inspect the next state.
 - Multi-step login, SSO, passkeys, magic links, OTP, device approval, CAPTCHA,
-  and security-key flows require a private `CHUCK_DAYTONA_BROWSER_HANDOFF`.
+  and security-key flows require a private `CHUCK_BROWSER_HANDOFF` in the retained E2B browser session.
   Never request a password, OTP, recovery code, cookie, or token in chat.
 - A handoff is a durable state machine, not a bearer link alone. After the owner
   returns, call `CHUCK_BROWSER_HANDOFF_COMPLETE`, inspect the same-origin page,

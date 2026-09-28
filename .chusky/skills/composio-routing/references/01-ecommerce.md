@@ -13,4 +13,4 @@
 
 **Skill pairing:** launch-pro, billing-ops-pro, support-desk-pro, retention-pro.
 
-If the storefront has no API toolkit, use Daytona browser + vault — not random Composio long-tail.
+If the storefront has no API toolkit, use the E2B browser + vault — not random Composio long-tail.

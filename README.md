@@ -42,7 +42,7 @@ The sections below are the detailed self-hosting and operations reference.
 | Connected apps | Composio app discovery, account connections, and a large catalog of provider actions | Uses the account's connected apps; availability depends on the selected action and connection |
 | Conversations | Telegram, authenticated dashboard and CLI, linked Slack, WhatsApp, Sendblue, Twilio SMS, regular X DMs, and optional encrypted XChat, plus voice and meeting workflows | Features and media support vary by channel; shared conversations do not inherit private account history |
 | Durable work | Owner-scoped tasks, missions, reminders, recurring jobs, triggers, and resumable workflows | Production durability requires Redis; scheduled and continued work also requires QStash |
-| Workspaces and media | Optional Daytona computer/browser workspaces, generated media, and verified artifacts | Optional provider configuration and capability limits apply |
+| Workspaces and media | Optional Daytona computer workspaces, E2B browser sessions, generated media, and verified artifacts | Optional provider configuration and capability limits apply |
 | Developer access | REST API and TypeScript SDK, plus A2A and remote MCP integrations | Project scopes, stable user identity, budgets, and approvals are enforced server-side |
 
 See [channel support and operating model](#channel-support-and-operating-model)
@@ -686,9 +686,8 @@ Build the template with `npm run e2b:template:build`, then configure
 installs Chromium with Playwright into `/opt/ms-playwright`, makes it readable
 by the non-root `chusky` user, and launches with safe container flags. Run
 `npm run e2b:browser:live-smoke -- https://example.com` after the template is
-available. E2B is the automated browser backend; Daytona remains responsible for
-computer, files, artifacts, terminals, and app work. The former Daytona browser
-names remain accepted only at the execution boundary for older queued runs and clients.
+available. E2B is the only automated browser backend; Daytona remains responsible for
+computer, files, artifacts, terminals, and app work.
 
 ### Browser and vault operations
 
