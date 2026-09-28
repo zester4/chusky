@@ -83,7 +83,9 @@ async function transcodeToJpeg(input: Buffer, executable = "ffmpeg"): Promise<Bu
  * and extensions are not proof that the downloaded bytes are an image; this
  * boundary prevents malformed CDN responses from reaching the model.
  */
-export async function normalizeInboundImages(message: InboundMessage, executable = "ffmpeg"): Promise<InboundMessage> {
+export type ImageTranscoder = (input: Buffer) => Promise<Buffer>;
+
+export async function normalizeInboundImages(message: InboundMessage, executable = "ffmpeg", transcode: ImageTranscoder = (input) => transcodeToJpeg(input, executable)): Promise<InboundMessage> {
   const attachments = await Promise.all(message.attachments.map(async (attachment) => {
     if (!attachment.url?.startsWith("data:")) return attachment;
     const decoded = decodeMediaDataUrl(attachment.url);
@@ -93,7 +95,7 @@ export async function normalizeInboundImages(message: InboundMessage, executable
     if (!sniffed || !hasValidImageEnvelope(decoded.bytes, sniffed)) return { ...attachment, mediaError: "invalid_media" as ChannelMediaError };
     if (decoded.bytes.length > MAX_IMAGE_BYTES) return { ...attachment, mediaError: "too_large" as ChannelMediaError };
     try {
-      const jpeg = await transcodeToJpeg(decoded.bytes, executable);
+      const jpeg = await transcode(decoded.bytes);
       return { ...attachment, kind: "image" as const, mimeType: "image/jpeg", sizeBytes: jpeg.length, url: `data:image/jpeg;base64,${jpeg.toString("base64")}` };
     } catch {
       return { ...attachment, mediaError: sniffed === "image/heic" ? "unsupported_media_type" as ChannelMediaError : "invalid_media" as ChannelMediaError };
