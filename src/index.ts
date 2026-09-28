@@ -12,7 +12,7 @@ import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
-import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook } from "./agent.js";
+import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -55,6 +55,7 @@ import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
+import { delegationStageObjective, WORKER_CAPABILITIES } from "./subagents/capabilities.js";
 import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import { workflowEventId } from "./workflowIds.js";
@@ -79,6 +80,7 @@ import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { defaultMediaInstruction } from "./mediaInput.js";
+import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -2153,20 +2155,53 @@ async function main(): Promise<void> {
             const plan = await buildAttentionPulsePlan(payload.userId);
             if (!plan.hasWork) return { text: "", suppressDelivery: true };
             if (job.attentionPulse?.lastDigestKey === plan.dedupeKey) return { text: "", suppressDelivery: true };
+            const proactiveRoute = await routeProactiveWork(plan.prompt, plan.decisionContext, {
+              accounts: config.jevMode === "off" ? [] : await listConnectedAccounts(payload.userId).catch(() => []),
+              listActions: listComposioToolkitActions,
+              listToolkits: listComposioToolkitCatalogue,
+            }).catch((error) => {
+              logger.warn({ err: error, userId: payload.userId, jobId: job.id }, "Proactive decision routing fell back to the attention governor");
+              return undefined;
+            });
+            const selectedWorker = proactiveRoute?.worker ?? binding.worker;
+            const selectedBinding = selectedWorker === binding.worker ? binding : undefined;
+            const selectedManifest = WORKER_CAPABILITIES[selectedWorker];
+            const selectedObjective = selectedBinding ? plan.prompt : delegationStageObjective(selectedWorker);
+            const selectedTools = selectedBinding?.allowedTools ?? selectedManifest.allowedTools;
+            const selectedComposioTools = proactiveRoute?.allowedComposioTools?.length
+              ? proactiveRoute.allowedComposioTools
+              : (selectedBinding?.allowedComposioTools ?? []);
+            const selectedApprovalPolicy = proactiveRoute?.allowedComposioTools?.length
+              ? proactiveRoute.approvalPolicy
+              : (selectedBinding?.approvalPolicy ?? "require_chusky_approval");
+            const routingContext = {
+              attentionPulse: true,
+              proactiveDecision: {
+                worker: selectedWorker,
+                reason: proactiveRoute?.reason ?? "No proactive route was available.",
+                skills: proactiveRoute?.skillNames ?? [],
+                composio: proactiveRoute?.composioContext ?? "",
+              },
+              decisionContext: plan.decisionContext,
+              ...(job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : {}),
+            };
             const result = await executeDelegation(payload.userId, {
-              worker: binding.worker,
-              objective: plan.prompt,
-              expectedOutput: binding.expectedOutput,
-              model: binding.model,
-              allowedTools: binding.allowedTools,
-              allowedComposioTools: binding.allowedComposioTools,
-              approvalPolicy: binding.approvalPolicy,
-              timeoutSeconds: binding.timeoutSeconds,
-              maxToolCalls: binding.maxToolCalls,
-              duration: binding.duration,
-              budgetSeconds: binding.budgetSeconds,
-              context: { attentionPulse: true, ...(job.deliveryTarget ? { deliveryTarget: job.deliveryTarget } : {}) },
-            }, { model: binding.model, historySummary: "Attention pulse uses only the bounded attention state supplied in its prompt.", deliveryTarget: job.deliveryTarget });
+              worker: selectedWorker,
+              objective: selectedObjective,
+              expectedOutput: selectedBinding?.expectedOutput ?? binding.expectedOutput,
+              model: selectedBinding?.model ?? config.defaultModel,
+              allowedTools: selectedTools,
+              allowedComposioTools: selectedComposioTools,
+              approvalPolicy: selectedApprovalPolicy,
+              timeoutSeconds: selectedBinding?.timeoutSeconds ?? binding.timeoutSeconds,
+              maxToolCalls: selectedBinding?.maxToolCalls ?? binding.maxToolCalls,
+              duration: selectedBinding?.duration ?? binding.duration,
+              budgetSeconds: selectedBinding?.budgetSeconds ?? binding.budgetSeconds,
+              context: routingContext,
+            }, { model: selectedBinding?.model ?? config.defaultModel, historySummary: `Attention pulse uses bounded owner state. Proactive route:
+${JSON.stringify(routingContext.proactiveDecision)}
+Decision context:
+${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.deliveryTarget });
             if (result.status === "requires_tool_request" && result.handoffRecord) {
               const continuation = await enqueueSubagentToolContinuation(payload.userId, result.handoffRecord.id);
               return { text: `The attention pulse paused for a verified capability request. Continuation ${continuation.workflowRunId} was queued.` };

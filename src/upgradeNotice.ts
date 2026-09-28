@@ -20,7 +20,7 @@ export const AGENT_UPGRADE_PRESETS = {
   attention: [
     "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
     "Personal and business watches are isolated by mode, and only confirmed successful tool calls count as handling; paused work and future waits remain untouched.",
-    "The pulse inspects current evidence, routes authorized recovery to the right specialist, and explains real blockers while preserving approval boundaries.",
+    "The pulse builds bounded decision context, lets Jev propose the specialist and exact connected-app action, and preserves deterministic authority, account, and verification gates while preserving approval boundaries.",
   ],
   missions: [
     "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",

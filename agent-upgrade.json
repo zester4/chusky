@@ -1,11 +1,11 @@
 {
-  "id": "release-4.20.0",
-  "version": "4.20.0",
+  "id": "release-4.21.0",
+  "version": "4.21.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added Jev decision routing for skills, Composio toolkits and actions, and Treg endpoint selection, layered on top of Chusky's existing deterministic routes.",
-    "Composio routing now includes a bounded catalog of apps the user has not connected; named unavailable apps trigger connection setup while their actions remain non-callable until connected.",
-    "Jev runs under one per-turn deadline with deterministic fallback, while approvals, budgets, account isolation, and native tool policy remain authoritative."
+    "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
+    "Personal and business watches are isolated by mode, and only confirmed successful tool calls count as handling; paused work and future waits remain untouched.",
+    "The pulse builds bounded decision context, lets Jev propose the specialist and exact connected-app action, and preserves deterministic authority, account, and verification gates while preserving approval boundaries."
   ],
-  "createdAt": "2026-09-28T00:00:00.000Z"
+  "createdAt": "2026-09-28T03:03:31.534Z"
 }

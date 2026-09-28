@@ -142,12 +142,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces Jev decision routing", async () => {
+test("current upgrade manifest announces proactive Jev attention routing", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.20.0");
-  assert.equal(notice?.version, "4.20.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Jev decision routing/);
-  assert.match(formatAgentUpgradeNotice(notice!), /remain non-callable until connected/);
+  assert.equal(notice?.id, "release-4.21.0");
+  assert.equal(notice?.version, "4.21.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /bounded decision context/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Jev/);
+  assert.match(formatAgentUpgradeNotice(notice!), /preserving approval boundaries/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

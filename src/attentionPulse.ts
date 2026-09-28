@@ -13,6 +13,7 @@ import {
   type TaskRecord,
 } from "./store.js";
 import { createHash } from "node:crypto";
+import { buildAutonomyDecisionContext, type AutonomyDecisionContext } from "./autonomy/decisionContext.js";
 
 const MAX_LOOPS = 12;
 const MAX_CANDIDATES = 12;
@@ -24,6 +25,7 @@ const MAX_PROMPT_CHARS = 12_000;
 
 export interface AttentionPulsePlan {
   prompt: string;
+  decisionContext: AutonomyDecisionContext;
   candidateIds: string[];
   hasWork: boolean;
   dedupeKey: string;
@@ -217,7 +219,17 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
   const relevantProfiles = (profiles as AutonomyProfileRecord[])
     .filter((profile) => dueWatches.some((watch) => (watch.mode ?? "personal") === profile.mode));
   const hasWork = actionableLoops.length > 0 || actionableCandidates.length > 0 || attentionTasks.length > 0 || attentionMissions.length > 0 || dueWatches.length > 0;
-  if (!hasWork) return { prompt: "", candidateIds: [], hasWork: false, dedupeKey: "" };
+  const decisionContext = buildAutonomyDecisionContext({
+    now,
+    loops: actionableLoops,
+    candidates: actionableCandidates,
+    tasks: attentionTasks,
+    missions: attentionMissions,
+    watches: dueWatches,
+    orders: activeOrders,
+    profiles: relevantProfiles,
+  });
+  if (!hasWork) return { prompt: "", decisionContext, candidateIds: [], hasWork: false, dedupeKey: "" };
   const dedupeKey = createHash("sha256").update(JSON.stringify({
     loops: actionableLoops.map((item) => [item.id, item.updatedAt, item.status, item.nextAction]),
     candidates: actionableCandidates.map((item) => [item.id, item.updatedAt, item.status, item.score]),
@@ -249,7 +261,7 @@ export async function buildAttentionPulsePlan(userId: number, now = Date.now()):
     "\nPending attention candidates:", actionableCandidates.length ? actionableCandidates.map(candidateLine).join("\n") : "- none",
     "\nActive standing orders:", activeOrders.length ? activeOrders.map(orderLine).join("\n") : "- none",
   ].join("\n").slice(0, MAX_PROMPT_CHARS);
-  return { prompt, candidateIds: actionableCandidates.map((item) => item.id), hasWork: true, dedupeKey };
+  return { prompt, decisionContext, candidateIds: actionableCandidates.map((item) => item.id), hasWork: true, dedupeKey };
 }
 
 export async function markAttentionPulseDelivered(userId: number, candidateIds: string[], now = Date.now()): Promise<void> {

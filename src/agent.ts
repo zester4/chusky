@@ -3200,7 +3200,7 @@ export async function getConnectionUrl(
  * Composio's public toolkit catalogue (most used first), used by decision
  * routing so requests can target apps the user has not connected yet.
  */
-async function listComposioToolkitCatalogue(signal?: AbortSignal): Promise<ComposioToolkitInfo[]> {
+export async function listComposioToolkitCatalogue(signal?: AbortSignal): Promise<ComposioToolkitInfo[]> {
   const out: ComposioToolkitInfo[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 10 && out.length < config.jevComposioCatalogLimit; page += 1) {
@@ -3217,7 +3217,7 @@ async function listComposioToolkitCatalogue(signal?: AbortSignal): Promise<Compo
  * Action catalogue for one toolkit, used by decision routing. This is public
  * Composio metadata (slugs, descriptions, input schemas), not user data.
  */
-async function listComposioToolkitActions(toolkit: string, signal?: AbortSignal): Promise<ComposioAction[]> {
+export async function listComposioToolkitActions(toolkit: string, signal?: AbortSignal): Promise<ComposioAction[]> {
   const getRawTools = composio?.tools?.getRawComposioTools;
   if (typeof getRawTools !== "function") return [];
   let raw: unknown;
