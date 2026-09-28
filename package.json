@@ -25,6 +25,7 @@
     "doctor": "tsx src/cli.ts doctor",
     "setup:bland-tool": "tsx scripts/setup-bland-consult-tool.ts",
     "treg:live-smoke": "tsx scripts/treg-live-smoke.ts",
+    "jev:live-smoke": "tsx scripts/jev-live-smoke.ts",
     "daytona:live-smoke": "tsx scripts/daytona-live-smoke.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",

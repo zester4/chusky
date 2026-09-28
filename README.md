@@ -1245,6 +1245,10 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `TREG_PER_CALL_SOFT_CAP_USD` | — | `0.25` | Maximum estimated cost of one Treg call |
 | `TREG_RATE_LIMIT_PER_MINUTE` | — | `30` | Per-owner Treg call-attempt limit per minute |
 | `TREG_ORG_TOKENS_JSON` | Treg | `{}` | Server-only organization-to-token map; never put this in client config |
+| `JEV_MODE` | — | `off` | Jev decision routing for skills, Composio toolkits/actions, and Treg: `off`, `shadow` (log only), or `enforce` (apply with keyword fallback). See `.agents/skills/chusky/references/jev.md` |
+| `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
+| `JEV_SURFACES` | — | `skills,composio,treg` | Surfaces routed by Jev |
+| `JEV_TURN_BUDGET_MS` | — | `3000` | Maximum time routing may add before the first model call; slower routes fall back to keywords |
 
 ---
 

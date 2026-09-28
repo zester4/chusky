@@ -123,10 +123,7 @@ export async function routedSkillContext(query: string, root = DEFAULT_SKILLS_RO
   return skillContextForBinding({
     primary: names,
     supporting: [],
-    requiredReferences: {
-      "fullstack-guardian": ["references/design-template.md"],
-      "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
-    },
+    requiredReferences: ROUTED_SKILL_REFERENCES,
   }, query, root);
 }
 
@@ -234,6 +231,17 @@ async function loadCatalog(root = DEFAULT_SKILLS_ROOT): Promise<SkillManifest[]>
   cache.set(resolvedRoot, { signature, skills });
   return skills;
 }
+
+/** Name and description of every installed trusted skill (routing metadata only). */
+export async function listSkillSummaries(root = DEFAULT_SKILLS_ROOT): Promise<Array<{ name: string; description: string }>> {
+  return (await loadCatalog(root)).map((skill) => ({ name: skill.name, description: skill.description })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** Required reference files that must accompany a routed skill. */
+export const ROUTED_SKILL_REFERENCES: Record<string, string[]> = {
+  "fullstack-guardian": ["references/design-template.md"],
+  "ui-ux-pro-max": ["references/pro-rules.md", "references/quick-reference.md"],
+};
 
 /** Installed trusted skills, using their frontmatter names. */
 export async function listInstalledSkillNames(root = DEFAULT_SKILLS_ROOT): Promise<string[]> {
