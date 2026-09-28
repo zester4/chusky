@@ -60,10 +60,12 @@ async function main(): Promise<void> {
       }
     }
     let clickProbe: Record<string, unknown> = { status: "not_run" };
+    let clickMatches: unknown;
     try {
       await engine.browser(userId, { action: "open", url: "https://github.com" });
       const found = await engine.browser(userId, { action: "find", role: "link", name: "Sign in", nameMatch: "substring", limit: 3 }) as { matches?: Array<{ id?: string }> };
       const matches = Array.isArray(found.matches) ? found.matches : [];
+      clickMatches = matches.slice(0, 3);
       const firstMatch = matches.find((match) => match && typeof match === "object") as { id?: string; nodeId?: string } | undefined;
       const nodeId = firstMatch?.nodeId ?? firstMatch?.id;
       if (!nodeId) {
@@ -74,7 +76,7 @@ async function main(): Promise<void> {
         clickProbe = { status: "clicked", invoked: Boolean(invoked), observedUrl: after.observedUrl, observationMethod: after.observationMethod };
       }
     } catch (error) {
-      clickProbe = { status: "error", error: String(error).slice(0, 300) };
+      clickProbe = { status: "error", error: String(error).slice(0, 300), matches: clickMatches };
     }
     await engine.writeFile(userId, probePath, probeContent);
     const read = await engine.readFile(userId, probePath, 200);
