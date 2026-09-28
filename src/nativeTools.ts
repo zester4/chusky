@@ -228,25 +228,18 @@ function daytonaCommand(value: unknown): string {
   return result;
 }
 
-function e2bSupportsBrowserAction(action?: unknown): boolean {
-  const e2bActions = new Set(["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"]);
-  return config.e2bEnabled && Boolean(config.e2bApiKey) && (action === undefined || e2bActions.has(String(action)));
+const E2B_BROWSER_ACTIONS = new Set(["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"]);
+
+export function shouldUseE2BBrowser(action: unknown, enabled: boolean, apiKeyConfigured: boolean): boolean {
+  return enabled && apiKeyConfigured && (action === undefined || E2B_BROWSER_ACTIONS.has(String(action)));
 }
 
 async function automatedBrowserEngine(userId: number, action?: unknown) {
-  if (!e2bSupportsBrowserAction(action)) return daytonaEngine;
-  if (!config.vaultEnabled) return e2bBrowserEngine;
-  try {
-    const sessions = await vaultStatus(userId);
-    // Keep legacy Daytona-authenticated sessions on Daytona. New E2B vault
-    // sessions stay on E2B so Playwright and the human handoff share cookies.
-    if (sessions.some((session) => (session.status === "authenticated" || session.status === "awaiting_user_interaction") && !session.workspaceId.startsWith("e2b-"))) return daytonaEngine;
-  } catch {
-    // If vault status cannot be checked, fail closed to Daytona rather than
-    // risking a browser action against a provider that cannot see the saved session.
-    return daytonaEngine;
-  }
-  return e2bBrowserEngine;
+  // Provider selection is global to the browser operation, not to an
+  // unrelated saved identity. A legacy Daytona vault session must not force
+  // public E2B browsing back onto Daytona; that identity simply needs a fresh
+  // E2B login before it can be reused there.
+  return shouldUseE2BBrowser(action, config.e2bEnabled, Boolean(config.e2bApiKey)) ? e2bBrowserEngine : daytonaEngine;
 }
 
 function fileContent(value: unknown): string {

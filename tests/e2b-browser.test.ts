@@ -10,6 +10,7 @@ const browserAgent = readFileSync(resolve(root, "e2b", "browser-template", "brow
 const browserClient = readFileSync(resolve(root, "e2b", "browser-template", "browser-client.mjs"), "utf8");
 const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.ts"), "utf8");
 const envExample = readFileSync(resolve(root, ".env.example"), "utf8");
+const nativeTools = readFileSync(resolve(root, "src", "nativeTools.ts"), "utf8");
 
 test("E2B browser template installs readable Chromium for the non-root runtime", () => {
   assert.match(templateDockerfile, /PLAYWRIGHT_BROWSERS_PATH=\/opt\/ms-playwright/);
@@ -53,4 +54,9 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
   assert.ok(browserTool);
   assert.doesNotMatch(browserTool.function.description, /Daytona browser/i);
+});
+
+test("legacy Daytona vault identities cannot hijack configured E2B browser work", () => {
+  assert.match(nativeTools, /shouldUseE2BBrowser\(action, config\.e2bEnabled, Boolean\(config\.e2bApiKey\)\)/);
+  assert.doesNotMatch(nativeTools, /sessions\.some\(\(session\) => .*workspaceId\.startsWith\("e2b-"\)/);
 });
