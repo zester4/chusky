@@ -16,6 +16,7 @@ import {
   claimRecallMeetingCreation, releaseRecallMeetingCreation,
   createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent,
   getAgentRun, saveAgentRun, type AgentRunRecord,
+  PERSISTED_MESSAGE_MAX_CHARS, PERSISTED_HISTORY_MAX_CHARS,
   setLiveVoicePreference,
 } from "../src/store.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -36,6 +37,38 @@ test("in-memory sessions return detached snapshots like the Redis backend", asyn
   await saveSession(userId, detached);
   detached.history[0]!.content = "post-save mutation";
   assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
+});
+
+test("bounds oversized chat and SDK payloads before they become hot-session Redis content", async () => {
+  const userId = 810203;
+  const now = Date.now();
+  const huge = "provider output " + "x".repeat(PERSISTED_MESSAGE_MAX_CHARS * 20);
+  const session = await getSession(userId);
+  session.history = [{ role: "assistant", content: huge }];
+  session.sdkThreads = [{
+    id: "thread-payload-budget", externalId: "thread-payload-budget", metadata: {}, history: [{ role: "assistant", content: huge }],
+    runs: [{
+      id: "run-payload-budget", status: "completed", input: huge, output: huge,
+      events: [{ id: "event-payload-budget", type: "run.delta", at: now, text: huge }], createdAt: now, updatedAt: now,
+    }], createdAt: now, updatedAt: now,
+  }];
+  session.sdkIdempotency = { "request-key": { fingerprint: "fingerprint", response: { output: huge, events: [{ text: huge }] }, createdAt: now } };
+
+  await saveSession(userId, session);
+  const restored = await getSession(userId);
+  const run = restored.sdkThreads?.[0]?.runs[0];
+
+  assert.ok(restored.history.every((message) => message.content.length <= PERSISTED_MESSAGE_MAX_CHARS));
+  assert.ok(restored.history.reduce((total, message) => total + message.content.length, 0) <= PERSISTED_HISTORY_MAX_CHARS);
+  assert.match(restored.history[0]?.content ?? "", /content truncated for durable storage/);
+  assert.ok((run?.input.length ?? 0) <= 24_000);
+  assert.ok((run?.output?.length ?? 0) <= 24_000);
+  assert.ok((run?.events[0]?.text?.length ?? 0) <= 2_000);
+  assert.match(run?.output ?? "", /content truncated for durable storage/);
+  const replay = restored.sdkIdempotency?.["request-key"]?.response as { output?: string; events?: Array<{ text?: string }> };
+  assert.ok((replay.output?.length ?? 0) <= 24_000);
+  assert.ok((replay.events?.[0]?.text?.length ?? 0) <= 24_000);
+  assert.ok(JSON.stringify(restored).length < 400_000, "one provider response must not turn the session into a multi-megabyte blob");
 });
 
 test("backfills existing completed dashboard runs into canonical history once", async () => {

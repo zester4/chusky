@@ -36,6 +36,132 @@ export interface Message {
   sourceId?: string;
 }
 
+// Session history is stored in one Redis value. Count-only limits are not
+// sufficient here: a provider response, tool result, or pasted document can
+// make one message megabytes long and force every later session read/write to
+// move that payload again.
+export const PERSISTED_MESSAGE_MAX_CHARS = 12_000;
+export const PERSISTED_HISTORY_MAX_CHARS = 256_000;
+const PERSISTED_RUN_INPUT_MAX_CHARS = 24_000;
+const PERSISTED_RUN_OUTPUT_MAX_CHARS = 24_000;
+const PERSISTED_EVENT_TEXT_MAX_CHARS = 2_000;
+const PERSISTED_SDK_RUNS_PER_THREAD = 100;
+const PERSISTED_SDK_EVENTS_PER_RUN = 200;
+const PERSISTED_TRUNCATION_MARKER = "\n[content truncated for durable storage]";
+
+function boundPersistedText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  if (maxChars <= PERSISTED_TRUNCATION_MARKER.length) return value.slice(0, maxChars);
+  const available = maxChars - PERSISTED_TRUNCATION_MARKER.length;
+  const head = Math.ceil(available * 0.75);
+  const tail = available - head;
+  return `${value.slice(0, head)}${PERSISTED_TRUNCATION_MARKER}${tail ? value.slice(-tail) : ""}`;
+}
+
+function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MAX_CHARS): Message | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const item = value as Partial<Message>;
+  if ((item.role !== "user" && item.role !== "assistant") || typeof item.content !== "string") return undefined;
+  return {
+    role: item.role,
+    content: boundPersistedText(item.content, maxChars),
+    ...(typeof item.createdAt === "number" && Number.isFinite(item.createdAt) && item.createdAt >= 0 ? { createdAt: item.createdAt } : {}),
+    ...(typeof item.sourceId === "string" && item.sourceId.length <= 160 ? { sourceId: item.sourceId } : {}),
+  };
+}
+
+function fitPersistedHistory(messages: unknown[], maxMessages: number, maxChars = PERSISTED_HISTORY_MAX_CHARS): { history: Message[]; dropped: Message[] } {
+  const normalized = messages.flatMap((message) => {
+    const compacted = compactPersistedMessage(message);
+    return compacted ? [compacted] : [];
+  });
+  const candidates = normalized.slice(-Math.max(1, maxMessages));
+  const history: Message[] = [];
+  let usedChars = 0;
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const message = candidates[index]!;
+    const messageChars = message.content.length;
+    if (history.length && usedChars + messageChars > maxChars) break;
+    history.unshift(message);
+    usedChars += messageChars;
+  }
+  const keptStart = normalized.length - candidates.length + (candidates.length - history.length);
+  return { history, dropped: normalized.slice(0, Math.max(0, keptStart)) };
+}
+
+function addHistoryCompactionSummary(session: UserSession, dropped: Message[]): void {
+  if (!dropped.length) return;
+  const compact = boundPersistedText(dropped.map((message) => `${message.role}: ${message.content}`).join(" "), 1_800);
+  session.summaries = [...(Array.isArray(session.summaries) ? session.summaries : []), compact].slice(-10);
+}
+
+function compactSdkRun(run: SdkRunRecord): SdkRunRecord {
+  return {
+    ...run,
+    input: boundPersistedText(typeof run.input === "string" ? run.input : "", PERSISTED_RUN_INPUT_MAX_CHARS),
+    ...(typeof run.output === "string" ? { output: boundPersistedText(run.output, PERSISTED_RUN_OUTPUT_MAX_CHARS) } : {}),
+    ...(typeof run.agentInstructions === "string" ? { agentInstructions: boundPersistedText(run.agentInstructions, PERSISTED_RUN_INPUT_MAX_CHARS) } : {}),
+    ...(run.error ? { error: { ...run.error, message: boundPersistedText(run.error.message, 2_000) } } : {}),
+    events: (Array.isArray(run.events) ? run.events : []).slice(-PERSISTED_SDK_EVENTS_PER_RUN).map((event) => ({
+      ...event,
+      ...(typeof event.text === "string" ? { text: boundPersistedText(event.text, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
+      ...(typeof event.message === "string" ? { message: boundPersistedText(event.message, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
+      ...(typeof event.summary === "string" ? { summary: boundPersistedText(event.summary, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
+      ...(typeof event.actionLabel === "string" ? { actionLabel: boundPersistedText(event.actionLabel, 240) } : {}),
+      ...(typeof event.objective === "string" ? { objective: boundPersistedText(event.objective, 2_000) } : {}),
+      ...(Array.isArray(event.batchActions) ? { batchActions: event.batchActions.slice(0, 50).map((action) => ({
+        ...action,
+        ...(typeof action.actionLabel === "string" ? { actionLabel: boundPersistedText(action.actionLabel, 240) } : {}),
+        ...(typeof action.summary === "string" ? { summary: boundPersistedText(action.summary, PERSISTED_EVENT_TEXT_MAX_CHARS) } : {}),
+      })) } : {}),
+    })),
+  };
+}
+
+function compactSdkThreads(threads: unknown): SdkThreadRecord[] {
+  if (!Array.isArray(threads)) return [];
+  const maxMessages = Math.min(80, Math.max(2, config.maxHistory * 2));
+  return threads.filter((thread): thread is SdkThreadRecord => Boolean(thread) && typeof thread === "object" && !Array.isArray(thread) && typeof (thread as SdkThreadRecord).id === "string")
+    .slice(-100)
+    .map((thread) => ({
+      ...thread,
+      metadata: thread.metadata && typeof thread.metadata === "object" && !Array.isArray(thread.metadata) ? thread.metadata : {},
+      history: fitPersistedHistory(Array.isArray(thread.history) ? thread.history : [], maxMessages).history,
+      runs: (Array.isArray(thread.runs) ? thread.runs : []).slice(-PERSISTED_SDK_RUNS_PER_THREAD).map(compactSdkRun),
+    }));
+}
+
+function compactReplayValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return boundPersistedText(value, PERSISTED_RUN_OUTPUT_MAX_CHARS);
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= 3) return "[nested response omitted from durable storage]";
+  if (Array.isArray(value)) return value.slice(-200).map((item) => compactReplayValue(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).slice(0, 200).map(([key, item]) => [key, compactReplayValue(item, depth + 1)]));
+}
+
+function compactSdkIdempotency(value: unknown): Record<string, { fingerprint: string; response: unknown; createdAt: number }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value).slice(-500).flatMap(([key, record]) => {
+    if (!record || typeof record !== "object" || Array.isArray(record)) return [];
+    const item = record as { fingerprint?: unknown; response?: unknown; createdAt?: unknown };
+    if (typeof item.fingerprint !== "string" || typeof item.createdAt !== "number" || !Number.isFinite(item.createdAt)) return [];
+    return [[key, { fingerprint: item.fingerprint.slice(0, 200), response: compactReplayValue(item.response), createdAt: Number(item.createdAt) }]];
+  }));
+}
+
+function compactSessionPersistence(session: UserSession): void {
+  const maxMessages = Math.min(80, Math.max(2, config.maxHistory * 2));
+  const fitted = fitPersistedHistory(Array.isArray(session.history) ? session.history : [], maxMessages);
+  addHistoryCompactionSummary(session, fitted.dropped);
+  session.history = fitted.history;
+  session.summaries = (Array.isArray(session.summaries) ? session.summaries : [])
+    .filter((summary): summary is string => typeof summary === "string")
+    .slice(-10)
+    .map((summary) => boundPersistedText(summary, 1_800));
+  session.sdkThreads = compactSdkThreads(session.sdkThreads);
+  session.sdkIdempotency = compactSdkIdempotency(session.sdkIdempotency);
+}
+
 export interface UserSession {
   model: string;
   history: Message[];
@@ -3677,6 +3803,15 @@ function fresh(): UserSession {
 
 let backend: Backend;
 const memoryVectorBackfillUsers = new Set<number>();
+const memoryVectorBackfillRetryAt = new Map<number, number>();
+
+function deferMemoryVectorBackfill(uid: number): void {
+  const now = Date.now();
+  for (const [userId, retryAt] of memoryVectorBackfillRetryAt) {
+    if (retryAt <= now) memoryVectorBackfillRetryAt.delete(userId);
+  }
+  memoryVectorBackfillRetryAt.set(uid, now + 60_000);
+}
 
 export async function initStore(options: { memoryOnly?: boolean } = {}): Promise<void> {
   const production = process.env.NODE_ENV === "production";
@@ -3688,6 +3823,17 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+      let lastRedisErrorLogAt = 0;
+      r.on("error", (error) => {
+        // ioredis includes command arguments on its error object. Never pass
+        // that object to the logger: a failed SETEX would otherwise echo the
+        // complete private session, including message content, into logs.
+        const now = Date.now();
+        if (now - lastRedisErrorLogAt < 30_000) return;
+        lastRedisErrorLogAt = now;
+        const message = error instanceof Error ? error.message.slice(0, 240) : "Redis client error";
+        logger.error({ errorType: error instanceof Error ? error.name : "RedisError", message }, "Redis client error");
+      });
       await r.connect();
       await r.ping();
       backend = new RedisBackend(r);
@@ -3986,6 +4132,11 @@ export async function getSession(uid: number): Promise<UserSession> {
   // Read and migrate the old persisted field once, without carrying the obsolete
   // key or provider secrets/bridge session identifiers into the current model.
   const { faceTimeCalls: legacyCalls, ...s } = raw;
+  const persistedHistory = fitPersistedHistory(Array.isArray(s.history) ? s.history : [], Math.min(80, Math.max(2, config.maxHistory * 2)));
+  addHistoryCompactionSummary(s, persistedHistory.dropped);
+  s.history = persistedHistory.history;
+  s.sdkThreads = compactSdkThreads(s.sdkThreads);
+  s.sdkIdempotency = compactSdkIdempotency(s.sdkIdempotency);
   const savedCalls = Array.isArray(s.phoneCalls) ? s.phoneCalls as unknown[] : Array.isArray(legacyCalls) ? legacyCalls : [];
   s.executionReservations = Array.isArray(s.executionReservations) ? s.executionReservations.filter((item): item is ExecutionReservation => Boolean(item) && typeof item.id === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(item.id) && typeof item.operation === "string" && item.operation.length <= 100 && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt)).slice(-100) : [];
   const phoneCalls = savedCalls.flatMap((value): PhoneCallRecord[] => {
@@ -4047,6 +4198,7 @@ export async function getSession(uid: number): Promise<UserSession> {
 }
 
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
+  compactSessionPersistence(s);
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
 }
@@ -4266,19 +4418,19 @@ function applyPhoneCallPatch(current: PhoneCallRecord, patch: PhoneCallPatch): v
 }
 
 function appendSessionHistory(session: UserSession, messages: Message[]): void {
-  const stamped = messages.map((message) => ({
-    ...message,
-    createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
-  }));
+  const stamped = messages.flatMap((message) => {
+    const compacted = compactPersistedMessage({
+      ...message,
+      createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
+    });
+    return compacted ? [compacted] : [];
+  });
+  session.history = Array.isArray(session.history) ? session.history : [];
   session.history.push(...stamped);
   session.totalMessages += stamped.filter((message) => message.role === "user").length;
-  const cap = config.maxHistory * 2;
-  if (session.history.length > cap) {
-    const overflow = session.history.slice(0, session.history.length - cap);
-    const compact = overflow.map((message) => `${message.role}: ${message.content}`).join(" ").slice(0, 1800);
-    session.summaries = [...session.summaries, compact].slice(-10);
-    session.history = session.history.slice(session.history.length - cap);
-  }
+  const fitted = fitPersistedHistory(session.history, Math.min(80, Math.max(2, config.maxHistory * 2)));
+  addHistoryCompactionSummary(session, fitted.dropped);
+  session.history = fitted.history;
 }
 
 /** Add one completed SDK turn to its thread and, for first-party web runs, the owner's canonical history. */
@@ -4293,6 +4445,7 @@ export function appendSdkRunHistoryToSession(session: UserSession, threadId: str
   }));
   const threadSourceIds = new Set(thread.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
   thread.history.push(...tagged.filter((message) => !threadSourceIds.has(message.sourceId!)));
+  thread.history = fitPersistedHistory(thread.history, Math.min(80, Math.max(2, config.maxHistory * 2))).history;
   if (run.ownerPrivateRun && !run.companyProjectId) {
     const accountSourceIds = new Set(session.history.map((message) => message.sourceId).filter((value): value is string => typeof value === "string"));
     appendSessionHistory(session, tagged.filter((message) => !accountSourceIds.has(message.sourceId!)));
@@ -6596,11 +6749,13 @@ export async function searchMemories(uid: number, query?: string, options: { cat
     .filter((x) => x.score > 0).sort((a, b) => b.score - a.score || b.m.updatedAt - a.m.updatedAt);
   const ranked = new Map<string, { memory: MemoryFact; score: number }>(lexical.map((item) => [item.m.id, { memory: item.m, score: item.score * 2 }]));
   if (vectorConfigured()) {
-    if (!memoryVectorBackfillUsers.has(uid)) {
+    const backfillRetryAt = memoryVectorBackfillRetryAt.get(uid) ?? 0;
+    if (!memoryVectorBackfillUsers.has(uid) && backfillRetryAt <= Date.now()) {
       memoryVectorBackfillUsers.add(uid);
       const allMemories = (await getSession(uid)).memories;
       void new UpstashKnowledgeStore().upsertMemories(allMemories.map((memory) => ({ userId: String(uid), id: memory.id, category: memory.category, key: memory.key, value: memory.value, projectId: memory.projectId, personKey: memory.personKey }))).catch((error) => {
         memoryVectorBackfillUsers.delete(uid);
+        deferMemoryVectorBackfill(uid);
         recordVectorFailure(error, { phase: "memory_backfill", errorClass: "vector_backfill" });
         logger.warn({ err: error, userId: uid }, "Memory vector backfill unavailable; structured search remains authoritative");
       });
