@@ -1,12 +1,14 @@
 import "dotenv/config";
 import { Sandbox } from "e2b";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 const apiKey = process.env.E2B_API_KEY?.trim();
 const template = process.env.E2B_BROWSER_TEMPLATE?.trim() || "chusky-browser-playwright";
 if (!apiKey) throw new Error("E2B_API_KEY is required");
 
 async function main() {
-  const sandbox = await Sandbox.create(template, { apiKey, timeoutMs: 300_000, requestTimeoutMs: 120_000, allowInternetAccess: true, metadata: { app: "chusky", purpose: "browser-smoke" } });
+  const sandbox = await Sandbox.create(template, { apiKey, timeoutMs: 300_000, requestTimeoutMs: 120_000, allowInternetAccess: process.env.E2B_ALLOW_INTERNET !== "false", metadata: { app: "chusky", purpose: "browser-smoke" } });
   try {
     const run = async (label: string, command: string, options: Record<string, unknown> = {}) => {
       try {
@@ -49,7 +51,14 @@ async function main() {
     const clicked = await requestBrowser({ action: "click", selector: { role: firstLink.role || "link", name: firstLink.name, nameMatch: "substring", index: firstLink.index ?? 0 } });
     const screenshot = await requestBrowser({ action: "screenshot" });
     const screenshotBytes = typeof screenshot.screenshot === "string" ? Buffer.from(screenshot.screenshot, "base64").length : 0;
-    console.log(JSON.stringify({ ok: true, sandboxId: sandbox.sandboxId, opened: { url: opened.url, title: opened.title }, foundLinks: Array.isArray(found.matches) ? found.matches.length : 0, clicked: { url: clicked.url, title: clicked.title }, screenshotBytes }));
+    const artifactDir = path.resolve(process.env.E2B_SMOKE_ARTIFACT_DIR || "artifacts/e2b-browser-smoke");
+    await mkdir(artifactDir, { recursive: true });
+    const screenshotPath = path.join(artifactDir, "browser.png");
+    const reportPath = path.join(artifactDir, "report.json");
+    if (typeof screenshot.screenshot === "string") await writeFile(screenshotPath, Buffer.from(screenshot.screenshot, "base64"));
+    const report = { ok: true, sandboxId: sandbox.sandboxId, opened: { url: opened.url, title: opened.title }, links: Array.isArray(found.matches) ? found.matches : [], clicked: { url: clicked.url, title: clicked.title }, screenshotBytes, screenshotPath };
+    await writeFile(reportPath, JSON.stringify(report, null, 2));
+    console.log(JSON.stringify({ ...report, reportPath }));
   } finally {
     await sandbox.kill();
   }

@@ -23,6 +23,7 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /launchPersistentContext\(PROFILE/);
   assert.match(browserAgent, /--no-sandbox/);
   assert.match(browserAgent, /getByRole/);
+  assert.match(browserAgent, /href: clean/);
   assert.match(browserAgent, /tab_open/);
   assert.match(browserAgent, /page\.keyboard\.type/);
   assert.match(browserAgent, /dragTo/);
@@ -32,6 +33,9 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(liveSmoke, /browser-agent\.mjs --server/);
   assert.match(liveSmoke, /browser-client\.mjs/);
   assert.match(browserAgent, /screenshot/);
+  assert.match(browserAgent, /server\.listen\(8765,\s*"127\.0\.0\.1"\)/);
+  assert.match(browserAgent, /safeHttpUrl/);
+  assert.match(browserAgent, /context\.route/);
   assert.doesNotMatch(browserAgent, /console\.log\([^\n]*(request\.(username|password)|cookie|token)\b/i);
 });
 
@@ -44,5 +48,9 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   assert.match(envExample, /E2B_ENABLED=false/);
   assert.match(envExample, /E2B_API_KEY=/);
   assert.match(envExample, /E2B_BROWSER_TEMPLATE=chusky-browser-playwright/);
+  assert.match(envExample, /E2B_ALLOW_INTERNET=true/);
   assert.ok(chuckTools.some((tool) => tool.function.name === "CHUCK_BROWSER"));
+  const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
+  assert.ok(browserTool);
+  assert.doesNotMatch(browserTool.function.description, /Daytona browser/i);
 });

@@ -696,7 +696,8 @@ personal and work accounts for the same service.
 
 The private Telegram controls are `/browser`, `/browser health`, `/browser audit`, `/browser handoffs`, and
 `/browser revoke <service> [account-alias] [origin]` (with `/browser logout` retained as a compatibility
-alias). Revocation pauses the workspace and blocks browser reuse until a fresh vault login. Saved
+alias). Revocation blocks reuse of that saved website identity until a fresh vault login. The shared
+browser workspace remains available for other identities and workspace processes. Saved
 identities are keyed by account, service label, alias, and exact HTTPS origin, so one service label
 can safely represent different websites. The agent can also use `CHUCK_BROWSER_PLAN`,
 `CHUCK_BROWSER_SESSION_HEALTH`, `CHUCK_BROWSER_PLAYBOOK_SAVE`, `CHUCK_BROWSER_PLAYBOOK_LIST`,
@@ -1245,6 +1246,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `E2B_ENABLED` | automated browser | `false` | Routes normal Playwright browser work through E2B when true |
 | `E2B_API_KEY` | automated browser | — | E2B server-side API key; never expose to the model or client |
 | `E2B_BROWSER_TEMPLATE` | automated browser | `chusky-browser-playwright` | Built E2B template containing Playwright and Chromium |
+| `E2B_ALLOW_INTERNET` | automated browser | `true` | Allow public web access; the browser still blocks local, metadata, private, and reserved network targets |
 | `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
 | `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
 | `LINK_AGENT_WALLET_ENABLED` | Stripe Link Agent Wallet | `false` | Enable owner-controlled Link spend requests |

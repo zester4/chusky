@@ -1,4 +1,6 @@
 import http from "node:http";
+import dns from "node:dns/promises";
+import net from "node:net";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= "/opt/ms-playwright";
 const { chromium } = await import("playwright");
@@ -8,6 +10,36 @@ const ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "me
 const PROFILE = "/home/chusky/.cache/chusky-browser";
 const DISPLAY = process.env.DISPLAY || ":99";
 const clean = (value, max = 180) => String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+const dnsCache = new Map();
+
+function privateAddress(value) {
+  const kind = net.isIP(value);
+  if (kind === 4) {
+    const [a, b] = value.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && (b === 0 || b === 168)) || (a === 198 && (b === 18 || b === 19 || b === 51)) || (a === 203 && b === 0) || a >= 224;
+  }
+  if (kind === 6) {
+    const normalized = value.toLowerCase();
+    const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    return normalized === "::" || normalized === "::1" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb") || Boolean(mapped && privateAddress(mapped[1]));
+  }
+  return true;
+}
+
+async function safeHttpUrl(value, resolveDns = true) {
+  let url;
+  try { url = new URL(String(value)); } catch { throw new Error("Only public http(s) URLs are allowed"); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error("Only public http(s) URLs are allowed");
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (["localhost", "metadata", "metadata.google.internal"].includes(host) || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local") || (net.isIP(host) && privateAddress(host))) throw new Error("Private or local browser navigation is blocked");
+  if (resolveDns && !net.isIP(host)) {
+    const cached = dnsCache.get(host);
+    const addresses = cached && cached.expiresAt > Date.now() ? cached.addresses : (await dns.lookup(host, { all: true, verbatim: true })).map((item) => item.address);
+    if (!addresses.length || addresses.some(privateAddress)) throw new Error("Browser navigation resolved to a private address");
+    dnsCache.set(host, { addresses, expiresAt: Date.now() + 60_000 });
+  }
+  return url;
+}
 
 function nameMatcher(value) {
   if (value?.nameMatch === "regex") {
@@ -39,7 +71,7 @@ async function roleMatches(page, request = {}) {
       const label = await item.getAttribute("aria-label").catch(() => "");
       const alt = await item.getAttribute("alt").catch(() => "");
       const nameValue = clean(label || await item.innerText().catch(() => "") || alt);
-      if (nameValue) out.push({ role, name: nameValue, index });
+      if (nameValue) out.push({ role, name: nameValue, index, ...(role === "link" ? { href: clean(await item.getAttribute("href").catch(() => ""), 1_000) } : {}) });
     }
     if (out.length >= limit) break;
   }
@@ -71,11 +103,11 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_open") page = await context.newPage();
   if (request.action === "tab_focus") page = context.pages()[Math.max(0, Number(request.index ?? 0))] || page;
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
-  if (request.currentUrl && /^https?:$/.test(new URL(request.currentUrl).protocol) && (!page.url() || page.url() === "about:blank")) await page.goto(request.currentUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
+  if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
   const target = request.selector ? locatorFor(page, request.selector) : null;
   if (action === "open") {
-    await page.goto(String(request.url), { waitUntil: "domcontentloaded", timeout: 45_000 });
+    await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
@@ -110,7 +142,7 @@ async function execute(context, pageState, request) {
 
 async function vaultLogin(context, request) {
   const page = context.pages()[0] || await context.newPage();
-  await page.goto(String(request.url), { waitUntil: "domcontentloaded", timeout: 45_000 });
+  await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const names = (value, fallback) => [value, ...fallback].filter(Boolean).map(String);
   const userNames = names(request.usernameFieldLabel, ["Email", "Email address", "Email or username", "Username", "Phone number", "Mobile number"]);
   const passwordNames = names(request.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
@@ -129,9 +161,23 @@ async function vaultLogin(context, request) {
 
 async function start() {
   const context = await chromium.launchPersistentContext(PROFILE, { headless: false, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: { ...process.env, DISPLAY } });
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    const url = request.url();
+    let parsed;
+    try { parsed = new URL(url); } catch { return route.continue(); }
+    if (!/^https?:$/.test(parsed.protocol)) return route.continue();
+    try {
+      await safeHttpUrl(url, request.resourceType() === "document");
+      return route.continue();
+    } catch {
+      return route.abort("blockedbyclient");
+    }
+  });
   if (!context.pages().length) await context.newPage();
   const pageState = { activeIndex: 0 };
   const server = http.createServer(async (incoming, response) => {
+    if (incoming.method === "GET" && incoming.url === "/health") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: true, provider: "e2b", browser: "ready" })); return; }
     if (incoming.method !== "POST" || incoming.url !== "/command") { response.writeHead(404); response.end(); return; }
     let body = ""; incoming.on("data", (chunk) => { body += chunk; if (body.length > 256_000) incoming.destroy(); });
     incoming.on("end", async () => { try { const request = JSON.parse(body); const output = request.action === "vault_login" ? await vaultLogin(context, request) : await execute(context, pageState, request); pageState.activeIndex = Number(output.activeIndex ?? pageState.activeIndex); response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(output)); } catch (error) { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: false, error: clean(error?.message || error, 800) })); } });

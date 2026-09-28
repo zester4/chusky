@@ -5,6 +5,7 @@ import { getSession, saveSession } from "../../store.js";
 import { guardVaultBrowserAction, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { redactBrowserText } from "../../vault/browserObservation.js";
 import { DaytonaInputError } from "../daytona/errors.js";
+import { assertSafeBrowserUrl } from "./urlSafety.js";
 import type { E2BBrowserAction, E2BBrowserNode, E2BBrowserRecord, E2BCommandResult } from "./types.js";
 
 const MAX_OUTPUT = 16_000;
@@ -22,14 +23,6 @@ function safeAction(value: unknown): E2BBrowserAction {
   const allowed: E2BBrowserAction[] = ["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"];
   if (!allowed.includes(action)) throw new DaytonaInputError(`Unsupported E2B browser action: ${action}`);
   return action;
-}
-
-function validateUrl(value: unknown): string {
-  const raw = boundedText(value, "url", 2_000);
-  let parsed: URL;
-  try { parsed = new URL(raw); } catch { throw new DaytonaInputError("Browser URL must be a valid http(s) URL"); }
-  if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) throw new DaytonaInputError("Browser URL must use http(s) without embedded credentials");
-  return parsed.toString();
 }
 
 function nodeId(role: string, name: string, index: number): string {
@@ -89,6 +82,8 @@ export class E2BBrowserEngine {
         return { sandbox, record: prior };
       } catch (error) {
         if (!create) throw error;
+        await this.retireSandbox(prior.sandboxId);
+        await this.save(userId, undefined);
       }
     }
     if (!create) throw new DaytonaInputError("No active E2B browser sandbox exists. Start the browser first.");
@@ -97,7 +92,7 @@ export class E2BBrowserEngine {
       apiKey: config.e2bApiKey,
       timeoutMs: config.e2bTimeoutMs,
       requestTimeoutMs: config.e2bRequestTimeoutMs,
-      allowInternetAccess: true,
+      allowInternetAccess: config.e2bAllowInternetAccess,
       metadata: { app: "chusky", surface: "browser", owner: String(userId) },
     });
     const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, createdAt: now, updatedAt: now, expiresAt };
@@ -106,9 +101,24 @@ export class E2BBrowserEngine {
     return { sandbox, record: next };
   }
 
+  private async retireSandbox(sandboxId: string): Promise<void> {
+    try {
+      await Sandbox.kill(sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    } catch {
+      // Cleanup is best effort; the new sandbox must not inherit a stale record.
+    }
+  }
+
   private async ensureRuntime(sandbox: Sandbox): Promise<void> {
-    await sandbox.commands.run("bash -lc 'if [ ! -f /tmp/chusky-xvfb.pid ] || ! kill -0 $(cat /tmp/chusky-xvfb.pid) 2>/dev/null; then nohup Xvfb :99 -screen 0 1440x900x24 -ac >/tmp/chusky-xvfb.log 2>&1 & echo $! >/tmp/chusky-xvfb.pid; fi; if [ ! -f /tmp/chusky-fluxbox.pid ] || ! kill -0 $(cat /tmp/chusky-fluxbox.pid) 2>/dev/null; then nohup fluxbox >/tmp/chusky-fluxbox.log 2>&1 & echo $! >/tmp/chusky-fluxbox.pid; fi; if [ ! -f /tmp/chusky-browser.pid ] || ! kill -0 $(cat /tmp/chusky-browser.pid) 2>/dev/null; then DISPLAY=:99 nohup node /app/browser-agent.mjs --server >/tmp/chusky-browser.log 2>&1 & echo $! >/tmp/chusky-browser.pid; fi'", { background: true, requestTimeoutMs: config.e2bRequestTimeoutMs });
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sandbox.commands.run("bash -lc 'if [ ! -f /tmp/chusky-xvfb.pid ] || ! kill -0 $(cat /tmp/chusky-xvfb.pid) 2>/dev/null; then nohup Xvfb :99 -screen 0 1440x900x24 -ac >/tmp/chusky-xvfb.log 2>&1 & echo $! >/tmp/chusky-xvfb.pid; fi; if [ ! -f /tmp/chusky-fluxbox.pid ] || ! kill -0 $(cat /tmp/chusky-fluxbox.pid) 2>/dev/null; then DISPLAY=:99 nohup fluxbox >/tmp/chusky-fluxbox.log 2>&1 & echo $! >/tmp/chusky-fluxbox.pid; fi; if [ ! -f /tmp/chusky-browser.pid ] || ! kill -0 $(cat /tmp/chusky-browser.pid) 2>/dev/null; then DISPLAY=:99 nohup node /app/browser-agent.mjs --server >/tmp/chusky-browser.log 2>&1 & echo $! >/tmp/chusky-browser.pid; fi'", { background: true, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    let lastError = "browser daemon did not become ready";
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:8765/health').then(async r => { if (!r.ok) process.exit(1); await r.text(); }).catch(() => process.exit(2))\"", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      if (probe.exitCode === 0) return;
+      lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new DaytonaInputError(`E2B browser daemon did not become ready: ${lastError}`);
   }
 
   private async run(sandbox: Sandbox, request: Record<string, unknown>): Promise<E2BCommandResult> {
@@ -186,7 +196,7 @@ export class E2BBrowserEngine {
       if (record.sessionId && action !== "state" && action !== "snapshot" && args.sessionId !== record.sessionId) throw new DaytonaInputError("Acquire the active E2B browser session lease before steering this browser");
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
       const request: Record<string, unknown> = { action };
-      if (action === "open") request.url = validateUrl(args.url);
+      if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
       if (["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press"].includes(action) && args.nodeId) {
@@ -209,6 +219,7 @@ export class E2BBrowserEngine {
       if (action === "tab_focus") request.index = Number(args.index ?? 0);
       if (action === "screenshot_region") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
       const result = await this.run(sandbox, request);
+      if (typeof result.url === "string" && /^https?:$/i.test(new URL(result.url).protocol)) await assertSafeBrowserUrl(result.url);
       const url = typeof result.url === "string" ? result.url : record.lastUrl ?? "";
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes);
