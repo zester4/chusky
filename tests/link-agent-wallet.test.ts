@@ -75,10 +75,15 @@ test("Link spend metadata is owner-scoped and bounded in durable storage", async
 
 test("Link wallet tools are owner-private and payment creation uses Link approval instead of a second Chusky prompt", () => {
   const names = [
+    "CHUCK_LINK_CONNECT",
+    "CHUCK_LINK_STATUS",
     "CHUCK_LINK_WALLET_CONNECT",
     "CHUCK_LINK_WALLET_STATUS",
     "CHUCK_LINK_PAYMENT_METHODS",
     "CHUCK_LINK_CREATE_SPEND_REQUEST",
+    "CHUCK_LINK_WAIT_FOR_APPROVAL",
+    "CHUCK_LINK_EXECUTE_PAYMENT",
+    "CHUCK_LINK_RECEIPT",
     "CHUCK_LINK_SPEND_STATUS",
     "CHUCK_LINK_SPEND_LIST",
     "CHUCK_LINK_SPEND_CANCEL",
@@ -90,8 +95,27 @@ test("Link wallet tools are owner-private and payment creation uses Link approva
     assert.ok(chuckTools.some((tool) => tool.function.name === name), name);
   }
   assert.equal(requiresToolApproval("CHUCK_LINK_CREATE_SPEND_REQUEST", {}, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_LINK_WAIT_FOR_APPROVAL", {}, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_LINK_EXECUTE_PAYMENT", {}, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_LINK_RECEIPT", {}, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_LINK_CONNECT", {}, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_LINK_WALLET_CONNECT", {}, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_LINK_WALLET_DISCONNECT", {}, false, true), true);
+});
+
+test("Link lifecycle schemas keep approval waiting bounded and execution browser-only", () => {
+  const wait = chuckTools.find((item) => item.function.name === "CHUCK_LINK_WAIT_FOR_APPROVAL");
+  const execute = chuckTools.find((item) => item.function.name === "CHUCK_LINK_EXECUTE_PAYMENT");
+  const receipt = chuckTools.find((item) => item.function.name === "CHUCK_LINK_RECEIPT");
+  assert.ok(wait);
+  assert.ok(execute);
+  assert.ok(receipt);
+  const waitSchema = wait.function.parameters as { properties?: Record<string, { maximum?: number; enum?: string[] }> };
+  assert.equal(waitSchema.properties?.waitSeconds.maximum, 30);
+  const executeSchema = execute.function.parameters as { properties?: Record<string, { enum?: string[] }> };
+  assert.deepEqual(executeSchema.properties?.executionMethod.enum, ["browser"]);
+  const receiptSchema = receipt.function.parameters as { required?: string[] };
+  assert.deepEqual(receiptSchema.required, ["spendRequestId"]);
 });
 
 test("Link spend schema requires the owner-visible purchase context and exact amount", () => {

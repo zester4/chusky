@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import type { CreateSpendRequestParams, Link, PaymentMethod, SpendRequest } from "@stripe/link-sdk";
+import type { CreateSpendRequestParams, Link, PaymentMethod, SpendRequest, Transaction } from "@stripe/link-sdk";
 import { config } from "../config.js";
 import { decryptCredential, encryptCredential, type EncryptedCredential } from "../vault/crypto.js";
 import { e2bBrowserEngine } from "../lib/e2b/index.js";
@@ -23,6 +23,8 @@ const ACCESS_TOKEN_SKEW_MS = 60_000;
 const MAX_CONTEXT = 2_000;
 const MAX_LINE_ITEMS = 50;
 const MAX_TOTALS = 20;
+const MAX_APPROVAL_WAIT_SECONDS = 30;
+const APPROVAL_POLL_INTERVAL_MS = 1_000;
 let linkSdkPromise: Promise<typeof import("@stripe/link-sdk")> | undefined;
 // The application emits CommonJS while Link's official SDK is ESM-only.
 // Keep this import native after TypeScript emits the file; a normal dynamic
@@ -150,6 +152,31 @@ export function safeProviderSpend(value: SpendRequest): Pick<LinkSpendRequestRec
   return { status: safeSpendStatus(value.status), providerId: value.id, ...(value.approval_url ? { approvalUrl: value.approval_url } : {}), ...(value.credential_type ? { credentialType: value.credential_type } : {}), ...(value.card_brand ? { cardBrand: value.card_brand } : {}), ...(value.card_last4 ? { cardLast4: value.card_last4 } : {}), ...(value.link_transaction_id ? { linkTransactionId: value.link_transaction_id } : {}), ...(value.expires_at ? { expiresAt: value.expires_at } : {}) };
 }
 
+function safeStatusMessage(status: LinkSpendStatus): string {
+  if (status === "pending_approval") return "Approve this exact amount in the Link app, then ask Chusky to check it again.";
+  if (status === "requires_action") return "Link requires an additional owner action before this purchase can continue.";
+  if (["approved", "submitted", "succeeded"].includes(status)) return "The Link request is approved or in progress; verify the merchant receipt before claiming success.";
+  if (["denied", "expired", "canceled", "failed"].includes(status)) return `The Link request is ${status}; no payment retry was performed.`;
+  return "The Link request is still being prepared; check its status before continuing.";
+}
+
+async function requestProviderApproval(userId: number, local: LinkSpendRequestRecord): Promise<LinkSpendRequestRecord> {
+  if (!local.providerId) throw new Error("Link spend request is not available for approval");
+  const status = safeSpendStatus(local.status);
+  if (!["created", "pending_approval"].includes(status)) return local;
+  if (status === "pending_approval" && local.approvalUrl) return local;
+  try {
+    const approval = await (await client(userId)).spendRequests.requestApproval(local.providerId);
+    const next: LinkSpendRequestRecord = { ...local, status: "pending_approval", ...(approval.approval_url ? { approvalUrl: approval.approval_url } : {}), updatedAt: Date.now() };
+    await saveLinkSpendRequest(userId, next);
+    return next;
+  } catch (error) {
+    const next: LinkSpendRequestRecord = { ...local, errorCode: "approval_request_failed", updatedAt: Date.now() };
+    await saveLinkSpendRequest(userId, next);
+    throw safeError(error, "Link approval request");
+  }
+}
+
 function boundedHttps(value: unknown, field: string): string {
   if (typeof value !== "string" || value.length > 2_000) throw new Error(`${field} must be an HTTPS URL`);
   let url: URL;
@@ -241,15 +268,40 @@ export async function createLinkSpendRequest(userId: number, args: Record<string
   const now = Date.now();
   const local: LinkSpendRequestRecord = { id: localId, userId, status: "uncertain", merchantName: input.merchantName, merchantUrl: input.merchantUrl, amount: input.amount, currency: input.currency, context: input.context, createdAt: now, updatedAt: now };
   await saveLinkSpendRequest(userId, local);
-  const params: CreateSpendRequestParams = { idempotency_key: input.idempotencyKey ?? `chusky_${sha256(localId).slice(0, 40)}`, amount: input.amount, currency: input.currency, merchant_name: input.merchantName, merchant_url: input.merchantUrl, context: input.context, request_approval: true, test: config.linkTestMode, ...(input.lineItems ? { line_items: input.lineItems } : {}), ...(input.totals ? { totals: input.totals } : {}) };
+  const params: CreateSpendRequestParams = { idempotency_key: input.idempotencyKey ?? `chusky_${sha256(localId).slice(0, 40)}`, amount: input.amount, currency: input.currency, merchant_name: input.merchantName, merchant_url: input.merchantUrl, context: input.context, test: config.linkTestMode, ...(input.lineItems ? { line_items: input.lineItems } : {}), ...(input.totals ? { totals: input.totals } : {}) };
   try {
     const response = await (await client(userId)).spendRequests.create(params);
-    const next = { ...local, ...safeProviderSpend(response), updatedAt: Date.now() };
+    let next: LinkSpendRequestRecord = { ...local, ...safeProviderSpend(response), updatedAt: Date.now() };
     await saveLinkSpendRequest(userId, next);
-    return { ...safeSpendView(next), next: next.status === "pending_approval" ? "Approve this exact amount in the Link app, then ask Chusky to check the spend request." : "Check the spend request before proceeding." };
+    if (next.status === "created" || (next.status === "pending_approval" && !next.approvalUrl)) next = await requestProviderApproval(userId, next);
+    return { ...safeSpendView(next), next: safeStatusMessage(next.status) };
   } catch (error) {
+    if (error instanceof Error && /approval request|authorization needs|temporarily unavailable|timed out/i.test(error.message)) throw error;
     await saveLinkSpendRequest(userId, { ...local, status: "uncertain", errorCode: "provider_unavailable", updatedAt: Date.now() });
     throw safeError(error, "Link spend request");
+  }
+}
+
+export async function requestLinkSpendApproval(userId: number, id: string): Promise<Record<string, unknown>> {
+  const local = await getLinkSpendRequest(userId, id);
+  if (!local) throw new Error("Link spend request not found");
+  const next = await requestProviderApproval(userId, local);
+  return { ...safeSpendView(next), next: safeStatusMessage(next.status) };
+}
+
+export async function waitForLinkSpendApproval(userId: number, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const id = boundedText(args.spendRequestId, "spendRequestId", 20, 140);
+  const waitSeconds = args.waitSeconds === undefined ? 0 : Number(args.waitSeconds);
+  if (!Number.isSafeInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > MAX_APPROVAL_WAIT_SECONDS) throw new Error(`waitSeconds must be an integer between 0 and ${MAX_APPROVAL_WAIT_SECONDS}`);
+  let local = await getLinkSpendRequest(userId, id);
+  if (!local) throw new Error("Link spend request not found");
+  if (local.status === "created") local = await requestProviderApproval(userId, local);
+  const deadline = Date.now() + waitSeconds * 1_000;
+  while (true) {
+    const current = await linkSpendStatus(userId, id);
+    const status = safeSpendStatus(current.status);
+    if (status !== "pending_approval" || Date.now() >= deadline) return { ...current, waiting: status === "pending_approval", next: safeStatusMessage(status) };
+    await new Promise((resolve) => setTimeout(resolve, Math.min(APPROVAL_POLL_INTERVAL_MS, Math.max(1, deadline - Date.now()))));
   }
 }
 
@@ -279,6 +331,51 @@ export async function cancelLinkSpendRequest(userId: number, id: string): Promis
 
 export async function listLinkSpendRequestViews(userId: number, limit?: number): Promise<unknown[]> {
   return (await listLinkSpendRequests(userId, limit)).map(safeSpendView);
+}
+
+function safeTransaction(value: Transaction): Record<string, unknown> {
+  return {
+    id: value.id,
+    sourceId: value.source_id,
+    amount: value.amount,
+    currency: value.currency,
+    createdDate: value.created_date,
+    description: typeof value.description === "string" ? value.description.slice(0, 500) : undefined,
+    origin: value.origin,
+    category: value.category,
+    status: typeof value.status === "string" ? value.status.slice(0, 80) : undefined,
+  };
+}
+
+export async function linkSpendReceipt(userId: number, id: string): Promise<Record<string, unknown>> {
+  const local = await getLinkSpendRequest(userId, id);
+  if (!local) throw new Error("Link spend request not found");
+  if (!local.providerId) return { ...safeSpendView(local), receipt: null, receiptPending: true, next: "The spend request has no provider receipt yet." };
+  try {
+    const link = await client(userId);
+    const response = await link.spendRequests.retrieve(local.providerId);
+    if (!response) return { ...safeSpendView(local), receipt: null, receiptPending: true, next: "Link has not returned a receipt for this request yet." };
+    const next = { ...local, ...safeProviderSpend(response), updatedAt: Date.now() };
+    await saveLinkSpendRequest(userId, next);
+    const paymentStatus = response.payment_status_details && typeof response.payment_status_details === "object" ? {
+      outcome: response.payment_status_details.outcome,
+      ...(response.payment_status_details.code ? { code: String(response.payment_status_details.code).slice(0, 80) } : {}),
+      ...(response.payment_status_details.decline_code ? { declineCode: String(response.payment_status_details.decline_code).slice(0, 80) } : {}),
+    } : undefined;
+    let transaction: Record<string, unknown> | undefined;
+    let transactionLookupFailed = false;
+    if (next.linkTransactionId) {
+      try {
+        const page = await link.transactions.list({ limit: 50 });
+        const match = page.data.find((item: Transaction) => item.id === next.linkTransactionId);
+        if (match) transaction = safeTransaction(match);
+      } catch {
+        transactionLookupFailed = true;
+      }
+    }
+    const receipt = transaction ?? (paymentStatus || next.linkTransactionId ? { ...(next.linkTransactionId ? { transactionId: next.linkTransactionId } : {}), ...(paymentStatus ? { paymentStatus } : {}) } : undefined);
+    return { ...safeSpendView(next), ...(receipt ? { receipt } : { receipt: null }), ...(transactionLookupFailed || !receipt ? { receiptPending: true } : {}), next: receipt && !transactionLookupFailed ? "This is the safe Link receipt metadata; confirm the merchant's own order confirmation separately." : "Link has not returned a complete receipt yet; check again before claiming merchant fulfillment." };
+  } catch (error) { throw safeError(error, "Link receipt lookup"); }
 }
 
 export async function disconnectLinkWallet(userId: number): Promise<{ disconnected: true }> {
@@ -328,4 +425,10 @@ export async function completeApprovedLinkCheckout(userId: number, args: Record<
   const next = { ...local, status: args.submitNodeId ? "submitted" as const : "approved" as const, updatedAt: Date.now() };
   await saveLinkSpendRequest(userId, next);
   return { ...safeSpendView(next), submitted: Boolean(args.submitNodeId), next: args.submitNodeId ? "The checkout was submitted. Check the Link spend request and merchant confirmation before claiming success." : "The approved card was filled securely. Inspect the checkout and submit it with the approved purchase control." };
+}
+
+export async function executeLinkPayment(userId: number, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const executionMethod = args.executionMethod === undefined ? "browser" : boundedText(args.executionMethod, "executionMethod", 1, 40);
+  if (executionMethod !== "browser") throw new Error("This execution path supports the approved virtual-card browser checkout only; no Link token was exposed or sent to an undocumented merchant endpoint.");
+  return completeApprovedLinkCheckout(userId, args);
 }

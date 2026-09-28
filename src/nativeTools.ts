@@ -70,7 +70,7 @@ import { TregOAuth } from "./treg/oauth.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
 import { buildBrowserCandidates } from "./vault/browserObservation.js";
-import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, createLinkSpendRequest, disconnectLinkWallet, linkPaymentMethods, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews } from "./link/agentWallet.js";
+import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, createLinkSpendRequest, disconnectLinkWallet, executeLinkPayment, linkPaymentMethods, linkSpendReceipt, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews, waitForLinkSpendApproval } from "./link/agentWallet.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -1835,10 +1835,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "session_revoked", service, ...(saved?.origin ? { origin: saved.origin } : {}), status: "succeeded", summary: `Revoked the ${service}${accountAlias ? ` (${accountAlias})` : ""} browser session`, createdAt: Date.now() });
       return { ...result, browserLogout, workspacePaused: false, note: "The selected saved session is revoked. Other browser identities and workspace processes remain available." };
     })();
+    case "CHUCK_LINK_CONNECT":
     case "CHUCK_LINK_WALLET_CONNECT": return beginLinkOAuth(userId);
+    case "CHUCK_LINK_STATUS":
     case "CHUCK_LINK_WALLET_STATUS": return linkWalletStatus(userId);
     case "CHUCK_LINK_PAYMENT_METHODS": return linkPaymentMethods(userId);
     case "CHUCK_LINK_CREATE_SPEND_REQUEST": return createLinkSpendRequest(userId, args);
+    case "CHUCK_LINK_WAIT_FOR_APPROVAL": return waitForLinkSpendApproval(userId, args);
+    case "CHUCK_LINK_EXECUTE_PAYMENT": return executeLinkPayment(userId, args);
+    case "CHUCK_LINK_RECEIPT": return linkSpendReceipt(userId, text(args.spendRequestId));
     case "CHUCK_LINK_SPEND_STATUS": return linkSpendStatus(userId, text(args.spendRequestId));
     case "CHUCK_LINK_SPEND_LIST": return listLinkSpendRequestViews(userId, args.limit === undefined ? 20 : Number(args.limit));
     case "CHUCK_LINK_SPEND_CANCEL": return cancelLinkSpendRequest(userId, text(args.spendRequestId));

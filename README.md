@@ -299,11 +299,21 @@ LINK_AGENT_WALLET_ENCRYPTION_KEY=<stable base64url 32-byte key>
 LINK_OAUTH_CALLBACK_URL=https://your-public-host.example/link/oauth/callback
 ```
 
-The owner connects Link in a private conversation, then asks Chusky to make a
-specific purchase. Chusky creates a Link spend request with approval required;
-the owner approves or declines it in Link. An approved request can be used by
-the private E2B checkout path, which fills payment fields server-side and does
-not claim success until both Link and the merchant confirm the result. Link
+The owner connects Link in a private conversation with `CHUCK_LINK_CONNECT`,
+checks the connection with `CHUCK_LINK_STATUS`, and can inspect safe payment
+method metadata with `CHUCK_LINK_PAYMENT_METHODS`. For a purchase, Chusky uses
+`CHUCK_LINK_CREATE_SPEND_REQUEST`; Link sends the owner its own approval request
+for the exact amount. `CHUCK_LINK_WAIT_FOR_APPROVAL` can perform a bounded
+status wait, but it cannot approve or charge anything. After Link reports the
+exact request approved, `CHUCK_LINK_EXECUTE_PAYMENT` uses the private E2B
+browser checkout path to fill the one-time card server-side. Finally,
+`CHUCK_LINK_RECEIPT` returns bounded Link transaction evidence. Chusky does not
+claim merchant fulfillment until both Link and the merchant confirm the result.
+
+The browser checkout method is the only exposed execution transport. Link Pay
+Tokens and Shared Payment Tokens are intentionally never copied into model
+context or sent to an arbitrary endpoint; a future token-based merchant flow
+must be added only after its exact verified protocol is implemented. Link
 wallet tools are unavailable in shared rooms and group conversations.
 `LINK_TEST_MODE=true` and `LINK_MAX_SPEND_CENTS` support bounded testing and a
 per-request ceiling; production still requires real Link eligibility,
