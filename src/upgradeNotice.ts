@@ -78,9 +78,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work.",
   ],
   linkAgentWallet: [
-    "Added an owner-controlled Stripe Link Agent Wallet with PKCE OAuth, encrypted server-side token storage, and bounded safe wallet and payment-method metadata.",
-    "Purchase requests carry the exact merchant, amount, currency, and owner-visible context to Link, which owns the approval notification and approval decision before any payment credential is released.",
-    "Approved checkout credentials remain outside model context, chat history, Redis plaintext, and tool arguments; owner-private E2B checkout can fill them server-side and never claims success before Link and the merchant confirm it.",
+    "Added an owner-controlled Stripe Link Agent Wallet with PKCE OAuth, encrypted server-side token storage, bounded wallet metadata, Link Pay Token steering, Shared Payment Token MPP, and UCP catalog and checkout support.",
+    "Purchase requests carry the exact merchant, amount, currency, checkout binding, and owner-visible context to Link, which owns the approval notification and approval decision before any payment credential is released.",
+    "Approved credentials remain outside model context, chat history, Redis plaintext, and tool arguments; virtual-card, LPT, and MPP execution never claim fulfillment without bounded provider or merchant confirmation.",
   ],
   jevRouting: [
     "Added Jev decision routing for skills, Composio toolkits and actions, and Treg endpoint selection, layered on top of Chusky's existing deterministic routes.",

@@ -73,6 +73,12 @@
       "skillPath": "skills/customer-research/SKILL.md",
       "computedHash": "4e55be83e7d9ccdee4a15faef7532dcab16f8f564c8047baa40737894bf11e1d"
     },
+    "daytona": {
+      "source": "daytona/skills",
+      "sourceType": "github",
+      "skillPath": "skills/daytona/SKILL.md",
+      "computedHash": "61f804d4b516509e7c4707ad9f0ac9586764ecac31b7bacbef672549b428a5df"
+    },
     "domain-modeling": {
       "source": "mattpocock/skills",
       "sourceType": "github",

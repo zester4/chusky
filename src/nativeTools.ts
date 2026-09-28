@@ -70,7 +70,7 @@ import { TregOAuth } from "./treg/oauth.js";
 import { decideMemoryDisposition } from "./autonomy/decisionLoop.js";
 import { routeBrowserNext } from "./decisions/browserRouter.js";
 import { buildBrowserCandidates } from "./vault/browserObservation.js";
-import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, createLinkSpendRequest, disconnectLinkWallet, executeLinkPayment, linkPaymentMethods, linkSpendReceipt, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews, waitForLinkSpendApproval } from "./link/agentWallet.js";
+import { beginLinkOAuth, cancelLinkSpendRequest, completeApprovedLinkCheckout, completeLinkUcpCheckout, confirmLinkMerchantOrder, createLinkSpendRequest, createLinkUcpCheckout, discoverLinkMppPayment, disconnectLinkWallet, executeLinkPayment, inspectLinkPayTokenCheckout, linkPaymentMethods, linkSpendReceipt, linkSpendStatus, linkWalletStatus, listLinkSpendRequestViews, payLinkMppRequest, reportLinkOutcome, searchLinkUcpCatalog, waitForLinkSpendApproval } from "./link/agentWallet.js";
 
 const MAX_TEXT = 1000;
 const MAX_DAYTONA_COMMAND = 64000;
@@ -1834,9 +1834,17 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_LINK_WALLET_STATUS": return linkWalletStatus(userId);
     case "CHUCK_LINK_PAYMENT_METHODS": return linkPaymentMethods(userId);
     case "CHUCK_LINK_CREATE_SPEND_REQUEST": return createLinkSpendRequest(userId, args);
+    case "CHUCK_LINK_INSPECT_CHECKOUT": return inspectLinkPayTokenCheckout(userId, args);
+    case "CHUCK_LINK_MPP_DISCOVER": return discoverLinkMppPayment(userId, args);
+    case "CHUCK_LINK_MPP_PAY": return payLinkMppRequest(userId, args);
+    case "CHUCK_LINK_UCP_SEARCH": return searchLinkUcpCatalog(userId, args);
+    case "CHUCK_LINK_UCP_CREATE_CHECKOUT": return createLinkUcpCheckout(userId, args);
+    case "CHUCK_LINK_UCP_COMPLETE_CHECKOUT": return completeLinkUcpCheckout(userId, args);
+    case "CHUCK_LINK_CONFIRM_ORDER": return confirmLinkMerchantOrder(userId, args);
     case "CHUCK_LINK_WAIT_FOR_APPROVAL": return waitForLinkSpendApproval(userId, args);
     case "CHUCK_LINK_EXECUTE_PAYMENT": return executeLinkPayment(userId, args);
     case "CHUCK_LINK_RECEIPT": return linkSpendReceipt(userId, text(args.spendRequestId));
+    case "CHUCK_LINK_REPORT_OUTCOME": return reportLinkOutcome(userId, args);
     case "CHUCK_LINK_SPEND_STATUS": return linkSpendStatus(userId, text(args.spendRequestId));
     case "CHUCK_LINK_SPEND_LIST": return listLinkSpendRequestViews(userId, args.limit === undefined ? 20 : Number(args.limit));
     case "CHUCK_LINK_SPEND_CANCEL": return cancelLinkSpendRequest(userId, text(args.spendRequestId));

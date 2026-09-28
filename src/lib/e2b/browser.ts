@@ -256,6 +256,40 @@ export class E2BBrowserEngine {
     });
   }
 
+  /**
+   * Inspect the live checkout for Stripe's Link Pay Token steering markers.
+   * The browser runtime returns only the merchant account and a boolean; it
+   * never returns the token input value or page source to the model.
+   */
+  async inspectLinkPayToken(userId: number, args: { sessionId?: unknown } = {}): Promise<Record<string, unknown>> {
+    return withUserLock(userId, async () => {
+      const record = await this.record(userId);
+      if (!record?.sandboxId || record.expiresAt <= Date.now()) throw new E2BBrowserError("No active E2B browser exists for Link checkout");
+      if (record.sessionId && record.sessionId !== args.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before Link checkout");
+      if (!record.lastUrl || !/^https:\/\//i.test(record.lastUrl)) throw new E2BBrowserError("Link checkout requires an active HTTPS merchant page");
+      const { sandbox } = await this.sandbox(userId, false);
+      const result = await this.run(sandbox, { action: "link_inspect", currentUrl: record.lastUrl });
+      await this.persistResult(userId, record, result);
+      const marker = result.linkPayToken && typeof result.linkPayToken === "object" ? result.linkPayToken as Record<string, unknown> : { supported: false };
+      return { provider: "e2b", supported: marker.supported === true, ...(typeof marker.merchantAccountId === "string" ? { merchantAccountId: marker.merchantAccountId } : {}), ...(typeof marker.frameUrl === "string" ? { frameUrl: marker.frameUrl } : {}) };
+    });
+  }
+
+  /** Trusted server-only LPT injection into the verified Stripe frame. */
+  async secureLinkPayToken(userId: number, args: { value: string; merchantAccountId: string; sessionId?: unknown }): Promise<{ provider: string; action: string; filled: true }> {
+    return withUserLock(userId, async () => {
+      const record = await this.record(userId);
+      if (!record?.sandboxId || record.expiresAt <= Date.now()) throw new E2BBrowserError("No active E2B browser exists for Link checkout");
+      if (record.sessionId && record.sessionId !== args.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before Link checkout");
+      if (typeof args.value !== "string" || !args.value || args.value.length > 4096) throw new E2BBrowserError("Link Pay Token is invalid");
+      if (!/^acct_[A-Za-z0-9]+$/.test(args.merchantAccountId)) throw new E2BBrowserError("Link merchant account is invalid");
+      const { sandbox } = await this.sandbox(userId, false);
+      const result = await this.run(sandbox, { action: "link_pay_token_fill", currentUrl: record.lastUrl, expectedMerchantAccountId: args.merchantAccountId, value: args.value });
+      await this.persistResult(userId, record, result);
+      return { provider: "e2b", action: "secure_link_pay_token", filled: true };
+    });
+  }
+
   async browserHandoff(userId: number, reason?: string): Promise<{ sandboxId: string; url: string; expiresAt: number; message: string }> {
     const { sandbox, record } = await this.sandbox(userId);
     const token = randomUUID().replaceAll("-", "").slice(0, 8);

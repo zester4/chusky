@@ -93,6 +93,24 @@ async function tabsFor(context, active) {
   return Promise.all(context.pages().slice(0, 10).map(async (page, index) => ({ index, url: page.url(), title: clean(await page.title().catch(() => ""), 160), active: page === active })));
 }
 
+async function linkPayTokenFrame(page) {
+  for (const frame of page.frames()) {
+    try {
+      const input = frame.locator('input[name="link_pay_token"]').first();
+      const inputCount = await frame.locator('input[name="link_pay_token"]').count();
+      const account = frame.locator('[data-stripe-merchant-account^="acct_"]').first();
+      const accountCount = await frame.locator('[data-stripe-merchant-account^="acct_"]').count();
+      if (inputCount > 0 && accountCount > 0) {
+        const merchantAccountId = await account.getAttribute("data-stripe-merchant-account");
+        if (merchantAccountId && /^acct_[A-Za-z0-9]+$/.test(merchantAccountId)) return { frame, input, merchantAccountId, frameUrl: frame.url() };
+      }
+    } catch {
+      // A third-party frame can disappear while the checkout is navigating.
+    }
+  }
+  return undefined;
+}
+
 async function result(page, context, extra = {}) {
   const challenge = await challengeFor(page);
   return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...extra, tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
@@ -109,6 +127,21 @@ async function execute(context, pageState, request) {
   if (action === "open") {
     await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
+  } else if (action === "link_inspect") {
+    const match = await linkPayTokenFrame(page);
+    return result(page, context, { linkPayToken: match ? { supported: true, merchantAccountId: match.merchantAccountId, frameUrl: clean(match.frameUrl, 1_000) } : { supported: false } });
+  } else if (action === "link_pay_token_fill") {
+    const match = await linkPayTokenFrame(page);
+    if (!match) throw new Error("The current checkout does not expose Link Pay Token markers in one Stripe frame");
+    if (request.expectedMerchantAccountId && request.expectedMerchantAccountId !== match.merchantAccountId) throw new Error("The live Stripe merchant account does not match the approved Link Pay Token request");
+    if (typeof request.value !== "string" || !request.value || request.value.length > 4096) throw new Error("Link Pay Token value is invalid");
+    await match.input.evaluate((element, value) => {
+      const input = element;
+      input.value = String(value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }, request.value);
+    return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click") await page.mouse.click(Number(request.x), Number(request.y));

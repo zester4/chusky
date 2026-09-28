@@ -45,8 +45,13 @@ async function main() {
       return parsed as Record<string, unknown>;
     };
     const opened = await requestBrowser({ action: "open", url: process.argv[2] || "https://www.iana.org/help/example-domains" });
-    const found = await requestBrowser({ action: "find", role: "link", limit: 5 });
-    const firstLink = Array.isArray(found.matches) ? found.matches[0] as { role?: string; name?: string; index?: number } | undefined : undefined;
+    const requestedLinkName = process.env.E2B_SMOKE_LINK_NAME?.trim();
+    const found = await requestBrowser({ action: "find", role: "link", ...(requestedLinkName ? { name: requestedLinkName, nameMatch: "substring" } : {}), limit: 25 });
+    const firstLink = Array.isArray(found.matches)
+      ? found.matches
+        .map((item) => item as { role?: string; name?: string; index?: number })
+        .find((item) => item.name && !/^(main content|skip to|navigation|results?$)/i.test(item.name.trim()) && !/\bskip to\b/i.test(item.name))
+      : undefined;
     if (!firstLink?.name) throw new Error(`No accessible link found on ${String(opened.url || process.argv[2])}`);
     const clicked = await requestBrowser({ action: "click", selector: { role: firstLink.role || "link", name: firstLink.name, nameMatch: "substring", index: firstLink.index ?? 0 } });
     const screenshot = await requestBrowser({ action: "screenshot" });

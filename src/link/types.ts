@@ -34,6 +34,20 @@ export type LinkSpendStatus =
   | "requires_action"
   | "uncertain";
 
+export type LinkNextActionResolution = "auto_resume" | "create_new_spend_request" | "create_new_spend_request_after_completion";
+
+export interface LinkSpendStatusDetails {
+  requiresAction?: {
+    failureCode?: string;
+    nextAction: {
+      type: string;
+      resolution: LinkNextActionResolution;
+      actionUrl?: string;
+      expiresAt?: number;
+    };
+  };
+}
+
 export interface LinkSpendRequestRecord {
   id: string;
   userId: number;
@@ -46,9 +60,24 @@ export interface LinkSpendRequestRecord {
   context: string;
   approvalUrl?: string;
   credentialType?: "card" | "shared_payment_token";
+  executionMethod?: "browser" | "link_pay_token" | "mpp" | "ucp";
+  merchantAccountId?: string;
+  networkId?: string;
+  ucpCheckoutId?: string;
+  ucpProfileId?: string;
+  /** MPP request material is encrypted; challenge metadata is non-secret. */
+  encryptedMppRequest?: EncryptedCredential;
+  mppChallenge?: Record<string, string>;
+  merchantConfirmation?: {
+    status: "observed" | "not_observed" | "uncertain";
+    orderId?: string;
+    source: "ucp" | "browser" | "provider";
+    observedAt: number;
+  };
   cardBrand?: string;
   cardLast4?: string;
   linkTransactionId?: string;
+  statusDetails?: LinkSpendStatusDetails;
   errorCode?: string;
   createdAt: number;
   updatedAt: number;

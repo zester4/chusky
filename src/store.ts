@@ -4189,7 +4189,34 @@ export async function getSession(uid: number): Promise<UserSession> {
   const linkWallet = s.linkWallet && typeof s.linkWallet === "object" && s.linkWallet.userId === uid && ["connected", "reauth_required", "disconnected"].includes(String(s.linkWallet.status)) && s.linkWallet.encryptedTokens && typeof s.linkWallet.encryptedTokens === "object" && Number.isFinite(s.linkWallet.expiresAt) && Number.isFinite(s.linkWallet.createdAt) && Number.isFinite(s.linkWallet.updatedAt)
     ? { ...s.linkWallet, scopes: Array.isArray(s.linkWallet.scopes) ? s.linkWallet.scopes.filter((scope): scope is string => typeof scope === "string").slice(0, 20).map((scope) => scope.slice(0, 120)) : [] } as LinkWalletRecord
     : undefined;
-  s.linkSpendRequests = Array.isArray(s.linkSpendRequests) ? s.linkSpendRequests.filter((item): item is LinkSpendRequestRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string" && /^lsp_[A-Za-z0-9_-]{20,120}$/.test(item.id) && typeof item.merchantName === "string" && typeof item.merchantUrl === "string" && /^https:\/\//i.test(item.merchantUrl) && Number.isSafeInteger(item.amount) && item.amount > 0 && typeof item.currency === "string" && typeof item.context === "string" && typeof item.status === "string" && Number.isFinite(item.createdAt) && Number.isFinite(item.updatedAt)).slice(-50) : [];
+  s.linkSpendRequests = Array.isArray(s.linkSpendRequests) ? s.linkSpendRequests.flatMap((item): LinkSpendRequestRecord[] => {
+    if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^lsp_[A-Za-z0-9_-]{20,120}$/.test(item.id) || typeof item.merchantName !== "string" || typeof item.merchantUrl !== "string" || !/^https:\/\//i.test(item.merchantUrl) || Number.isNaN(Number(item.amount)) || Number(item.amount) <= 0 || typeof item.currency !== "string" || typeof item.context !== "string" || typeof item.status !== "string" || !Number.isFinite(item.createdAt) || !Number.isFinite(item.updatedAt)) return [];
+    const candidate = item as LinkSpendRequestRecord;
+    const executionMethod = ["browser", "link_pay_token", "mpp", "ucp"].includes(String(candidate.executionMethod)) ? candidate.executionMethod : undefined;
+    const merchantConfirmation = candidate.merchantConfirmation && typeof candidate.merchantConfirmation === "object" && ["observed", "not_observed", "uncertain"].includes(candidate.merchantConfirmation.status) && ["ucp", "browser", "provider"].includes(candidate.merchantConfirmation.source) && Number.isFinite(candidate.merchantConfirmation.observedAt)
+      ? { status: candidate.merchantConfirmation.status, source: candidate.merchantConfirmation.source, observedAt: candidate.merchantConfirmation.observedAt, ...(typeof candidate.merchantConfirmation.orderId === "string" ? { orderId: candidate.merchantConfirmation.orderId.slice(0, 200) } : {}) }
+      : undefined;
+    const rawStatusDetails = candidate.statusDetails?.requiresAction;
+    const rawNextAction = rawStatusDetails?.nextAction;
+    const statusDetails = rawStatusDetails && rawNextAction && typeof rawNextAction === "object" && (rawNextAction.resolution === "auto_resume" || rawNextAction.resolution === "create_new_spend_request" || rawNextAction.resolution === "create_new_spend_request_after_completion") && typeof rawNextAction.type === "string"
+      ? { requiresAction: { ...(typeof rawStatusDetails.failureCode === "string" ? { failureCode: rawStatusDetails.failureCode.slice(0, 120) } : {}), nextAction: { type: rawNextAction.type.slice(0, 80), resolution: rawNextAction.resolution, ...(typeof rawNextAction.actionUrl === "string" ? { actionUrl: rawNextAction.actionUrl.slice(0, 2_000) } : {}), ...(typeof rawNextAction.expiresAt === "number" && Number.isFinite(rawNextAction.expiresAt) ? { expiresAt: rawNextAction.expiresAt } : {}) } } }
+      : undefined;
+    return [{
+      ...candidate,
+      merchantName: candidate.merchantName.slice(0, 160),
+      merchantUrl: candidate.merchantUrl.slice(0, 2_000),
+      currency: candidate.currency.slice(0, 3).toUpperCase(),
+      context: candidate.context.slice(0, 2_000),
+      ...(executionMethod ? { executionMethod } : {}),
+      ...(typeof candidate.merchantAccountId === "string" ? { merchantAccountId: candidate.merchantAccountId.slice(0, 120) } : {}),
+      ...(typeof candidate.networkId === "string" ? { networkId: candidate.networkId.slice(0, 160) } : {}),
+      ...(typeof candidate.ucpCheckoutId === "string" ? { ucpCheckoutId: candidate.ucpCheckoutId.slice(0, 160) } : {}),
+      ...(typeof candidate.ucpProfileId === "string" ? { ucpProfileId: candidate.ucpProfileId.slice(0, 160) } : {}),
+      ...(candidate.mppChallenge && typeof candidate.mppChallenge === "object" ? { mppChallenge: Object.fromEntries(Object.entries(candidate.mppChallenge).slice(0, 20).flatMap(([key, value]) => typeof value === "string" && value.length <= 2_000 ? [[key.slice(0, 80), value]] : [])) } : {}),
+      ...(statusDetails ? { statusDetails } : {}),
+      ...(merchantConfirmation ? { merchantConfirmation } : {}),
+    }];
+  }).slice(-50) : [];
   s.linkWallet = linkWallet;
   const browserHandoffs = Array.isArray(s.browserHandoffs) ? s.browserHandoffs.filter((item): item is BrowserHandoffRecord => {
     if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^bh_[A-Za-z0-9_-]{1,120}$/.test(item.id) || typeof item.workspaceId !== "string" || !item.workspaceId || typeof item.reason !== "string" || !["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(item.reason) || typeof item.status !== "string" || !["waiting", "awaiting_verification", "completed", "expired", "cancelled"].includes(item.status) || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt)) return false;

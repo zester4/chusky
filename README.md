@@ -310,11 +310,21 @@ browser checkout path to fill the one-time card server-side. Finally,
 `CHUCK_LINK_RECEIPT` returns bounded Link transaction evidence. Chusky does not
 claim merchant fulfillment until both Link and the merchant confirm the result.
 
-The browser checkout method is the only exposed execution transport. Link Pay
-Tokens and Shared Payment Tokens are intentionally never copied into model
-context or sent to an arbitrary endpoint; a future token-based merchant flow
-must be added only after its exact verified protocol is implemented. Link
-wallet tools are unavailable in shared rooms and group conversations.
+Chusky supports three Link payment routes without exposing credentials to the
+model: the owner-private E2B virtual-card checkout, Stripe-hosted Link Pay
+Token steering when the live checkout exposes the verified Stripe markers, and
+HTTP 402 Machine Payment Protocol (MPP) using a one-time Shared Payment Token.
+For UCP merchants, Chusky can search the catalog, create a checkout, bind its
+exact total to a Link spend request, and complete the checkout only after the
+owner approves that request. MPP requests retain the original merchant request
+encrypted server-side; failed or uncertain responses are never replayed
+automatically.
+
+The flow is intentionally provider-neutral at the evidence layer: Link
+receipts, UCP order details, MPP payment receipts, or a verified merchant page
+can confirm the order. Chusky does not claim fulfillment from a model-authored
+message or from Link approval alone. Link wallet tools are unavailable in
+shared rooms and group conversations.
 `LINK_TEST_MODE=true` and `LINK_MAX_SPEND_CENTS` support bounded testing and a
 per-request ceiling; production still requires real Link eligibility,
 registered OAuth credentials, E2B checkout configuration, and
