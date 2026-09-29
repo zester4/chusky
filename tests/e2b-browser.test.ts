@@ -50,6 +50,10 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.match(browserEngine, /console\.log\(r\.ok \? 'ready' : 'not-ready'\)/);
   assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
+  assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);
+  assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc 6080 localhost:5900/);
+  assert.match(browserEngine, /127\.0\.0\.1:6080\/vnc\.html/);
+  assert.doesNotMatch(browserEngine, /pkill -f \\"x11vnc\.\*-rfbport 5900/);
 });
 
 test("E2B template includes the desktop handoff dependencies", () => {

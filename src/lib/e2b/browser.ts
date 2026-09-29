@@ -308,7 +308,35 @@ export class E2BBrowserEngine {
     const token = randomUUID().replaceAll("-", "").slice(0, 8);
     const requestedTtl = Number(config.e2bBrowserHandoffTtlSeconds);
     const ttlSeconds = Number.isFinite(requestedTtl) ? Math.min(900, Math.max(60, Math.floor(requestedTtl))) : 300;
-    await sandbox.commands.run(`bash -lc 'pkill -f "x11vnc.*-rfbport 5900" 2>/dev/null || true; pkill -f "websockify.*6080" 2>/dev/null || true; DISPLAY=:99 nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwd ${token} >/tmp/chusky-x11vnc.log 2>&1 & nohup websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/chusky-websockify.log 2>&1 & nohup sh -lc "sleep ${ttlSeconds}; pkill -f \\\"x11vnc.*-rfbport 5900\\\" 2>/dev/null || true; pkill -f \\\"websockify.*6080\\\" 2>/dev/null || true" >/dev/null 2>&1 &'`, { background: true, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    const handoffEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
+    const startHandoffService = async (command: string) => {
+      await sandbox.commands.run(command, { envs: handoffEnv, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    };
+    // Keep the VNC services separate from the browser daemon. The E2B command
+    // API treats a detached nested shell as a failed command intermittently,
+    // and returning the preview URL before websockify is listening creates a
+    // misleading "closed port" handoff.
+    await startHandoffService("if [ -f /tmp/chusky-x11vnc.pid ] && kill -0 $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; pkill -x x11vnc 2>/dev/null || true; rm -f /tmp/chusky-x11vnc.pid");
+    await startHandoffService("if [ -f /tmp/chusky-websockify.pid ] && kill -0 $(cat /tmp/chusky-websockify.pid) 2>/dev/null; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi; pkill -x websockify 2>/dev/null || true; rm -f /tmp/chusky-websockify.pid");
+    await startHandoffService(`nohup x11vnc -display :99 -rfbport 5900 -localhost -forever -shared -passwd ${token} >/tmp/chusky-x11vnc.log 2>&1 & echo $! >/tmp/chusky-x11vnc.pid`);
+    let lastError = "x11vnc did not become ready";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const probe = await sandbox.commands.run("node -e \"const net=require('node:net'); const s=net.createConnection({host:'127.0.0.1',port:5900}); s.once('connect',()=>{console.log('ready');s.end()}); s.once('error',()=>console.log('not-ready')); setTimeout(()=>{s.destroy();console.log('not-ready')},1000)\"", { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).includes("ready")) break;
+      lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (attempt === 19) throw new E2BBrowserError(`E2B VNC service did not become ready: ${lastError}`);
+    }
+    await startHandoffService(`nohup websockify --web=/usr/share/novnc 6080 localhost:5900 >/tmp/chusky-websockify.log 2>&1 & echo $! >/tmp/chusky-websockify.pid`);
+    lastError = "websockify did not become ready";
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:6080/vnc.html').then(async r=>{console.log(r.ok?'ready':'not-ready');await r.arrayBuffer()}).catch(()=>console.log('not-ready'))\"", { timeoutMs: 2_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).at(-1) === "ready") break;
+      lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (attempt === 19) throw new E2BBrowserError(`E2B handoff service did not become ready: ${lastError}`);
+    }
+    await startHandoffService(`nohup sh -lc "sleep ${ttlSeconds}; if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi" >/dev/null 2>&1 &`);
     const host = sandbox.getHost(6080);
     const base = /^https?:\/\//i.test(host) ? host : `https://${host}`;
     const url = `${base.replace(/\/$/, "")}/vnc.html?autoconnect=1&resize=remote&password=${encodeURIComponent(token)}`;
