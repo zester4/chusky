@@ -31,7 +31,11 @@ test("verified triggers receive executor framing while ordinary conversations do
   const instructions = triggerAutonomyInstructions("evt_trigger_1");
   assert.match(instructions ?? "", /AUTONOMOUS TRIGGER EXECUTION/);
   assert.match(instructions ?? "", /not a user chat message/i);
-  assert.match(instructions ?? "", /return exactly NO_ACTION/i);
+  assert.match(instructions ?? "", /No custom per-trigger instructions are required/i);
+  assert.match(instructions ?? "", /Reply in that same thread when it asks a clear, routine question/i);
+  assert.match(instructions ?? "", /financial, legal, HR, medical, sensitive/i);
+  assert.match(instructions ?? "", /always close out to the owner/i);
+  assert.doesNotMatch(instructions ?? "", /return exactly NO_ACTION/i);
   assert.match(instructions ?? "", /not create a durable attention record.*guess/i);
 });
 
