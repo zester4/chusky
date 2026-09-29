@@ -165,7 +165,11 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   slug = canonicalPolicySlug(slug);
   if (slug === "CHUCK_BROWSER") {
-    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method", "unknown"].includes(String(args.vaultAction ?? ""))) return "approval_required";
+    // Unknown browser claims are validated by the E2B/vault guard against the
+    // freshly inspected accessible control. Do not turn an ambiguous model
+    // claim into a generic approval card; risky controls must declare their
+    // exact action and then pass the matching approval boundary.
+    if (["checkout", "place_order", "purchase", "change_address", "add_payment_method"].includes(String(args.vaultAction ?? ""))) return "approval_required";
     return "private";
   }
   if (slug === "CHUCK_BROWSER_NEXT") return "private";

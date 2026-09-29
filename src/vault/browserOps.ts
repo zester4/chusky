@@ -157,6 +157,10 @@ export function classifyBrowserIntent(input: { label?: string; url?: string; rol
   if (/(search|find|filter|sort)/.test(text)) return "search";
   if (/(login|log in|sign in|authenticate)/.test(text)) return "login";
   if (/(download|export).*(statement|invoice|report|data)/.test(text)) return "download_sensitive";
+  // Common navigation controls are routine browsing. Keep this after the
+  // high-impact checks so labels such as "Continue to checkout" still fail
+  // closed through the purchase classification above.
+  if (/^(continue|next|proceed|done|skip)(?:\s+(?:to|with|for)\s+.+)?$/.test(text.trim())) return "browse";
   return "unknown";
 }
 

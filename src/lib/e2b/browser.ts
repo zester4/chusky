@@ -110,11 +110,24 @@ export class E2BBrowserEngine {
   }
 
   private async ensureRuntime(sandbox: Sandbox): Promise<void> {
-    await sandbox.commands.run("bash -lc 'if [ ! -f /tmp/chusky-xvfb.pid ] || ! kill -0 $(cat /tmp/chusky-xvfb.pid) 2>/dev/null; then nohup Xvfb :99 -screen 0 1440x900x24 -ac >/tmp/chusky-xvfb.log 2>&1 & echo $! >/tmp/chusky-xvfb.pid; fi; if [ ! -f /tmp/chusky-fluxbox.pid ] || ! kill -0 $(cat /tmp/chusky-fluxbox.pid) 2>/dev/null; then DISPLAY=:99 nohup fluxbox >/tmp/chusky-fluxbox.log 2>&1 & echo $! >/tmp/chusky-fluxbox.pid; fi; if [ ! -f /tmp/chusky-browser.pid ] || ! kill -0 $(cat /tmp/chusky-browser.pid) 2>/dev/null; then DISPLAY=:99 nohup node /app/browser-agent.mjs --server >/tmp/chusky-browser.log 2>&1 & echo $! >/tmp/chusky-browser.pid; fi'", { background: true, requestTimeoutMs: config.e2bRequestTimeoutMs });
+    const displayEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
+    const startIfMissing = async (command: string) => {
+      await sandbox.commands.run(command, {
+        envs: displayEnv,
+        requestTimeoutMs: config.e2bRequestTimeoutMs,
+      });
+    };
+    // Keep each long-lived process in its own command. E2B can report a
+    // nested background shell as exit status 2 even when one child started;
+    // splitting the launches makes startup observable and idempotent.
+    await startIfMissing("mkdir -p /tmp/chusky-runtime && chmod 700 /tmp/chusky-runtime");
+    await startIfMissing("if [ ! -f /tmp/chusky-xvfb.pid ] || ! kill -0 $(cat /tmp/chusky-xvfb.pid) 2>/dev/null; then nohup Xvfb :99 -screen 0 1440x900x24 -ac >/tmp/chusky-xvfb.log 2>&1 & echo $! >/tmp/chusky-xvfb.pid; fi");
+    await startIfMissing("if [ ! -f /tmp/chusky-fluxbox.pid ] || ! kill -0 $(cat /tmp/chusky-fluxbox.pid) 2>/dev/null; then nohup fluxbox >/tmp/chusky-fluxbox.log 2>&1 & echo $! >/tmp/chusky-fluxbox.pid; fi");
+    await startIfMissing("if [ ! -f /tmp/chusky-browser.pid ] || ! kill -0 $(cat /tmp/chusky-browser.pid) 2>/dev/null; then nohup node /app/browser-agent.mjs --server >/tmp/chusky-browser.log 2>&1 & echo $! >/tmp/chusky-browser.pid; fi");
     let lastError = "browser daemon did not become ready";
     for (let attempt = 0; attempt < 24; attempt += 1) {
-      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:8765/health').then(async r => { if (!r.ok) process.exit(1); await r.text(); }).catch(() => process.exit(2))\"", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
-      if (probe.exitCode === 0) return;
+      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:8765/health').then(async r => { console.log(r.ok ? 'ready' : 'not-ready'); await r.text(); }).catch(() => console.log('not-ready'))\"", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).at(-1) === "ready") return;
       lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
       await new Promise((resolve) => setTimeout(resolve, 250));
     }

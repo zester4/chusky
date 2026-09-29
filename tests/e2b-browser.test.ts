@@ -8,6 +8,7 @@ const root = process.cwd();
 const templateDockerfile = readFileSync(resolve(root, "e2b", "browser-template", "Dockerfile"), "utf8");
 const browserAgent = readFileSync(resolve(root, "e2b", "browser-template", "browser-agent.mjs"), "utf8");
 const browserClient = readFileSync(resolve(root, "e2b", "browser-template", "browser-client.mjs"), "utf8");
+const browserEngine = readFileSync(resolve(root, "src", "lib", "e2b", "browser.ts"), "utf8");
 const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.ts"), "utf8");
 const envExample = readFileSync(resolve(root, ".env.example"), "utf8");
 const nativeTools = readFileSync(resolve(root, "src", "nativeTools.ts"), "utf8");
@@ -38,6 +39,17 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /safeHttpUrl/);
   assert.match(browserAgent, /context\.route/);
   assert.doesNotMatch(browserAgent, /console\.log\([^\n]*(request\.(username|password)|cookie|token)\b/i);
+});
+
+test("E2B runtime starts display and browser services through separate idempotent commands", () => {
+  assert.ok(browserEngine.includes('const displayEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };'));
+  assert.match(browserEngine, /startIfMissing\("mkdir -p \/tmp\/chusky-runtime/);
+  assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-xvfb\.pid \]/);
+  assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-fluxbox\.pid \]/);
+  assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-browser\.pid \]/);
+  assert.match(browserEngine, /console\.log\(r\.ok \? 'ready' : 'not-ready'\)/);
+  assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
+  assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
 });
 
 test("E2B template includes the desktop handoff dependencies", () => {

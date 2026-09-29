@@ -102,6 +102,8 @@ test("vault audit records retain identifiers and keys only, never raw values", (
 test("browser intent classification treats ambiguous and high-impact controls conservatively", () => {
   assert.equal(classifyBrowserIntent({ label: "Subscribe to Pro" }), "place_order");
   assert.equal(classifyBrowserIntent({ label: "Export account statement" }), "download_sensitive");
+  assert.equal(classifyBrowserIntent({ label: "Continue" }), "browse");
+  assert.equal(classifyBrowserIntent({ label: "Next" }), "browse");
   assert.equal(classifyBrowserIntent({ label: "Confirm" }), "unknown");
   const plan = createBrowserOperationPlan("Prepare the cart and stop before payment", "https://shop.example.com");
   assert.equal(plan.requiresApproval, false);

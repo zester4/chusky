@@ -128,6 +128,8 @@ test("owner-private runs keep routine actions direct and preserve high-impact ap
   ] as Array<[string, Record<string, unknown>]>) {
     assert.equal(requiresToolApproval(slug, args, false, true), true, `${slug} must pause before deleting`);
   }
+  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "unknown" }, false, true), false);
+  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "place_order" }, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { text: "Update" } }, false, true), false);
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "GITHUB_PUSH_COMMITS", arguments: {} }, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE", { toolSlug: "GITHUB_DELETE_REPOSITORY", arguments: {} }, false, true), true);
