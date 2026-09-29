@@ -97,6 +97,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Vault login now follows a bounded multi-step form state machine; CAPTCHA, 2FA, passkeys, SSO, and other human-only challenges preserve the same E2B session for a short-lived private handoff and verified resume.",
     "Routine browsing stays autonomous; private-origin checks, session leases, credential isolation, and exact approval or block rules for uploads, sensitive actions, and account changes remain enforced.",
   ],
+  webBotAuth: [
+    "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
+    "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",
+    "Web Bot Auth identifies Chusky transparently but does not bypass CAPTCHA, site policies, authentication, regional controls, or guarantee universal website access.",
+  ],
 } as const;
 
 export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;

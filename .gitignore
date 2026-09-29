@@ -4,6 +4,7 @@ sdk/dist/
 .env
 .env.local
 .env.*
+.web-bot-auth.env
 token.enc
 !.env.example
 *.log

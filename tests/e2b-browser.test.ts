@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { chuckTools } from "../src/agentTools.js";
+import { E2B_BROWSER_DENY_OUT_CIDRS } from "../src/lib/e2b/networkPolicy.js";
 
 const root = process.cwd();
 const templateDockerfile = readFileSync(resolve(root, "e2b", "browser-template", "Dockerfile"), "utf8");
 const browserAgent = readFileSync(resolve(root, "e2b", "browser-template", "browser-agent.mjs"), "utf8");
 const browserClient = readFileSync(resolve(root, "e2b", "browser-template", "browser-client.mjs"), "utf8");
 const browserEngine = readFileSync(resolve(root, "src", "lib", "e2b", "browser.ts"), "utf8");
+const browserNetworkPolicy = readFileSync(resolve(root, "src", "lib", "e2b", "networkPolicy.ts"), "utf8");
 const liveSmoke = readFileSync(resolve(root, "scripts", "e2b-browser-live-smoke.ts"), "utf8");
 const envExample = readFileSync(resolve(root, ".env.example"), "utf8");
 const nativeTools = readFileSync(resolve(root, "src", "nativeTools.ts"), "utf8");
@@ -38,7 +40,11 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /screenshot/);
   assert.match(browserAgent, /server\.listen\(8765,\s*"127\.0\.0\.1"\)/);
   assert.match(browserAgent, /safeHttpUrl/);
-  assert.match(browserAgent, /context\.route/);
+  assert.match(browserAgent, /Fetch\.enable/);
+  assert.match(browserAgent, /Fetch\.requestPaused/);
+  assert.match(browserAgent, /createWebBotAuthHeaders/);
+  assert.match(browserAgent, /delete browserEnv\.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64/);
+  assert.doesNotMatch(browserAgent, /context\.route/);
   assert.doesNotMatch(browserAgent, /console\.log\([^\n]*(request\.(username|password)|cookie|token)\b/i);
 });
 
@@ -63,7 +69,8 @@ test("E2B template includes the desktop handoff dependencies", () => {
   assert.match(templateDockerfile, /xvfb fluxbox x11vnc novnc/);
   assert.match(templateDockerfile, /dpkg-query -W novnc \| cut -f2/);
   assert.match(templateDockerfile, /\/usr\/share\/novnc\/package\.json/);
-  assert.match(templateDockerfile, /COPY browser-client\.mjs/);
+  assert.match(templateDockerfile, /COPY browser-agent\.mjs browser-client\.mjs web-bot-auth\.mjs/);
+  assert.match(templateDockerfile, /npm ci --omit=dev/);
 });
 
 test("E2B browser configuration is opt-in and exposes the backend-neutral browser slug", () => {
@@ -75,6 +82,17 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
   assert.ok(browserTool);
   assert.doesNotMatch(browserTool.function.description, /Daytona browser/i);
+});
+
+test("E2B network deny list excludes API-rejected CIDRs and is shared with live smoke", () => {
+  assert.match(browserEngine, /denyOut: \[\.\.\.E2B_BROWSER_DENY_OUT_CIDRS\]/);
+  assert.match(liveSmoke, /denyOut: \[\.\.\.E2B_BROWSER_DENY_OUT_CIDRS\]/);
+  assert.deepEqual([...E2B_BROWSER_DENY_OUT_CIDRS], [
+    "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+    "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+    "224.0.0.0/4", "240.0.0.0/4", "::1/128", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8",
+  ]);
+  assert.doesNotMatch(browserNetworkPolicy, /"(?:0\.0\.0\.0\/8|::\/128|::ffff:0:0\/96)"/);
 });
 
 test("legacy Daytona vault identities cannot hijack configured E2B browser work", () => {

@@ -7,8 +7,10 @@ import { redactBrowserText } from "../../vault/browserObservation.js";
 import { assertE2BBrowserHandoffAllowsAction, normalizeE2BBrowserFileName, normalizeE2BPageContent } from "./contracts.js";
 import { E2BBrowserError } from "./errors.js";
 import { assertSafeBrowserUrl } from "./urlSafety.js";
+import { E2B_BROWSER_DENY_OUT_CIDRS } from "./networkPolicy.js";
 import { deleteR2Object, putR2Object, r2Configured, readR2Object } from "../../lib/storage/r2.js";
 import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
+import { webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthKeyId, webBotAuthSandboxEnvironment, webBotAuthSigningEnabled } from "../../webBotAuth.js";
 
 const MAX_OUTPUT = 16_000;
 const MAX_NODES = 60;
@@ -16,11 +18,6 @@ const NODE_TTL_MS = 2 * 60_000;
 const MAX_BROWSER_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
 const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const PRIVATE_EGRESS_CIDRS = [
-  "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
-  "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
-  "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8",
-];
 const locks = new Map<number, Promise<void>>();
 
 function boundedText(value: unknown, field: string, max: number): string {
@@ -88,9 +85,13 @@ export class E2BBrowserEngine {
 
   private async sandbox(userId: number, create = true): Promise<{ sandbox: Sandbox; record: E2BBrowserRecord }> {
     if (!config.e2bEnabled || !config.e2bApiKey) throw new E2BBrowserError("E2B browser is disabled. Configure E2B_ENABLED=true and E2B_API_KEY.");
+    if (config.webBotAuthSignRequests && !webBotAuthSigningEnabled()) throw new E2BBrowserError(webBotAuthConfigurationIssue() ?? "Web Bot Auth signing is enabled but its configuration is invalid.");
     const prior = await this.record(userId);
     const now = Date.now();
     if (prior?.sandboxId && prior.expiresAt > now) {
+      const authConfigured = webBotAuthSigningEnabled();
+      const expectedKeyId = authConfigured ? webBotAuthKeyId() : undefined;
+      if (authConfigured && prior.webBotAuthKeyId !== expectedKeyId) throw new E2BBrowserError("Web Bot Auth identity changed for this retained browser. Stop and start the browser to safely load the new identity.");
       try {
         const sandbox = await Sandbox.connect(prior.sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
         await sandbox.setTimeout(config.e2bTimeoutMs, { requestTimeoutMs: config.e2bRequestTimeoutMs });
@@ -109,10 +110,11 @@ export class E2BBrowserEngine {
       timeoutMs: config.e2bTimeoutMs,
       requestTimeoutMs: config.e2bRequestTimeoutMs,
       allowInternetAccess: config.e2bAllowInternetAccess,
-      network: { allowPublicTraffic: true, denyOut: PRIVATE_EGRESS_CIDRS },
+      network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
+      envs: webBotAuthSandboxEnvironment(),
       metadata: { app: "chusky", surface: "browser", owner: String(userId) },
     });
-    const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, createdAt: now, updatedAt: now, expiresAt };
+    const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, webBotAuthKeyId: webBotAuthSigningEnabled() ? webBotAuthKeyId() : undefined, createdAt: now, updatedAt: now, expiresAt };
     await this.ensureRuntime(sandbox);
     await this.save(userId, next);
     return { sandbox, record: next };
@@ -152,9 +154,10 @@ export class E2BBrowserEngine {
   }
 
   private async run(sandbox: Sandbox, request: Record<string, unknown>): Promise<E2BCommandResult> {
+    const browserRequest = { ...request, webBotAuthEnabled: webBotAuthSigningEnabled() };
     const result = await sandbox.commands.run("node /app/browser-client.mjs", {
       cwd: "/app",
-      envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(request) },
+      envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(browserRequest) },
       timeoutMs: Math.min(config.e2bRequestTimeoutMs, 60_000),
       requestTimeoutMs: config.e2bRequestTimeoutMs,
     });

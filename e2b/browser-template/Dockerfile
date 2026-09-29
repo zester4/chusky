@@ -12,11 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && printf '{"name":"noVNC","version":"%s"}' "$(dpkg-query -W novnc | cut -f2)" > /usr/share/novnc/package.json \
     && rm -rf /var/lib/apt/lists/*
 
-COPY package.json ./package.json
-RUN npm install --omit=dev --ignore-scripts && npx playwright install --with-deps chromium
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npx playwright install --with-deps chromium
 
-COPY browser-agent.mjs /app/browser-agent.mjs
-COPY browser-client.mjs /app/browser-client.mjs
+COPY browser-agent.mjs browser-client.mjs web-bot-auth.mjs ./
 RUN chmod -R a+rX /opt/ms-playwright /app \
     && useradd --create-home --shell /bin/bash chusky \
     && mkdir -p /home/chusky/.cache/chusky-browser \

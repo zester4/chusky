@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= "/opt/ms-playwright";
 const { chromium } = await import("playwright");
+const { createWebBotAuthHeaders } = await import("./web-bot-auth.mjs");
+import { createPrivateKey, createHash, sign as cryptoSign } from "node:crypto";
 
 const MAX_MATCHES = 60;
 const ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "menuitem", "option", "tab", "heading", "listbox", "img", "switch", "file"];
@@ -22,6 +24,75 @@ const dnsCache = new Map();
 const downloaded = new Map();
 const downloadWaiters = [];
 const recordings = new Map();
+const signatureDirectory = process.env.CHUSKY_WEB_BOT_AUTH_DIRECTORY_URL || "";
+const signingKeyB64 = process.env.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64 || "";
+let webBotAuthActive = Boolean(signatureDirectory && signingKeyB64);
+let webBotAuthSigner;
+
+async function getWebBotAuthSigner() {
+  if (webBotAuthSigner) return webBotAuthSigner;
+  if (!signatureDirectory || !signingKeyB64) throw new Error("Web Bot Auth key is not configured in this browser sandbox");
+  const privateKey = createPrivateKey({ key: Buffer.from(signingKeyB64, "base64"), format: "der", type: "pkcs8" });
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Web Bot Auth requires an Ed25519 key");
+  const jwk = privateKey.export({ format: "jwk" });
+  const keyId = createHash("sha256").update(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x })).digest("base64url");
+  webBotAuthSigner = {
+    algorithm: "ed25519",
+    keyId,
+    sign: (data) => cryptoSign(null, Buffer.from(data), privateKey),
+  };
+  return webBotAuthSigner;
+}
+
+async function interceptPageRequests(context, page) {
+  if (page.isClosed() || page.__chuskyFetchInterception) return;
+  const cdp = await context.newCDPSession(page);
+  page.__chuskyFetchInterception = cdp;
+  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });
+  cdp.on("Fetch.requestPaused", async (event) => {
+    const requestId = event.requestId;
+    let url;
+    try { url = new URL(event.request.url); } catch {
+      await cdp.send("Fetch.continueRequest", { requestId }).catch(() => {});
+      return;
+    }
+    if (!/^https?:$/.test(url.protocol)) {
+      await cdp.send("Fetch.continueRequest", { requestId }).catch(() => {});
+      return;
+    }
+    try {
+      await safeHttpUrl(url.toString(), true);
+    } catch {
+      await cdp.send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }).catch(() => {});
+      return;
+    }
+
+    const originalHeaders = Object.entries(event.request.headers || {})
+      .filter(([name]) => !["signature", "signature-input", "signature-agent"].includes(name.toLowerCase()))
+      .map(([name, value]) => ({ name, value: String(value) }));
+    if (!webBotAuthActive || url.protocol !== "https:") {
+      await cdp.send("Fetch.continueRequest", { requestId, headers: originalHeaders }).catch(() => {});
+      return;
+    }
+    try {
+      const headers = await createWebBotAuthHeaders({
+        url: url.toString(),
+        method: event.request.method,
+        headers: originalHeaders,
+      }, {
+        ...await getWebBotAuthSigner(),
+        directoryUrl: signatureDirectory,
+      });
+      await cdp.send("Fetch.continueRequest", {
+        requestId,
+        headers,
+      });
+    } catch {
+      // Do not silently send unsigned requests when identity signing is enabled.
+      await cdp.send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }).catch(() => {});
+    }
+  });
+}
 
 function safeFileName(value) {
   const name = path.basename(String(value ?? "").replaceAll("\\", "/"))
@@ -527,24 +598,19 @@ async function vaultLogin(context, request) {
 }
 
 async function start() {
-  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: { ...process.env, DISPLAY } });
+  const browserEnv = { ...process.env, DISPLAY };
+  delete browserEnv.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64;
+  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: browserEnv });
   await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
   await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
-  context.on("page", attachDownloadListener);
-  for (const page of context.pages()) attachDownloadListener(page);
-  await context.route("**/*", async (route) => {
-    const request = route.request();
-    const url = request.url();
-    let parsed;
-    try { parsed = new URL(url); } catch { return route.continue(); }
-    if (!/^https?:$/.test(parsed.protocol)) return route.continue();
-    try {
-      await safeHttpUrl(url, true);
-      return route.continue();
-    } catch {
-      return route.abort("blockedbyclient");
-    }
+  context.on("page", (page) => {
+    attachDownloadListener(page);
+    void interceptPageRequests(context, page);
   });
+  for (const page of context.pages()) {
+    attachDownloadListener(page);
+    await interceptPageRequests(context, page);
+  }
   if (!context.pages().length) await context.newPage();
   const pageState = { activeIndex: 0 };
   const server = http.createServer(async (incoming, response) => {
@@ -554,6 +620,7 @@ async function start() {
     incoming.on("end", async () => {
       try {
         const request = JSON.parse(body);
+        if (typeof request.webBotAuthEnabled === "boolean") webBotAuthActive = request.webBotAuthEnabled && Boolean(signatureDirectory && signingKeyB64);
         let output;
         if (request.action === "vault_login") output = await vaultLogin(context, request);
         else if (request.action === "smoke_fixture") {

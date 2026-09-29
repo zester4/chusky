@@ -338,6 +338,13 @@ export const config = {
   e2bAllowInternetAccess: optional("E2B_ALLOW_INTERNET", "true") === "true",
   e2bTimeoutMs: boundedInt("E2B_TIMEOUT_MS", 900_000, 60_000, 86_400_000),
   e2bRequestTimeoutMs: boundedInt("E2B_REQUEST_TIMEOUT_MS", 120_000, 5_000, 300_000),
+  // Cloudflare Web Bot Auth identity; the private key is used only by the
+  // trusted E2B browser process and never enters page or model context.
+  webBotAuthEnabled: optional("WEB_BOT_AUTH_ENABLED", "false") === "true",
+  // Keep request signing off until Cloudflare approves the directory identity.
+  webBotAuthSignRequests: optional("WEB_BOT_AUTH_SIGN_REQUESTS", "false") === "true",
+  webBotAuthDirectoryUrl: optional("WEB_BOT_AUTH_DIRECTORY_URL", ""),
+  webBotAuthPrivateKeyB64: optional("WEB_BOT_AUTH_PRIVATE_KEY_B64", ""),
 
   // ── Chusky's identity & system prompt ─────────────────────────────
   // SYSTEM_PROMPT customizes persona and operating guidance. The runtime

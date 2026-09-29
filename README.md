@@ -696,6 +696,26 @@ private noVNC handoff. Daytona continues
 to provide files, artifacts, terminals, and desktop Computer Use; it is not the
 automated browser backend.
 
+Cloudflare Web Bot Auth is an opt-in, transparent identity signal for browser
+requests. Roll it out in two stages. First generate a key with
+`npm run web-bot-auth:generate-key`, set `WEB_BOT_AUTH_ENABLED=true`,
+`WEB_BOT_AUTH_DIRECTORY_URL`, and `WEB_BOT_AUTH_PRIVATE_KEY_B64`, while keeping
+`WEB_BOT_AUTH_SIGN_REQUESTS=false`. Deploy and verify the signed, public-only
+Ed25519 key directory at `/.well-known/http-message-signatures-directory`, then
+submit the directory URL to Cloudflare's BotBase review. During this stage the
+private key is not sent to E2B and browser requests remain unsigned. Only after
+Cloudflare approves Chusky, set `WEB_BOT_AUTH_SIGN_REQUESTS=true` and deploy
+again. The trusted E2B browser then signs each public HTTPS request with RFC
+9421 headers; redirect hops are revalidated by the existing URL safety guard
+and signed for their destination authority. The private key is never passed to
+page JavaScript, model context, tool arguments, history, or logs. This does not
+bypass CAPTCHA or site policies and does not guarantee that every website will
+permit access. After enabling, disabling, or rotating signing, stop and restart
+retained browser sandboxes so the old process environment is removed; toggling
+off stops signing on subsequent commands but does not erase a key from an
+already-running sandbox. Chusky's retained records store only the public key
+thumbprint.
+
 Build the template with `npm run e2b:template:build`, then configure
 `E2B_API_KEY`, `E2B_BROWSER_TEMPLATE`, and `E2B_ENABLED=true`. The template
 installs Chromium with Playwright into `/opt/ms-playwright`, makes it readable
@@ -1275,6 +1295,10 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `E2B_ALLOW_INTERNET` | automated browser | `true` | Allow public web access; the browser still blocks local, metadata, private, and reserved network targets |
 | `E2B_TIMEOUT_MS` | automated browser | `900000` | Owner sandbox lifetime, bounded to 60 seconds–24 hours |
 | `E2B_REQUEST_TIMEOUT_MS` | automated browser | `120000` | E2B command/request timeout |
+| `WEB_BOT_AUTH_ENABLED` | browser identity | `false` | Publish the signed Web Bot Auth directory; does not enable request signing |
+| `WEB_BOT_AUTH_SIGN_REQUESTS` | browser identity | `false` | Sign browser requests only after Cloudflare approves the identity |
+| `WEB_BOT_AUTH_DIRECTORY_URL` | browser identity | — | Exact public HTTPS URL ending in `/.well-known/http-message-signatures-directory` |
+| `WEB_BOT_AUTH_PRIVATE_KEY_B64` | browser identity | — | Unique Ed25519 PKCS#8 DER private key, base64 encoded; server/E2B process only |
 | `LINK_AGENT_WALLET_ENABLED` | Stripe Link Agent Wallet | `false` | Enable owner-controlled Link spend requests |
 | `LINK_CLIENT_ID` | Stripe Link OAuth | — | Confidential Link OAuth client ID |
 | `LINK_CLIENT_SECRET` | Stripe Link OAuth | — | Server-only Link OAuth client secret |

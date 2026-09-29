@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Sandbox } from "e2b";
+import { E2B_BROWSER_DENY_OUT_CIDRS } from "../src/lib/e2b/networkPolicy.js";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -18,7 +19,7 @@ async function main() {
       timeoutMs: 300_000,
       requestTimeoutMs: 120_000,
       allowInternetAccess: process.env.E2B_ALLOW_INTERNET !== "false",
-      network: { allowPublicTraffic: true },
+      network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
       metadata: { app: "chusky", purpose: "disposable-browser-integration-smoke" },
     });
     const run = async (label: string, command: string, options: Record<string, unknown> = {}) => {

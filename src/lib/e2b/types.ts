@@ -21,6 +21,8 @@ export type E2BBrowserNode = {
 
 export type E2BBrowserRecord = {
   sandboxId: string;
+  /** RFC 7638 thumbprint of the Web Bot Auth key loaded at sandbox creation. */
+  webBotAuthKeyId?: string;
   sessionId?: string;
   lastUrl?: string;
   title?: string;

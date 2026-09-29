@@ -112,6 +112,14 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
+test("Web Bot Auth upgrade preset describes identity without claiming access bypass", () => {
+  const bullets = getAgentUpgradePreset("webBotAuth");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /separate RFC 9421 Ed25519 request-signing switch/);
+  assert.match(bullets[1], /remains off during Cloudflare review/);
+  assert.match(bullets[2], /does not bypass CAPTCHA/);
+});
+
 test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
@@ -161,13 +169,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the E2B browser capability release", async () => {
+test("current upgrade manifest announces the Web Bot Auth capability release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.27.0");
-  assert.equal(notice?.version, "4.27.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /bounded page text/);
-  assert.match(formatAgentUpgradeNotice(notice!), /multi-step form state machine/);
-  assert.match(formatAgentUpgradeNotice(notice!), /same E2B session/);
+  assert.equal(notice?.id, "release-4.28.0");
+  assert.equal(notice?.version, "4.28.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Cloudflare Web Bot Auth identity/);
+  assert.match(formatAgentUpgradeNotice(notice!), /separate RFC 9421 Ed25519 request-signing switch/);
+  assert.match(formatAgentUpgradeNotice(notice!), /does not bypass CAPTCHA/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {
