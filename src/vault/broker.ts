@@ -1,7 +1,7 @@
 import { leaseVaultCredential, recordVaultSession } from "./vault.js";
 import type { BrowserPlaybookRecord } from "./browserOps.js";
 
-export type TrustedBrowserLogin = { workspaceId?: (userId: number) => Promise<string>; login(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: BrowserPlaybookRecord["login"] }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> };
+export type TrustedBrowserLogin = { workspaceId?: (userId: number) => Promise<string>; login(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: BrowserPlaybookRecord["login"] }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean; handoffOrigin?: string }> };
 
 /** The only secret-bearing operation in Railway. Its return value is always secret-free. */
 export async function loginWithVault(userId: number, service: string, browser: TrustedBrowserLogin, accountAlias = "default", origin?: string, loginRecipe?: BrowserPlaybookRecord["login"]) {
@@ -12,7 +12,7 @@ export async function loginWithVault(userId: number, service: string, browser: T
     const result = await browser.login(userId, { ...credential, ...secret, ...(loginRecipe ? { loginRecipe } : {}) });
     const status = result.needsUserInteraction ? "awaiting_user_interaction" : result.authenticated ? "authenticated" : "needs_reauth";
     const session = await recordVaultSession(userId, { credentialId: credential.id, service: credential.service, accountAlias: credential.accountAlias, origin: credential.origin, workspaceId: result.workspaceId, status, lastAuthenticatedAt: result.authenticated ? Date.now() : undefined, lastUsedAt: Date.now() });
-    return { authenticated: result.authenticated, service: credential.service, origin: credential.origin, session, needsUserInteraction: Boolean(result.needsUserInteraction) };
+    return { authenticated: result.authenticated, service: credential.service, origin: credential.origin, session, needsUserInteraction: Boolean(result.needsUserInteraction), ...(result.handoffOrigin ? { handoffOrigin: result.handoffOrigin } : {}), credentialId: credential.id };
   } finally {
     secret.username = ""; secret.password = "";
     credential.username = ""; credential.password = "";

@@ -31,6 +31,7 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /dragTo/);
   assert.match(browserAgent, /challengeFor/);
   assert.match(browserAgent, /headless: false/);
+  assert.match(browserAgent, /const item = await startRecording\(request\.durationSeconds\)/);
   assert.match(browserClient, /127\.0\.0\.1:8765\/command/);
   assert.match(liveSmoke, /browser-agent\.mjs --server/);
   assert.match(liveSmoke, /browser-client\.mjs/);
@@ -52,12 +53,16 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
   assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);
   assert.match(browserEngine, /websockify --web=\/usr\/share\/novnc 6080 localhost:5900/);
+  assert.match(browserEngine, /vnc\.html#autoconnect=1&resize=scale&password=/);
+  assert.doesNotMatch(browserEngine, /vnc\.html\?autoconnect=1&resize=scale&password=/);
   assert.match(browserEngine, /127\.0\.0\.1:6080\/vnc\.html/);
   assert.doesNotMatch(browserEngine, /pkill -f \\"x11vnc\.\*-rfbport 5900/);
 });
 
 test("E2B template includes the desktop handoff dependencies", () => {
   assert.match(templateDockerfile, /xvfb fluxbox x11vnc novnc/);
+  assert.match(templateDockerfile, /dpkg-query -W novnc \| cut -f2/);
+  assert.match(templateDockerfile, /\/usr\/share\/novnc\/package\.json/);
   assert.match(templateDockerfile, /COPY browser-client\.mjs/);
 });
 

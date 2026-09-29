@@ -1,11 +1,11 @@
 {
-  "id": "release-4.26.0",
-  "version": "4.26.0",
+  "id": "release-4.27.0",
+  "version": "4.27.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added opt-in Jev native-tool routing that selects a compact, task-relevant set of CHUCK_* schemas instead of sending the full catalog on every model turn.",
-    "Native-tool metadata is bounded and private before Jev sees it; full schemas, argument validation, account scope, execution, and approvals remain in Chusky's trusted runtime.",
-    "Turning Jev off, leaving native routing disabled, using shadow mode, or hitting a timeout or low-confidence decision preserves the existing full native-tool behavior."
+    "Expanded the owner-scoped E2B Playwright browser with bounded page text, accessible navigation and forms, tabs, scrolling, drag/drop, screenshots, and private upload, download, recording, storage, and retrieval flows.",
+    "Vault login now follows a bounded multi-step form state machine; CAPTCHA, 2FA, passkeys, SSO, and other human-only challenges preserve the same E2B session for a short-lived private handoff and verified resume.",
+    "Routine browsing stays autonomous; private-origin checks, session leases, credential isolation, and exact approval or block rules for uploads, sensitive actions, and account changes remain enforced."
   ],
-  "createdAt": "2026-09-28T22:13:52.445Z"
+  "createdAt": "2026-09-29T11:20:05.723Z"
 }

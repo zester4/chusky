@@ -32,51 +32,11 @@ async function main(): Promise<void> {
       45,
     );
     const computer = await engine.computer(userId, { action: "status" }) as { status?: string };
-    const browser = await engine.browser(userId, { action: "state", maxDepth: 2 }) as { action?: string; loadState?: string; sandboxId?: string };
     const desktopBefore = await engine.computer(userId, { action: "screenshot" }) as { base64?: string };
     if (process.env.DAYTONA_SAVE_SCREENSHOT === "1" && desktopBefore.base64) writeFileSync(".daytona-live-desktop.jpg", Buffer.from(desktopBefore.base64, "base64"));
-    const browserOpen = await engine.browser(userId, { action: "open", url: "https://api.github.com" }) as { opened?: string; observationMethod?: string; verificationRequired?: boolean; inspection?: unknown };
     const screenshot = await engine.computer(userId, { action: "screenshot" }) as { __daytonaScreenshot?: boolean; sizeBytes?: number };
-    if (!computer || typeof computer !== "object" || !browser || browser.action !== "state" || browserOpen.opened !== "https://api.github.com" || browserOpen.verificationRequired !== true || !screenshot.__daytonaScreenshot) {
-      throw new Error("Live Daytona Computer Use/browser verification failed.");
-    }
-    const browserPages: Array<Record<string, unknown>> = [];
-    for (const url of ["https://api.github.com", "https://example.com", "https://www.wikipedia.org"]) {
-      try {
-        const opened = await engine.browser(userId, { action: "open", url }) as { opened?: string; observedUrl?: string; observationMethod?: string; loadState?: string; inspection?: unknown };
-        const pageScreenshot = await engine.browser(userId, { action: "screenshot" }) as { __daytonaScreenshot?: boolean; sizeBytes?: number };
-        if (process.env.DAYTONA_SAVE_SCREENSHOT === "1" && url === "https://example.com" && (pageScreenshot as { base64?: string }).base64) writeFileSync(".daytona-example.jpg", Buffer.from((pageScreenshot as { base64: string }).base64, "base64"));
-        browserPages.push({
-          requested: url,
-          opened: opened.opened,
-          observedUrl: opened.observedUrl,
-          observationMethod: opened.observationMethod,
-          loadState: opened.loadState,
-          screenshotBytes: pageScreenshot.sizeBytes ?? 0,
-          inspectionAvailable: Boolean(opened.inspection && typeof opened.inspection === "object" && !("unavailable" in (opened.inspection as Record<string, unknown>))),
-        });
-      } catch (error) {
-        browserPages.push({ requested: url, error: String(error).slice(0, 300) });
-      }
-    }
-    let clickProbe: Record<string, unknown> = { status: "not_run" };
-    let clickMatches: unknown;
-    try {
-      await engine.browser(userId, { action: "open", url: "https://github.com" });
-      const found = await engine.browser(userId, { action: "find", role: "link", name: "Sign in", nameMatch: "substring", limit: 3 }) as { matches?: Array<{ id?: string }> };
-      const matches = Array.isArray(found.matches) ? found.matches : [];
-      clickMatches = matches.slice(0, 3);
-      const firstMatch = matches.find((match) => match && typeof match === "object") as { id?: string; nodeId?: string } | undefined;
-      const nodeId = firstMatch?.nodeId ?? firstMatch?.id;
-      if (!nodeId) {
-        clickProbe = { status: "no_accessible_link", matches: matches.slice(0, 3) };
-      } else {
-        const invoked = await engine.browser(userId, { action: "invoke", nodeId, nodeAction: "click" });
-        const after = await engine.browser(userId, { action: "state", maxDepth: 2 }) as { observedUrl?: string; observationMethod?: string };
-        clickProbe = { status: "clicked", invoked: Boolean(invoked), observedUrl: after.observedUrl, observationMethod: after.observationMethod };
-      }
-    } catch (error) {
-      clickProbe = { status: "error", error: String(error).slice(0, 300), matches: clickMatches };
+    if (!computer || typeof computer !== "object" || !screenshot.__daytonaScreenshot) {
+      throw new Error("Live Daytona computer screenshot verification failed.");
     }
     await engine.writeFile(userId, probePath, probeContent);
     const read = await engine.readFile(userId, probePath, 200);
@@ -84,7 +44,7 @@ async function main(): Promise<void> {
     if (read.content !== probeContent || !files.some((file) => file.path === probePath)) {
       throw new Error("Live Daytona create/write/read/list verification failed.");
     }
-    const probes: Array<{ type: "pdf" | "docx" | "presentation" | "spreadsheet"; extension: "pdf" | "docx" | "pptx" | "xlsx"; artifact: any; signature: (data: Buffer) => boolean }> = process.env.DAYTONA_BROWSER_ONLY === "1" ? [] : [
+    const probes: Array<{ type: "pdf" | "docx" | "presentation" | "spreadsheet"; extension: "pdf" | "docx" | "pptx" | "xlsx"; artifact: any; signature: (data: Buffer) => boolean }> = [
       {
         type: "pdf",
         extension: "pdf",
@@ -142,7 +102,7 @@ async function main(): Promise<void> {
       }
       artifactResults[probe.extension] = "create+qa+register+download passed";
     }
-    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", sandboxPolicy: { networkBlockAll: workspace.networkBlockAll, domainAllowList: workspace.domainAllowList || "" }, networkProbe: { exitCode: networkProbe.exitCode, output: networkProbe.output }, computerUse: computer.status ?? "available", browserState: browser.loadState ?? "unknown", browserOpen: { requested: browserOpen.opened, observationMethod: browserOpen.observationMethod ?? "unknown", inspectionAvailable: Boolean(browserOpen.inspection && typeof browserOpen.inspection === "object" && !("unavailable" in (browserOpen.inspection as Record<string, unknown>))) }, browserPages, clickProbe, screenshotBytes: screenshot.sizeBytes ?? 0, writeReadList: "passed", artifacts: artifactResults, cleanup: "pending" }));
+    console.log(JSON.stringify({ liveDaytona: "passed", workspaceState: "created", sandboxPolicy: { networkBlockAll: workspace.networkBlockAll, domainAllowList: workspace.domainAllowList || "" }, networkProbe: { exitCode: networkProbe.exitCode, output: networkProbe.output }, computerUse: computer.status ?? "available", screenshotBytes: screenshot.sizeBytes ?? 0, writeReadList: "passed", artifacts: artifactResults, cleanup: "pending" }));
   } finally {
     if (created) await engine.workspace(userId, "delete");
   }

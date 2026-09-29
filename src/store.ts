@@ -22,7 +22,7 @@ import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
-import type { E2BBrowserRecord } from "./lib/e2b/types.js";
+import type { E2BBrowserFileRecord, E2BBrowserRecord } from "./lib/e2b/types.js";
 import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
 import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
 import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./reliability/providerSmoke.js";
@@ -175,6 +175,8 @@ export interface UserSession {
   daytonaWorkspaceId?: string;
   /** Owner-scoped automated E2B browser sandbox. Daytona remains the desktop backend. */
   e2bBrowser?: E2BBrowserRecord;
+  /** Private browser downloads and recordings; file bytes live in R2. */
+  browserFiles?: E2BBrowserFileRecord[];
   telegramChatId?: number;
   voiceReplies?: boolean;
   /** Per-account voices for the three live call transports, independent of Telegram audio replies. */
@@ -4221,8 +4223,22 @@ export async function getSession(uid: number): Promise<UserSession> {
   const browserHandoffs = Array.isArray(s.browserHandoffs) ? s.browserHandoffs.filter((item): item is BrowserHandoffRecord => {
     if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^bh_[A-Za-z0-9_-]{1,120}$/.test(item.id) || typeof item.workspaceId !== "string" || !item.workspaceId || typeof item.reason !== "string" || !["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(item.reason) || typeof item.status !== "string" || !["waiting", "awaiting_verification", "completed", "expired", "cancelled"].includes(item.status) || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt)) return false;
     if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
+    if (typeof item.credentialId === "string" && item.credentialId.length > 200) return false;
     return true;
   }).slice(-20) : [];
+  s.browserFiles = Array.isArray(s.browserFiles) ? s.browserFiles.flatMap((item): E2BBrowserFileRecord[] => {
+    if (!item || typeof item !== "object" || typeof item.id !== "string" || !/^bf_[A-Za-z0-9_-]{1,120}$/.test(item.id)
+      || typeof item.key !== "string" || !item.key.startsWith(`browser/${uid}/`) || item.key.length > 500
+      || typeof item.name !== "string" || !item.name.trim() || item.name.length > 120
+      || typeof item.contentType !== "string" || item.contentType.length > 120
+      || !Number.isSafeInteger(item.size) || item.size < 1 || item.size > 100 * 1024 * 1024
+      || (item.kind !== "download" && item.kind !== "recording")
+      || typeof item.sandboxId !== "string" || !item.sandboxId || item.sandboxId.length > 200
+      || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt) || item.expiresAt <= item.createdAt) return [];
+    return [{ id: item.id, key: item.key, name: item.name, contentType: item.contentType, size: item.size, kind: item.kind,
+      ...(typeof item.sourceId === "string" && item.sourceId.length <= 160 ? { sourceId: item.sourceId } : {}),
+      sandboxId: item.sandboxId, createdAt: item.createdAt, expiresAt: item.expiresAt }];
+  }).slice(-100) : [];
   s.contextNodes = Array.isArray(s.contextNodes) ? s.contextNodes.filter((item): item is ContextNodeRecord => Boolean(item) && typeof item === "object" && item.userId === uid && typeof item.id === "string").slice(-1000) : [];
   s.linkedWebSessionImports = Array.isArray(s.linkedWebSessionImports) ? s.linkedWebSessionImports.filter((item) => Boolean(item) && Number.isSafeInteger(item.sourceUserId) && item.sourceUserId > 0 && Number.isFinite(item.sourceUpdatedAt)).slice(-20).map((item) => ({
     sourceUserId: item.sourceUserId,
@@ -6595,6 +6611,7 @@ export async function saveBrowserHandoff(uid: number, record: BrowserHandoffReco
     workspaceId: record.workspaceId.slice(0, 200),
     ...(record.service ? { service: record.service.slice(0, 80) } : {}),
     ...(record.origin ? { origin: record.origin.slice(0, 300) } : {}),
+    ...(record.credentialId ? { credentialId: record.credentialId.slice(0, 200) } : {}),
   };
   s.browserHandoffs = [...(s.browserHandoffs ?? []).filter((item) => item.id !== safe.id), safe].slice(-20);
   await saveSession(uid, s);

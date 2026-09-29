@@ -821,6 +821,20 @@ async function sdkAgentOptions(body: RunBody, runId?: string, parentRunId?: stri
   for (const skill of skills) { try { const file = await readSkillFile(skill, "SKILL.md", 12000); if (file.content) blocks.push(`Trusted skill guidance (${skill}):\n${file.content}`); } catch { /* unknown skills are ignored; the run remains usable */ } }
   return { ...privateRun, ...(scopedOrganizationId ? { organizationId: scopedOrganizationId } : {}), ...(allow ? { toolAllow: allow } : {}), ...(deny ? { toolDeny: deny } : {}), ...(requireApproval ? { toolRequireApproval: requireApproval } : {}), ...limits, ...(blocks.length ? { instructions: blocks.join("\n\n").slice(0, 24000) } : {}), ...(runId ? { runId } : {}), ...(parentRunId ? { parentRunId } : {}) };
 }
+
+export function browserFileDownloadResponse(file: import("./lib/e2b/types.js").E2BBrowserFileRecord, bytes: Buffer, now = Date.now()): Response {
+  if (file.expiresAt <= now || bytes.byteLength !== file.size || bytes.byteLength < 1 || bytes.byteLength > 100 * 1024 * 1024) {
+    throw new Error("Browser file is expired or failed its size verification");
+  }
+  const filename = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "browser-file.bin";
+  return new Response(bytes, { headers: {
+    "Content-Type": file.contentType,
+    "Content-Length": String(bytes.byteLength),
+    "Content-Disposition": `attachment; filename="${filename}"`,
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+  } });
+}
 function validateRunPolicy(body: RunBody): string | undefined {
   const durations = new Set(["5m", "30m", "1h", "3h", "6h", "3d", "1w"]);
   const toolSlug = /^[A-Za-z][A-Za-z0-9_]{0,119}$/;
@@ -2375,7 +2389,21 @@ export function registerSdkApi(app: Hono): void {
   app.get("/v1/artifacts", async (c) => { const session = await getSession(sdkUser(c)!.userId); const type = c.req.query("type"); const items = (session.artifacts ?? []).filter((item) => !type || item.type === type); const result = page(items, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map(artifactView), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
   app.get("/v1/artifacts/:id", async (c) => { const artifact = (await getSession(sdkUser(c)!.userId)).artifacts?.find((item) => item.id === c.req.param("id")); return artifact ? c.json(artifactView(artifact)) : apiError(c, 404, "not_found", "Artifact not found."); });
   app.delete("/v1/artifacts/:id", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const index = (session.artifacts ?? []).findIndex((item) => item.id === c.req.param("id")); if (index < 0) return apiError(c, 404, "not_found", "Artifact not found."); session.artifacts!.splice(index, 1); await saveSession(owner.userId, session); return c.body(null, 204); });
-  app.get("/v1/artifacts/:id/download", async (c) => { try { const delivery = await daytonaEngine.streamArtifact(sdkUser(c)!.userId, c.req.param("id")); return new Response(Readable.toWeb(delivery.stream) as unknown as any, { headers: { "Content-Type": delivery.contentType, "Content-Length": String(delivery.size), "Content-Disposition": `attachment; filename="${delivery.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } }); } catch (error) { return apiError(c, 404, "artifact_unavailable", error instanceof Error ? error.message : "Artifact download unavailable."); } });
+  app.get("/v1/artifacts/:id/download", async (c) => {
+    const owner = sdkUser(c)!;
+    const id = c.req.param("id");
+    if (id.startsWith("bf_")) {
+      const file = (await getSession(owner.userId)).browserFiles?.find((item) => item.id === id && item.expiresAt > Date.now());
+      if (!file) return apiError(c, 404, "artifact_unavailable", "Browser file not found or expired.");
+      if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "Private browser file storage is not configured.");
+      try { return browserFileDownloadResponse(file, await readR2Object(file.key)); }
+      catch (error) { return apiError(c, 404, "artifact_unavailable", error instanceof Error ? error.message : "Browser file download unavailable."); }
+    }
+    try {
+      const delivery = await daytonaEngine.streamArtifact(owner.userId, id);
+      return new Response(Readable.toWeb(delivery.stream) as unknown as any, { headers: { "Content-Type": delivery.contentType, "Content-Length": String(delivery.size), "Content-Disposition": `attachment; filename="${delivery.name.replace(/[^a-zA-Z0-9._-]/g, "_")}"`, "Cache-Control": "private, max-age=300" } });
+    } catch (error) { return apiError(c, 404, "artifact_unavailable", error instanceof Error ? error.message : "Artifact download unavailable."); }
+  });
   app.get("/v1/videos", async (c) => { const data = (await listVideoJobs(sdkUser(c)!.userId)).map(videoView); return c.json({ data }); });
   app.post("/v1/videos", async (c) => { const body = await c.req.json().catch(() => ({})) as any; const prompt = String(body.prompt ?? "").trim(); const destination = ["telegram", "daytona", "both"].includes(body.destination) ? body.destination : "telegram"; if (!prompt || prompt.length > 4000) return apiError(c, 400, "invalid_video_request", "prompt is required and must be 4000 characters or fewer."); try { const result = await queueVideoWorkflow(sdkUser(c)!.userId, prompt, destination, body.workspacePath, { duration: body.duration, aspectRatio: body.aspectRatio, resolution: body.resolution, generateAudio: body.generateAudio }); const job = await getVideoJob(sdkUser(c)!.userId, result.jobId); return c.json(videoView(job), 202); } catch (error) { return apiError(c, 503, "video_unavailable", error instanceof Error ? error.message : "Video generation is unavailable."); } });
   app.get("/v1/videos/:id", async (c) => { const job = await getVideoJob(sdkUser(c)!.userId, c.req.param("id")); return job ? c.json(videoView(job)) : apiError(c, 404, "not_found", "Video job not found."); });

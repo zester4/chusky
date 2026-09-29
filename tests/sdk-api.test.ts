@@ -4,7 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -280,6 +280,24 @@ test("SDK artifact download returns the owner-scoped binary with download header
   } finally {
     (daytonaEngine as any).streamArtifact = originalStreamArtifact;
   }
+});
+
+test("private browser file response verifies bytes and uses safe download headers", async () => {
+  const file = { id: "bf_test", key: "browser/1/file", name: "report.pdf", contentType: "application/pdf", size: 9, kind: "download" as const, sandboxId: "sandbox", createdAt: 100, expiresAt: 10_000 };
+  const response = browserFileDownloadResponse(file, Buffer.from("pdf-bytes"), 200);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="report.pdf"');
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from("pdf-bytes"));
+  assert.throws(() => browserFileDownloadResponse(file, Buffer.from("wrong"), 200), /size verification/);
+  assert.throws(() => browserFileDownloadResponse({ ...file, expiresAt: 199 }, Buffer.from("pdf-bytes"), 200), /expired/);
+});
+
+test("SDK browser artifact downloads do not reveal another owner's browser file", async () => {
+  const api = app();
+  const response = await api.fetch(new Request("http://local/v1/artifacts/bf_private/download", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "browser-file-other" } }));
+  assert.equal(response.status, 404);
 });
 
 test("SDK thread creation is authenticated, replay-safe, and rejects key/body mismatches", async () => {

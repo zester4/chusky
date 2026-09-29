@@ -1,9 +1,14 @@
-export type E2BBrowserAction =
-  | "start" | "stop" | "status" | "state" | "session_acquire" | "session_list" | "session_release"
-  | "open" | "snapshot" | "find" | "focus" | "invoke" | "fill" | "click" | "move" | "drag"
-  | "type" | "press" | "select_option" | "check" | "uncheck" | "hover" | "wait" | "screenshot"
-  | "screenshot_full" | "screenshot_region" | "windows" | "display_info" | "tabs" | "tab_open"
-  | "tab_focus" | "tab_close" | "back" | "forward" | "refresh" | "scroll";
+export const E2B_BROWSER_ACTIONS = [
+  "start", "stop", "status", "state", "session_acquire", "session_list", "session_release",
+  "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
+  "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region",
+  "screenshot_region_full", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close",
+  "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
+  "download_register", "download_get", "download_delete", "recording_start", "recording_stop",
+  "recording_list", "recording_get", "recording_delete", "recording_download",
+] as const;
+
+export type E2BBrowserAction = typeof E2B_BROWSER_ACTIONS[number];
 
 export type E2BBrowserNode = {
   nodeId: string;
@@ -25,13 +30,38 @@ export type E2BBrowserRecord = {
   expiresAt: number;
 };
 
+/** Owner-scoped file metadata. Bytes live in R2; this record contains no file content. */
+export type E2BBrowserFileRecord = {
+  id: string;
+  key: string;
+  name: string;
+  contentType: string;
+  size: number;
+  kind: "download" | "recording";
+  sourceId?: string;
+  sandboxId: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
 export type E2BCommandResult = {
   ok: boolean;
   url?: string;
   title?: string;
   loadState?: string;
   text?: string;
+  pageContent?: string;
+  pageContentTruncated?: boolean;
   matches?: Array<{ role: string; name: string; index: number; nodeId?: string }>;
+  downloads?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
+  download?: { id: string; name: string; state: string; size: number; createdAt: number; error?: string } | null;
+  recordings?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
+  recording?: { id: string; name: string; state: string; size?: number; createdAt: number; error?: string };
+  runtimeFilePath?: string;
+  filePath?: string;
+  size?: number;
+  kind?: "download" | "recording";
+  createdAt?: number;
   screenshot?: string;
   needsUserInteraction?: boolean;
   challenge?: { type: "captcha" | "two_factor" | "site_challenge"; detected: boolean };

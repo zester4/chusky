@@ -130,6 +130,10 @@ test("owner-private runs keep routine actions direct and preserve high-impact ap
   }
   assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "unknown" }, false, true), false);
   assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "invoke", vaultAction: "place_order" }, false, true), true);
+  assert.equal(requiresToolApproval("CHUCK_BROWSER", { action: "click", nodeId: "node_1" }, false, true), false, "ordinary browsing stays autonomous");
+  for (const action of ["upload", "upload_files", "download_delete", "recording_delete"]) {
+    assert.equal(requiresToolApproval("CHUCK_BROWSER", { action }, false, true), true, `${action} requires owner approval`);
+  }
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { text: "Update" } }, false, true), false);
   assert.equal(requiresToolApproval("CHUCK_MEDIA_BRIDGE", { toolSlug: "GITHUB_PUSH_COMMITS", arguments: {} }, false, true), true);
   assert.equal(requiresToolApproval("CHUCK_FILE_BRIDGE", { toolSlug: "GITHUB_DELETE_REPOSITORY", arguments: {} }, false, true), true);

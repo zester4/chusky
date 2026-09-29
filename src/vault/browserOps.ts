@@ -85,6 +85,8 @@ export type BrowserHandoffRecord = {
   workspaceId: string;
   service?: string;
   origin?: string;
+  /** Private reference used to resume the exact vaulted identity after an SSO handoff. */
+  credentialId?: string;
   reason: BrowserHandoffReason;
   status: "waiting" | "awaiting_verification" | "completed" | "expired" | "cancelled";
   createdAt: number;

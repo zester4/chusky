@@ -28,6 +28,8 @@ import {
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
 import { e2bBrowserEngine } from "./lib/e2b/index.js";
+import { isTrustedBrowserUrlObservation } from "./lib/e2b/contracts.js";
+import { E2B_BROWSER_ACTIONS } from "./lib/e2b/types.js";
 import { transferDaytonaImage, type DaytonaImageTransferInput } from "./daytonaImageTransfer.js";
 import { startTwilioCallForUser } from "./calls/twilio.js";
 import { startBlandCallForUser } from "./calls/bland.js";
@@ -228,10 +230,8 @@ function daytonaCommand(value: unknown): string {
   return result;
 }
 
-const E2B_BROWSER_ACTIONS = new Set(["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"]);
-
 export function shouldUseE2BBrowser(action: unknown, enabled: boolean, apiKeyConfigured: boolean): boolean {
-  return enabled && apiKeyConfigured && (action === undefined || E2B_BROWSER_ACTIONS.has(String(action)));
+  return enabled && apiKeyConfigured && (action === undefined || (typeof action === "string" && (E2B_BROWSER_ACTIONS as readonly string[]).includes(action)));
 }
 
 function automatedBrowserEngine(action?: unknown) {
@@ -293,13 +293,22 @@ function browserHandoffReason(value: unknown): BrowserHandoffReason {
   return reason as BrowserHandoffReason;
 }
 
-async function createBrowserHandoffRecord(userId: number, input: { reason?: unknown; service?: unknown; origin?: unknown; shoppingPlanId?: unknown }) {
+async function createBrowserHandoffRecord(userId: number, input: { reason?: unknown; service?: unknown; origin?: unknown; shoppingPlanId?: unknown; credentialId?: unknown }, ownerPrivateRun: boolean) {
+  if (!ownerPrivateRun) throw new Error("Private browser handoffs are available only in the owner's private conversation");
   const reason = browserHandoffReason(input.reason);
   const service = input.service ? normaliseVaultService(text(input.service)) : undefined;
-  const origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
+  let origin = input.origin ? normaliseVaultOrigin(text(input.origin)) : undefined;
   if (!config.e2bEnabled || !config.e2bApiKey) {
     throw new Error("E2B is required for browser handoff. Configure E2B_ENABLED=true and E2B_API_KEY; Daytona cannot provide browser handoffs.");
   }
+  if (!origin) {
+    const observed = await e2bBrowserEngine.browser(userId, { action: "state" });
+    const currentUrl = observed && typeof observed === "object" ? (observed as { observedUrl?: unknown }).observedUrl : undefined;
+    if (typeof currentUrl === "string") {
+      try { const url = new URL(currentUrl); if (url.protocol === "https:") origin = url.origin; } catch { /* no safe live origin */ }
+    }
+  }
+  const credentialId = input.credentialId ? text(input.credentialId, 200) : undefined;
   const handoff = await e2bBrowserEngine.browserHandoff(userId, reason.replaceAll("_", " "));
   const record = await saveBrowserHandoff(userId, {
     id: `bh_${randomUUID()}`,
@@ -307,6 +316,7 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
     workspaceId: handoff.sandboxId,
     ...(service ? { service } : {}),
     ...(origin ? { origin } : {}),
+    ...(credentialId ? { credentialId } : {}),
     reason,
     status: "waiting",
     createdAt: Date.now(),
@@ -369,11 +379,15 @@ async function runDelegationWithDurableContinuation(
   return { ...result, durableContinuation: { queued: true, ...continuation } };
 }
 
-async function daytonaCall<T>(runtime: NativeToolRuntime, operation: () => Promise<T>): Promise<T> {
+async function abortableToolCall<T>(runtime: NativeToolRuntime, operation: () => Promise<T>): Promise<T> {
   throwIfAborted(runtime.signal);
   const result = await abortable(operation(), runtime.signal);
   throwIfAborted(runtime.signal);
   return result;
+}
+
+async function daytonaCall<T>(runtime: NativeToolRuntime, operation: () => Promise<T>): Promise<T> {
+  return abortableToolCall(runtime, operation);
 }
 
 /**
@@ -1632,7 +1646,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_BROWSER_NEXT": {
       const goal = text(args.goal, 1500);
       const browser = automatedBrowserEngine("state");
-      const inspected = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+      const inspected = await abortableToolCall(runtime, () => browser.browser(userId, { action: "state", ...(args.maxDepth === undefined ? {} : { maxDepth: Number(args.maxDepth) }) }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
       const state = inspected && typeof inspected === "object" ? inspected as Record<string, unknown> : {};
       const page = state.page && typeof state.page === "object" ? state.page as Record<string, unknown> : state;
       const accessibility = state.accessibility ?? state.snapshot ?? page.accessibility;
@@ -1707,13 +1721,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       // Never let model-authored metadata authorize a retained website session.
       // Read the live retained desktop and verify only its observed state.
       const browser = automatedBrowserEngine("state");
-      const observed = await daytonaCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 })) as {
-        observedUrl?: unknown; title?: unknown; accessibility?: unknown; observationMethod?: unknown;
+      const observed = await abortableToolCall(runtime, () => browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: runtime.ownerPrivateRun })) as {
+        provider?: unknown; observedUrl?: unknown; title?: unknown; accessibility?: unknown; pageContent?: unknown; observationMethod?: unknown;
       };
       const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
       const title = typeof observed.title === "string" ? observed.title : undefined;
-      const liveText = JSON.stringify(observed.accessibility ?? "").slice(0, 5000);
-      if (handoff && (!currentUrl || observed.observationMethod !== "address_bar")) {
+      const liveText = `${JSON.stringify(observed.accessibility ?? "")} ${typeof observed.pageContent === "string" ? observed.pageContent : ""}`.slice(0, 12_000);
+      const trustedLiveUrl = isTrustedBrowserUrlObservation(observed.provider, observed.observationMethod);
+      if (handoff && (!currentUrl || !trustedLiveUrl)) {
         throw new Error("The automated browser could not observe the live browser URL; the handoff remains unverified");
       }
       const result = verifyBrowserResult({
@@ -1732,8 +1747,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: result.passed ? "verification_passed" : "verification_failed", status: result.passed ? "succeeded" : "failed", summary: result.passed ? "Browser result verification passed" : "Browser result verification needs review", createdAt: Date.now() });
       if (handoffId && result.passed) {
+        const linkedVaultLogin = Boolean(handoff && (handoff.credentialId || (handoff.reason === "login" && handoff.service)));
+        if (!linkedVaultLogin) {
+          await updateBrowserHandoff(userId, handoffId, "completed", Date.now());
+          await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", ...(handoff?.service ? { service: handoff.service } : {}), ...(handoff?.origin ? { origin: handoff.origin } : {}), status: "succeeded", summary: "Private browser handoff passed same-origin verification", createdAt: Date.now() });
+          return { ...result, handoffId, handoffCompleted: true };
+        }
         const credentials = await listVault(userId);
-        const saved = credentials.find((credential) => credential.session?.workspaceId === handoff!.workspaceId && credential.session.status === "awaiting_user_interaction" && (!handoff!.origin || credential.origin === handoff!.origin) && (!handoff!.service || credential.service === handoff!.service));
+        const matches = credentials.filter((credential) => credential.session?.workspaceId === handoff!.workspaceId && credential.session.status === "awaiting_user_interaction"
+          && (handoff!.credentialId ? credential.id === handoff!.credentialId : (!handoff!.service || credential.service === handoff!.service)));
+        const saved = matches.length === 1 ? matches[0] : undefined;
         if (!saved?.session) throw new Error("The retained browser session is not awaiting verification. Inspect the same browser and start a fresh vault login if necessary.");
         const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
         await updateBrowserHandoff(userId, handoffId, "completed", Date.now());
@@ -1747,7 +1770,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const origin = typeof args.url === "string" ? (() => { try { return new URL(args.url).origin; } catch { return undefined; } })() : undefined;
       try {
         const browser = automatedBrowserEngine(args.action);
-        const result = await daytonaCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+        const result = await abortableToolCall(runtime, () => browser.browser(userId, args, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
         if (runtime.registerCancellationCleanup && args.action === "session_acquire" && result && typeof result === "object" && typeof (result as { sessionId?: unknown }).sessionId === "string") {
           const sessionId = (result as { sessionId: string }).sessionId;
           runtime.registerCancellationCleanup(async () => { await browser.browser(userId, { action: "session_release", sessionId }); });
@@ -1756,7 +1779,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         if (result && typeof result === "object" && (result as { needsUserInteraction?: unknown }).needsUserInteraction === true && (result as { challenge?: unknown }).challenge) {
           const challenge = (result as { challenge?: { type?: unknown } }).challenge;
           const reason = challenge?.type === "two_factor" ? "two_factor" : challenge?.type === "captcha" ? "captcha" : "site_challenge";
-          const handoff = await createBrowserHandoffRecord(userId, { reason, origin });
+          const observedUrl = typeof (result as { observedUrl?: unknown }).observedUrl === "string" ? (result as { observedUrl: string }).observedUrl : undefined;
+          let observedOrigin: string | undefined;
+          if (observedUrl) { try { const current = new URL(observedUrl); if (current.protocol === "https:") observedOrigin = current.origin; } catch { /* use request origin fallback */ } }
+          const handoff = await createBrowserHandoffRecord(userId, { reason, origin: observedOrigin ?? origin }, runtime.ownerPrivateRun === true);
           return { ...(result as Record<string, unknown>), browserHandoff: handoff, next: "Open the private browser link delivered to you, complete the challenge there, return and say continue, then call CHUCK_BROWSER_HANDOFF_COMPLETE followed by CHUCK_BROWSER_VERIFY." };
         }
         return result;
@@ -1765,7 +1791,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         throw error;
       }
     }
-    case "CHUCK_BROWSER_HANDOFF": return daytonaCall(runtime, () => createBrowserHandoffRecord(userId, args));
+    case "CHUCK_BROWSER_HANDOFF": return abortableToolCall(runtime, () => createBrowserHandoffRecord(userId, args, runtime.ownerPrivateRun === true));
     case "CHUCK_BROWSER_HANDOFF_STATUS": {
       const id = args.id ? text(args.id) : undefined;
       const records = id ? [await getBrowserHandoff(userId, id)] : await listBrowserHandoffs(userId, args.limit === undefined ? 10 : Number(args.limit));
@@ -1796,6 +1822,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       // the owner. Daytona is never a browser or vault-login backend.
       const browser = automatedBrowserEngine("open");
       const login = await loginWithVault(userId, service, { workspaceId: (owner) => browser.workspaceId(owner), login: (owner, input) => browser.vaultLogin(owner, input) }, accountAlias, origin, loginRecipe?.login);
+      const { credentialId, ...safeLogin } = login;
       if (loginRecipe) {
         const verifiedAt = login.authenticated ? Date.now() : loginRecipe.login.lastVerifiedAt;
         await saveBrowserPlaybook(userId, normalizePlaybook({ ...loginRecipe, login: { ...loginRecipe.login, ...(verifiedAt ? { lastVerifiedAt: verifiedAt } : {}) }, successCount: login.authenticated ? loginRecipe.successCount + 1 : loginRecipe.successCount, failureCount: login.authenticated ? loginRecipe.failureCount : loginRecipe.failureCount + 1, lastUsedAt: Date.now() })).catch(() => undefined);
@@ -1804,10 +1831,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       // A CAPTCHA, 2FA prompt, or an unfamiliar login form must not fail the
       // entire sign-in or expose credentials. Give the owner a short-lived
       // direct browser handoff and retain the same browser session instead.
-      if (!login.needsUserInteraction) return login;
+      if (!login.needsUserInteraction) return safeLogin;
       return {
-        ...login,
-        browserHandoff: await createBrowserHandoffRecord(userId, { reason: "login", service, origin: login.origin }),
+        ...safeLogin,
+        browserHandoff: await createBrowserHandoffRecord(userId, { reason: "login", service, origin: login.handoffOrigin ?? login.origin, credentialId }, runtime.ownerPrivateRun === true),
       };
     });
     case "CHUCK_VAULT_LOGOUT": return (async () => {

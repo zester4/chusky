@@ -1,4 +1,9 @@
-# Daytona audit: browser, computer, PDFs, and execution
+# Browser and computer audit: E2B, Daytona, PDFs, and execution
+
+> Historical audit, updated for the current provider split: automated website
+> browsing and website login run in the owner-scoped E2B Playwright browser.
+> Daytona is reserved for computer use, workspaces, code, files, artifacts,
+> terminals, and app building; it is not a browser backend.
 
 The main conclusion is that Chusky already has a strong Computer Use foundation. You are not missing the basic Daytona mouse, keyboard, screenshot, recording, or accessibility primitives.
 
@@ -19,7 +24,7 @@ I could not directly invoke the Exa or Context7 connectors in this environment, 
 | Area | Current Chusky state | Assessment |
 |---|---|---|
 | Computer Use | Mouse, keyboard, screenshots, screen regions, recordings, display info, windows, process diagnostics, accessibility tree and actions | Strong |
-| Browser wrapper | Open, back, forward, refresh, click, type, press, scroll, accessibility find/focus/invoke/fill | Useful but fragile |
+| Browser wrapper | Owner-scoped E2B Playwright: readable page content, accessible controls, forms, navigation, uploads/downloads, recordings, screenshots, and private human handoff | Current implementation; see `src/lib/e2b/browser.ts` and `e2b/browser-template/browser-agent.mjs` |
 | Daytona sandbox | Create, recover, start, pause, archive, delete, execute commands, network policy, snapshots | Good foundation |
 | Files | Read/write/list/search/move/delete/details | Functional, but not optimized for large workspaces |
 | PTY | Create/read/write/status/resize/kill | Functional, but not true durable streaming sessions |
@@ -45,7 +50,7 @@ Chusky exposes nearly all of Daytona’s current Computer Use primitives:
 - Accessibility tree inspection
 - Accessibility node finding, focus, invoke, and value setting
 
-That is substantially better than a simple browser automation wrapper. It can operate the entire Daytona desktop, not only a browser page.
+Daytona Computer Use operates the desktop itself; E2B Playwright is the separate, supported browser for web pages.
 
 The vault boundary is also a significant strength. Credentials are not handed to the model as plaintext. Login actions are brokered through the vault, and browser values are redacted before being returned. That design should be preserved.
 
@@ -306,7 +311,7 @@ Use compressed screenshots by default and full-resolution screenshots only when 
 
 ### Accessibility scope and filtering
 
-The current browser accessibility search effectively searches broadly. Daytona supports more precise targeting by:
+The E2B browser supports more precise page targeting by:
 
 - Focused scope
 - Process ID

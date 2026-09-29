@@ -1,14 +1,31 @@
 import { config } from "../config.js";
+import { getSession } from "../store.js";
 import { vaultBroker } from "./client.js";
 import { vaultStatus } from "./vault.js";
 import { vaultActionPolicy, type VaultAction } from "./policy.js";
 import { browserSessionIsRevoked, classifyBrowserIntent } from "./browserOps.js";
+import type { BrowserHandoffRecord } from "./browserOps.js";
 
 type KnownNode = { label: string; origin: string; capturedAt: number };
 const knownNodes = new Map<string, KnownNode>();
 const key = (userId: number, workspaceId: string, nodeId: string) => `${userId}:${workspaceId}:${nodeId}`;
 const NODE_TTL_MS = 2 * 60_000;
 const SENSITIVE_WORKSPACE_DATA = /(cookies?|login data|web data|local storage|session storage|key4\.db|logins\.json|google[-_ ]?chrome|chromium|firefox|\.ssh|\.aws|credentials|browser profile|password store|secret store)/i;
+
+export function pendingVaultInspectionOrigins(
+  pendingOrigins: string[],
+  handoffs: BrowserHandoffRecord[],
+  workspaceId: string,
+  now = Date.now(),
+): string[] {
+  const origins = new Set(pendingOrigins.filter(Boolean));
+  for (const handoff of handoffs) {
+    if (handoff.workspaceId === workspaceId && handoff.status === "awaiting_verification" && handoff.expiresAt > now && handoff.origin) {
+      origins.add(handoff.origin);
+    }
+  }
+  return [...origins];
+}
 
 function matches(value: unknown): Array<{ nodeId?: unknown; id?: unknown; name?: unknown }> {
   if (Array.isArray(value)) return value as Array<{ nodeId?: unknown; id?: unknown; name?: unknown }>;
@@ -18,7 +35,7 @@ function matches(value: unknown): Array<{ nodeId?: unknown; id?: unknown; name?:
 
 export async function rememberVaultBrowserNodes(userId: number, workspaceId: string, result: unknown, currentUrl?: string): Promise<void> {
   // An optional or temporarily misconfigured broker must not break ordinary
-  // Daytona browsing. Once the broker is actually configured, all retained
+  // E2B browsing. Once the broker is actually configured, all retained
   // authenticated sessions continue through the strict guard below.
   if (!config.vaultEnabled || !vaultBroker.enabled()) return;
   let origin = "";
@@ -47,9 +64,13 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   if (!active) {
     if (pendingSessions.length) {
       const currentOrigin = typeof args.currentUrl === "string" ? (() => { try { return new URL(args.currentUrl).origin; } catch { return ""; } })() : "";
-      const pendingOrigins = pendingSessions.map((session) => session.origin);
-      if (["status", "start", "windows"].includes(action)) return;
-      if (["snapshot", "find", "accessibility_tree"].includes(action)) {
+      const pendingOrigins = pendingVaultInspectionOrigins(
+        pendingSessions.map((session) => session.origin),
+        (await getSession(userId)).browserHandoffs ?? [],
+        workspaceId,
+      );
+      if (["status", "start", "stop", "windows"].includes(action)) return;
+      if (["state", "snapshot", "find", "accessibility_tree"].includes(action)) {
         if (!currentOrigin || !pendingOrigins.includes(currentOrigin)) throw new Error("Inspect the same saved website origin after completing the private browser handoff; Chusky will not inspect a different page.");
         return;
       }
@@ -73,7 +94,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   if (currentOrigin && !["status", "start", "open", "windows"].includes(action) && !activeSessions.some((session) => session.origin === currentOrigin)) {
     throw new Error("The current browser page is outside every active saved website origin. Open the intended authorised origin before continuing.");
   }
-  if (["screenshot", "screenshot_region", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
+  if (["screenshot", "screenshot_region", "screenshot_region_full", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
   if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
   if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" }, ownerPrivateRun, ownerApprovedAction);
   if (action === "accessibility_set_value") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "fill" }, ownerPrivateRun, ownerApprovedAction);

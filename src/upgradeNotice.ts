@@ -93,9 +93,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Turning Jev off, leaving native routing disabled, using shadow mode, or hitting a timeout or low-confidence decision preserves the existing full native-tool behavior.",
   ],
   browserAutonomy: [
-    "Added a bounded browser decision loop and an owner-scoped E2B Playwright/Chromium browser with headed sessions, accessible controls, tabs, scrolling, drag/drop, forms, keyboard actions, navigation, and screenshots.",
-    "CAPTCHA, 2FA, passkeys, security keys, and other human-only challenges can hand the same E2B browser session to the owner through a short-lived private noVNC link; ordinary browsing remains autonomous.",
-    "Browser observations are redacted and bounded before Jev sees them, while origin checks, session leases, existing approval policy, high-impact safeguards, and the Daytona fallback remain authoritative.",
+    "Expanded the owner-scoped E2B Playwright browser with bounded page text, accessible navigation and forms, tabs, scrolling, drag/drop, screenshots, and private upload, download, recording, storage, and retrieval flows.",
+    "Vault login now follows a bounded multi-step form state machine; CAPTCHA, 2FA, passkeys, SSO, and other human-only challenges preserve the same E2B session for a short-lived private handoff and verified resume.",
+    "Routine browsing stays autonomous; private-origin checks, session leases, credential isolation, and exact approval or block rules for uploads, sensitive actions, and account changes remain enforced.",
   ],
 } as const;
 

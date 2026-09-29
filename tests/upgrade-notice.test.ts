@@ -161,21 +161,22 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the native-tool routing release", async () => {
+test("current upgrade manifest announces the E2B browser capability release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.26.0");
-  assert.equal(notice?.version, "4.26.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /compact, task-relevant set/);
-  assert.match(formatAgentUpgradeNotice(notice!), /full schemas/);
-  assert.match(formatAgentUpgradeNotice(notice!), /existing full native-tool behavior/);
+  assert.equal(notice?.id, "release-4.27.0");
+  assert.equal(notice?.version, "4.27.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /bounded page text/);
+  assert.match(formatAgentUpgradeNotice(notice!), /multi-step form state machine/);
+  assert.match(formatAgentUpgradeNotice(notice!), /same E2B session/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {
   const bullets = getAgentUpgradePreset("browserAutonomy");
   assert.equal(bullets.length, 3);
-  assert.match(bullets[0], /bounded browser decision loop/);
-  assert.match(bullets[1], /E2B|Playwright/);
-  assert.match(bullets[2], /authoritative|deterministic/);
+  assert.match(bullets[0], /page text/);
+  assert.match(bullets[0], /upload, download, recording/);
+  assert.match(bullets[1], /multi-step form state machine/);
+  assert.match(bullets[2], /approval or block rules/);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

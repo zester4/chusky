@@ -154,10 +154,11 @@ Images, documents, audio, and video uploaded through the dashboard must use
 verified temporary R2 upload URLs. The browser sends file IDs to Chusky; it
 does not send raw binary content through Redis or expose storage keys.
 
-### Daytona workspaces, app building, and browser
+### E2B browser and Daytona workspaces/app building
 
-Daytona is the only browser/computer backend currently in scope. Do not add
-Browserbase, Firecrawl, or another browser provider to the product UI.
+Use E2B for automated website browsing and Daytona for the agent's computer,
+workspace, and app-building tasks. Do not add another browser provider to the
+product UI.
 
 The workspace UI must support:
 
@@ -173,11 +174,12 @@ The workspace UI must support:
   production build, start a server, inspect logs, capture a visual preview,
   review evidence, stop, and hand off a release. Preview URLs must be signed,
   temporary, and shown with expiry.
-- Browser/computer use: navigate HTTPS pages, inspect accessibility trees, find
-  controls, focus/invoke/fill accessible controls, click/type/scroll/keyboard
-  navigate, capture screenshots/regions, inspect windows/processes, and manage
-  recordings. The UI must show when a browser action is running and retain
-  only safe URL/state metadata.
+- Browser use: E2B navigates public HTTPS pages, reads bounded visible content,
+  inspects accessible controls, fills forms, clicks, scrolls, captures
+  screenshots, and supports private same-session human handoff. The UI must
+  show when a browser action is running and retain only safe URL/state metadata.
+- Computer use: Daytona inspects and operates desktop applications, windows,
+  local files, terminals, and recordings. It is not the automated web browser.
 - Visual QA: show captured preview screenshots and honest verification status;
   never claim an app or artifact was tested when the evidence is missing.
 

@@ -88,6 +88,7 @@ export async function reconcileComposioTriggerWebhook(webhookUrl: string): Promi
 const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
+const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 
 function providerReceiptId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -2995,6 +2996,18 @@ export async function runAgent(
               generatedFiles.push({ data: delivered.data, name: delivered.name, contentType: delivered.contentType, artifactId: delivered.id, type: delivered.type });
               execResult = { artifactCreated: true, artifactId: delivered.id, name: delivered.name, type: delivered.type, size: delivered.size, ...(artifact.verification ? { verification: artifact.verification } : {}), note: "The artifact is ready and was delivered to the active channel. To email it, call CHUCK_EMAIL_ARTIFACT with this artifactId and the exact connected email action schema; Chusky will attach the bytes server-side." };
             }
+          }
+          if (slug === "CHUCK_BROWSER" && execResult && typeof execResult === "object" && "__browserFileId" in execResult) {
+            if (!ownerPrivateRun || channelContext?.scope === "shared" || options?.meetingId) throw new Error("Private browser files cannot be delivered into a shared conversation or meeting");
+            const fileId = String((execResult as { __browserFileId: unknown }).__browserFileId);
+            const file = (await getSession(userId)).browserFiles?.find((item) => item.id === fileId && item.expiresAt > Date.now());
+            if (!file) throw new Error("The private browser download expired or is not owned by this account");
+            const bytes = await abortable(readR2Object(file.key), signal);
+            if (bytes.length !== file.size || bytes.length < 1 || bytes.length > MAX_BROWSER_FILE_TRANSFER_BYTES) throw new Error("The private browser file failed its stored-size verification");
+            const extension = file.name.toLowerCase().split(".").at(-1) ?? "";
+            const artifactType = extension === "pdf" ? "pdf" : ["png", "jpg", "jpeg", "webp", "gif"].includes(extension) ? "image" : ["mp4", "webm", "mov"].includes(extension) ? "video" : ["xlsx", "xls", "csv"].includes(extension) ? "spreadsheet" : ["ppt", "pptx"].includes(extension) ? "presentation" : ["doc", "docx"].includes(extension) ? "docx" : extension === "html" || extension === "htm" ? "website" : "report";
+            generatedFiles.push({ data: bytes, name: file.name, contentType: file.contentType, artifactId: file.id, type: artifactType });
+            execResult = { browserFileReady: true, fileId: file.id, name: file.name, size: file.size, contentType: file.contentType, kind: file.kind, expiresAt: file.expiresAt };
           }
           if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };

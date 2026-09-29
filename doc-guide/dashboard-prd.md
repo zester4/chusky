@@ -375,7 +375,7 @@ Agents, Integrations, Memory, Automations, role-based access, audit logs, and se
 
 ### Phase 3 — builder platform
 
-Daytona Workspaces, Browser, app previews, file editing, build/test evidence, GitHub delivery, and visual QA.
+Daytona Workspaces, app previews, file editing, build/test evidence, GitHub delivery, and visual QA, with the E2B browser for web access.
 
 ### Phase 4 — business intelligence
 

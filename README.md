@@ -684,10 +684,15 @@ tools after local checks pass. Changing `DAYTONA_SNAPSHOT` does not change an ex
 When `E2B_ENABLED=true`, `CHUCK_BROWSER` routes normal browser actions through the
 owner-scoped E2B Playwright/Chromium
 template. E2B keeps a retained headed Playwright process per owner, returns
-bounded accessibility candidates, and supports page navigation, tabs, clicks,
-hover, drag-and-drop, form controls, typing, keyboard presses, scrolling,
-screenshots, and verification. CAPTCHA/2FA and passkey challenges can expose
-that same browser through a short-lived private noVNC handoff. Daytona continues
+bounded accessibility candidates and redacted visible page text, and supports
+public-site navigation, tabs, accessible controls, forms, typing, keyboard
+presses, scrolling, screenshots, and verification. It does not apply a
+site-domain allowlist, but blocks private/local network targets and metadata
+services; individual sites can still require authentication or a human check.
+Owner-private uploads, downloads, and screen recordings use bounded file sizes
+and an owner-scoped 30-day file library; uploads require approval. CAPTCHA/2FA,
+SSO, and passkey challenges can expose that same browser through a short-lived
+private noVNC handoff. Daytona continues
 to provide files, artifacts, terminals, and desktop Computer Use; it is not the
 automated browser backend.
 
@@ -707,9 +712,11 @@ the narrowest accessible browser action, and verifies the result against bounded
 detectors. Saved playbooks are origin-scoped and contain only login labels, safe action names, and
 verification metadata; they never contain passwords, cookies, screenshots, or raw page content.
 
-Unknown or security-sensitive actions require owner approval. Checkout, payment, account changes,
-credential changes, sensitive downloads, and uncertain actions stop for approval. CAPTCHA, 2FA,
-SSO, passkeys, and device approvals use a private browser handoff in the same E2B browser session.
+Routine browsing and ordinary form interaction do not require blanket approval. Checkout, payment,
+account changes, credential changes, sensitive downloads, uploads, and saved-file deletion retain
+their specific approval or block rules. CAPTCHA, 2FA, SSO, passkeys, and device approvals use a
+private browser handoff in the same E2B browser session. Owner-private snapshots can include bounded,
+redacted visible page text; that text is not added to durable browser history.
 Replacing a saved identity logs out its prior browser identities, and aliases allow separate
 personal and work accounts for the same service.
 

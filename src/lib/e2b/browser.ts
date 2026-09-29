@@ -4,13 +4,23 @@ import { config } from "../../config.js";
 import { getSession, saveSession } from "../../store.js";
 import { guardVaultBrowserAction, rememberVaultBrowserNodes } from "../../vault/browserGuard.js";
 import { redactBrowserText } from "../../vault/browserObservation.js";
+import { assertE2BBrowserHandoffAllowsAction, normalizeE2BBrowserFileName, normalizeE2BPageContent } from "./contracts.js";
 import { E2BBrowserError } from "./errors.js";
 import { assertSafeBrowserUrl } from "./urlSafety.js";
-import type { E2BBrowserAction, E2BBrowserNode, E2BBrowserRecord, E2BCommandResult } from "./types.js";
+import { deleteR2Object, putR2Object, r2Configured, readR2Object } from "../../lib/storage/r2.js";
+import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
 
 const MAX_OUTPUT = 16_000;
 const MAX_NODES = 60;
 const NODE_TTL_MS = 2 * 60_000;
+const MAX_BROWSER_DOWNLOAD_BYTES = 25 * 1024 * 1024;
+const MAX_BROWSER_RECORDING_BYTES = 100 * 1024 * 1024;
+const BROWSER_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PRIVATE_EGRESS_CIDRS = [
+  "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+  "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+  "224.0.0.0/4", "240.0.0.0/4", "::/128", "::1/128", "::ffff:0:0/96", "64:ff9b::/96", "fc00::/7", "fe80::/10", "ff00::/8",
+];
 const locks = new Map<number, Promise<void>>();
 
 function boundedText(value: unknown, field: string, max: number): string {
@@ -20,9 +30,15 @@ function boundedText(value: unknown, field: string, max: number): string {
 
 function safeAction(value: unknown): E2BBrowserAction {
   const action = boundedText(value, "action", 32) as E2BBrowserAction;
-  const allowed: E2BBrowserAction[] = ["start", "stop", "status", "state", "session_acquire", "session_list", "session_release", "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press", "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close", "back", "forward", "refresh", "scroll"];
-  if (!allowed.includes(action)) throw new E2BBrowserError(`Unsupported E2B browser action: ${action}`);
+  if (!(E2B_BROWSER_ACTIONS as readonly string[]).includes(action)) throw new E2BBrowserError(`Unsupported E2B browser action: ${action}`);
   return action;
+}
+
+function browserContentType(name: string, kind: "download" | "recording"): string {
+  if (kind === "recording") return "video/mp4";
+  const extension = name.toLowerCase().split(".").at(-1);
+  const types: Record<string, string> = { pdf: "application/pdf", txt: "text/plain", csv: "text/csv", json: "application/json", md: "text/markdown", html: "text/html", htm: "text/html", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", zip: "application/zip", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation", mp4: "video/mp4", mp3: "audio/mpeg", wav: "audio/wav" };
+  return types[extension ?? ""] ?? "application/octet-stream";
 }
 
 function nodeId(role: string, name: string, index: number): string {
@@ -93,6 +109,7 @@ export class E2BBrowserEngine {
       timeoutMs: config.e2bTimeoutMs,
       requestTimeoutMs: config.e2bRequestTimeoutMs,
       allowInternetAccess: config.e2bAllowInternetAccess,
+      network: { allowPublicTraffic: true, denyOut: PRIVATE_EGRESS_CIDRS },
       metadata: { app: "chusky", surface: "browser", owner: String(userId) },
     });
     const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, createdAt: now, updatedAt: now, expiresAt };
@@ -142,7 +159,88 @@ export class E2BBrowserEngine {
       requestTimeoutMs: config.e2bRequestTimeoutMs,
     });
     if (result.exitCode !== 0) throw new E2BBrowserError(`E2B browser action failed: ${redactBrowserText(result.stderr || result.stdout, 800)}`);
-    return parseResult(result.stdout, result.stderr);
+    const parsed = parseResult(result.stdout, result.stderr);
+    if (parsed.ok !== true) throw new E2BBrowserError(redactBrowserText(parsed.error || "E2B browser action failed", 800));
+    return parsed;
+  }
+
+  private async persistRuntimeFile(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, input: {
+    id: string; kind: "download" | "recording"; name: string; size: number; createdAt: number; filePath: string;
+  }): Promise<E2BBrowserFileRecord> {
+    const session = await getSession(userId);
+    const existing = (session.browserFiles ?? []).find((file) => file.sandboxId === record.sandboxId && file.kind === input.kind && file.sourceId === input.id && file.expiresAt > Date.now());
+    if (existing) return existing;
+    if (!r2Configured()) throw new E2BBrowserError("Cloudflare R2 is required to keep browser downloads and recordings private and available after the sandbox closes.");
+    const maxBytes = input.kind === "recording" ? MAX_BROWSER_RECORDING_BYTES : MAX_BROWSER_DOWNLOAD_BYTES;
+    if (!Number.isSafeInteger(input.size) || input.size < 1 || input.size > maxBytes) throw new E2BBrowserError(`Browser ${input.kind} exceeds the ${maxBytes} byte file limit`);
+    const allowedRoot = input.kind === "recording" ? "/tmp/chusky-browser-recordings/" : "/tmp/chusky-browser-downloads/";
+    if (typeof input.filePath !== "string" || !input.filePath.startsWith(allowedRoot) || input.filePath.includes("..")) throw new E2BBrowserError("Browser runtime returned an invalid private file path");
+    const bytes = Buffer.from(await sandbox.files.read(input.filePath, { format: "bytes" }));
+    if (bytes.length !== input.size || bytes.length < 1 || bytes.length > maxBytes) throw new E2BBrowserError("Browser file size changed or exceeded its transfer limit");
+    const name = normalizeE2BBrowserFileName(input.name);
+    const file: E2BBrowserFileRecord = {
+      id: `bf_${randomUUID()}`,
+      key: `browser/${userId}/${randomUUID()}-${name}`,
+      name,
+      contentType: browserContentType(name, input.kind),
+      size: bytes.length,
+      kind: input.kind,
+      sourceId: input.id,
+      sandboxId: record.sandboxId,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + BROWSER_FILE_TTL_MS,
+    };
+    await putR2Object(file.key, bytes, file.contentType);
+    session.browserFiles ??= [];
+    if (session.browserFiles.length >= 100) {
+      await deleteR2Object(file.key).catch(() => undefined);
+      throw new E2BBrowserError("The private browser file library has reached its 100-file limit. Delete older browser files before saving another.");
+    }
+    session.browserFiles.push(file);
+    await saveSession(userId, session);
+    return file;
+  }
+
+  private async syncRuntimeFiles(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, kind: "download" | "recording"): Promise<E2BBrowserFileRecord[]> {
+    const listed = await this.run(sandbox, { action: kind === "download" ? "downloads" : "recording_list" });
+    const entries = kind === "download" ? listed.downloads : listed.recordings;
+    const files: E2BBrowserFileRecord[] = [];
+    for (const item of (Array.isArray(entries) ? entries : []).slice(0, 20)) {
+      if (!item || item.state !== "ready" || typeof item.id !== "string" || typeof item.name !== "string" || !Number.isFinite(item.size)) continue;
+      const claim = await this.run(sandbox, { action: kind === "download" ? "download_claim" : "recording_claim", id: item.id });
+      if (typeof claim.filePath !== "string" || typeof claim.name !== "string" || !Number.isFinite(claim.size) || !Number.isFinite(claim.createdAt)) continue;
+      const file = await this.persistRuntimeFile(userId, sandbox, record, { id: item.id, kind, name: claim.name, size: Number(claim.size), createdAt: Number(claim.createdAt), filePath: claim.filePath });
+      files.push(file);
+      await this.run(sandbox, { action: kind === "download" ? "download_ack" : "recording_ack", id: item.id });
+    }
+    return files;
+  }
+
+  private async browserFile(userId: number, fileId: unknown, kind?: "download" | "recording"): Promise<E2BBrowserFileRecord> {
+    const id = boundedText(fileId, "fileId", 128);
+    const file = (await getSession(userId)).browserFiles?.find((item) => (item.id === id || item.sourceId === id) && item.expiresAt > Date.now() && (!kind || item.kind === kind));
+    if (!file) throw new E2BBrowserError("Browser file not found, expired, or not owned by this account");
+    return file;
+  }
+
+  private async storedBrowserFiles(userId: number, kind: "download" | "recording"): Promise<E2BBrowserFileRecord[]> {
+    const session = await getSession(userId);
+    return (session.browserFiles ?? [])
+      .filter((file) => file.kind === kind && file.expiresAt > Date.now())
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 50);
+  }
+
+  private async purgeExpiredBrowserFiles(userId: number): Promise<void> {
+    if (!r2Configured()) return;
+    const session = await getSession(userId);
+    const files = session.browserFiles ?? [];
+    const expired = files.filter((file) => file.expiresAt <= Date.now());
+    if (!expired.length) return;
+    const results = await Promise.allSettled(expired.map((file) => deleteR2Object(file.key)));
+    const failedIds = new Set(results.flatMap((result, index) => result.status === "rejected" ? [expired[index]!.id] : []));
+    session.browserFiles = files.filter((file) => file.expiresAt > Date.now() || failedIds.has(file.id));
+    await saveSession(userId, session);
   }
 
   private async persistResult(userId: number, record: E2BBrowserRecord, result: E2BCommandResult, nodes: E2BBrowserNode[] = []): Promise<E2BBrowserRecord> {
@@ -170,6 +268,7 @@ export class E2BBrowserEngine {
 
   async browser(userId: number, args: Record<string, unknown>, internal: { vaultLoginFlow?: boolean; ownerPrivateRun?: boolean; ownerApprovedAction?: boolean } = {}): Promise<unknown> {
     return withUserLock(userId, async () => {
+      await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
       if (action === "session_list") {
         const record = await this.record(userId);
@@ -178,7 +277,9 @@ export class E2BBrowserEngine {
       if (action === "session_acquire") {
         const { record } = await this.sandbox(userId);
         const ttlSeconds = Math.max(60, Math.min(3_600, Math.floor(Number(args.ttlSeconds ?? 900))));
-        const sessionId = typeof args.sessionId === "string" && args.sessionId.trim() ? args.sessionId.trim() : `br_${randomUUID()}`;
+        const requestedSessionId = typeof args.sessionId === "string" ? args.sessionId.trim() : "";
+        if (requestedSessionId && !/^br_[A-Za-z0-9_-]{1,116}$/.test(requestedSessionId)) throw new E2BBrowserError("sessionId must be a Chusky browser lease ID");
+        const sessionId = requestedSessionId || `br_${randomUUID()}`;
         const next = { ...record, sessionId, updatedAt: Date.now(), expiresAt: Date.now() + ttlSeconds * 1000 };
         await this.save(userId, next);
         return { provider: "e2b", sandboxId: next.sandboxId, sessionId, action, expiresAt: next.expiresAt };
@@ -202,20 +303,77 @@ export class E2BBrowserEngine {
         }
         return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt };
       }
+      if (["download_get", "recording_download", "recording_get"].includes(action)) {
+        if (!internal.ownerPrivateRun) throw new E2BBrowserError("Private browser files can only be retrieved in the owner's private conversation");
+        const file = await this.browserFile(userId, args.fileId ?? args.recordingId ?? args.downloadId, action === "recording_download" || action === "recording_get" ? "recording" : "download");
+        return action === "recording_get"
+          ? { provider: "e2b", action, fileId: file.id, name: file.name, size: file.size, contentType: file.contentType, createdAt: file.createdAt, expiresAt: file.expiresAt }
+          : { provider: "e2b", action, __browserFileId: file.id, name: file.name, size: file.size, contentType: file.contentType, kind: file.kind };
+      }
+      if (["download_delete", "recording_delete"].includes(action)) {
+        if (!internal.ownerPrivateRun) throw new E2BBrowserError("Private browser files can only be deleted from the owner's private conversation");
+        if (!internal.ownerApprovedAction) throw new E2BBrowserError("Deleting a private browser file requires owner approval");
+        const file = await this.browserFile(userId, args.fileId ?? args.recordingId ?? args.downloadId, action === "recording_delete" ? "recording" : "download");
+        await deleteR2Object(file.key);
+        const session = await getSession(userId);
+        session.browserFiles = (session.browserFiles ?? []).filter((item) => item.id !== file.id);
+        await saveSession(userId, session);
+        return { provider: "e2b", action, deleted: true, name: file.name };
+      }
+      const fileLibraryKind = action === "downloads" || action === "download_register"
+        ? "download"
+        : action === "recording_list" ? "recording" : undefined;
+      if (fileLibraryKind) {
+        if (!internal.ownerPrivateRun) throw new E2BBrowserError("The private browser file library is available only in the owner's private conversation");
+        const record = await this.record(userId);
+        let runtimeError: string | undefined;
+        if (record?.sandboxId && record.expiresAt > Date.now()) {
+          try {
+            const { sandbox, record: active } = await this.sandbox(userId, false);
+            await this.syncRuntimeFiles(userId, sandbox, active, fileLibraryKind);
+          } catch (error) {
+            runtimeError = error instanceof Error ? redactBrowserText(error.message, 300) : "The live browser file list is temporarily unavailable";
+          }
+        }
+        const files = (await this.storedBrowserFiles(userId, fileLibraryKind)).map((file) => ({
+          id: file.id, fileId: file.id, name: file.name, state: "ready", size: file.size,
+          contentType: file.contentType, kind: file.kind, createdAt: file.createdAt, expiresAt: file.expiresAt,
+        }));
+        return { provider: "e2b", action, ...(fileLibraryKind === "download" ? { downloads: files } : { recordings: files }), ...(runtimeError ? { runtimeStatus: "unavailable", runtimeError } : {}) };
+      }
       const { sandbox, record } = await this.sandbox(userId);
       if (action === "start") return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, expiresAt: record.expiresAt };
       if (action === "windows") return { provider: "e2b", sandboxId: record.sandboxId, windows: [{ title: record.title ?? "Chromium", url: record.lastUrl ?? "about:blank" }] };
       if (action === "display_info") return { provider: "e2b", sandboxId: record.sandboxId, width: 1440, height: 900 };
+      if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "recording_start", "recording_stop", "recording_get"].includes(action) && !internal.ownerPrivateRun) {
+        throw new E2BBrowserError("Screenshots and browser recordings are available only in the owner's private conversation");
+      }
       if (record.sessionId && action !== "state" && action !== "snapshot" && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
+      if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
       const request: Record<string, unknown> = { action };
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
-      if (["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press"].includes(action) && args.nodeId) {
+      if (["state", "snapshot", "find", "open", "wait", "back", "forward", "refresh"].includes(action)) request.includePageContent = internal.ownerPrivateRun === true;
+      if (["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"].includes(action) && args.nodeId) {
         const saved = record.nodes?.find((item) => item.nodeId === args.nodeId);
         if (!saved || Date.now() - saved.capturedAt > NODE_TTL_MS) throw new E2BBrowserError("E2B browser interaction requires a fresh find/state result");
         Object.assign(request, { selector: { role: saved.role, name: saved.name, index: saved.index }, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+      }
+      if (action === "upload" || action === "upload_files") {
+        if (!internal.ownerPrivateRun) throw new E2BBrowserError("File uploads are available only in the owner's private conversation");
+        if (!internal.ownerApprovedAction) throw new E2BBrowserError("Uploading a file to a website requires owner approval");
+        if (!args.nodeId || !request.selector) throw new E2BBrowserError("Upload requires a fresh accessible file-input or upload-button node");
+        const fileId = boundedText(args.fileId, "fileId", 128);
+        const file = (await getSession(userId)).sdkFiles?.find((item) => item.id === fileId && item.status === "available");
+        if (!file) throw new E2BBrowserError("Upload file not found or not owned by this account");
+        if (file.size < 1 || file.size > MAX_BROWSER_DOWNLOAD_BYTES) throw new E2BBrowserError("The selected upload exceeds the 25 MB browser transfer limit");
+        const bytes = await readR2Object(file.key);
+        if (bytes.length !== file.size) throw new E2BBrowserError("The stored upload size no longer matches its verified file record");
+        const uploadPath = `/tmp/chusky-browser-upload/${randomUUID()}-${normalizeE2BBrowserFileName(file.name)}`;
+        await sandbox.files.write(uploadPath, Uint8Array.from(bytes).buffer);
+        request.uploadPath = uploadPath;
       }
       if (["click", "move", "type", "press"].includes(action) && !args.nodeId && (args.x !== undefined || args.y !== undefined)) Object.assign(request, { x: Number(args.x), y: Number(args.y) });
       if (action === "type") Object.assign(request, { text: args.text, delayMs: args.delayMs });
@@ -231,13 +389,24 @@ export class E2BBrowserEngine {
       if (action === "wait") request.timeoutMs = Math.max(50, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 1_000) * (args.timeoutSeconds ? 1_000 : 1)));
       if (action === "tab_focus") request.index = Number(args.index ?? 0);
       if (action === "screenshot_region") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
-      const result = await this.run(sandbox, request);
+      if (action === "screenshot_region_full") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
+      if (action === "wait_download") request.timeoutMs = Math.max(100, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 10_000) * (args.timeoutSeconds ? 1_000 : 1)));
+      if (action === "recording_start") request.durationSeconds = Math.max(10, Math.min(900, Number(args.timeoutSeconds ?? 900)));
+      if (action === "recording_stop" || action === "recording_get") request.recordingId = boundedText(args.recordingId ?? args.fileId, "recordingId", 128);
+      let result = await this.run(sandbox, request);
+      let importedFiles: E2BBrowserFileRecord[] = [];
+      if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");
+      if (action === "recording_stop" && result.runtimeFilePath && result.recording?.id && result.recording.size) {
+        const file = await this.persistRuntimeFile(userId, sandbox, record, { id: result.recording.id, kind: "recording", name: result.recording.name ?? `${result.recording.id}.mp4`, size: result.recording.size, createdAt: result.recording.createdAt ?? Date.now(), filePath: result.runtimeFilePath });
+        importedFiles = [file];
+        await this.run(sandbox, { action: "recording_ack", id: result.recording.id });
+      }
       if (typeof result.url === "string" && /^https?:$/i.test(new URL(result.url).protocol)) await assertSafeBrowserUrl(result.url);
       const url = typeof result.url === "string" ? result.url : record.lastUrl ?? "";
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes);
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.url ? { observedUrl: result.url } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
+      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
       if (action === "state" || action === "snapshot" || action === "open" || action === "back" || action === "forward" || action === "refresh") {
@@ -339,11 +508,13 @@ export class E2BBrowserEngine {
     await startHandoffService(`nohup sh -lc "sleep ${ttlSeconds}; if [ -f /tmp/chusky-x11vnc.pid ]; then kill $(cat /tmp/chusky-x11vnc.pid) 2>/dev/null || true; fi; if [ -f /tmp/chusky-websockify.pid ]; then kill $(cat /tmp/chusky-websockify.pid) 2>/dev/null || true; fi" >/dev/null 2>&1 &`);
     const host = sandbox.getHost(6080);
     const base = /^https?:\/\//i.test(host) ? host : `https://${host}`;
-    const url = `${base.replace(/\/$/, "")}/vnc.html?autoconnect=1&resize=remote&password=${encodeURIComponent(token)}`;
+    // noVNC explicitly supports config in the URL fragment. Keep the VNC
+    // password out of HTTP requests, reverse-proxy access logs, and referrers.
+    const url = `${base.replace(/\/$/, "")}/vnc.html#autoconnect=1&resize=scale&password=${encodeURIComponent(token)}`;
     return { sandboxId: record.sandboxId, url, expiresAt: Date.now() + ttlSeconds * 1000, message: `Open this private browser session to complete ${reason || "the website step"}. It expires soon. When you are done, return here and say continue; Chusky will inspect the same retained browser before it does anything else.` };
   }
 
-  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: { steps?: Array<{ role?: string; name?: string; action?: string }>; failure?: Array<{ textIncludes?: string }> } }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean }> {
+  async vaultLogin(userId: number, input: { origin: string; loginUrl: string; usernameFieldLabel: string; passwordFieldLabel: string; submitButtonLabel: string; username: string; password: string; loginRecipe?: { steps?: Array<{ role?: string; name?: string; action?: string }>; failure?: Array<{ textIncludes?: string }> } }): Promise<{ workspaceId: string; authenticated: boolean; needsUserInteraction?: boolean; handoffOrigin?: string }> {
     // Credentials arrive only from the broker. They are sent to the trusted
     // E2B process as an environment value for one command and are never
     // returned, logged, or persisted by this adapter.
@@ -352,7 +523,11 @@ export class E2BBrowserEngine {
     const { sandbox, record } = await this.sandbox(userId);
     const result = await this.run(sandbox, { action: "vault_login", url: login.toString(), usernameFieldLabel: input.usernameFieldLabel, passwordFieldLabel: input.passwordFieldLabel, submitButtonLabel: input.submitButtonLabel, username: input.username, password: input.password, loginRecipe: input.loginRecipe, currentUrl: record.lastUrl });
     const next = await this.persistResult(userId, record, result);
-    return { workspaceId: next.sandboxId, authenticated: result.authenticated === true, ...(result.needsUserInteraction === true ? { needsUserInteraction: true } : {}) };
+    let handoffOrigin: string | undefined;
+    if (result.needsUserInteraction === true && typeof result.url === "string") {
+      try { const observed = new URL(result.url); if (observed.protocol === "https:") handoffOrigin = observed.origin; } catch { /* ignore invalid page URL */ }
+    }
+    return { workspaceId: next.sandboxId, authenticated: result.authenticated === true, ...(result.needsUserInteraction === true ? { needsUserInteraction: true } : {}), ...(handoffOrigin ? { handoffOrigin } : {}) };
   }
 }
 

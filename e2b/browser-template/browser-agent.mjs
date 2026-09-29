@@ -1,16 +1,46 @@
 import http from "node:http";
 import dns from "node:dns/promises";
 import net from "node:net";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 process.env.PLAYWRIGHT_BROWSERS_PATH ||= "/opt/ms-playwright";
 const { chromium } = await import("playwright");
 
 const MAX_MATCHES = 60;
-const ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "menuitem", "option", "tab", "heading", "listbox", "img", "switch"];
+const ROLES = ["button", "link", "textbox", "combobox", "checkbox", "radio", "menuitem", "option", "tab", "heading", "listbox", "img", "switch", "file"];
 const PROFILE = "/home/chusky/.cache/chusky-browser";
 const DISPLAY = process.env.DISPLAY || ":99";
+const DOWNLOAD_ROOT = "/tmp/chusky-browser-downloads";
+const RECORDING_ROOT = "/tmp/chusky-browser-recordings";
+const MAX_PAGE_TEXT = 12_000;
+const MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024;
 const clean = (value, max = 180) => String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 const dnsCache = new Map();
+const downloaded = new Map();
+const downloadWaiters = [];
+const recordings = new Map();
+
+function safeFileName(value) {
+  const name = path.basename(String(value ?? "").replaceAll("\\", "/"))
+    .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "_").trim().slice(0, 120);
+  return name && name !== "." && name !== ".." ? name : "browser-download.bin";
+}
+
+function notifyDownload(item) {
+  const waiter = downloadWaiters.shift();
+  if (waiter) waiter(item);
+}
+
+async function pageText(page) {
+  const raw = await page.locator("body").evaluate((element, max) => {
+    const text = element.innerText || "";
+    return { text: text.slice(0, max + 1), truncated: text.length > max };
+  }, MAX_PAGE_TEXT).catch(() => ({ text: "", truncated: false }));
+  return { pageContent: clean(raw.text, MAX_PAGE_TEXT), pageContentTruncated: raw.truncated || raw.text.length > MAX_PAGE_TEXT };
+}
 
 function privateAddress(value) {
   const kind = net.isIP(value);
@@ -51,6 +81,7 @@ function nameMatcher(value) {
 function locatorFor(page, value) {
   const role = typeof value?.role === "string" && ROLES.includes(value.role) ? value.role : "button";
   const name = nameMatcher(value);
+  if (role === "file") return page.locator('input[type="file"]').nth(Math.max(0, Number(value?.index ?? 0)));
   const options = name ? { name, exact: value?.nameMatch !== "substring" && value?.nameMatch !== "regex" } : {};
   return page.getByRole(role, options).nth(Math.max(0, Number(value?.index ?? 0)));
 }
@@ -63,14 +94,20 @@ async function roleMatches(page, request = {}) {
   const options = name ? { name, exact: request.nameMatch !== "substring" && request.nameMatch !== "regex" } : {};
   const limit = Math.max(1, Math.min(MAX_MATCHES, Number(request.limit ?? MAX_MATCHES)));
   for (const role of roles) {
-    const locator = page.getByRole(role, options);
+    const locator = role === "file" ? page.locator('input[type="file"]') : page.getByRole(role, options);
     const count = Math.min(await locator.count(), limit - out.length);
     for (let index = 0; index < count; index += 1) {
       const item = locator.nth(index);
-      if (!(await item.isVisible().catch(() => false))) continue;
+      if (role !== "file" && !(await item.isVisible().catch(() => false))) continue;
       const label = await item.getAttribute("aria-label").catch(() => "");
       const alt = await item.getAttribute("alt").catch(() => "");
-      const nameValue = clean(label || await item.innerText().catch(() => "") || alt);
+      const associated = role === "file" ? await item.evaluate((element) => {
+        const input = element;
+        const labels = Array.from(input.labels || []).map((label) => label.innerText || label.textContent || "");
+        return labels.join(" ") || input.getAttribute("title") || input.getAttribute("name") || input.getAttribute("accept") || "File upload";
+      }).catch(() => "File upload") : "";
+      const nameValue = clean(label || await item.innerText().catch(() => "") || alt || associated);
+      if (name && !String(nameValue).toLowerCase().includes(String(name).toLowerCase())) continue;
       if (nameValue) out.push({ role, name: nameValue, index, ...(role === "link" ? { href: clean(await item.getAttribute("href").catch(() => ""), 1_000) } : {}) });
     }
     if (out.length >= limit) break;
@@ -111,9 +148,155 @@ async function linkPayTokenFrame(page) {
   return undefined;
 }
 
-async function result(page, context, extra = {}) {
+async function result(page, context, extra = {}, includePageContent = false) {
   const challenge = await challengeFor(page);
-  return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...extra, tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
+  return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
+}
+
+async function runSmokeFixture(context) {
+  const page = context.pages()[0] || await context.newPage();
+  await page.setContent(`<!doctype html><html><head><title>Chusky E2B browser fixture</title></head><body>
+    <main><h1>Browser integration fixture</h1><p>Visible content proves page reading works.</p>
+    <label for="query">Search fixture</label><input id="query" aria-label="Search fixture" />
+    <button id="continue">Continue</button><output id="output"></output>
+    <label for="upload">Attach fixture file</label><input id="upload" type="file" aria-label="Attach fixture file" />
+    <a id="download" download="fixture.txt" href="data:text/plain;base64,Q2h1c2t5IEUyQiBkb3dubG9hZCBmaXh0dXJl">Download fixture</a>
+    <div style="height:2400px">End of long page</div></main>
+    <script>
+      document.querySelector('#continue').addEventListener('click',()=>{document.querySelector('#output').textContent='Submitted: '+document.querySelector('#query').value});
+      document.querySelector('#upload').addEventListener('change',(event)=>{document.querySelector('#output').textContent+='; Uploaded: '+(event.target.files?.[0]?.name||'none')});
+    </script>
+  </body></html>`);
+  return result(page, context, { matches: await roleMatches(page) }, true);
+}
+
+async function waitForDownload(timeoutMs) {
+  const ready = [...downloaded.values()].find((item) => item.state === "ready");
+  if (ready) return ready;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (item) => { if (settled) return; settled = true; clearTimeout(timer); resolve(item); };
+    const timer = setTimeout(() => finish(null), Math.max(100, Math.min(30_000, timeoutMs)));
+    downloadWaiters.push(finish);
+  });
+}
+
+function attachDownloadListener(page) {
+  page.on("download", (download) => {
+    const id = "dl_" + randomUUID();
+    const name = safeFileName(download.suggestedFilename());
+    const filePath = path.join(DOWNLOAD_ROOT, id + "-" + name);
+    const item = { id, name, filePath, state: "saving", createdAt: Date.now(), size: 0 };
+    downloaded.set(id, item);
+    void (async () => {
+      try {
+        await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
+        await download.saveAs(filePath);
+        const info = await fs.stat(filePath);
+        if (!info.isFile() || info.size < 1 || info.size > MAX_DOWNLOAD_BYTES) throw new Error("download size is outside the supported limit");
+        item.size = info.size;
+        item.state = "ready";
+        notifyDownload(item);
+      } catch (error) {
+        item.state = "failed";
+        item.error = clean(error?.message || error, 200);
+        await fs.rm(filePath, { force: true }).catch(() => {});
+        notifyDownload(item);
+      }
+    })();
+  });
+}
+
+function waitForProcessClose(item, timeoutMs) {
+  if (item.exitCode !== null || item.exitSignal !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (closed) => {
+      clearTimeout(timer);
+      item.process.removeListener("close", onClose);
+      resolve(closed);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    item.process.once("close", onClose);
+  });
+}
+
+async function startRecording(durationSeconds = 900) {
+  const active = [...recordings.values()].filter((item) => item.state === "recording").length;
+  if (active >= 2) throw new Error("At most two browser recordings can run at once");
+  const id = "rec_" + randomUUID();
+  const filePath = path.join(RECORDING_ROOT, id + ".mp4");
+  const boundedDuration = Math.max(10, Math.min(900, Number(durationSeconds) || 900));
+  const process = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", "-nostdin", "-f", "x11grab", "-video_size", "1440x900", "-framerate", "8", "-i", DISPLAY, "-t", String(boundedDuration), "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32", "-movflags", "+faststart", filePath], { stdio: ["ignore", "ignore", "pipe"] });
+  const item = { id, name: id + ".mp4", filePath, state: "recording", createdAt: Date.now(), size: 0, process, exitCode: null, exitSignal: null, stderr: "" };
+  process.stderr?.on("data", (chunk) => { item.stderr = (item.stderr + String(chunk)).slice(-1_200); });
+  recordings.set(id, item);
+  process.once("error", (error) => { item.state = "failed"; item.error = clean(error.message, 200); });
+  process.once("close", (code, signal) => {
+    item.exitCode = code;
+    item.exitSignal = signal;
+    if (item.state === "recording" || item.state === "stopping") item.state = code === 0 || code === 255 ? "ready" : "failed";
+  });
+  const readyBy = Date.now() + 5_000;
+  while (Date.now() < readyBy) {
+    if (item.state === "failed" || item.exitCode !== null || item.exitSignal !== null) break;
+    const info = await fs.stat(filePath).catch(() => null);
+    if (info?.isFile() && info.size > 0) return item;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (item.state === "recording" && item.exitCode === null && item.exitSignal === null) {
+    item.process.kill("SIGTERM");
+    if (!(await waitForProcessClose(item, 1_500))) {
+      item.process.kill("SIGKILL");
+      await waitForProcessClose(item, 1_000);
+    }
+  }
+  const startupDetail = item.error || item.stderr || "ffmpeg did not produce video frames during startup";
+  item.state = "failed";
+  recordings.delete(id);
+  await fs.rm(filePath, { force: true });
+  throw new Error(`Recording failed to start (${clean(startupDetail, 300)})`);
+}
+
+async function stopRecording(id) {
+  const item = recordings.get(String(id));
+  if (!item) throw new Error("Recording not found");
+  if (item.state === "recording") {
+    item.state = "stopping";
+    item.process.kill("SIGINT");
+    if (!(await waitForProcessClose(item, 8_000))) {
+      item.process.kill("SIGTERM");
+      if (!(await waitForProcessClose(item, 2_000))) {
+        item.process.kill("SIGKILL");
+        await waitForProcessClose(item, 1_000);
+      }
+    }
+  }
+  const info = await fs.stat(item.filePath).catch(() => null);
+  if (!info?.isFile() || info.size < 1 || info.size > 100 * 1024 * 1024) {
+    item.state = "failed";
+    const processState = item.exitCode === null ? "still running" : `exit ${item.exitCode}${item.exitSignal ? ` (${item.exitSignal})` : ""}`;
+    const detail = item.error || item.stderr || `ffmpeg ${processState}`;
+    if (item.exitCode !== null || item.exitSignal !== null) item.state = "failed";
+    throw new Error(`Recording did not produce a supported video file (${clean(detail, 300)})`);
+  }
+  const handle = await fs.open(item.filePath, "r");
+  const header = Buffer.alloc(12);
+  let bytesRead = 0;
+  try { ({ bytesRead } = await handle.read(header, 0, header.length, 0)); }
+  finally { await handle.close(); }
+  if (bytesRead < 12 || header.toString("ascii", 4, 8) !== "ftyp") {
+    item.state = "failed";
+    throw new Error("Recording did not produce a valid MP4 container");
+  }
+  item.size = info.size;
+  item.state = "ready";
+  return item;
+}
+
+async function runtimeFileList(kind) {
+  const records = kind === "recording" ? [...recordings.values()] : [...downloaded.values()];
+  return records.slice(-50).map((item) => ({ id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt, ...(item.error ? { error: item.error } : {}) }));
 }
 
 async function execute(context, pageState, request) {
@@ -142,7 +325,7 @@ async function execute(context, pageState, request) {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     }, request.value);
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
-  } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) });
+  } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click") await page.mouse.click(Number(request.x), Number(request.y));
     else await page.mouse.move(Number(request.x), Number(request.y));
@@ -156,6 +339,21 @@ async function execute(context, pageState, request) {
     if (action === "select_option") await target.selectOption(String(request.value ?? ""));
     if (action === "check") await target.check();
     if (action === "uncheck") await target.uncheck();
+  } else if (["upload", "upload_files"].includes(action)) {
+    if (!target || !request.uploadPath || !/^\/tmp\/chusky-browser-upload\/[A-Za-z0-9_-]+-[^/]{1,120}$/.test(String(request.uploadPath))) throw new Error("Upload requires a fresh file-input node and an owner file reference");
+    if (!(await target.count())) throw new Error("The selected file input is no longer available");
+    try {
+      if (action === "upload" && request.selector.role !== "file") {
+        const chooserPromise = page.waitForEvent("filechooser", { timeout: 10_000 });
+        await target.click({ timeout: 15_000 });
+        const chooser = await chooserPromise;
+        await chooser.setFiles(String(request.uploadPath));
+      } else {
+        await target.setInputFiles(String(request.uploadPath), { timeout: 15_000 });
+      }
+    } finally {
+      await fs.rm(String(request.uploadPath), { force: true }).catch(() => {});
+    }
   } else if (action === "type") { if (target) await target.focus(); await page.keyboard.type(String(request.text ?? ""), { delay: Math.max(0, Math.min(250, Number(request.delayMs ?? 0))) }); }
   else if (action === "press") { if (target) await target.focus(); await page.keyboard.press(String(request.key || request.keys || "Enter")); }
   else if (action === "drag") { if (!request.source || !request.target) throw new Error("drag requires source and target accessible selectors"); await locatorFor(page, request.source).dragTo(locatorFor(page, request.target), { timeout: 15_000 }); }
@@ -164,36 +362,176 @@ async function execute(context, pageState, request) {
   else if (action === "forward") await page.goForward({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
   else if (action === "refresh") await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
   else if (action === "wait") await page.waitForTimeout(Math.max(50, Math.min(30_000, Number(request.timeoutMs ?? 1_000))));
-  else if (["screenshot", "screenshot_full", "screenshot_region"].includes(action)) {
-    const clip = action === "screenshot_region" && [request.x, request.y, request.width, request.height].every((value) => Number.isFinite(Number(value))) ? { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } : undefined;
-    const image = await page.screenshot({ type: "jpeg", quality: 70, fullPage: action === "screenshot_full", ...(clip ? { clip } : {}) });
+  else if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
+    const clipped = ["screenshot_region", "screenshot_region_full"].includes(action);
+    const clip = clipped && [request.x, request.y, request.width, request.height].every((value) => Number.isFinite(Number(value))) ? { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } : undefined;
+    const image = await page.screenshot({ type: "jpeg", quality: 75, fullPage: action === "screenshot_full", ...(clip ? { clip } : {}) });
     return result(page, context, { screenshot: image.toString("base64") });
+  } else if (action === "downloads" || action === "download_register") {
+    return result(page, context, { downloads: await runtimeFileList("download") });
+  } else if (action === "wait_download") {
+    const item = await waitForDownload(Number(request.timeoutMs ?? 10_000));
+    return result(page, context, { download: item ? { id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt, ...(item.error ? { error: item.error } : {}) } : null });
+  } else if (action === "recording_start") {
+    const item = await startRecording(request.durationSeconds);
+    return result(page, context, { recording: { id: item.id, name: item.name, state: item.state, createdAt: item.createdAt } });
+  } else if (action === "recording_stop") {
+    const item = await stopRecording(request.recordingId);
+    return result(page, context, { recording: { id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt }, runtimeFilePath: item.filePath });
+  } else if (action === "recording_list") {
+    return result(page, context, { recordings: await runtimeFileList("recording") });
+  } else if (action === "recording_get") {
+    const item = recordings.get(String(request.recordingId));
+    if (!item) throw new Error("Recording not found");
+    return result(page, context, { recording: { id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt, ...(item.error ? { error: item.error } : {}) } });
   } else if (["tabs", "windows"].includes(action)) return result(page, context);
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-  return result(page, context, { matches: await roleMatches(page) });
+  return result(page, context, { matches: await roleMatches(page) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {
   const page = context.pages()[0] || await context.newPage();
-  await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
-  const names = (value, fallback) => [value, ...fallback].filter(Boolean).map(String);
-  const userNames = names(request.usernameFieldLabel, ["Email", "Email address", "Email or username", "Username", "Phone number", "Mobile number"]);
-  const passwordNames = names(request.passwordFieldLabel, ["Password", "Your password", "Enter password"]);
-  const buttonNames = names(request.submitButtonLabel, ["Sign in", "Log in", "Login", "Continue", "Next", "Submit", "Verify", "Done"]);
-  const findOne = async (role, list) => { for (const name of [...new Set(list)]) { const item = page.getByRole(role, { name, exact: true }).first(); if (await item.count() && await item.isVisible().catch(() => false)) return item; } return null; };
-  let user = await findOne("textbox", userNames); let pass = await findOne("textbox", passwordNames);
-  if (user) { await user.fill(String(request.username)); const next = await findOne("button", buttonNames); if (!pass && next) { await next.click(); await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {}); } }
-  pass = pass || await findOne("textbox", passwordNames);
-  if (!pass || (await challengeFor(page)).detected) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true };
-  await pass.fill(String(request.password)); const submit = await findOne("button", buttonNames);
-  if (!submit) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true };
-  await submit.click(); await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {}); await new Promise((resolve) => setTimeout(resolve, 700));
-  const stillPassword = await findOne("textbox", passwordNames); const challenge = await challengeFor(page);
-  return { ...(await result(page, context)), authenticated: !stillPassword && !challenge.detected, needsUserInteraction: Boolean(stillPassword || challenge.detected) };
+  if (request.smokeFixture === true && process.env.CHUSKY_E2B_SMOKE_TESTS === "1") {
+    await page.setContent(`<!doctype html><html><head><title>Chusky vault login fixture</title></head><body>
+      <main><label for="email">Email</label><input id="email" type="email" autocomplete="username" />
+      <label for="password">Password</label><input id="password" type="password" autocomplete="current-password" />
+      <button id="login">Sign in</button><button id="logout" hidden>Sign out</button><p id="message"></p></main>
+      <script>document.querySelector('#login').addEventListener('click',()=>{document.querySelector('#logout').hidden=false;document.querySelector('#email').hidden=true;document.querySelector('#password').hidden=true;document.querySelector('#message').textContent='Welcome to the test account'});</script>
+    </body></html>`);
+  } else {
+    await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
+  }
+  const userNames = [request.usernameFieldLabel, "Email", "Email address", "Email or username", "Username", "Phone number", "Mobile number"].filter(Boolean).map(String);
+  const passwordNames = [request.passwordFieldLabel, "Password", "Your password", "Enter password"].filter(Boolean).map(String);
+  const buttonNames = [request.submitButtonLabel, "Sign in", "Log in", "Login", "Continue", "Next", "Submit", "Verify"].filter(Boolean).map(String);
+  const recipe = request.loginRecipe && typeof request.loginRecipe === "object" ? request.loginRecipe : {};
+  const recipeSteps = Array.isArray(recipe.steps) ? recipe.steps.slice(0, 20) : [];
+  const visible = async (locator) => await locator.count().catch(() => 0) > 0 && await locator.first().isVisible().catch(() => false);
+  const findNamed = async (role, labels) => {
+    for (const label of [...new Set(labels)]) {
+      const locator = page.getByRole(role, { name: String(label), exact: true }).first();
+      if (await visible(locator)) return locator;
+      const byLabel = page.getByLabel(String(label), { exact: true }).first();
+      if (await visible(byLabel)) return byLabel;
+    }
+    return null;
+  };
+  const passwordInput = async () => {
+    const direct = page.locator('input[type="password"]:visible').first();
+    if (await visible(direct)) return direct;
+    return findNamed("textbox", passwordNames);
+  };
+  const usernameInput = async () => {
+    const named = await findNamed("textbox", userNames);
+    if (named) return named;
+    for (const selector of [
+      'input[autocomplete="username"]:visible', 'input[type="email"]:visible',
+      'input[name*="email" i]:visible', 'input[name*="user" i]:visible',
+      'input[name*="phone" i]:visible', 'input[type="tel"]:visible',
+    ]) {
+      const candidate = page.locator(selector).first();
+      if (await visible(candidate)) return candidate;
+    }
+    return null;
+  };
+  const loginButton = async (recipeOnly = false) => {
+    const explicit = recipeSteps.find((step) => step?.action === "invoke" && step?.role === "button" && step?.name);
+    const labels = explicit ? [explicit.name, ...buttonNames] : buttonNames;
+    for (const label of [...new Set(labels)]) {
+      if (recipeOnly && label !== explicit?.name) continue;
+      const candidate = await findNamed("button", [label]);
+      if (candidate && /sign in|log ?in|continue|next|submit|verify|authenticate/i.test(String(label))) return candidate;
+    }
+    return null;
+  };
+  const bodyText = async () => clean(await page.locator("body").innerText().catch(() => ""), 8_000);
+  const detectorMatches = async (detector) => {
+    if (!detector || typeof detector !== "object") return false;
+    const [url, title, text] = [page.url(), await page.title().catch(() => ""), await bodyText()];
+    return Boolean((!detector.urlIncludes || url.toLowerCase().includes(String(detector.urlIncludes).toLowerCase()))
+      && (!detector.titleIncludes || title.toLowerCase().includes(String(detector.titleIncludes).toLowerCase()))
+      && (!detector.textIncludes || text.toLowerCase().includes(String(detector.textIncludes).toLowerCase())));
+  };
+  const anyDetector = async (detectors) => {
+    for (const detector of (Array.isArray(detectors) ? detectors : []).slice(0, 12)) if (await detectorMatches(detector)) return true;
+    return false;
+  };
+  const settle = async () => {
+    await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
+    await page.waitForTimeout(300);
+  };
+  const initialUrl = page.url();
+  const initialChallenge = await challengeFor(page);
+  if (initialChallenge.detected) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true, loginState: "challenge_detected" };
+
+  // Reuse safe, label-only recipe steps first. Values are selected only from
+  // the broker lease above; the saved recipe never stores them.
+  for (const step of recipeSteps) {
+    if (!step || typeof step.name !== "string" || !["textbox", "button", "link", "any"].includes(String(step.role))) continue;
+    if (step.action === "fill") {
+      const field = await findNamed(step.role === "any" ? "textbox" : step.role, [step.name]);
+      if (!field) { if (step.optional) continue; break; }
+      if (/password|passcode/i.test(step.name)) await field.fill(String(request.password));
+      else if (/email|user|login|phone|mobile/i.test(step.name)) await field.fill(String(request.username));
+    } else if (step.action === "focus") {
+      const field = await findNamed(step.role === "any" ? "textbox" : step.role, [step.name]);
+      if (field) await field.focus();
+    }
+  }
+
+  let submitted = false;
+  for (let stepIndex = 0; stepIndex < 4; stepIndex += 1) {
+    const challenge = await challengeFor(page);
+    if (challenge.detected) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true };
+    const password = await passwordInput();
+    if (password) {
+      await password.fill(String(request.password));
+      const submit = await loginButton();
+      if (!submit) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true, loginState: "password_step_button_missing" };
+      await submit.click({ timeout: 15_000 });
+      submitted = true;
+      await settle();
+      break;
+    }
+    const username = await usernameInput();
+    if (username && !submitted) {
+      await username.fill(String(request.username));
+      const next = await loginButton();
+      if (!next) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true, loginState: "username_step_button_missing" };
+      await next.click({ timeout: 15_000 });
+      submitted = true;
+      await settle();
+      continue;
+    }
+    break;
+  }
+
+  const challenge = await challengeFor(page);
+  if (challenge.detected) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: true, loginState: "challenge_detected" };
+  if (await anyDetector(recipe.failure)) return { ...(await result(page, context)), authenticated: false, needsUserInteraction: false, loginState: "failure_detector_matched" };
+  const successes = Array.isArray(recipe.success) ? recipe.success.filter((item) => item && item.required !== false) : [];
+  const recipeVerified = successes.length > 0 && await (async () => {
+    for (const detector of successes) if (!(await detectorMatches(detector))) return false;
+    return true;
+  })();
+  const positiveAuthSignal = await findNamed("link", ["Sign out", "Log out", "My account", "My profile", "Account", "Profile"])
+    || await findNamed("button", ["Sign out", "Log out", "My account", "My profile", "Account", "Profile"]);
+  const passStillVisible = Boolean(await passwordInput());
+  const authenticated = recipeVerified || Boolean(positiveAuthSignal && !passStillVisible);
+  if (authenticated) return { ...(await result(page, context)), authenticated: true, needsUserInteraction: false, loginState: "authenticated" };
+  const usernameStillVisible = Boolean(await usernameInput());
+  const stillLogin = usernameStillVisible || passStillVisible;
+  const changedOrigin = (() => { try { return new URL(page.url()).origin !== new URL(initialUrl).origin; } catch { return false; } })();
+  const loginState = !submitted ? (usernameStillVisible || passStillVisible ? "login_fields_not_submitted" : "login_form_not_found") : stillLogin ? "credentials_not_accepted" : changedOrigin ? "external_identity_provider_requires_handoff" : "login_success_not_verified";
+  return { ...(await result(page, context)), authenticated: false, needsUserInteraction: Boolean(!submitted || stillLogin || changedOrigin), loginUnverified: submitted && !stillLogin && !changedOrigin, loginState };
 }
 
 async function start() {
-  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: { ...process.env, DISPLAY } });
+  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: { ...process.env, DISPLAY } });
+  await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
+  await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
+  context.on("page", attachDownloadListener);
+  for (const page of context.pages()) attachDownloadListener(page);
   await context.route("**/*", async (route) => {
     const request = route.request();
     const url = request.url();
@@ -201,7 +539,7 @@ async function start() {
     try { parsed = new URL(url); } catch { return route.continue(); }
     if (!/^https?:$/.test(parsed.protocol)) return route.continue();
     try {
-      await safeHttpUrl(url, request.resourceType() === "document");
+      await safeHttpUrl(url, true);
       return route.continue();
     } catch {
       return route.abort("blockedbyclient");
@@ -213,7 +551,33 @@ async function start() {
     if (incoming.method === "GET" && incoming.url === "/health") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: true, provider: "e2b", browser: "ready" })); return; }
     if (incoming.method !== "POST" || incoming.url !== "/command") { response.writeHead(404); response.end(); return; }
     let body = ""; incoming.on("data", (chunk) => { body += chunk; if (body.length > 256_000) incoming.destroy(); });
-    incoming.on("end", async () => { try { const request = JSON.parse(body); const output = request.action === "vault_login" ? await vaultLogin(context, request) : await execute(context, pageState, request); pageState.activeIndex = Number(output.activeIndex ?? pageState.activeIndex); response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(output)); } catch (error) { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: false, error: clean(error?.message || error, 800) })); } });
+    incoming.on("end", async () => {
+      try {
+        const request = JSON.parse(body);
+        let output;
+        if (request.action === "vault_login") output = await vaultLogin(context, request);
+        else if (request.action === "smoke_fixture") {
+          if (process.env.CHUSKY_E2B_SMOKE_TESTS !== "1") throw new Error("Browser smoke fixture is disabled");
+          output = await runSmokeFixture(context);
+        }
+        else if (request.action === "download_claim" || request.action === "recording_claim") {
+          const item = (request.action === "download_claim" ? downloaded : recordings).get(String(request.id));
+          if (!item || item.state !== "ready") throw new Error("Browser file is not ready");
+          output = { ok: true, id: item.id, name: item.name, size: item.size, createdAt: item.createdAt, filePath: item.filePath, kind: request.action === "download_claim" ? "download" : "recording" };
+        } else if (request.action === "download_ack" || request.action === "recording_ack") {
+          const collection = request.action === "download_ack" ? downloaded : recordings;
+          const item = collection.get(String(request.id));
+          if (item) { await fs.rm(item.filePath, { force: true }); collection.delete(String(request.id)); }
+          output = { ok: true, removed: Boolean(item) };
+        } else output = await execute(context, pageState, request);
+        pageState.activeIndex = Number(output.activeIndex ?? pageState.activeIndex);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(output));
+      } catch (error) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: false, error: clean(error?.message || error, 800) }));
+      }
+    });
   });
   server.listen(8765, "127.0.0.1");
 }
