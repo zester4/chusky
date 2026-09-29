@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
 import { getAuth } from "./auth.js";
-import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
+import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
@@ -14,6 +14,7 @@ import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest
 import { vectorConfigured } from "./lib/knowledge/vector.js";
 import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, completeMissionStep, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, replanMission, resumeMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
+import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
 import { listJobOccurrences } from "./store.js";
 import { appendSdkRunHistoryToSession, backfillSdkPrivateRunHistory, mergeLinkedWebSession, mutateSession } from "./store.js";
@@ -1688,8 +1689,19 @@ export function registerSdkApi(app: Hono): void {
 
   app.get("/v1/triggers", async (c) => {
     try {
-      const items = await listTriggers(sdkUser(c)!.userId);
-      return c.json({ data: items.map((item: any) => ({ id: String(item.id ?? item.trigger_id ?? item.triggerId ?? ""), slug: String(item.trigger_slug ?? item.slug ?? ""), status: String(item.status ?? (item.enabled === false ? "disabled" : "active")), config: item.config ?? item.triggerConfig ?? {} })).filter((item) => item.id) });
+      const userId = sdkUser(c)!.userId;
+      const [items, session] = await Promise.all([listTriggers(userId), getSession(userId)]);
+      return c.json({ data: items.map((item: any) => {
+        const id = String(item.id ?? item.trigger_id ?? item.triggerId ?? "");
+        return {
+          id,
+          slug: String(item.trigger_slug ?? item.slug ?? ""),
+          status: String(item.status ?? (item.enabled === false ? "disabled" : "active")),
+          enabled: item.enabled === true,
+          config: item.config ?? item.triggerConfig ?? {},
+          ...(session.triggerInstructions?.[id] ? { instructions: session.triggerInstructions[id] } : {}),
+        };
+      }).filter((item) => item.id) });
     } catch (error) { return apiError(c, 502, "triggers_unavailable", error instanceof Error ? error.message : "Triggers are temporarily unavailable."); }
   });
 
@@ -1710,25 +1722,54 @@ export function registerSdkApi(app: Hono): void {
       const types = await listAvailableTriggerTypes(toolkit);
       const totalPages = Math.max(1, Math.ceil(types.length / pageSize));
       const page = Math.min(requestedPage, totalPages);
-      return c.json({ data: types.slice((page - 1) * pageSize, page * pageSize), page, pageSize, total: types.length, totalPages });
+      const data = types.slice((page - 1) * pageSize, page * pageSize).map((item) => ({
+        token: item.token,
+        ...triggerTypeForAgent(item),
+        toolkit: { slug: item.toolkit.slug, name: item.toolkit.name.slice(0, 100), ...(item.toolkit.logo ? { logo: item.toolkit.logo } : {}) },
+      }));
+      return c.json({ data, page, pageSize, total: types.length, totalPages });
     } catch (error) { return apiError(c, 502, "trigger_catalog_unavailable", error instanceof Error ? error.message : "Trigger catalogue is temporarily unavailable."); }
   });
 
   app.post("/v1/triggers", async (c) => {
-    const body = await c.req.json().catch(() => ({})) as { slug?: unknown; connectedAccountId?: unknown; triggerConfig?: unknown };
+    const body = await c.req.json().catch(() => ({})) as { slug?: unknown; connectedAccountId?: unknown; triggerConfig?: unknown; instructions?: unknown };
     const slug = String(body.slug ?? "").trim();
     if (!/^[A-Z0-9][A-Z0-9_.-]{1,150}$/.test(slug)) return apiError(c, 400, "invalid_trigger", "Provide a valid trigger slug.");
     if (body.connectedAccountId !== undefined && (typeof body.connectedAccountId !== "string" || body.connectedAccountId.length < 1 || body.connectedAccountId.length > 200)) return apiError(c, 400, "invalid_connected_account", "connectedAccountId must be a valid connected account ID.");
     if (body.triggerConfig !== undefined && (typeof body.triggerConfig !== "object" || body.triggerConfig === null || Array.isArray(body.triggerConfig))) return apiError(c, 400, "invalid_trigger_config", "triggerConfig must be an object.");
-    try { return c.json(await createTrigger(sdkUser(c)!.userId, slug, { ...(body.connectedAccountId ? { connectedAccountId: body.connectedAccountId } : {}), triggerConfig: body.triggerConfig ?? {} }), 201); }
+    if (body.instructions !== undefined && (typeof body.instructions !== "string" || !body.instructions.trim() || body.instructions.trim().length > 2_000)) return apiError(c, 400, "invalid_trigger_instructions", "instructions must contain 1 to 2000 characters.");
+    const idempotencyKey = (c.req.header("Idempotency-Key") ?? "").trim();
+    if (!idempotencyKey || idempotencyKey.length > 255) return apiError(c, 400, "idempotency_key_required", "A valid Idempotency-Key is required to create a trigger.");
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    try { return await sdkMutation(c, fingerprint, (userId) => createTrigger(userId, slug, {
+      ...(body.connectedAccountId ? { connectedAccountId: body.connectedAccountId } : {}),
+      triggerConfig: body.triggerConfig ?? {},
+      ...(typeof body.instructions === "string" ? { instructions: body.instructions } : {}),
+    }), 201); }
     catch (error) { return apiError(c, 502, "trigger_create_failed", error instanceof Error ? error.message : "Could not create the trigger."); }
   });
 
   app.patch("/v1/triggers/:triggerId", async (c) => {
-    const enabled = (await c.req.json().catch(() => ({})) as { enabled?: unknown }).enabled;
-    if (typeof enabled !== "boolean") return apiError(c, 400, "invalid_trigger_state", "enabled must be a boolean.");
-    try { return c.json(await setTriggerState(sdkUser(c)!.userId, c.req.param("triggerId"), enabled)); }
-    catch (error) { return apiError(c, 403, "trigger_not_owned", error instanceof Error ? error.message : "You do not own this trigger."); }
+    const body = await c.req.json().catch(() => ({})) as { enabled?: unknown; instructions?: unknown };
+    const hasEnabled = Object.hasOwn(body, "enabled");
+    const hasInstructions = Object.hasOwn(body, "instructions");
+    if (hasEnabled === hasInstructions || Object.keys(body).length !== 1) return apiError(c, 400, "invalid_trigger_update", "Provide exactly one of enabled or instructions.");
+    if (hasEnabled && typeof body.enabled !== "boolean") return apiError(c, 400, "invalid_trigger_state", "enabled must be a boolean.");
+    if (hasInstructions && (typeof body.instructions !== "string" || !body.instructions.trim() || body.instructions.trim().length > 2_000)) return apiError(c, 400, "invalid_trigger_instructions", "instructions must contain 1 to 2000 characters.");
+    const triggerId = c.req.param("triggerId");
+    const fingerprint = createHash("sha256").update(`PATCH:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    try {
+      return await sdkMutation(c, fingerprint, async (userId) => {
+        if (hasInstructions) {
+          await updateTriggerInstructions(userId, triggerId, String(body.instructions));
+          return { id: triggerId, instructions: String(body.instructions).trim() };
+        }
+        return setTriggerState(userId, triggerId, body.enabled as boolean);
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not update the trigger.";
+      return apiError(c, /do not own/i.test(message) ? 403 : 502, /do not own/i.test(message) ? "trigger_not_owned" : "trigger_update_failed", message);
+    }
   });
 
   app.delete("/v1/triggers/:triggerId", async (c) => {

@@ -2,6 +2,15 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.7.0 - 2026-09-29
+
+- Expose typed trigger catalogue schemas, connected-account binding, and
+  owner-authored event instructions through the authenticated API and SDK.
+- Persist trigger instructions for future event runs, support owner-scoped
+  policy edits, and make trigger creation idempotent.
+- Keep credential-shaped provider fields out of trigger configuration forms
+  and preserve the existing approval boundary for event-driven actions.
+
 ## 1.6.4 - 2026-09-26
 
 - Return durable generated-image metadata on completed runs when the image was

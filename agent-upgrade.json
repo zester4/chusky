@@ -1,11 +1,11 @@
 {
-  "id": "release-4.28.0",
-  "version": "4.28.0",
+  "id": "release-4.29.0",
+  "version": "4.29.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
-    "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",
-    "Web Bot Auth identifies Chusky transparently but does not bypass CAPTCHA, site policies, authentication, regional controls, or guarantee universal website access."
+    "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
+    "Bind each event to an exact active connected account, configure fields from provider metadata, and save owner-authored handling instructions for future events.",
+    "Trigger setup rejects credential-shaped config, scopes trigger and instruction state to its owner, and retains normal approval and safety policy for event-driven actions."
   ],
-  "createdAt": "2026-09-29T16:21:43.280Z"
+  "createdAt": "2026-09-29T19:51:32.225Z"
 }

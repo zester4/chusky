@@ -81,6 +81,11 @@ export type MemoryCategory = "profile" | "personal" | "preference" | "business" 
 export interface MemoryFact { id: string; category: MemoryCategory; key: string; value: string; confidence: number; source: string; sensitivity: "normal" | "sensitive"; status?: string; projectId?: string; personKey?: string; createdAt: string; updatedAt: string; expiresAt?: string; reviewAt?: string; }
 export interface CliDevice { id: string; name: string; createdAt: string; lastSeenAt: string; }
 export interface AppConnection { id: string; toolkit?: string; accountId?: string; name?: string; status?: string; [key: string]: unknown; }
+export interface Trigger { id: string; slug: string; status: string; enabled: boolean; config: Record<string, unknown>; instructions?: string; }
+export interface TriggerConfigField { name: string; required: boolean; sensitive?: boolean; type?: string; description?: string; allowedValues?: Array<string | number | boolean>; minLength?: number; maxLength?: number; }
+export interface TriggerCatalogueItem { token: string; slug: string; name: string; description: string; setupInstructions?: string; toolkit: { slug: string; name: string; logo?: string }; requiredFields: string[]; fields: TriggerConfigField[]; }
+export interface TriggerToolkit { slug: string; name: string; logo?: string; triggerCount: number; connected: boolean; accountCount: number; }
+export interface TriggerCreateParams { slug: string; connectedAccountId?: string; triggerConfig?: Record<string, unknown>; instructions?: string; }
 export interface McpCatalogEntry { id: string; name: string; url: string; auth: "none" | "bearer" | "oauth"; allowedTools?: string[]; requireApproval?: boolean; custom?: boolean; enabled?: boolean; }
 export interface McpConnection { serverId: string; name: string; auth: "none" | "bearer" | "oauth"; enabled: boolean; connectedAt: string; updatedAt: string; verifiedToolCount?: number; }
 export interface AddCustomMcpServerParams { name: string; url: string; auth: "none" | "bearer"; accessToken?: string; allowedTools?: string[]; requireApproval?: boolean; }

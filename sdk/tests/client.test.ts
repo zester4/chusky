@@ -31,6 +31,22 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("SDK creates provider-catalogued triggers with exact account and instructions, then updates their policy", async () => {
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown>; idempotencyKey: string | null }> = [];
+  const sdk = new Chusky({ apiKey: "chsk_trigger_test", userId: "trigger-owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    calls.push({ url, method: init?.method ?? "GET", body, idempotencyKey: new Headers(init?.headers).get("idempotency-key") });
+    return new Response(JSON.stringify({ id: "trigger_gmail_1", slug: "GMAIL_NEW_GMAIL_MESSAGE", status: "enabled", enabled: true, config: {}, instructions: body.instructions ?? "Triage new messages." }), { status: 200 });
+  }) });
+  await sdk.account.createTrigger({ slug: "GMAIL_NEW_GMAIL_MESSAGE", connectedAccountId: "gmail_assistant_workspace", triggerConfig: { query: "in:inbox" }, instructions: "Triage new messages." }, { idempotencyKey: "gmail-create-1" });
+  const updated = await sdk.account.updateTriggerInstructions("trigger_gmail_1", "Summarize only.", { idempotencyKey: "gmail-policy-1" });
+  assert.equal(updated.instructions, "Summarize only.");
+  assert.deepEqual(calls, [
+    { url: "https://example.test/v1/triggers", method: "POST", body: { slug: "GMAIL_NEW_GMAIL_MESSAGE", connectedAccountId: "gmail_assistant_workspace", triggerConfig: { query: "in:inbox" }, instructions: "Triage new messages." }, idempotencyKey: "gmail-create-1" },
+    { url: "https://example.test/v1/triggers/trigger_gmail_1", method: "PATCH", body: { instructions: "Summarize only." }, idempotencyKey: "gmail-policy-1" },
+  ]);
+});
+
 test("SDK adds custom MCP servers through the authenticated verification endpoint", async () => {
   let request: { url: string; body: Record<string, unknown>; key: string | null; userId: string | null } | undefined;
   const sdk = new Chusky({ apiKey: "chsk_mcp_test", userId: "mcp-owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

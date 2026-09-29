@@ -112,6 +112,15 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
+test("trigger management preset documents live catalogue, account binding, and safe event policy", () => {
+  const bullets = getAgentUpgradePreset("triggers");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.triggers]);
+  assert.match(bullets[0], /authenticated dashboard or typed SDK/);
+  assert.match(bullets[1], /exact active connected account/);
+  assert.match(bullets[2], /approval and safety policy/);
+});
+
 test("Web Bot Auth upgrade preset describes identity without claiming access bypass", () => {
   const bullets = getAgentUpgradePreset("webBotAuth");
   assert.equal(bullets.length, 3);
@@ -169,13 +178,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the Web Bot Auth capability release", async () => {
+test("current upgrade manifest announces the connected-app trigger management release", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.28.0");
-  assert.equal(notice?.version, "4.28.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Cloudflare Web Bot Auth identity/);
-  assert.match(formatAgentUpgradeNotice(notice!), /separate RFC 9421 Ed25519 request-signing switch/);
-  assert.match(formatAgentUpgradeNotice(notice!), /does not bypass CAPTCHA/);
+  assert.equal(notice?.id, "release-4.29.0");
+  assert.equal(notice?.version, "4.29.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /authenticated dashboard or typed SDK/);
+  assert.match(formatAgentUpgradeNotice(notice!), /exact active connected account/);
+  assert.match(formatAgentUpgradeNotice(notice!), /approval and safety policy/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

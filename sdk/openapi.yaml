@@ -116,13 +116,46 @@ paths:
     delete: { summary: Disconnect an owned Composio account, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Disconnected } } }
   /triggers:
     get: { summary: List account triggers, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
-    post: { summary: Create an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
+    post:
+      summary: Create an account trigger from an exact provider catalogue entry
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug]
+              additionalProperties: false
+              properties:
+                slug: { type: string, minLength: 2, maxLength: 151, description: Exact provider catalogue slug, such as GMAIL_NEW_GMAIL_MESSAGE }
+                connectedAccountId: { type: string, minLength: 1, maxLength: 200, description: Optional exact active account ID when only one matching app account is connected; required when multiple match }
+                triggerConfig: { type: object, default: {}, description: Values matching the current provider schema; credential fields are rejected }
+                instructions: { type: string, minLength: 1, maxLength: 2000, description: Owner-authored event handling rules; cannot override safety or approval policy }
+      responses: { '201': { description: Created and durably associated with the authenticated user }, '400': { description: Invalid schema, account selection, instructions, or missing idempotency key }, '409': { description: Idempotency key reused with a different request } }
   /triggers/catalog/toolkits:
     get: { summary: List Composio trigger-capable app toolkits, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
   /triggers/catalog/toolkits/{toolkit}:
     get: { summary: List paginated trigger types for an app toolkit, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: toolkit, in: path, required: true, schema: { type: string } }], responses: { '200': { description: OK } } }
   /triggers/{triggerId}:
-    patch: { summary: Enable or disable an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated } } }
+    patch:
+      summary: Enable, disable, or update the owner-authored instructions for a trigger
+        parameters: [{ name: triggerId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [enabled]
+                  additionalProperties: false
+                  properties: { enabled: { type: boolean } }
+                - type: object
+                  required: [instructions]
+                  additionalProperties: false
+                  properties: { instructions: { type: string, minLength: 1, maxLength: 2000 } }
+        responses: { '200': { description: Updated }, '400': { description: Invalid update }, '403': { description: Trigger is not owned by this user }, '409': { description: Idempotency key reused with a different request } }
     delete: { summary: Delete an account trigger, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '204': { description: Deleted } } }
   /threads:
     get:

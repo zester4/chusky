@@ -11,6 +11,7 @@ import { daytonaEngine } from "../src/lib/daytona/engine.js";
 import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
+import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -865,6 +866,76 @@ test("SDK trigger catalogue rejects malformed toolkit route parameters before pr
   const response = await api.fetch(new Request("http://local/v1/triggers/catalog/toolkits/not%20a%20toolkit", { headers }));
   assert.equal(response.status, 400);
   assert.equal((await response.json() as { error: { code: string } }).error.code, "invalid_toolkit");
+});
+
+test("trigger dashboard contract binds Gmail events to an owned account and persists owner instructions idempotently", async () => {
+  const creates: unknown[][] = [];
+  const changes: unknown[][] = [];
+  resetTriggerCatalogueForTests();
+  setAgentDependenciesForTests({ composio: {
+    connectedAccounts: { list: async () => ({ items: [{ id: "gmail_assistant_workspace", alias: "assistant-workspace", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }) },
+    triggers: {
+      listTypes: async () => ({ items: [{
+        slug: "GMAIL_NEW_GMAIL_MESSAGE",
+        name: "New Gmail message",
+        description: "A new email arrives.",
+        toolkit: { slug: "gmail", name: "Gmail" },
+        config: {
+          type: "object",
+          required: ["query"],
+          properties: {
+            query: { type: "string", description: "Gmail search query", maxLength: 120 },
+            api_key: { type: "string" },
+          },
+        },
+      }] }),
+      create: async (...args: unknown[]) => { creates.push(args); return { triggerId: "trigger_gmail_1", status: "enabled" }; },
+      listActive: async () => ({ items: [{ id: "trigger_gmail_1", trigger_slug: "GMAIL_NEW_GMAIL_MESSAGE", status: "enabled" }] }),
+      enable: async (id: string) => { changes.push(["enable", id]); return { id, enabled: true }; },
+      disable: async (id: string) => { changes.push(["disable", id]); return { id, enabled: false }; },
+    },
+  } });
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "trigger-owner", "Content-Type": "application/json", "Idempotency-Key": "gmail-trigger-create-1" };
+  const catalog = await api.fetch(new Request("http://local/v1/triggers/catalog/toolkits/gmail", { headers }));
+  assert.equal(catalog.status, 200);
+  const type = (await catalog.json() as { data: Array<{ slug: string; requiredFields: string[]; fields: Array<{ name: string; sensitive?: boolean }> }> }).data[0]!;
+  assert.equal(type.slug, "GMAIL_NEW_GMAIL_MESSAGE");
+  assert.deepEqual(type.requiredFields, ["query"]);
+  assert.equal(type.fields.find((field) => field.name === "query")?.sensitive, undefined);
+  assert.equal(type.fields.find((field) => field.name === "api_key")?.sensitive, true);
+
+  const body = JSON.stringify({ slug: type.slug, connectedAccountId: "gmail_assistant_workspace", triggerConfig: { query: "in:inbox" }, instructions: "Triage mail; draft sensitive replies and never send those without asking." });
+  const create = () => new Request("http://local/v1/triggers", { method: "POST", headers, body });
+  const first = await api.fetch(create());
+  assert.equal(first.status, 201);
+  const firstResult = await first.json();
+  const replay = await api.fetch(create());
+  assert.equal(replay.status, 201);
+  assert.deepEqual(await replay.json(), firstResult);
+  assert.equal(creates.length, 1);
+  assert.match(String(creates[0]?.[0]), /^user_\d+$/);
+  assert.deepEqual(creates[0]?.slice(1), ["GMAIL_NEW_GMAIL_MESSAGE", { connectedAccountId: "gmail_assistant_workspace", triggerConfig: { query: "in:inbox" } }]);
+
+  const listed = await api.fetch(new Request("http://local/v1/triggers", { headers }));
+  const trigger = (await listed.json() as { data: Array<{ id: string; instructions?: string }> }).data[0]!;
+  assert.equal(trigger.id, "trigger_gmail_1");
+  assert.equal(trigger.instructions, "Triage mail; draft sensitive replies and never send those without asking.");
+
+  const edited = await api.fetch(new Request("http://local/v1/triggers/trigger_gmail_1", { method: "PATCH", headers: { ...headers, "Idempotency-Key": "gmail-trigger-policy-1" }, body: JSON.stringify({ instructions: "Summarize only; do not send mail." }) }));
+  assert.equal(edited.status, 200);
+  assert.equal((await edited.json() as { instructions: string }).instructions, "Summarize only; do not send mail.");
+  const enabled = await api.fetch(new Request("http://local/v1/triggers/trigger_gmail_1", { method: "PATCH", headers: { ...headers, "Idempotency-Key": "gmail-trigger-disable-1" }, body: JSON.stringify({ enabled: false }) }));
+  assert.equal(enabled.status, 200);
+  assert.deepEqual(changes, [["disable", "trigger_gmail_1"]]);
+
+  const noKey = await api.fetch(new Request("http://local/v1/triggers/trigger_gmail_1", { method: "PATCH", headers: { Authorization: headers.Authorization, "X-Chusky-User-Id": "trigger-owner", "Content-Type": "application/json" }, body: JSON.stringify({ instructions: "Summarize only; do not send mail." }) }));
+  assert.equal(noKey.status, 200);
+
+  const invalid = await api.fetch(new Request("http://local/v1/triggers/trigger_gmail_1", { method: "PATCH", headers, body: JSON.stringify({ instructions: "x".repeat(2001) }) }));
+  assert.equal(invalid.status, 400);
+  const foreign = await api.fetch(new Request("http://local/v1/triggers/trigger_gmail_1", { method: "PATCH", headers: { ...headers, "X-Chusky-User-Id": "different-owner" }, body: JSON.stringify({ instructions: "Not yours" }) }));
+  assert.equal(foreign.status, 403);
 });
 
 test("SDK webhook creation replays the same subscription on a lost response", async () => {

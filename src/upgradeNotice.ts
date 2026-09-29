@@ -72,6 +72,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Bearer credentials are encrypted at rest, outbound hosts are pinned to validated public DNS results, and private/link-local targets and redirects are rejected.",
     "The agent executes discovered tools with schema validation, default human approval, bounded results, visible failures, and account isolation from group and meeting contexts.",
   ],
+  triggers: [
+    "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
+    "Bind each event to an exact active connected account, configure fields from provider metadata, and save owner-authored handling instructions for future events.",
+    "Trigger setup rejects credential-shaped config, scopes trigger and instruction state to its owner, and retains normal approval and safety policy for event-driven actions.",
+  ],
   treg: [
     "Added Treg as Chusky's first-class live-data gateway with bounded native tools for provider catalog search, endpoint inspection, provider comparison, enrichment, data resolution, organization-tool discovery, usage, and balance checks.",
     "Treg calls use server-only organization credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",

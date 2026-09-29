@@ -2,7 +2,7 @@ import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./
 import { readNdjson } from "./stream.js";
 import type { A2AMessageInput } from "./types.js";
 import type { ImageDownload } from "./types.js";
-import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
+import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 const DEFAULT_BASE_URL = "https://api.chusky.ai";
 
@@ -428,19 +428,20 @@ export class AccountResource {
   connectApp(toolkit: string, options?: RequestOptions): Promise<{ toolkit: string; url: string }> { return this.client.request(`/apps/${encodeURIComponent(toolkit)}/connect`, { method: "POST", body: "{}" }, options); }
   appConnections(options?: RequestOptions): Promise<Page<AppConnection>> { return this.client.request("/apps/connections", {}, options); }
   disconnectApp(connectionId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/apps/connections/${encodeURIComponent(connectionId)}`, { method: "DELETE" }, options); }
-  triggers(options?: RequestOptions): Promise<Page<Record<string, unknown>>> { return this.client.request("/triggers", {}, options); }
-  triggerToolkits(params: { connectedOnly?: boolean } = {}, options?: RequestOptions): Promise<Page<Record<string, unknown>>> {
+  triggers(options?: RequestOptions): Promise<Page<Trigger>> { return this.client.request("/triggers", {}, options); }
+  triggerToolkits(params: { connectedOnly?: boolean } = {}, options?: RequestOptions): Promise<Page<TriggerToolkit>> {
     const query = params.connectedOnly === false ? "?connectedOnly=false" : "";
     return this.client.request(`/triggers/catalog/toolkits${query}`, {}, options);
   }
-  triggerTypes(toolkit: string, params: { page?: number; pageSize?: number } = {}, options?: RequestOptions): Promise<Page<Record<string, unknown>>> {
+  triggerTypes(toolkit: string, params: { page?: number; pageSize?: number } = {}, options?: RequestOptions): Promise<Page<TriggerCatalogueItem>> {
     const query = new URLSearchParams();
     if (params.page) query.set("page", String(params.page));
     if (params.pageSize) query.set("pageSize", String(params.pageSize));
     return this.client.request(`/triggers/catalog/toolkits/${encodeURIComponent(toolkit)}${query.size ? `?${query}` : ""}`, {}, options);
   }
-  createTrigger(params: { slug: string; connectedAccountId?: string; triggerConfig?: Record<string, unknown> }, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/triggers", { method: "POST", body: JSON.stringify(params) }, options); }
+  createTrigger(params: TriggerCreateParams, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request("/triggers", { method: "POST", body: JSON.stringify(params) }, options); }
   setTriggerState(triggerId: string, enabled: boolean, options?: RequestOptions): Promise<Record<string, unknown>> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "PATCH", body: JSON.stringify({ enabled }) }, options); }
+  updateTriggerInstructions(triggerId: string, instructions: string, options?: RequestOptions): Promise<{ id: string; instructions: string }> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "PATCH", body: JSON.stringify({ instructions }) }, options); }
   deleteTrigger(triggerId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/triggers/${encodeURIComponent(triggerId)}`, { method: "DELETE" }, options); }
   telegramLink(options?: RequestOptions): Promise<{ code: string; expiresAt: string }> { return this.client.request("/account/telegram-link", { method: "POST", body: "{}" }, options); }
   calls(options?: RequestOptions): Promise<CallsResponse> { return this.client.request("/account/calls", {}, options); }
