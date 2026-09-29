@@ -22,7 +22,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 concurrency:
   group: chusky-sdk-release
@@ -105,7 +104,10 @@ jobs:
         working-directory: sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+        # The workflow runs from the agent repository while package metadata
+        # correctly points at the separate SDK repository; provenance would
+        # reject that mismatch. Authenticate the public publish with NPM_TOKEN.
+        run: npm publish --access public
       - name: Commit and tag release
         if: steps.release_tag.outputs.exists != 'true'
         env:

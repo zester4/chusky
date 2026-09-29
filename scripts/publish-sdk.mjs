@@ -24,7 +24,7 @@ if (lockfile.version !== requestedVersion || lockRoot?.version !== requestedVers
 }
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const publishArgs = ["publish", "--access", "public", "--provenance", ...(dryRun ? ["--dry-run"] : [])];
+const publishArgs = ["publish", "--access", "public", ...(dryRun ? ["--dry-run"] : [])];
 console.log(`${dryRun ? "Previewing" : "Publishing"} @chusky/sdk@${requestedVersion}`);
 
 await new Promise((resolveProcess, reject) => {

@@ -3,22 +3,21 @@ title: SDK releases
 description: Validate, version, publish, and track Chusky SDK releases.
 ---
 
-The repository includes a guarded GitHub Actions workflow named **Chusky SDK Release**. It accepts an exact semantic version from **Run workflow** or from a pushed `sdk-vX.Y.Z` tag. The local repository also exposes an exact-version CLI path so an operator can preflight or publish from a trusted release environment. The workflow:
+The canonical SDK source is the separate [`zester4/chusky-sdk`](https://github.com/zester4/chusky-sdk) repository. Its **Release Chusky SDK** workflow automatically validates and publishes when `package.json` or `package-lock.json` changes on `main`. It also supports a manually dispatched exact version and `sdk-vX.Y.Z` tags for recovery. The agent monorepo's release workflow is a guarded fallback; never start two releases for the same version concurrently.
 
-1. Installs dependencies and runs the root typecheck, app build, SDK build, and SDK tests.
-2. Updates `sdk/package.json` and `sdk/package-lock.json` with the requested version.
-3. Commits the version change and creates the `sdk-vX.Y.Z` tag.
-4. Publishes `@chusky/sdk` with npm provenance.
-5. Creates a GitHub release with generated notes for that tag.
+For the normal release:
 
-Configure the repository `NPM_TOKEN` secret before running it. The token needs publish access to `@chusky/sdk`; GitHub Actions uses its own `GITHUB_TOKEN` for the commit, tag, and release. A failed validation stops before the version, tag, or publish steps.
+1. Update the SDK source, changelog, and package version in the dedicated SDK repository. Keep `package.json` and `package-lock.json` versions in sync.
+2. Run `npm ci`, `npm run typecheck`, `npm run build`, and `npm test` in that repository.
+3. Commit and push the changes to `main`. GitHub Actions reruns those checks, publishes `@chusky/sdk`, and creates the matching `sdk-vX.Y.Z` tag and GitHub release.
+4. Confirm the exact npm version, tag, and successful workflow run before announcing the release.
 
-For a local preflight, run:
+The SDK repository must have an `NPM_TOKEN` Actions secret with publish access to `@chusky/sdk`; `GITHUB_TOKEN` is used for tags and GitHub releases. The package is public. Provenance is intentionally omitted because npm's provenance repository validation does not accept this private source repository's identity. A repeated automatic push for an already published version is a no-op; manual duplicate releases fail clearly.
+
+From the agent monorepo, `npm run sdk:check` validates its SDK mirror. To preflight an exact version without publishing, run:
 
 ```bash
-npm run sdk:check
-npm run sdk:version -- 1.5.0
-npm run sdk:publish -- --version 1.5.0 --dry-run
+npm run sdk:publish -- --version 1.7.0 --dry-run
 ```
 
-The version script accepts `patch`, `minor`, `major`, or an exact `x.y.z` version. The publish command requires the exact package version and verifies that the lockfile matches it. Remove `--dry-run` only when you intend to publish publicly, and confirm the resulting npm version and `sdk-vX.Y.Z` tag.
+The preflight verifies that the manifest and lockfile agree and runs the SDK's publish lifecycle checks. Prefer publishing from the dedicated SDK repository; do not change the package repository URL to the agent monorepo.

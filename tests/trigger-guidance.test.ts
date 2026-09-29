@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mdToTelegramHtml } from "../src/markdown.js";
 import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "../src/triggerGuidance.js";
 
 test("default trigger policy authorizes clear routine email handling but protects sensitive decisions", () => {
@@ -7,8 +8,16 @@ test("default trigger policy authorizes clear routine email handling but protect
   assert.match(TRIGGER_DEFAULT_HANDLING, /Reply in that same thread when it asks a clear, routine question/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /pricing or financial decisions, legal\/HR\/medical\/security matters/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /create a provider draft when supported, otherwise prepare a concise recommended reply/i);
-  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not post merely because a channel event fired/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Do not ask the owner to authorize each routine event or reply individually/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /availability checks .*“Anyone here\?”/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /exact conversation/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /always return a useful private owner-facing closeout/i);
+});
+
+test("trigger Telegram heading uses Markdown that renders as bold HTML", () => {
+  const rendered = mdToTelegramHtml("🔔 **Chusky trigger**\n\nHandled safely.");
+  assert.match(rendered, /🔔 <b>Chusky trigger<\/b>/);
+  assert.doesNotMatch(rendered, /&lt;b&gt;|<b>Chusky trigger<\/b>.*literal/i);
 });
 
 test("trigger closeout preserves a real agent answer", () => {

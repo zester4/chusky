@@ -2778,7 +2778,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         const triggerCost = result.cost;
         if (triggerCost) await workflow.run("record-trigger-usage", async () => addUsage(event.userId, triggerCost));
         await workflow.run("deliver-trigger-result", async () => {
-          for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 <b>Chusky trigger</b>\n\n${safeResult}`), 3900).entries()) {
+          for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 **Chusky trigger**\n\n${safeResult}`), 3900).entries()) {
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${chatId}:${index}`, correlationId: event.eventId, kind: "notification" });
           }
         });
@@ -2814,7 +2814,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           const resumedTriggerCost = resumed.cost;
           if (resumedTriggerCost) await workflow.run("record-resumed-trigger-usage", async () => addUsage(event.userId, resumedTriggerCost));
           await workflow.run("deliver-resumed-trigger-result", async () => {
-            for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 <b>Chusky trigger</b>\n\n${safeResumed}`), 3900).entries()) {
+            for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 **Chusky trigger**\n\n${safeResumed}`), 3900).entries()) {
               await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(resumedChatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${resumedChatId}:${index}`, correlationId: event.eventId, kind: "notification" });
             }
           });

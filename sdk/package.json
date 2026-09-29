@@ -5,13 +5,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zester4/chusky.git",
-    "directory": "sdk"
+    "url": "git+https://github.com/zester4/chusky-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/zester4/chusky/issues"
+    "url": "https://github.com/zester4/chusky-sdk/issues"
   },
-  "homepage": "https://github.com/zester4/chusky/tree/main/sdk#readme",
+  "homepage": "https://github.com/zester4/chusky-sdk#readme",
   "publishConfig": {
     "access": "public"
   },
