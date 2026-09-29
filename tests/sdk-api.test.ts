@@ -34,6 +34,16 @@ afterEach(() => {
 function app(): Hono { const value = new Hono(); registerSdkApi(value); return value; }
 function request(body: unknown, key = "idem_1") { return new Request("http://local/v1/threads", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tenant-user", "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) }); }
 
+test("onboarding website research rejects unsafe URLs before agent execution", async () => {
+  const response = await app().fetch(new Request("http://local/v1/onboarding/site-summary", {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "onboarding-owner", "Content-Type": "application/json" },
+    body: JSON.stringify({ websiteUrl: "http://127.0.0.1" }),
+  }));
+  assert.equal(response.status, 400);
+  assert.equal((await response.json() as { error?: { code?: string } }).error?.code, "unsafe_website_url");
+});
+
 test("native tool discovery returns executable JSON schemas for all reliability capabilities", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-catalog-owner" };
