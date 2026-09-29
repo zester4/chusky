@@ -40,6 +40,22 @@ test("in-memory sessions return detached snapshots like the Redis backend", asyn
   assert.equal((await getSession(userId)).history[0]?.content, "unsaved mutation");
 });
 
+test("trigger handling instructions persist only for triggers owned by the session", async () => {
+  const userId = 810202;
+  const session = await getSession(userId);
+  session.triggerIds = ["owned-trigger"];
+  session.triggerInstructions = {
+    "owned-trigger": "Summarize new mail; draft but do not send replies.",
+    "foreign-trigger": "Do not persist this cross-owner instruction.",
+  };
+  await saveSession(userId, session);
+
+  const restored = await getSession(userId);
+  assert.deepEqual(restored.triggerInstructions, {
+    "owned-trigger": "Summarize new mail; draft but do not send replies.",
+  });
+});
+
 test("bounds oversized chat and SDK payloads before they become hot-session Redis content", async () => {
   const userId = 810203;
   const now = Date.now();

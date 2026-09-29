@@ -26,7 +26,7 @@
 import { Composio } from "@composio/core";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { config } from "./config.js";
-import { getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
+import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
 import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
@@ -2841,8 +2841,39 @@ export async function runAgent(
               ...images.map((image) => ({ type: "image_url" as const, image_url: { url: `data:${image.mediaType};base64,${image.data.toString("base64")}` } })),
             ],
           });
+        } else if (slug === "CHUCK_LIST_TRIGGER_APPS") {
+          execResult = (await listAvailableTriggerToolkits(userId, true)).slice(0, 100).map(({ slug: toolkitSlug, name, triggerCount, accountCount }) => ({ slug: toolkitSlug, name, triggerCount, connectedAccounts: accountCount }));
+        } else if (slug === "CHUCK_LIST_TRIGGER_TYPES") {
+          const toolkit = String(args.toolkit ?? "").trim();
+          if (!toolkit || toolkit.length > 120) throw new Error("toolkit must be an exact toolkit slug from CHUCK_LIST_TRIGGER_APPS");
+          const types = await listAvailableTriggerTypes(toolkit);
+          execResult = types.slice(0, 100).map(triggerTypeForAgent);
+        } else if (slug === "CHUCK_LIST_TRIGGERS") {
+          const [triggers, triggerSession] = await Promise.all([listTriggers(userId), getSession(userId)]);
+          execResult = triggers.slice(0, 100).map((value) => {
+            const trigger = value as Record<string, unknown>;
+            const id = String(trigger.id ?? "");
+            return { id, slug: String(trigger.trigger_slug ?? trigger.triggerName ?? ""), status: String(trigger.status ?? "unknown"), enabled: trigger.enabled === true, ...(triggerSession.triggerInstructions?.[id] ? { instructions: triggerSession.triggerInstructions[id] } : {}) };
+          });
         } else if (slug === "CHUCK_CREATE_TRIGGER") {
-          execResult = await createTrigger(userId, String(args.slug ?? ""), { triggerConfig: args.triggerConfig ?? {} });
+          const result = await createTrigger(userId, String(args.slug ?? ""), {
+            ...(args.connectedAccountId ? { connectedAccountId: String(args.connectedAccountId) } : {}),
+            triggerConfig: args.triggerConfig ?? {},
+            ...(typeof args.instructions === "string" ? { instructions: args.instructions } : {}),
+          });
+          const triggerId = String((result as any)?.triggerId ?? (result as any)?.id ?? "");
+          const providerStatus = typeof (result as any)?.status === "string" ? String((result as any).status).slice(0, 40) : undefined;
+          execResult = { created: true, id: triggerId, slug: String(args.slug ?? ""), ...(providerStatus ? { providerStatus } : {}) };
+        } else if (slug === "CHUCK_SET_TRIGGER_STATE") {
+          const id = String(args.id ?? "").trim();
+          if (!id || typeof args.enabled !== "boolean") throw new Error("id and enabled are required");
+          await setTriggerState(userId, id, args.enabled);
+          execResult = { id, enabled: args.enabled };
+        } else if (slug === "CHUCK_UPDATE_TRIGGER_INSTRUCTIONS") {
+          const id = String(args.id ?? "").trim();
+          const instructions = typeof args.instructions === "string" ? args.instructions : "";
+          await updateTriggerInstructions(userId, id, instructions);
+          execResult = { id, updated: true };
         } else if (slug === "CHUCK_GENERATE_VIDEO") {
           const destination = normalizeVideoDestination(args.destination);
           const workspacePath = resolveVideoWorkspacePath(destination, args.workspacePath);
@@ -3528,11 +3559,13 @@ export async function listTriggers(userId: number): Promise<unknown[]> {
     const disabledAt = value.disabled_at ?? value.disabledAt;
     const configValue = value.trigger_config ?? value.triggerConfig ?? value.config;
     const config = configValue && typeof configValue === "object" && !Array.isArray(configValue) ? configValue : {};
+    const status = String(value.status ?? (value.enabled === false || disabledAt ? "disabled" : "active"));
+    const enabled = value.enabled === true || (value.enabled !== false && !disabledAt && !["disabled", "paused", "inactive"].includes(status.toLowerCase()));
     return {
       id,
       ...(slug ? { trigger_slug: slug, triggerName: slug } : {}),
-      status: String(value.status ?? (value.enabled === false || disabledAt ? "disabled" : "active")),
-      enabled: value.enabled !== false && !disabledAt,
+      status,
+      enabled,
       ...(disabledAt ? { disabledAt } : {}),
       config,
       triggerConfig: config,
@@ -3586,12 +3619,77 @@ export async function getAvailableTriggerType(token: string): Promise<TriggerCat
   return getTriggerTypeByToken(composio.triggers, token);
 }
 
+function findTriggerCredentialField(value: unknown, depth = 0): string | undefined {
+  if (depth > 12 || !value || typeof value !== "object") return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 100)) {
+      const field = findTriggerCredentialField(item, depth + 1);
+      if (field) return field;
+    }
+    return undefined;
+  }
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>).slice(0, 200)) {
+    if (/(token|secret|password|authorization|credential|private[_-]?key|api[_-]?key)/i.test(key)) return key;
+    const field = findTriggerCredentialField(nested, depth + 1);
+    if (field) return field;
+  }
+  return undefined;
+}
+
 export async function createTrigger(userId: number, slug: string, body: Record<string, unknown>): Promise<unknown> {
-  const result = await composio.triggers.create(`user_${userId}`, slug, body as any);
+  const triggerType = await getTriggerTypeBySlug(composio.triggers, slug);
+  if (!triggerType) throw new Error("That trigger slug is not in the current provider catalog. List the app's trigger types and use an exact supported slug.");
+  const rawConfig = body.triggerConfig;
+  if (rawConfig !== undefined && (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig))) throw new Error("triggerConfig must be an object matching the selected provider schema");
+  const triggerConfig = rawConfig && typeof rawConfig === "object" && !Array.isArray(rawConfig) ? rawConfig as Record<string, unknown> : {};
+  const missing = requiredTriggerConfigFields(triggerType.config).filter((field) => triggerConfig[field] === undefined || triggerConfig[field] === null || triggerConfig[field] === "");
+  if (missing.length) throw new Error(`Trigger configuration is missing required field${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. Ask the owner for these values; do not guess.`);
+  const secretField = findTriggerCredentialField(triggerConfig);
+  if (secretField) throw new Error(`Trigger configuration cannot contain credential field '${secretField}'. Connect the app through Connected Apps instead.`);
+  validateToolArgumentsAgainstSchema("Composio trigger configuration", triggerConfig, { ...triggerType.config, type: triggerType.config.type ?? "object" }, 16_384);
+
+  const connectedAccounts = (await listConnectedAccounts(userId, triggerType.toolkit.slug)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+  const requestedAccountId = typeof body.connectedAccountId === "string" ? body.connectedAccountId.trim() : "";
+  const account = requestedAccountId
+    ? connectedAccounts.find((candidate) => candidate.id === requestedAccountId)
+    : connectedAccounts.length === 1 ? connectedAccounts[0] : undefined;
+  if (!account) {
+    if (!connectedAccounts.length) throw new Error(`No active ${triggerType.toolkit.name} connection is available. Connect the app first.`);
+    if (requestedAccountId) throw new Error("The selected connected account is not active, does not belong to this user, or is for a different app.");
+    throw new Error(`Choose the exact ${triggerType.toolkit.name} account from your connected accounts before creating this trigger.`);
+  }
+
+  const instructions = typeof body.instructions === "string" ? body.instructions.trim().slice(0, 2_000) : "";
+  const result = await composio.triggers.create(`user_${userId}`, triggerType.slug, {
+    connectedAccountId: account.id,
+    triggerConfig,
+  });
   const session = await getSession(userId);
   const id = String((result as any).triggerId ?? (result as any).id ?? "");
-  if (id) { session.triggerIds = [...new Set([...(session.triggerIds ?? []), id])]; await saveSession(userId, session); }
+  if (!id) throw new Error("The provider response did not include a trigger ID, so Chusky could not register ownership or guarantee event delivery. Check existing triggers before retrying; the provider may have created one.");
+  session.triggerIds = [...new Set([...(session.triggerIds ?? []), id])];
+  if (instructions) session.triggerInstructions = { ...(session.triggerInstructions ?? {}), [id]: instructions };
+  try {
+    await saveSession(userId, session);
+  } catch (error) {
+    try {
+      await composio.triggers.delete(id);
+    } catch (cleanupError) {
+      logger.error({ err: cleanupError, userId, triggerId: id }, "Could not roll back provider trigger after ownership persistence failed");
+      throw new Error("The provider created this trigger, but Chusky could not save its ownership record or remove it. Check your trigger list before retrying.", { cause: error });
+    }
+    throw new Error("Trigger setup could not be saved, so Chusky removed the provider trigger to avoid an untracked automation.", { cause: error });
+  }
   return result;
+}
+
+export async function updateTriggerInstructions(userId: number, id: string, instructions: string): Promise<void> {
+  const session = await getSession(userId);
+  if (!session.triggerIds?.includes(id)) throw new Error("You do not own this trigger");
+  const normalized = instructions.trim();
+  if (!normalized || normalized.length > 2_000) throw new Error("Instructions must contain 1 to 2000 characters");
+  session.triggerInstructions = { ...(session.triggerInstructions ?? {}), [id]: normalized };
+  await saveSession(userId, session);
 }
 
 export async function setTriggerState(userId: number, id: string, enabled: boolean): Promise<unknown> {

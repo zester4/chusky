@@ -96,9 +96,51 @@ export async function getTriggerTypeByToken(client: TriggerCatalogueClient, toke
   return (await listTriggerCatalogue(client)).find((item) => item.token === token);
 }
 
+export async function getTriggerTypeBySlug(client: TriggerCatalogueClient, slug: string): Promise<TriggerCatalogueItem | undefined> {
+  const exactSlug = slug.trim();
+  return exactSlug ? (await listTriggerCatalogue(client)).find((item) => item.slug === exactSlug) : undefined;
+}
+
 export function requiredTriggerConfigFields(config: Record<string, unknown>): string[] {
   const required = Array.isArray(config.required) ? config.required.filter((field): field is string => typeof field === "string") : [];
   return [...new Set(required)].slice(0, 20);
+}
+
+/** A bounded, credential-safe view of provider configuration requirements for the agent. */
+export function triggerTypeForAgent(item: TriggerCatalogueItem): Record<string, unknown> {
+  const properties = item.config.properties && typeof item.config.properties === "object" && !Array.isArray(item.config.properties)
+    ? item.config.properties as Record<string, unknown>
+    : {};
+  const required = new Set(requiredTriggerConfigFields(item.config));
+  const names = [...new Set([...Object.keys(properties), ...required])].slice(0, 40);
+  const fields = names.map((name) => {
+    const raw = properties[name] && typeof properties[name] === "object" && !Array.isArray(properties[name])
+      ? properties[name] as Record<string, unknown>
+      : {};
+    const sensitive = /(token|secret|password|authorization|credential|private[_-]?key|api[_-]?key)/i.test(name);
+    if (sensitive) return { name, required: required.has(name), sensitive: true };
+    const options = Array.isArray(raw.enum)
+      ? raw.enum.filter((value): value is string | number | boolean => ["string", "number", "boolean"].includes(typeof value)).slice(0, 20)
+      : undefined;
+    return {
+      name,
+      required: required.has(name),
+      ...(typeof raw.type === "string" ? { type: raw.type.slice(0, 40) } : {}),
+      ...(typeof raw.description === "string" ? { description: raw.description.slice(0, 300) } : {}),
+      ...(options?.length ? { allowedValues: options } : {}),
+      ...(Number.isFinite(raw.maxLength) ? { maxLength: raw.maxLength } : {}),
+      ...(Number.isFinite(raw.minLength) ? { minLength: raw.minLength } : {}),
+    };
+  });
+  return {
+    slug: item.slug,
+    name: item.name.slice(0, 160),
+    description: item.description.slice(0, 500),
+    toolkit: { slug: item.toolkit.slug, name: item.toolkit.name.slice(0, 100) },
+    ...(item.instructions ? { setupInstructions: item.instructions.slice(0, 800) } : {}),
+    requiredFields: [...required],
+    fields,
+  };
 }
 
 /** Test seam: production refreshes the catalogue naturally after ten minutes. */

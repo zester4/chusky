@@ -92,7 +92,11 @@ async function main(): Promise<void> {
   console.log(`Prepared ${options.target}`);
   console.log(`Run ID: ${options.runId}`);
   console.log("Attach README.md, run-config.json, company-profile.md, commercial-policy.md, and scenario.md to one dashboard message.");
-  console.log("Copy the full text of prompt.md into that message, then leave sandboxConfirmed false to test the connection pause or set it true after confirming both accounts are isolated test accounts.");
+  if (options.sandboxConfirmed) {
+    console.log("sandboxConfirmed=true: provider access is enabled for the configured accounts. Confirm the email addresses before sending the prompt.");
+  } else {
+    console.log("Copy the full text of prompt.md into that message, then leave sandboxConfirmed false to test the connection pause or set it true after confirming both accounts are isolated test accounts.");
+  }
 }
 
 main().catch((error: unknown) => {

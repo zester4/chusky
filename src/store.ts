@@ -164,6 +164,11 @@ function compactSessionPersistence(session: UserSession): void {
   session.sdkIdempotency = compactSdkIdempotency(session.sdkIdempotency);
   session.linkOAuthStates = (Array.isArray(session.linkOAuthStates) ? session.linkOAuthStates : []).slice(-10);
   session.linkSpendRequests = (Array.isArray(session.linkSpendRequests) ? session.linkSpendRequests : []).slice(-50);
+  const ownedTriggerIds = new Set(Array.isArray(session.triggerIds) ? session.triggerIds : []);
+  session.triggerInstructions = Object.fromEntries(Object.entries(session.triggerInstructions ?? {})
+    .filter(([id, value]) => ownedTriggerIds.has(id) && typeof value === "string")
+    .slice(-100)
+    .map(([id, value]) => [id, value.slice(0, 2_000)]));
 }
 
 export interface UserSession {
@@ -182,6 +187,8 @@ export interface UserSession {
   /** Per-account voices for the three live call transports, independent of Telegram audio replies. */
   voicePreferences?: LiveVoicePreferences;
   triggerIds: string[];
+  /** Private owner-authored operating instructions, keyed only by owned trigger ID. */
+  triggerInstructions?: Record<string, string>;
   reminders: ReminderRecord[];
   jobs: JobRecord[];
   /** Bounded durable execution records for autonomous reminders, jobs, and missions. */
@@ -4151,6 +4158,11 @@ export async function getSession(uid: number): Promise<UserSession> {
   s.history = persistedHistory.history;
   s.sdkThreads = compactSdkThreads(s.sdkThreads);
   s.sdkIdempotency = compactSdkIdempotency(s.sdkIdempotency);
+  s.triggerIds = Array.isArray(s.triggerIds) ? s.triggerIds.filter((id): id is string => typeof id === "string") : [];
+  s.triggerInstructions = Object.fromEntries(Object.entries(s.triggerInstructions ?? {})
+    .filter(([id, value]) => s.triggerIds.includes(id) && typeof value === "string")
+    .slice(-100)
+    .map(([id, value]) => [id, value.slice(0, 2_000)]));
   const savedCalls = Array.isArray(s.phoneCalls) ? s.phoneCalls as unknown[] : Array.isArray(legacyCalls) ? legacyCalls : [];
   s.executionReservations = Array.isArray(s.executionReservations) ? s.executionReservations.filter((item): item is ExecutionReservation => Boolean(item) && typeof item.id === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(item.id) && typeof item.operation === "string" && item.operation.length <= 100 && Number.isFinite(item.createdAt) && Number.isFinite(item.expiresAt)).slice(-100) : [];
   const phoneCalls = savedCalls.flatMap((value): PhoneCallRecord[] => {

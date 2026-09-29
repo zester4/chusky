@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getTriggerTypeByToken, listTriggerCatalogue, listTriggerToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, resetTriggerCatalogueForTests, type TriggerCatalogueClient } from "../src/triggerCatalog.js";
+import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerCatalogue, listTriggerToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, resetTriggerCatalogueForTests, triggerTypeForAgent, type TriggerCatalogueClient } from "../src/triggerCatalog.js";
 
 function client(): TriggerCatalogueClient {
   const gmail = Array.from({ length: 9 }, (_, index) => ({ slug: `GMAIL_EVENT_${index}`, name: `Gmail event ${index}`, description: "A Gmail event", toolkit: { slug: "gmail", name: "Gmail" }, config: {} }));
@@ -24,4 +24,26 @@ test("catalogue paginates the provider, groups toolkits, and returns stable call
 
 test("required trigger configuration fields are bounded and de-duplicated", () => {
   assert.deepEqual(requiredTriggerConfigFields({ required: ["repository", "repository", 7, "branch"] }), ["repository", "branch"]);
+});
+
+test("trigger discovery resolves only exact provider slugs and returns safe bounded configuration guidance", async () => {
+  resetTriggerCatalogueForTests();
+  const types = await listTriggerTypesForToolkit(client(), "gmail");
+  assert.equal((await getTriggerTypeBySlug(client(), types[0]!.slug))?.slug, types[0]!.slug);
+  assert.equal(await getTriggerTypeBySlug(client(), `${types[0]!.slug}_GUESSED`), undefined);
+  const projected = triggerTypeForAgent({
+    ...types[0]!,
+    config: {
+      required: ["query", "api_key"],
+      properties: {
+        query: { type: "string", description: "Mailbox filter", maxLength: 200 },
+        api_key: { type: "string", description: "A secret credential value" },
+      },
+    },
+  });
+  assert.deepEqual(projected.requiredFields, ["query", "api_key"]);
+  assert.deepEqual(projected.fields, [
+    { name: "query", required: true, type: "string", description: "Mailbox filter", maxLength: 200 },
+    { name: "api_key", required: true, sensitive: true },
+  ]);
 });

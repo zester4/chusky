@@ -32,7 +32,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   "CHUCK_MEDIA_BRIDGE",
   "CHUCK_ARTIFACT", "CHUCK_CREATE_PDF", "CHUCK_CREATE_PRESENTATION", "CHUCK_CANCEL_JOB", "CHUCK_CANCEL_REMINDER", "CHUCK_PAUSE_REMINDER", "CHUCK_RESUME_REMINDER", "CHUCK_RUN_REMINDER_NOW",
   "CHUCK_EMAIL_ARTIFACT",
-  "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_UPDATE_MEMORY",
+  "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_SPREADSHEET", "CHUCK_CREATE_TRIGGER", "CHUCK_LIST_TRIGGER_APPS", "CHUCK_LIST_TRIGGER_TYPES", "CHUCK_LIST_TRIGGERS", "CHUCK_SET_TRIGGER_STATE", "CHUCK_UPDATE_TRIGGER_INSTRUCTIONS", "CHUCK_UPDATE_MEMORY",
   "CHUCK_START_PHONE_CALL", "CHUCK_LIST_PHONE_CALLS", "CHUCK_ATTENTION_PULSE", "CHUCK_VIDEO_STATUS",
   // Meeting participation is available only after the user's explicit join
   // request and uses a visible bot identity; leave/status/list are owner-scoped.
@@ -239,6 +239,11 @@ const STATUSES: Record<string, string> = {
   CHUCK_GENERATE_IMAGE: "🎨 I’m creating your image…",
   CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
   CHUCK_CREATE_TRIGGER: "🔔 I’m setting up that automation…",
+  CHUCK_LIST_TRIGGER_APPS: "🔔 I’m checking which connected apps can send events…",
+  CHUCK_LIST_TRIGGER_TYPES: "🔎 I’m checking the supported event types…",
+  CHUCK_LIST_TRIGGERS: "📋 I’m checking your existing automations…",
+  CHUCK_SET_TRIGGER_STATE: "🔔 I’m updating that automation…",
+  CHUCK_UPDATE_TRIGGER_INSTRUCTIONS: "📝 I’m updating how that automation should handle events…",
   CHUCK_DAYTONA_WORKSPACE: "🖥️ I’m opening my private computer workspace…",
   CHUCK_DAYTONA_SANDBOX: "🧭 I’m checking the private Daytona sandbox…",
   CHUCK_DAYTONA_EXECUTE: "🖥️ I’m working in my private computer workspace…",
