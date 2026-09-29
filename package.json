@@ -30,6 +30,7 @@
     "e2b:template:build": "tsx scripts/build-e2b-browser-template.ts",
     "web-bot-auth:generate-key": "tsx scripts/generate-web-bot-auth-key.ts",
     "e2b:browser:live-smoke": "tsx scripts/e2b-browser-live-smoke.ts",
+    "benchmark:e2e-sales-cycle": "tsx scripts/prepare-e2e-sales-cycle.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
     "test:sdk": "tsx --test --test-concurrency=1 sdk/tests/*.test.ts"

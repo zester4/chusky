@@ -20,18 +20,31 @@ plan provides one). Do not run this against a production mailbox or CRM.
 
 ## One-time setup
 
+For a repeatable local copy, run this from the repository root:
+
+```bash
+npm run benchmark:e2e-sales-cycle -- --sales-inbox-email sales-test@example.com --buyer-email buyer-test@example.com
+```
+
+The command creates `workspace/e2e-sales-cycle/`, writes a fresh
+`run-config.json`, and never writes credentials. In the dashboard, attach
+`README.md`, `run-config.json`, `company-profile.md`, `commercial-policy.md`,
+and `scenario.md` in one message, then paste the complete text of `prompt.md`.
+Keep `scorecard.md` for independent operator review.
+
 1. Copy this folder into the local workspace that Chusky can read.
 2. Create or select an isolated HubSpot test portal and Gmail test account.
    Connect those exact accounts to Chusky for a full run. To exercise the
    connection gate, intentionally leave one disconnected; the benchmark never
    needs Stripe, payment processing, production email, or a real prospect.
-3. Copy `run-config.example.json` to `run-config.json`. Set `sandboxConfirmed`
-   to `true` only after confirming both intended accounts are isolated test
-   accounts, whether or not both are connected yet.
-   Enter their exact Chusky connection aliases (leave an intentionally
-   disconnected account alias blank until the connection is made), the address
-   of the Gmail test mailbox, a buyer email address you control, and a fresh
-   `runId` for each run. This file must contain no tokens or credentials.
+3. If you used `npm run benchmark:e2e-sales-cycle`, `run-config.json` is already
+   present. Otherwise copy `run-config.example.json` to `run-config.json`. Set
+   `sandboxConfirmed` to `true` only after confirming both intended accounts are
+   isolated test accounts, whether or not both are connected yet. Enter their
+   exact Chusky connection aliases (leave an intentionally disconnected account
+   alias blank until the connection is made), the address of the Gmail test
+   mailbox, a buyer email address you control, and a fresh `runId` for each run.
+   This file must contain no tokens or credentials.
 4. In the HubSpot sandbox, create one company named `Harborlight Facilities`
    and one associated contact named `Jordan Miles`. Set the contact's email to
    the controlled `buyerEmail` from `run-config.json`, title to `Director of
