@@ -82,6 +82,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Treg calls use server-only organization credentials, rate limits, atomic owner and mission spend reservations, bounded receipts, response-header settlement, and reusable idempotency keys.",
     "Treg OAuth handoffs keep provider tokens with Treg; authenticated actions stay in connected Composio apps, while empty, ambiguous, stale, or provider-flagged results are handled explicitly before customer-facing or irreversible work.",
   ],
+  tregLeadSignals: [
+    "Owners can create scheduled personal or business lead-signal watches that discover relevant external signal providers through Treg and return evidence-backed candidates.",
+    "First-seen signal identities are hashed and persisted per owner/watch, so repeated provider results are suppressed and new signals become private durable observations.",
+    "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps.",
+  ],
   linkAgentWallet: [
     "Added an owner-controlled Stripe Link Agent Wallet with PKCE OAuth, encrypted server-side token storage, bounded wallet metadata, Link Pay Token steering, Shared Payment Token MPP, and UCP catalog and checkout support.",
     "Purchase requests carry the exact merchant, amount, currency, checkout binding, and owner-visible context to Link, which owns the approval notification and approval decision before any payment credential is released.",

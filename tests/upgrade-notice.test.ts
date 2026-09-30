@@ -139,6 +139,15 @@ test("Treg upgrade preset describes live provider data and spend controls", () =
   assert.match(bullets[2], /Composio apps/);
 });
 
+test("Treg lead-signal preset describes durable monitoring and external-action boundaries", () => {
+  const bullets = getAgentUpgradePreset("tregLeadSignals");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.tregLeadSignals]);
+  assert.match(bullets[0], /scheduled personal or business lead-signal watches/);
+  assert.match(bullets[1], /hashed and persisted per owner\/watch/);
+  assert.match(bullets[2], /never contact leads or write to connected apps/);
+});
+
 test("Link Agent Wallet upgrade preset describes approval and credential boundaries", () => {
   const bullets = getAgentUpgradePreset("linkAgentWallet");
   assert.equal(bullets.length, 3);
@@ -180,13 +189,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces durable attention observations and coverage", async () => {
+test("current upgrade manifest announces durable Treg lead-signal monitoring", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.31.0");
-  assert.equal(notice?.version, "4.31.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /change, failure, and recovery observations/);
-  assert.match(formatAgentUpgradeNotice(notice!), /never-checked coverage/);
-  assert.match(formatAgentUpgradeNotice(notice!), /confirmed delivery/);
+  assert.equal(notice?.id, "release-4.32.0");
+  assert.equal(notice?.version, "4.32.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /scheduled personal or business lead-signal watches/);
+  assert.match(formatAgentUpgradeNotice(notice!), /hashed and persisted per owner\/watch/);
+  assert.match(formatAgentUpgradeNotice(notice!), /never contact leads or write to connected apps/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

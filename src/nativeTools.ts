@@ -136,6 +136,9 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** Hard per-run Treg limits for explicitly configured autonomous monitors. */
+  tregMaxCalls?: number;
+  tregMaxSpendUsd?: number;
   /** Optional workflow publisher for deterministic mission scheduling tests and internal recovery. */
   enqueueMissionTask?: MissionTaskEnqueuer;
   /** Trusted company workspace scope; never accepted from model tool arguments. */
@@ -1070,8 +1073,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       userId,
       need: text(args.need, 1000),
       requiredFields: Array.isArray(args.requiredFields) ? args.requiredFields.map((field) => text(field, 120)) : undefined,
-      maxCalls: args.maxCalls === undefined ? undefined : Number(args.maxCalls),
-      maxSpendUsd: args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd),
+      maxCalls: runtime.tregMaxCalls === undefined
+        ? args.maxCalls === undefined ? undefined : Number(args.maxCalls)
+        : Math.max(1, Math.min(runtime.tregMaxCalls, args.maxCalls === undefined ? runtime.tregMaxCalls : Number(args.maxCalls))),
+      maxSpendUsd: runtime.tregMaxSpendUsd === undefined
+        ? args.maxSpendUsd === undefined ? undefined : Number(args.maxSpendUsd)
+        : Math.min(runtime.tregMaxSpendUsd, args.maxSpendUsd === undefined ? runtime.tregMaxSpendUsd : Number(args.maxSpendUsd)),
       missionId: args.missionId ? text(args.missionId, 160) : runtime.missionId,
       organizationId: runtime.organizationId,
     });

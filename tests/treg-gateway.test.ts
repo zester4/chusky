@@ -415,3 +415,16 @@ test("native Treg dispatch routes through the gateway boundary", async () => {
     setTregGatewayForTests(undefined);
   }
 });
+
+test("native Treg resolution cannot widen a trusted signal-monitor budget", async () => {
+  let received: Record<string, unknown> | undefined;
+  const gateway = { resolveDataNeed: async (options: Record<string, unknown>) => (received = options) } as unknown as TregGateway;
+  setTregGatewayForTests(gateway);
+  try {
+    await nativeTool(42, "CHUCK_TREG_RESOLVE", { need: "new hiring signals", maxCalls: 5, maxSpendUsd: 10 }, { tregMaxCalls: 1, tregMaxSpendUsd: 0.25 });
+    assert.equal(received?.maxCalls, 1);
+    assert.equal(received?.maxSpendUsd, 0.25);
+  } finally {
+    setTregGatewayForTests(undefined);
+  }
+});

@@ -163,7 +163,7 @@ test("Treg lead-signal watches bound tools, persist first-seen signals, and supp
   assert.equal(first[0]?.status, "completed");
   assert.equal(first[0]?.changed, true);
   assert.deepEqual(toolSlugs, ["CHUCK_TREG_SEARCH", "CHUCK_TREG_RESOLVE"]);
-  assert.match(prompt, /mission budget/);
+  assert.match(prompt, /trusted runtime enforces maxSpendUsd=\$0\.25 and maxCalls=1/);
   assert.match(prompt, /Never contact anyone/);
   const firstSignals = (await listAttentionRecords(userId, "observation") as any[]).filter((item) => item.eventType === "lead_signal.detected");
   assert.equal(firstSignals.length, 2);
