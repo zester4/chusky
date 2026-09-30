@@ -33,6 +33,45 @@ test("reconciliation executes only exact read-only scopes, checkpoints, and dedu
   assert.equal(watch.userId, userId);
 });
 
+test("reconciliation writes deduplicated owner observations for changes, failures, and recovery", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990009;
+  const firstNow = Date.parse("2026-01-31T00:00:00Z");
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Inbox watch", domain: "gmail", objective: "Check for important new messages",
+    toolSlugs: ["GMAIL_LIST_MESSAGES"], cadenceSeconds: 300, authority: "observe",
+    status: "active", maxItems: 10, nextCheckAt: firstNow,
+  });
+  const changed = async () => ({ text: 'AUTONOMY_RESULT: {"changed":true,"summary":"A new message needs a reply","cursor":"mail-2"}' });
+
+  await runDueAutonomyWatches(userId, { mode: "personal", now: firstNow, execute: changed as any });
+  let observations = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].eventType, "watch.changed");
+  assert.equal(observations[0].status, "new");
+  assert.equal(observations[0].privacyScope, "private");
+  assert.match(observations[0].summary, /new message needs a reply/);
+
+  await runDueAutonomyWatches(userId, { mode: "personal", now: firstNow + 300_000, execute: changed as any });
+  observations = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(observations.length, 1, "replayed observation must deduplicate");
+
+  const failNow = firstNow + 600_000;
+  await runDueAutonomyWatches(userId, { mode: "personal", now: failNow, execute: async () => { throw new Error("connected provider unavailable: Bearer should-never-persist api_key=sk_test_12345678901234567890"); } });
+  observations = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(observations.length, 2);
+  const failed = observations.find((item) => item.eventType === "watch.failed");
+  assert.ok(failed);
+  assert.match(failed.summary, /provider unavailable/);
+  assert.doesNotMatch(failed.summary, /should-never-persist|sk_test_12345678901234567890/);
+
+  await runDueAutonomyWatches(userId, { mode: "personal", now: failNow + 300_000, execute: changed as any });
+  observations = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(observations.length, 3);
+  assert.ok(observations.some((item) => item.eventType === "watch.recovered"));
+  assert.equal(observations.every((item) => item.userId === userId), true);
+});
+
 test("reconciliation never crosses personal and business watch boundaries", async () => {
   await initStore({ memoryOnly: true });
   const userId = 990006;

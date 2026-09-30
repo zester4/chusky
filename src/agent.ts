@@ -2657,6 +2657,14 @@ export async function runAgent(
         const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
         if (!toolIsAllowed) {
+          if (slug === "CHUCK_MISSION_START" && auditArgs && Object.hasOwn(auditArgs, "id")
+            && modelAvailableTools.some((tool) => toolSchemaName(tool) === "CHUCK_MISSION_RESUME")) {
+            throw new Error("This run exposes mission recovery, not new mission creation. You passed an existing mission ID to CHUCK_MISSION_START; call CHUCK_MISSION_RESUME with {id}. No mission was created.");
+          }
+          if (slug === "CHUCK_TASK_CREATE" && auditArgs && Object.hasOwn(auditArgs, "id")
+            && modelAvailableTools.some((tool) => toolSchemaName(tool) === "CHUCK_TASK_GET")) {
+            throw new Error("This run exposes task recovery, not new task creation. You passed an existing task ID to CHUCK_TASK_CREATE; call CHUCK_TASK_GET with {id}. No task was created.");
+          }
           const directImageActionAvailable = roundMediaSelection
             && slug === "COMPOSIO_MULTI_EXECUTE_TOOL"
             && modelAvailableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_EXECUTE_TOOL")

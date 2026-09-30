@@ -14,6 +14,45 @@ test("native catalog includes core agent capabilities", () => {
   }
 });
 
+test("every published native schema declares and enforces each top-level required argument", () => {
+  for (const tool of chuckTools) {
+    const schema = tool.function.parameters as { type?: string; properties?: Record<string, unknown>; required?: string[] };
+    assert.equal(schema.type, "object", `${tool.function.name} arguments must be an object schema`);
+    for (const key of schema.required ?? []) {
+      assert.ok(Object.hasOwn(schema.properties ?? {}, key), `${tool.function.name} requires ${key} but does not declare it`);
+    }
+    if (schema.required?.length) {
+      assert.throws(
+        () => validateNativeToolArguments(tool.function.name, {}),
+        new RegExp(`${tool.function.name} requires argument: ${schema.required[0]}`),
+      );
+    }
+  }
+});
+
+test("mission start gives an actionable correction when an existing mission ID is passed", () => {
+  assert.throws(
+    () => validateNativeToolArguments("CHUCK_MISSION_START", { id: "mis_existing" }),
+    /creates a new mission.*CHUCK_MISSION_RESUME.*\{\s*id/i,
+  );
+});
+
+test("mission lifecycle tool descriptions distinguish creation from recovery", () => {
+  const start = chuckTools.find((tool) => tool.function.name === "CHUCK_MISSION_START")?.function.description ?? "";
+  const resume = chuckTools.find((tool) => tool.function.name === "CHUCK_MISSION_RESUME")?.function.description ?? "";
+  assert.match(start, /create a NEW .*mission/i);
+  assert.match(start, /existing mission.*CHUCK_MISSION_RESUME/i);
+  assert.match(resume, /existing mission/i);
+  assert.match(resume, /never.*create/i);
+});
+
+test("task creation gives an actionable correction when an existing task ID is passed", () => {
+  assert.throws(
+    () => validateNativeToolArguments("CHUCK_TASK_CREATE", { id: "task_existing" }),
+    /creates a new task.*CHUCK_TASK_GET.*no task was created/i,
+  );
+});
+
 test("Treg exposes bounded intelligence tools without exposing a provider catalog", () => {
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   for (const name of ["CHUCK_TREG_SEARCH", "CHUCK_TREG_GET", "CHUCK_TREG_PLATFORMS", "CHUCK_TREG_MY_TOOLS", "CHUCK_TREG_CALL", "CHUCK_TREG_ENRICH_PERSON", "CHUCK_TREG_ENRICH_COMPANY", "CHUCK_TREG_RESOLVE", "CHUCK_TREG_BALANCE", "CHUCK_TREG_USAGE", "CHUCK_TREG_OAUTH_START", "CHUCK_TREG_OAUTH_STATUS", "CHUCK_TREG_OAUTH_CONNECTIONS", "CHUCK_TREG_OAUTH_REVOKE"]) assert.equal(names.has(name), true, name);

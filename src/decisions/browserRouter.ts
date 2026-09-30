@@ -43,6 +43,11 @@ export async function routeBrowserNext(input: { observation: BrowserObservation;
     recordDecision({ surface: "browser", mode, applied: false, baseline: baseline.candidate ? [baseline.candidate.id] : [], jev: result.value.ranked.slice(0, 6).map((item) => ({ id: item.id, p: item.probability })), latencyMs: result.value.latencyMs, costUsd: result.value.costUsd, model: input.client?.modelId });
     return { ...baseline, mode, fallbackReason: "shadow_mode" };
   }
+  if (result.value.none >= result.value.confidence) {
+    const decision = { ...baseline, mode, fallbackReason: "jev_none" };
+    recordDecision({ surface: "browser", mode, applied: false, fallbackReason: decision.fallbackReason, jev: result.value.ranked.slice(0, 6).map((item) => ({ id: item.id, p: item.probability })), baseline: baseline.candidate ? [baseline.candidate.id] : [], latencyMs: result.value.latencyMs, costUsd: result.value.costUsd, model: input.client?.modelId });
+    return decision;
+  }
   const ranked = result.value.ranked[0];
   const selected = ranked && ranked.probability >= config.jevMinConfidence ? input.observation.candidates.find((candidate) => candidate.id === ranked.id) : undefined;
   const applied = Boolean(selected && !selected.requiresApproval);

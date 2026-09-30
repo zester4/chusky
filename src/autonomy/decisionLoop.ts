@@ -184,10 +184,12 @@ export function validateAutonomyDecision(input: {
     return { effectiveAction: "ask_owner", authority: "require_approval", requiresApproval: true };
   }
   if (action === "act_now" || action === "retry" || action === "switch_provider") {
-    if (authority.readOnly || authorityRank(authority.level) >= authorityRank("execute_reversible")) {
+    // These generic actions can perform provider writes or replay a mutation;
+    // read-only/observe grants cannot prove that a proposal is read-only.
+    if (!authority.readOnly && authorityRank(authority.level) >= authorityRank("execute_reversible")) {
       return { effectiveAction: action, authority: authority.level, requiresApproval: false };
     }
-    return { effectiveAction: "ask_owner", authority: "prepare", requiresApproval: false };
+    return { effectiveAction: "ask_owner", authority: authority.level, requiresApproval: false };
   }
   if (["schedule", "delegate", "replan"].includes(action) && authorityRank(authority.level) < authorityRank("prepare")) {
     return { effectiveAction: "ask_owner", authority: "prepare", requiresApproval: false };
@@ -272,6 +274,20 @@ export async function decideAutonomyStep(input: AutonomyDecisionInput, options: 
   const itemAnswer = routed.value.answers.item as JevChoiceAnswer;
   const actionAnswer = routed.value.answers.action as JevChoiceAnswer;
   const selectedItem = items.find((item) => item.id === itemAnswer.choice);
+  if (!selectedItem) {
+    recordDecision({
+      surface: "autonomy",
+      mode: "enforce",
+      applied: false,
+      fallbackReason: itemAnswer.choice === "__none__" ? "jev_none_item" : "invalid_item_choice",
+      jev: [{ id: itemAnswer.choice, p: itemAnswer.probabilities[itemAnswer.choice] ?? itemAnswer.confidence }],
+      baseline: fallback.selectedItemId ? [fallback.selectedItemId, fallback.proposedAction] : [],
+      latencyMs: routed.value.latencyMs,
+      costUsd: routed.value.costUsd,
+      model: client.modelId,
+    });
+    return { ...fallback, reason: "Jev selected no valid work item; the deterministic autonomy decision was preserved." };
+  }
   const proposedAction = safeAction(actionAnswer.choice, allowed);
   const confidence = Math.min(itemAnswer.confidence, actionAnswer.confidence);
   const validation = validateAutonomyDecision({ decision: { proposedAction, priority: itemAnswer.probabilities[itemAnswer.choice] ?? 0, confidence, selectedItemId: selectedItem?.id }, item: selectedItem, authority: input.authority });

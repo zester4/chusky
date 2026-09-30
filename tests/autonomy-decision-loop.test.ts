@@ -2,11 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient, setJevClientForTests } from "../src/decisions/jev.js";
-import { decideAutonomySignal, decideAutonomyStep, decideFollowUp, decideMemoryDisposition, decideRecovery } from "../src/autonomy/decisionLoop.js";
+import { decideAutonomySignal, decideAutonomyStep, decideFollowUp, decideMemoryDisposition, decideRecovery, validateAutonomyDecision } from "../src/autonomy/decisionLoop.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
-function withJev<T>(run: (calls: Array<Record<string, unknown>>) => Promise<T>): Promise<T> {
+function withJev<T>(run: (calls: Array<Record<string, unknown>>) => Promise<T>, choices: Record<string, string> = {}): Promise<T> {
   const previous = { mode: mutableConfig.jevMode, surfaces: mutableConfig.jevSurfaces, key: mutableConfig.openRouterApiKey };
   const calls: Array<Record<string, unknown>> = [];
   mutableConfig.jevMode = "enforce";
@@ -20,7 +20,7 @@ function withJev<T>(run: (calls: Array<Record<string, unknown>>) => Promise<T>):
       const criteria = question.criteria ?? {};
       const ids = Object.keys(criteria).filter((id) => id !== "__none__" && id !== "none");
       if (question.type === "choice") {
-        const choice = key === "action" ? (ids.includes("replan") ? "replan" : ids[0] ?? "__none__")
+        const choice = choices[key] ?? (key === "action" ? (ids.includes("replan") ? "replan" : ids[0] ?? "__none__")
           : key === "triage" ? "actionable"
             : key === "channel" ? "email"
               : key === "timing" ? "scheduled"
@@ -28,7 +28,7 @@ function withJev<T>(run: (calls: Array<Record<string, unknown>>) => Promise<T>):
                   : key === "disposition" ? "remember_until_review"
                     : key === "review" ? "thirty_days"
                       : key === "recovery" ? "switch_provider"
-                        : ids[0] ?? "__none__";
+                        : ids[0] ?? "__none__");
         answers[key] = { type: "choice", choice, confidence: 0.93, probabilities: { [choice]: 0.93, __none__: 0.01 } };
       } else if (question.type === "score") {
         answers[key] = { type: "score", score: 2, confidence: 0.9, probabilities: { "2": 0.9 } };
@@ -105,6 +105,29 @@ test("Jev proposes a next step, but deterministic authority converts high-impact
     assert.equal(result.requiresApproval, true);
     assert.equal(calls.length, 1);
   });
+});
+
+test("a Jev __none__ item falls back to the deterministic item instead of proposing itemless work", async () => {
+  await withJev(async () => {
+    const result = await decideAutonomyStep({
+      objective: "Continue the mission",
+      items: [{ kind: "mission", id: "mission-1", title: "Continue launch", status: "open", nextAction: "Verify the next milestone" }],
+      authority: { level: "execute_reversible" },
+      allowedActions: ["act_now", "wait", "ask_owner"],
+    });
+    assert.equal(result.source, "deterministic");
+    assert.equal(result.selectedItemId, "mission-1");
+  }, { item: "__none__", action: "act_now" });
+});
+
+test("observe or read-only authority cannot permit write-shaped autonomy proposals", () => {
+  for (const proposedAction of ["act_now", "retry", "switch_provider"] as const) {
+    const decision = validateAutonomyDecision({
+      decision: { proposedAction, priority: 0.9, confidence: 0.95, selectedItemId: "task-1" },
+      authority: { level: "observe", readOnly: true },
+    });
+    assert.equal(decision.effectiveAction, "ask_owner", `${proposedAction} must not pass an observe-only grant`);
+  }
 });
 
 test("autonomy decision loop covers signal triage, follow-up, memory, and recovery proposals", async () => {

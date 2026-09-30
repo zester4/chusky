@@ -62,9 +62,10 @@ test("attention upgrade preset describes evidence-based proactive reconciliation
   const bullets = getAgentUpgradePreset("attention");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.attention]);
-  assert.match(bullets[0], /blocked or failed tasks and missions/);
-  assert.match(bullets[1], /Personal and business watches are isolated/);
-  assert.match(bullets[2], /preserving approval boundaries/);
+  assert.match(bullets[0], /change, failure, and recovery observations/);
+  assert.match(bullets[1], /current, scheduled, stale, failed, and never-checked coverage/);
+  assert.match(bullets[2], /pending until confirmed delivery/);
+  assert.match(bullets[2], /NO_ACTION from hiding an update/);
 });
 
 test("tool reliability upgrade preset describes bounded diagnostics and approved artifact transfer", () => {
@@ -179,13 +180,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces durable trigger outcomes and recovery", async () => {
+test("current upgrade manifest announces durable attention observations and coverage", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.30.0");
-  assert.equal(notice?.version, "4.30.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /owner-scoped result and notification state in the dashboard/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Attention Pulse follow-up/);
-  assert.match(formatAgentUpgradeNotice(notice!), /never blindly replays the original external action/);
+  assert.equal(notice?.id, "release-4.31.0");
+  assert.equal(notice?.version, "4.31.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /change, failure, and recovery observations/);
+  assert.match(formatAgentUpgradeNotice(notice!), /never-checked coverage/);
+  assert.match(formatAgentUpgradeNotice(notice!), /confirmed delivery/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

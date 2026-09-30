@@ -10,7 +10,7 @@ import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOcc
 import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
-import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
+import type { AttentionCandidateRecord, DeliveryPreferenceRecord, ObservationRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
@@ -43,7 +43,7 @@ import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
+import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, getAttentionPulseWatchCoverage, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -2161,7 +2161,7 @@ async function main(): Promise<void> {
         getJobOccurrence, createJobOccurrence, updateJobOccurrence,
         confirmDelivery: async (userId, job, confirmation) => {
           if (confirmation.kind !== "attention_pulse") return;
-          await markAttentionPulseDelivered(userId, confirmation.candidateIds, Date.now());
+          await markAttentionPulseDelivered(userId, confirmation.candidateIds, Date.now(), confirmation.observationIds ?? []);
           await updateJob(userId, job.id, { attentionPulse: { ...recordAttentionPulseDelivery(job.attentionPulse, Date.now()), lastDigestKey: confirmation.dedupeKey } });
         },
         runAgent: async (job) => withCliLock(payload.userId, undefined, async () => {
@@ -2256,16 +2256,26 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             if (result.status === "requires_approval") {
               return { text: `The attention pulse needs approval for ${result.proposal?.actionName ?? "an external action"}. Approve request ${result.approvalId ?? "in Telegram"}.` };
             }
-            const noAction = isNoActionPulseOutput(result.output);
+            const reconciliationCompleted = result.toolCallsLog.some((entry) => entry.tool === "CHUCK_AUTONOMY_RECONCILE" && entry.status === "completed");
+            let closeoutPlan = attentionPulseRequireDueWatchReport(plan, reconciliationCompleted);
+            if (reconciliationCompleted) {
+              const [coverage, pendingObservations] = await Promise.all([
+                getAttentionPulseWatchCoverage(payload.userId),
+                listAttentionRecords(payload.userId, "observation", { limit: 200, status: "new" }) as Promise<ObservationRecord[]>,
+              ]);
+              closeoutPlan = attentionPulseRefreshOwnerState(plan, coverage, pendingObservations);
+            }
+            const output = attentionPulseCloseoutOutput(closeoutPlan, result.output);
+            const noAction = isNoActionPulseOutput(output);
             const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
             // A successfully delivered owner digest should suppress an identical
             // hourly repeat even when the signal only needs the owner's decision.
             // Candidate records remain pending unless the worker actually handled
             // or delegated the underlying work.
-            const deliveryConfirmation = attentionPulseDeliveryConfirmation(plan, result.output, handled);
+            const deliveryConfirmation = attentionPulseDeliveryConfirmation(closeoutPlan, output, handled);
             const text = !noAction && !handled
-              ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${result.output}`
-              : result.output;
+              ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${output}`
+              : output;
             return { text, suppressDelivery: noAction, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
           }
           const session = await getSession(payload.userId);

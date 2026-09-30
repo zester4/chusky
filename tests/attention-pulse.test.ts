@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
+import { attentionPulseCloseoutOutput, attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, attentionPulseRefreshOwnerState, attentionPulseRequireDueWatchReport, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
 import { addJob, addRecallMeeting, addReminder, blockTask, createApproval, createAttentionRecord, createJobOccurrence, createMission, createTask, createTriggerEvent, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, saveCalendarMeetingPreparation, updateAttentionRecord, updateTask, type DeliveryPreferenceRecord } from "../src/store.js";
@@ -78,6 +78,74 @@ test("attention pulse checkpoints delivered owner digests without falsely comple
     kind: "attention_pulse", candidateIds: ["candidate_1"], dedupeKey: "digest_1",
   });
   assert.equal(attentionPulseDeliveryConfirmation(plan, "NO_ACTION", false), undefined);
+});
+
+test("attention pulse cannot suppress a new observation and only checkpoints it after delivery", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910020;
+  const now = Date.UTC(2026, 8, 30, 12);
+  const observation = await createAttentionRecord(userId, "observation", {
+    source: "watch:gmail", eventType: "watch.changed", summary: "A customer message needs a reply",
+    entityId: "watch_inbox", dedupeKey: "watch-change-once", occurredAt: now,
+    importance: 0.9, novelty: 0.8, confidence: 0.8, privacyScope: "private", status: "new",
+  });
+  const plan = await buildAttentionPulsePlan(userId, now);
+
+  assert.equal(plan.mustReport, true);
+  assert.equal(plan.observationIds.includes(observation.id), true);
+  assert.match(plan.prompt, /A customer message needs a reply/);
+  assert.match(plan.prompt, /not a claim that all mail, apps, calendars/);
+  assert.match(attentionPulseCloseoutOutput(plan, "NO_ACTION"), /saved update/);
+  assert.match(attentionPulseCloseoutOutput(plan, "Nothing needs attention."), /A customer message needs a reply/);
+  assert.equal(attentionPulseDeliveryConfirmation(plan, "NO_ACTION", false), undefined);
+
+  const confirmation = attentionPulseDeliveryConfirmation(plan, attentionPulseCloseoutOutput(plan, "NO_ACTION"), false);
+  assert.deepEqual(confirmation?.observationIds, [observation.id]);
+  assert.equal((await listAttentionRecords(userId, "observation") as any[])[0]?.status, "new");
+  await markAttentionPulseDelivered(userId, [], now, confirmation?.observationIds);
+  assert.equal((await listAttentionRecords(userId, "observation") as any[])[0]?.status, "processed");
+});
+
+test("attention pulse reports skipped due checks and captures observations created during reconciliation", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910022;
+  const now = Date.now();
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Calendar watch", domain: "calendar", objective: "Check for changed meetings", cadenceSeconds: 3600,
+    authority: "observe", status: "active", maxItems: 10, nextCheckAt: now - 1000,
+  });
+  const plan = await buildAttentionPulsePlan(userId, now);
+  assert.equal(plan.dueWatchIds.length, 1);
+  const skipped = attentionPulseRequireDueWatchReport(plan, false);
+  assert.match(attentionPulseCloseoutOutput(skipped, "NO_ACTION"), /no fresh read-back was recorded/);
+  const freshPlan = { ...plan, mustReport: false, fallbackDigest: undefined, watchCoverage: plan.watchCoverage.map((watch) => ({ ...watch, status: "current" as const })) };
+  assert.equal(attentionPulseCloseoutOutput(attentionPulseRequireDueWatchReport(freshPlan, true), "NO_ACTION"), "NO_ACTION");
+
+  const observation = await createAttentionRecord(userId, "observation", {
+    source: "watch:calendar", eventType: "watch.changed", summary: "The owner has a new meeting at 3 PM",
+    entityId: plan.dueWatchIds[0], dedupeKey: "pulse-created-during-reconcile", occurredAt: now,
+    importance: 0.9, novelty: 0.9, confidence: 0.8, privacyScope: "private", status: "new",
+  }) as any;
+  const refreshed = attentionPulseRefreshOwnerState(plan, plan.watchCoverage.map((watch) => ({ ...watch, status: "current" as const })), [observation]);
+  assert.equal(refreshed.mustReport, true);
+  assert.equal(refreshed.observationIds.includes(observation.id), true);
+  assert.match(attentionPulseCloseoutOutput(refreshed, "NO_ACTION"), /new meeting at 3 PM/);
+  assert.equal(attentionPulseRefreshOwnerState(plan, plan.watchCoverage.map((watch) => ({ ...watch, status: "current" as const })), []).mustReport, false);
+});
+
+test("attention pulse status shows configured watch coverage honestly", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910021;
+  const now = Date.UTC(2026, 8, 30, 12);
+  await createAttentionRecord(userId, "autonomy_watch", {
+    name: "Gmail inbox", domain: "gmail", objective: "Check for new mail", cadenceSeconds: 3600,
+    freshnessMs: 60_000, authority: "observe", status: "active", maxItems: 10,
+    lastCheckedAt: now - 120_000, lastObservedAt: now - 120_000, nextCheckAt: now + 60_000,
+  });
+  const status = await configureAttentionPulse(userId, { action: "status" }) as any;
+  assert.equal(status.watchCoverage.scope, "owner-configured watches only; not a full sweep of connected apps");
+  assert.equal(status.watchCoverage.stale, 1);
+  assert.equal(status.watchCoverage.watches[0].status, "stale");
 });
 
 test("attention pulse executes Elena's real handle-or-delegate boundary", async () => {
@@ -217,7 +285,9 @@ test("attention pulse finds blocked durable work and due watches without waking 
   assert.match(plan.prompt, /Business renewal/);
   assert.match(plan.prompt, /personal.*Invoice status|Invoice status.*personal/);
   assert.match(plan.prompt, /business.*Business renewal|Business renewal.*business/);
-  assert.doesNotMatch(plan.prompt, /Future shipment/);
+  assert.match(plan.prompt, /Future shipment .*scheduled/);
+  const dueWatchSection = plan.prompt.split("\nDue autonomy watches:\n")[1]?.split("\nAutonomy profile state")[0] ?? "";
+  assert.doesNotMatch(dueWatchSection, /Future shipment/);
   assert.doesNotMatch(plan.prompt, /Paused work/);
 });
 

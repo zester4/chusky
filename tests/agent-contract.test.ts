@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, getApproval, getSession, initStore, listAgentRuns, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, getApproval, getSession, initStore, listAgentRuns, listMissions, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
@@ -52,7 +52,7 @@ test("tool-bearing runs reject bare completion language until the result is clos
   assert.equal(needsAutonomyCloseoutNudge("Done.", 0), false);
 });
 
-async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false, safeToolSchema: Record<string, unknown> = { type: "object" }) {
+async function withAgentMocks(responses: Response[], execute: (slug: string, args: any) => unknown, fn: () => Promise<void>, includeMultiExecute = false, safeToolSchema: Record<string, unknown> = { type: "object" }, onRequest?: (body: Record<string, any>) => void) {
   const originalFetch = globalThis.fetch;
   let index = 0;
   const session = {
@@ -69,10 +69,14 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
     { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", description: "Test-only multi tool", parameters: { type: "object" } } },
   ];
   setAgentDependenciesForTests({ composio: { create: async () => session, sessions: { use: async () => session } } });
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
-    if (url.includes("/chat/completions")) return responses[index++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+    if (url.includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
+      onRequest?.(body);
+      return responses[index++] ?? chatResponse({ role: "assistant", content: "unexpected extra request" });
+    }
     // Async SDK telemetry and unrelated provider requests must not consume a
     // queued model completion merely because this test replaces global fetch.
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
@@ -1280,6 +1284,39 @@ test("agent distinguishes a failed tool attempt from a successful side effect", 
     assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
     assert.deepEqual(result.toolsSucceeded, []);
   });
+});
+
+test("a Jev-routed mission recovery rejects a stray start-with-id call with a usable correction", async () => {
+  const userId = 830022;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  await withAgentMocks([
+    toolResponse("CHUCK_MISSION_START", JSON.stringify({ id: "mis_existing" })),
+    chatResponse({ role: "assistant", content: "I’ll continue the existing mission." }),
+  ], async () => assert.fail("The disallowed new-mission tool must not execute"), async () => {
+    const result = await runAgent(
+      userId,
+      "Continue the existing mission mis_existing",
+      [],
+      "test/model",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { ephemeral: true, toolAllow: ["CHUCK_MISSION_RESUME"] },
+    );
+    assert.equal(result.text, "I’ll continue the existing mission.");
+    assert.deepEqual(result.toolsSucceeded, []);
+  }, false, undefined, (body) => requests.push(body));
+
+  const visibleTools = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+  assert.ok(visibleTools.includes("CHUCK_MISSION_RESUME"));
+  assert.ok(!visibleTools.includes("CHUCK_MISSION_START"));
+  const correction = requests[1]?.messages?.find((message: any) => message.role === "tool")?.content ?? "";
+  assert.match(correction, /CHUCK_MISSION_RESUME.*No mission was created/i);
+  assert.deepEqual(await listMissions(userId), []);
 });
 
 test("routes a direct Composio tool to the requested connected-account alias", async () => {

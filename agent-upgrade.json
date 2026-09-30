@@ -1,11 +1,11 @@
 {
-  "id": "release-4.30.0",
-  "version": "4.30.0",
+  "id": "release-4.31.0",
+  "version": "4.31.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
-    "Every event now keeps its owner-scoped result and notification state in the dashboard, even when no private Telegram destination is linked; unresolved delivery creates durable Attention Pulse follow-up.",
-    "Trigger work preserves approval and safety policy, and recovery never blindly replays the original external action."
+    "Attention Pulse records owner-private change, failure, and recovery observations from configured read-only watches, deduplicates replays, and surfaces them as durable events.",
+    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
+    "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain."
   ],
-  "createdAt": "2026-09-30T04:08:22.735Z"
+  "createdAt": "2026-09-30T15:18:59.068Z"
 }

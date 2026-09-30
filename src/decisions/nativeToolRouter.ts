@@ -175,6 +175,27 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
   });
 }
 
+function retainLifecycleToolFamilies(tools: ToolSchema[], selected: Set<string>, context: string): void {
+  const families = [
+    { prefix: "CHUCK_MISSION_", mentioned: /\bmissions?\b|\bmission[-_ ](?:id|resume|start|checkpoint|proof|verification)\b/i },
+    { prefix: "CHUCK_TASK_", mentioned: /\b(?:durable\s+)?tasks?\b|\btask[-_ ](?:id|resume|retry|checkpoint)\b/i },
+  ];
+  for (const family of families) {
+    const selectedFamilyTool = [...selected].some((slug) => slug.startsWith(family.prefix));
+    if (!selectedFamilyTool && !family.mentioned.test(context)) continue;
+    for (const tool of tools) {
+      const slug = toolName(tool);
+      if (descriptorBySlug.has(slug) && slug.startsWith(family.prefix)) selected.add(slug);
+    }
+  }
+  const existingMissionRecovery = (/\bmis_[a-z0-9_-]+\b|\bexisting\s+mission\b/i.test(context))
+    && !/\bnew\s+mission\b/i.test(context);
+  if (existingMissionRecovery) selected.delete("CHUCK_MISSION_START");
+  const existingTaskRecovery = (/\btask_[a-z0-9_-]+\b|\bexisting\s+task\b/i.test(context))
+    && !/\bnew\s+task\b/i.test(context);
+  if (existingTaskRecovery) selected.delete("CHUCK_TASK_CREATE");
+}
+
 export async function computeNativeToolRoute(query: string, tools: ToolSchema[], options: {
   client?: JevClient;
   signal?: AbortSignal;
@@ -184,7 +205,8 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   const baseline = baselineRoute(tools);
   const availableNative = tools.filter((tool) => descriptorBySlug.has(toolName(tool)));
   if (!availableNative.length) return baseline;
-  const candidates = candidateSet(tools, query);
+  const routingContext = [query, options.recentContext].filter(Boolean).join("\n");
+  const candidates = candidateSet(tools, routingContext);
   if (!candidates.matched || candidates.candidates.length < 2) return { ...baseline, fallbackReason: "no_native_candidate_set" };
   const client = options.client ?? jevClient();
   const state = {
@@ -226,6 +248,11 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   }
   const selectedSet = new Set(selected);
   for (const item of candidates.candidates) if (item.alwaysAvailable) selectedSet.add(item.slug);
+  // Lifecycle operations are a coherent control surface: a single Jev pick
+  // must not hide the recovery action needed after that action is attempted.
+  // The closure is bounded to the requested mission/task family, not the full
+  // native catalog, and only exposes schemas; execution authority is unchanged.
+  retainLifecycleToolFamilies(tools, selectedSet, routingContext);
   const routed = modelToolsForSelection(tools, selectedSet);
   return {
     tools: routed,

@@ -45,7 +45,7 @@ and Treg spend guards are unchanged.
   It validates every proposal against deterministic authority before a caller
   may execute or persist anything.
 - `src/decisions/browserRouter.ts` and `src/vault/browserObservation.ts` —
-  redact live Daytona accessibility observations, generate synthetic
+  redact live E2B browser accessibility observations, generate synthetic
   server-side candidate IDs, and let Jev rank only those bounded candidates.
   The router never executes the selected action; `CHUCK_BROWSER` and
   the vault guard remain the execution and approval boundary.
@@ -82,8 +82,12 @@ low confidence, no-match requests, or disabled routing fall back to the full
 catalog. Turning Jev off therefore preserves the pre-routing behavior exactly.
 
 Jev is additive. A Jev answer, including a confident `__none__`, never
-removes keyword skill routes or the keyword Composio domain route. Fuzzy
-skill search stays available unless the user explicitly selected a skill.
+removes keyword skill routes or the keyword Composio domain route. A Treg
+endpoint `__none__` keeps the gateway's deterministic price/reliability/input
+ranking. Autonomy falls back to its deterministic item/action when Jev selects
+no valid work item; observe/read-only authority cannot authorize generic
+`act_now`, retry, or provider-switch proposals. Fuzzy skill search stays
+available unless the user explicitly selected a skill.
 
 `JEV_SURFACES` limits routing to `skills`, `composio`, `treg`, `autonomy`,
 and/or `browser`. `JEV_MODE=off` disables every Jev surface and preserves the

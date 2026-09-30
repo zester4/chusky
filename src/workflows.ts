@@ -23,7 +23,7 @@ export interface WorkflowDependencies {
   getJobOccurrence?(userId: number, jobId: string, occurrenceId: string): Promise<JobOccurrenceRecord | undefined>;
   createJobOccurrence?(record: JobOccurrenceRecord): Promise<JobOccurrenceRecord>;
   updateJobOccurrence?(userId: number, id: string, patch: Partial<JobOccurrenceRecord>, expectedVersion?: number): Promise<JobOccurrenceRecord | undefined>;
-  confirmDelivery?(userId: number, job: JobRecord, confirmation: { kind: "attention_pulse"; candidateIds: string[]; dedupeKey: string }): Promise<void>;
+  confirmDelivery?(userId: number, job: JobRecord, confirmation: { kind: "attention_pulse"; candidateIds: string[]; observationIds?: string[]; dedupeKey: string }): Promise<void>;
   claimDelivery?(key: string, leaseMs: number): Promise<boolean>;
   completeDelivery?(key: string, ttlSeconds: number): Promise<void>;
 }
@@ -37,7 +37,7 @@ export interface WorkflowExecutionResult {
   nextAction?: string;
   waitReason?: string;
   retryAt?: number;
-  deliveryConfirmation?: { kind: "attention_pulse"; candidateIds: string[]; dedupeKey: string };
+  deliveryConfirmation?: { kind: "attention_pulse"; candidateIds: string[]; observationIds?: string[]; dedupeKey: string };
 }
 
 export function parseReminderWorkflowPayload(value: unknown): ReminderWorkflowPayload {

@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, createTask, initStore, createMission, getMission, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission } from "../src/store.js";
+import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
@@ -100,6 +100,59 @@ test("resuming an already-running mission repairs missing task scheduling withou
   assert.equal((replay as { status: string }).status, "running");
   assert.equal(enqueued.length, 1, "repeating resume does not publish a second workflow");
   assert.equal((await listTasks(userId)).filter((task) => task.missionId === mission.id).length, 1);
+});
+
+test("replayed mission start calls in one agent run create and schedule only one mission", async () => {
+  const userId = 972016;
+  const args = {
+    title: "Idempotent mission start",
+    objective: "Create one durable mission despite a retried tool call",
+    definitionOfDone: "Exactly one mission and one initial task exist",
+    steps: [{ id: "only", title: "First step", objective: "Run once" }],
+  };
+  const enqueued: string[] = [];
+  const runtime = {
+    currentRunId: "run_replayed_mission_start",
+    enqueueMissionTask: async (_ownerId: number, taskId: string) => { enqueued.push(taskId); return `workflow_${taskId}`; },
+  };
+
+  const first = await nativeTool(userId, "CHUCK_MISSION_START", { ...args }, runtime) as { id: string };
+  const replay = await nativeTool(userId, "CHUCK_MISSION_START", { ...args }, runtime) as { id: string };
+
+  assert.equal(replay.id, first.id);
+  assert.equal((await listMissions(userId)).filter((mission) => mission.title === args.title).length, 1);
+  assert.equal((await listTasks(userId)).filter((task) => task.missionId === first.id).length, 1);
+  assert.equal(enqueued.length, 1, "the repeated start must not enqueue a duplicate workflow");
+});
+
+test("a mission ID sent to start fails with recovery guidance before creating or resuming anything", async () => {
+  const userId = 972018;
+  await assert.rejects(
+    nativeTool(userId, "CHUCK_MISSION_START", { id: "mis_existing" }),
+    /creates a new mission.*CHUCK_MISSION_RESUME.*no mission was created/i,
+  );
+  assert.deepEqual(await listMissions(userId), []);
+});
+
+test("replayed native task creation in one agent run returns the same durable task", async () => {
+  const userId = 972017;
+  const args = { title: "Idempotent task creation", objective: "Create one resumable task" };
+  const runtime = { currentRunId: "run_replayed_task_create" };
+  const first = await nativeTool(userId, "CHUCK_TASK_CREATE", { ...args }, runtime) as { id: string };
+  const replay = await nativeTool(userId, "CHUCK_TASK_CREATE", { ...args }, runtime) as { id: string };
+  assert.equal(replay.id, first.id);
+  assert.equal((await listTasks(userId)).filter((task) => task.title === args.title).length, 1);
+  const separate = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "A separate task", objective: args.objective }, runtime) as { id: string };
+  assert.notEqual(separate.id, first.id, "different task intents within one run remain distinct");
+});
+
+test("an existing task ID sent to task creation fails before creating a task", async () => {
+  const userId = 972019;
+  await assert.rejects(
+    nativeTool(userId, "CHUCK_TASK_CREATE", { id: "task_existing" }),
+    /creates a new task.*CHUCK_TASK_GET.*no task was created/i,
+  );
+  assert.deepEqual(await listTasks(userId), []);
 });
 
 test("native replan reports a completed-step conflict without mutating the mission", async () => {

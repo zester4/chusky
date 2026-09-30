@@ -30,6 +30,12 @@ const activeRuns = new Set<string>();
 const MAX_OUTPUT = 5000;
 
 function compact(value: unknown, max: number): string { return String(value ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max); }
+function safeErrorMessage(error: unknown): string {
+  return compact(error instanceof Error ? error.message : error, 1000)
+    .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [redacted]")
+    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|authorization)\s*[:=]\s*["']?[^\s,"'};]+/gi, "$1=[redacted]")
+    .replace(/\b(?:sk|rk|pk|xox[baprs]|gh[pousr])[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted credential]");
+}
 function utcDay(now: number): string { return new Date(now).toISOString().slice(0, 10); }
 function domainMatches(domain: string, patterns: string[]): boolean {
   if (!patterns.length) return true;
@@ -157,6 +163,30 @@ async function recordGaps(userId: number, gaps: ReturnType<typeof detectBusiness
   }));
 }
 
+async function recordWatchObservation(
+  userId: number,
+  watch: AutonomyWatchRecord,
+  eventType: "watch.changed" | "watch.failed" | "watch.recovered",
+  summary: string,
+  dedupeKey: string,
+  occurredAt: number,
+): Promise<void> {
+  await createAttentionRecord(userId, "observation", {
+    source: `watch:${watch.domain}`,
+    eventType,
+    summary: compact(summary, 4000),
+    entityId: watch.id,
+    dedupeKey: `watch:${watch.id}:${eventType}:${dedupeKey}`,
+    metadata: { watchId: watch.id, mode: watch.mode ?? "personal" },
+    occurredAt,
+    importance: eventType === "watch.failed" ? 0.9 : eventType === "watch.changed" ? 0.85 : 0.7,
+    novelty: eventType === "watch.recovered" ? 0.6 : 0.9,
+    confidence: 0.75,
+    privacyScope: "private",
+    status: "new",
+  });
+}
+
 /** Run bounded, idempotent, triggerless checks for all due owner watches. */
 export async function runDueAutonomyWatches(userId: number, options: ReconciliationOptions = {}): Promise<ReconciliationRun[]> {
   const now = options.now ?? Date.now();
@@ -194,11 +224,28 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       const signals = parsed.signals;
       const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
       await recordGaps(userId, gaps);
-      const digestKey = createHash("sha256").update(JSON.stringify({ watch: watch.id, summary, cursor: parsed.cursor, gaps: gaps.map((gap) => gap.key) })).digest("hex").slice(0, 32);
+      const digestKey = createHash("sha256").update(JSON.stringify({
+        watch: watch.id,
+        summary,
+        cursor: parsed.cursor,
+        signals: signals.map((signal) => [signal.id, signal.source, signal.kind, signal.subject, signal.status, signal.updatedAt, signal.dueAt]),
+        gaps: gaps.map((gap) => gap.key),
+      })).digest("hex").slice(0, 32);
+      if (watch.lastError) {
+        const failureKey = createHash("sha256").update(`${watch.lastCheckedAt ?? 0}:${watch.lastError}`).digest("hex").slice(0, 32);
+        await recordWatchObservation(userId, watch, "watch.recovered", `Watch “${compact(watch.name, 120)}” recovered and completed a fresh check.`, failureKey, now);
+      }
+      if (changed && digestKey !== watch.lastDigestKey) {
+        await recordWatchObservation(userId, watch, "watch.changed", summary, digestKey, now);
+      }
       await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {
-      const message = compact(error instanceof Error ? error.message : error, 1000);
+      const message = safeErrorMessage(error);
+      if (!watch.lastError) {
+        const failureKey = createHash("sha256").update(`${watch.lastCheckedAt ?? 0}:${message}`).digest("hex").slice(0, 32);
+        await recordWatchObservation(userId, watch, "watch.failed", `Watch “${compact(watch.name, 120)}” failed: ${message}`, failureKey, now);
+      }
       await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, nextCheckAt: now + Math.min(watch.cadenceSeconds, 3600) * 1000, lastError: message, consecutiveFailures: (watch.consecutiveFailures ?? 0) + 1 });
       results.push({ watchId: watch.id, status: "failed", changed: false, summary: "Reconciliation failed; the watch remains active for a bounded retry.", gaps: 0, error: message });
     } finally { clearInterval(leaseRenewal); activeRuns.delete(watch.id); await releaseAutonomyWatchLock(userId, watch.id, leaseToken).catch(() => undefined); }

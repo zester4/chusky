@@ -8,6 +8,7 @@ import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { getAttentionPulseWatchCoverage } from "./attentionPulse.js";
 import { createTinyFishClient } from "./tinyfish.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
@@ -224,6 +225,54 @@ function missionText(value: unknown, field: string, max: number): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > max) throw new Error(`${field} must be 1-${max} characters`);
   return result;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    return `{${entries.map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function missionStartIdempotencyKey(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
+  const explicit = optionalIdentifier(args.idempotencyKey, 200);
+  if (explicit) return explicit;
+  const runId = runtime.currentRunId?.trim();
+  if (!runId) return undefined;
+  const intent = {
+    title: args.title,
+    objective: args.objective,
+    definitionOfDone: args.definitionOfDone,
+    requiredEvidence: args.requiredEvidence,
+    verificationMode: args.verificationMode ?? (Array.isArray(args.requiredEvidence) && args.requiredEvidence.length ? "strict" : "legacy"),
+    steps: Array.isArray(args.steps) && args.steps.length ? args.steps : null,
+    budget: {
+      maxDurationSeconds: args.maxDurationSeconds,
+      maxSteps: args.maxSteps,
+      maxToolCalls: args.maxToolCalls,
+      maxCost: args.maxCost,
+    },
+  };
+  const scope = createHash("sha256").update(`${userId}:${runId}`).digest("hex");
+  const fingerprint = createHash("sha256").update(stableJson(intent)).digest("hex");
+  return `agent-run:${scope}:${fingerprint}`;
+}
+
+function taskCreateIdempotencyId(userId: number, args: Record<string, unknown>, runtime: NativeToolRuntime): string | undefined {
+  const runId = runtime.currentRunId?.trim();
+  if (!runId) return undefined;
+  const fingerprint = createHash("sha256").update(stableJson({
+    userId,
+    runId,
+    title: args.title,
+    objective: args.objective,
+    workspaceId: args.workspaceId,
+  })).digest("hex").slice(0, 48);
+  return `task_${fingerprint}`;
 }
 
 function daytonaCommand(value: unknown): string {
@@ -616,7 +665,23 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   if (!["enable", "disable", "status"].includes(action)) throw new Error("Attention pulse action must be enable, disable, or status");
   if (runtime.sharedConversation && action === "enable") throw new Error("Attention pulse must be enabled from your private Chusky chat");
   const active = (await listJobs(userId)).filter((job) => job.kind === "attention_pulse");
-  if (action === "status") return { enabled: active.length > 0, jobs: active };
+  if (action === "status") {
+    const watchCoverage = await getAttentionPulseWatchCoverage(userId);
+    return {
+      enabled: active.length > 0,
+      jobs: active,
+      watchCoverage: {
+        scope: "owner-configured watches only; not a full sweep of connected apps",
+        active: watchCoverage.length,
+        current: watchCoverage.filter((watch) => watch.status === "current").length,
+        scheduled: watchCoverage.filter((watch) => watch.status === "scheduled").length,
+        stale: watchCoverage.filter((watch) => watch.status === "stale").length,
+        failed: watchCoverage.filter((watch) => watch.status === "failed").length,
+        neverChecked: watchCoverage.filter((watch) => watch.status === "not_checked").length,
+        watches: watchCoverage,
+      },
+    };
+  }
   if (action === "disable") {
     for (const job of active) await cancelJob(userId, job.id);
     return { enabled: false, cancelled: active.map((job) => job.id) };
@@ -1321,7 +1386,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const jobs = await listVideoJobs(userId);
       return jobs.filter((job) => !id || job.id === id).slice(0, limit);
     }
-    case "CHUCK_TASK_CREATE": return createTask(userId, { title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
+    case "CHUCK_TASK_CREATE": return createTask(userId, { id: taskCreateIdempotencyId(userId, args, runtime), title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
     case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));
     case "CHUCK_TASK_GET": {
       const task = await getTask(userId, text(args.id));
@@ -1376,7 +1441,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         title: missionText(args.title, "title", 240),
         objective: missionText(args.objective, "objective", 8000),
         definitionOfDone: missionText(args.definitionOfDone, "definitionOfDone", 4000),
-        idempotencyKey: args.idempotencyKey ? text(args.idempotencyKey) : undefined,
+        idempotencyKey: missionStartIdempotencyKey(userId, args, runtime),
         requiredEvidence: Array.isArray(args.requiredEvidence) ? args.requiredEvidence.filter((value: unknown): value is string => typeof value === "string") : undefined,
         verificationMode: args.verificationMode === "strict" || (args.verificationMode === undefined && Array.isArray(args.requiredEvidence) && args.requiredEvidence.length > 0) ? "strict" : "legacy",
         steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({

@@ -18,9 +18,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Extended the governed runtime across meetings, A2A, E2B browser, Daytona computer/artifact execution, Telegram, the CLI, SDK/API, dashboard, and MCP with the same owner-scoped durable state.",
   ],
   attention: [
-    "The proactive attention pulse now reconciles open loops, pending candidates, blocked or failed tasks and missions, expired waits, and due owner-configured watches.",
-    "Personal and business watches are isolated by mode, and only confirmed successful tool calls count as handling; paused work and future waits remain untouched.",
-    "The pulse builds bounded decision context, lets Jev propose the specialist and exact connected-app action, and preserves deterministic authority, account, and verification gates while preserving approval boundaries.",
+    "Attention Pulse records owner-private change, failure, and recovery observations from configured read-only watches, deduplicates replays, and surfaces them as durable events.",
+    "Pulse status reports current, scheduled, stale, failed, and never-checked coverage for explicitly configured watches; it does not claim to monitor every connected app.",
+    "New observations stay pending until confirmed delivery, and a deterministic digest prevents NO_ACTION from hiding an update while existing approval and personal/business boundaries remain.",
   ],
   missions: [
     "Added durable autonomous missions for concrete outcomes: dependency-aware steps, bounded budgets, checkpoints, retries, restart-safe execution, server-side closeout, and live provider outcome verification.",

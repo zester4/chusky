@@ -632,7 +632,7 @@ in progress, not for user reminders or periodic jobs.
 ### Proactive attention pulse
 
 The attention state is an owner-scoped substrate for open loops, attention candidates,
-standing orders, and delivery preferences. It becomes proactive only after the owner asks
+standing orders, observations, autonomy watches, and delivery preferences. It becomes proactive only after the owner asks
 Chusky to enable the pulse. The agent then creates one stable QStash schedule (hourly by
 default) for Elena, the workflow governor. Each run reviews bounded state, applies only
 active standing-order authority, preserves normal approvals for risky actions, suppresses
@@ -645,7 +645,13 @@ digests on the pulse job itself, and an open loop is not closed merely because i
 in a digest—Elena must complete or explicitly snooze/update the loop. Pulse plans also surface
 blocked/failed durable tasks and missions, expired non-timer waits, and due owner-configured
 watches; paused work and future waits stay dormant. Watch reconciliation is mode-scoped
-(personal/business) and strictly read-only. Handling is counted only after a tool confirms
+(personal/business) and strictly read-only. Meaningful watch changes, first failures, and
+recovery are stored as deduplicated private observations. Pulse reports these observations and
+tracks whether configured watches are current, scheduled, stale, failed, or not yet checked;
+this is coverage of only explicitly configured watches, not a sweep of every connected app.
+An observation is marked processed only after the delivery workflow confirms it was sent. If
+the worker incorrectly returns `NO_ACTION` while an observation or coverage gap is pending,
+Pulse sends a deterministic owner digest instead. Handling is counted only after a tool confirms
 completion, not when it merely starts or is inspected. Pulse runs use a narrower task, reminder,
 mission-inspection, and attention-state tool surface than ordinary Elena work; connected-app
 actions require an explicit capability expansion. Redis and QStash are required in production.

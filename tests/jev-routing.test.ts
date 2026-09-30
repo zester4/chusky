@@ -7,7 +7,7 @@ import { config } from "../src/config.js";
 import { JevClient, JevUnavailableError, NONE_OPTION, createRoutingDeadline, rankOptions, verifyCandidates, setJevClientForTests } from "../src/decisions/jev.js";
 import { explicitlyNamedSkills, routeSkillsForTurn } from "../src/decisions/skillRouter.js";
 import { clearComposioActionCache, composioDecisionContext, computeJevComposioDecision, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "../src/decisions/composioRouter.js";
-import { createTregEndpointJudge } from "../src/decisions/tregRouter.js";
+import { computeTregTurnRoute, createTregEndpointJudge } from "../src/decisions/tregRouter.js";
 import { rankHits } from "../src/treg/gateway.js";
 import { clearSkillCatalogCache } from "../src/skills/catalog.js";
 import { resetJevRoutingStats, jevRoutingStats } from "../src/decisions/telemetry.js";
@@ -284,6 +284,31 @@ test("Treg endpoint judge reorders candidates by semantic fit without bypassing 
     const failed = await createTregEndpointJudge({ client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { status: 500 }) }) })({ intent: "enrich_person", need: "x", hits });
     assert.equal(failed, undefined, "judge failure keeps deterministic ranking");
   } finally { restore(); }
+});
+
+test("a confident Treg __none__ keeps deterministic endpoint ranking and is not logged as applied", async () => {
+  const hits: TregEndpointHit[] = [
+    { id: "email-by-domain", title: "Find a work email by domain", provider: "p1", category: "other", priceUsd: 0.02, successRate: 0.9 },
+    { id: "company-enrich", title: "Enrich a company profile", provider: "p2", category: "enrichment_company", priceUsd: 0.03, successRate: 0.9 },
+  ];
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["treg"]) });
+  resetJevRoutingStats();
+  try {
+    const fit = await createTregEndpointJudge({ client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) })({ intent: "enrich_person", need: "find a work email", hits });
+    assert.equal(fit, undefined, "an explicit no-match must preserve the deterministic score path");
+    assert.equal(jevRoutingStats().treg_endpoint?.applied, 0, "a no-match is a fallback, not an applied routing decision");
+  } finally { restore(); resetJevRoutingStats(); }
+});
+
+test("a Treg turn-level __none__ is reported as a fallback, not an applied route", async () => {
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["treg"]), tregEnabled: true });
+  resetJevRoutingStats();
+  try {
+    const route = await computeTregTurnRoute("Tell me a joke", { client: new JevClient({ apiKey: "k", fetchImpl: fakeJev([], { forceNone: true }) }) });
+    assert.equal(route.tool, undefined);
+    assert.equal(route.fallbackReason, "jev_none");
+    assert.equal(jevRoutingStats().treg_tool?.applied, 0);
+  } finally { restore(); resetJevRoutingStats(); }
 });
 
 test("routing is inert when JEV_MODE is off", async () => {

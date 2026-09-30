@@ -44,8 +44,10 @@ export async function computeTregTurnRoute(objective: string, options: { client?
   }, { signal: options.signal, sessionId: options.sessionId });
   const tool = result.answers.tool as JevChoiceAnswer;
   const liveData = (result.answers.live_data as JevNoulAnswer).noul;
-  recordDecision({ surface: "treg_tool", mode: config.jevMode === "enforce" ? "enforce" : "shadow", applied: config.jevMode === "enforce", jev: [{ id: tool.choice, p: tool.probabilities[tool.choice] ?? tool.confidence }], latencyMs: result.latencyMs, ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }), model: client.modelId });
-  if (tool.choice === NONE_OPTION || liveData < 0.5 || tool.confidence < config.jevMinConfidence) return { probability: tool.probabilities[tool.choice] ?? 0, needsLiveData: liveData };
+  const fallbackReason = tool.choice === NONE_OPTION ? "jev_none" : liveData < 0.5 ? "no_live_data_needed" : tool.confidence < config.jevMinConfidence ? "low_confidence" : undefined;
+  const applied = config.jevMode === "enforce" && !fallbackReason;
+  recordDecision({ surface: "treg_tool", mode: config.jevMode === "enforce" ? "enforce" : "shadow", applied, ...(fallbackReason ? { fallbackReason } : {}), jev: [{ id: tool.choice, p: tool.probabilities[tool.choice] ?? tool.confidence }], latencyMs: result.latencyMs, ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }), model: client.modelId });
+  if (fallbackReason) return { probability: tool.probabilities[tool.choice] ?? 0, needsLiveData: liveData, fallbackReason };
   return { tool: tool.choice, probability: tool.probabilities[tool.choice] ?? tool.confidence, needsLiveData: liveData };
 }
 
@@ -106,10 +108,16 @@ export function createTregEndpointJudge(options: { client?: JevClient } = {}): T
         endpoint: { type: "choice", instructions: "Which provider endpoint best fits `job` for `need`, returning `required_output_fields` from `available_inputs`? Judge task fit only; synchronous, asynchronous, and bulk endpoints are all valid when their mode suits the need.", criteria },
       });
       const answer = result.answers.endpoint as JevChoiceAnswer;
+      const selected = input.hits.find((hit) => hit.id === answer.choice);
+      const fallbackReason = answer.choice === NONE_OPTION ? "jev_none" : !selected ? "invalid_endpoint_choice" : answer.confidence < config.jevMinConfidence * 0.5 ? "low_confidence" : undefined;
+      if (fallbackReason) {
+        recordDecision({ surface: "treg_endpoint", mode: config.jevMode === "enforce" ? "enforce" : "shadow", applied: false, fallbackReason, jev: [{ id: answer.choice, p: answer.probabilities[answer.choice] ?? answer.confidence }], latencyMs: result.latencyMs, ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }), model: client.modelId });
+        return undefined;
+      }
       const fit: Record<string, number> = {};
       for (const hit of hits) fit[hit.id] = answer.probabilities[hit.id] ?? 0;
       const ranked = Object.entries(fit).sort((a, b) => b[1] - a[1]).map(([id, p]) => ({ id, p }));
-      const apply = config.jevMode === "enforce" && answer.confidence >= config.jevMinConfidence * 0.5;
+      const apply = config.jevMode === "enforce";
       recordDecision({ surface: "treg_endpoint", mode: config.jevMode === "enforce" ? "enforce" : "shadow", applied: apply, ...(apply ? {} : { fallbackReason: config.jevMode === "enforce" ? "low_confidence" : "shadow" }), jev: ranked, latencyMs: result.latencyMs, ...(result.costUsd === undefined ? {} : { costUsd: result.costUsd }), model: client.modelId });
       return apply ? fit : undefined;
     } catch (error) {

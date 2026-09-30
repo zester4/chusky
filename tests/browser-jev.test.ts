@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { routeBrowserNext } from "../src/decisions/browserRouter.js";
 import { JevClient } from "../src/decisions/jev.js";
+import { jevRoutingStats, resetJevRoutingStats } from "../src/decisions/telemetry.js";
 import { buildBrowserCandidates, browserObservationState, redactBrowserText, type BrowserObservation } from "../src/vault/browserObservation.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
@@ -13,15 +14,17 @@ function withConfig(overrides: Record<string, unknown>): () => void {
   return () => { for (const [key, value] of Object.entries(previous)) mutableConfig[key] = value; };
 }
 
-function fakeJev(fetchCalls: Array<Record<string, unknown>>): typeof fetch {
+function fakeJev(fetchCalls: Array<Record<string, unknown>> = [], options: { none?: boolean } = {}): typeof fetch {
   return (async (_url: string | URL, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
     fetchCalls.push(body);
     const answers: Record<string, unknown> = {};
     for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
-      const first = Object.keys(question.criteria).find((id) => id !== "__none__") ?? "__none__";
+      const first = options.none ? "__none__" : Object.keys(question.criteria).find((id) => id !== "__none__") ?? "__none__";
       const ids = Object.keys(question.criteria);
-      answers[key] = { type: "choice", choice: first, confidence: 0.92, probabilities: Object.fromEntries(ids.map((id) => [id, id === first ? 0.92 : 0.08 / Math.max(1, ids.length - 1)])) };
+      answers[key] = options.none
+        ? { type: "choice", choice: first, confidence: 0.52, probabilities: Object.fromEntries(ids.map((id) => [id, id === "__none__" ? 0.52 : 0.51])) }
+        : { type: "choice", choice: first, confidence: 0.92, probabilities: Object.fromEntries(ids.map((id) => [id, id === first ? 0.92 : 0.08 / Math.max(1, ids.length - 1)])) };
     }
     return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 100, cost: 0.000001 } }), { status: 200 });
   }) as typeof fetch;
@@ -92,4 +95,24 @@ test("enforce mode selects only an inspected candidate and never authorizes a hi
     assert.equal(guarded.candidate?.id, "c_safe");
     assert.match(guarded.fallbackReason ?? "", /approval|unavailable|network/i);
   } finally { restore(); }
+});
+
+test("enforce mode honors Jev's explicit none choice and records deterministic fallback", async () => {
+  const observation: BrowserObservation = {
+    goal: "Search the current page",
+    origin: "https://example.com",
+    candidates: [
+      { id: "c_find", kind: "find", role: "button", name: "Search", nodeId: "search-node", action: "find", risk: "low", description: "Find the Search button", requiresApproval: false, execution: { action: "find", role: "button", name: "Search" } },
+      { id: "c_reinspect", kind: "reinspect", action: "browse", risk: "low", description: "Re-inspect the current page", requiresApproval: false, execution: { action: "state" } },
+    ],
+  };
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["browser"]), openRouterApiKey: "test-key", jevMinConfidence: 0.45 });
+  resetJevRoutingStats();
+  try {
+    const decision = await routeBrowserNext({ observation, client: new JevClient({ apiKey: "test-key", fetchImpl: fakeJev([], { none: true }) }) });
+    assert.equal(decision.source, "deterministic");
+    assert.equal(decision.candidate?.id, "c_reinspect");
+    assert.equal(decision.fallbackReason, "jev_none");
+    assert.equal(jevRoutingStats().browser?.applied, 0);
+  } finally { restore(); resetJevRoutingStats(); }
 });
