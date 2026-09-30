@@ -1,4 +1,4 @@
-# Chusky TypeScript SDK
+# Chusky SDK
 
 The official TypeScript client for the Chusky Developer API.
 
