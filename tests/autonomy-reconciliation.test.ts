@@ -138,3 +138,53 @@ test("reconciliation parses nested provider evidence without treating it as a ch
   const watch = (await listAttentionRecords(userId, "autonomy_watch") as any[])[0];
   assert.equal(watch.cursor, "page-2");
 });
+
+test("Treg lead-signal watches bound tools, persist first-seen signals, and suppress repeats", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990010;
+  const firstNow = Date.parse("2026-02-01T00:00:00Z");
+  const watch = await createAttentionRecord(userId, "autonomy_watch", {
+    name: "AI SaaS buyer signals", domain: "leads", toolkit: "treg", mode: "business",
+    objective: "Find US SaaS companies hiring sales staff or publicly seeking customer-support automation; return evidence and source links.",
+    query: "US SaaS, 20-200 employees, hiring sales or discussing support automation",
+    cadenceSeconds: 3600, authority: "observe", status: "active", maxItems: 10, nextCheckAt: firstNow,
+  });
+  let prompt = "";
+  let toolSlugs: string[] = [];
+  const execute = async (input: { prompt: string; toolSlugs: string[] }) => {
+    prompt = input.prompt;
+    toolSlugs = input.toolSlugs;
+    return { text: `AUTONOMY_RESULT: ${JSON.stringify({ changed: true, summary: "Two candidate signals returned by Treg", signals: [
+      { id: "provider-signal-1", source: "treg.linkedin", kind: "hiring", subject: "Acme is hiring its first SDR", createdAt: "2026-01-31T12:00:00Z", metadata: { company: "Acme", url: "https://example.com/jobs/1", score: 0.92, email: "must-not-persist@example.com" } },
+      { id: "provider-signal-2", source: "treg.reddit", kind: "intent", subject: "Looking for support automation", metadata: { signal: "Public request", url: "http://unsafe.example/post" } },
+    ] })}` };
+  };
+  const first = await runDueAutonomyWatches(userId, { mode: "business", now: firstNow, tregEnabled: true, execute: execute as any });
+  assert.equal(first[0]?.status, "completed");
+  assert.equal(first[0]?.changed, true);
+  assert.deepEqual(toolSlugs, ["CHUCK_TREG_SEARCH", "CHUCK_TREG_RESOLVE"]);
+  assert.match(prompt, /mission budget/);
+  assert.match(prompt, /Never contact anyone/);
+  const firstSignals = (await listAttentionRecords(userId, "observation") as any[]).filter((item) => item.eventType === "lead_signal.detected");
+  assert.equal(firstSignals.length, 2);
+  assert.equal(firstSignals[0].metadata.email, undefined);
+  assert.equal(firstSignals[1].metadata.url, undefined, "non-HTTPS source URLs are dropped");
+  const persistedWatch = (await listAttentionRecords(userId, "autonomy_watch") as any[]).find((item) => item.id === watch.id);
+  assert.equal(persistedWatch.seenSignalKeys.length, 2);
+
+  const second = await runDueAutonomyWatches(userId, { mode: "business", now: firstNow + 3_600_000, tregEnabled: true, execute: execute as any });
+  assert.equal(second[0]?.status, "completed");
+  assert.equal(second[0]?.changed, false);
+  assert.match(second[0]?.summary ?? "", /No new lead signals/);
+  const observations = await listAttentionRecords(userId, "observation") as any[];
+  assert.equal(observations.filter((item) => item.eventType === "lead_signal.detected").length, 2);
+});
+
+test("Treg lead-signal watches fail closed when Treg is disabled", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 990011;
+  await createAttentionRecord(userId, "autonomy_watch", { name: "Lead signals", domain: "leads", toolkit: "treg", objective: "Find signals", cadenceSeconds: 300, authority: "observe", status: "active", maxItems: 5, nextCheckAt: 1 });
+  const result = await runDueAutonomyWatches(userId, { mode: "personal", now: Date.now(), tregEnabled: false, execute: async () => { throw new Error("must not execute"); } });
+  assert.equal(result[0]?.status, "failed");
+  assert.match(result[0]?.error ?? "", /Treg is disabled/);
+});

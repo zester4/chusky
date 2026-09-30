@@ -21,6 +21,8 @@ export interface ReconciliationOptions {
   mode?: "personal" | "business";
   now?: number;
   maxWatches?: number;
+  /** Tests may enable the isolated Treg route without external credentials. */
+  tregEnabled?: boolean;
   profileOverrides?: Partial<Pick<AutonomyProfileRecord, "enabled" | "defaultAuthority" | "maxChecksPerDay" | "maxAutonomousActionsPerDay" | "allowedDomains" | "deniedDomains" | "notifyOn">>;
   /** Tests can provide a deterministic agent result without network access. */
   execute?: (input: { userId: number; watch: AutonomyWatchRecord; toolSlugs: string[]; prompt: string }) => Promise<{ text: string; toolsSucceeded?: string[] }>;
@@ -103,10 +105,18 @@ function normalizeSignals(value: unknown, source: string, now: number): Normaliz
     if (!normalizedSource || !kind) return [];
     const count = (candidate: unknown): number | undefined => typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0 && candidate <= 1_000_000_000 ? candidate : undefined;
     const amount = typeof item.amount === "number" && Number.isFinite(item.amount) && Math.abs(item.amount) <= 1_000_000_000_000 ? item.amount : undefined;
+    const metadataInput = item.metadata && typeof item.metadata === "object" && !Array.isArray(item.metadata) ? item.metadata as Record<string, unknown> : {};
+    const metadata: Record<string, unknown> = {};
+    for (const key of ["company", "domain", "url", "signal", "evidence", "confidence", "score"] as const) {
+      const candidate = metadataInput[key];
+      if (typeof candidate === "string" && candidate.trim() && candidate.length <= 500) {
+        if (key !== "url" || /^https:\/\//i.test(candidate)) metadata[key] = compact(candidate, 500);
+      } else if ((key === "confidence" || key === "score") && typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0 && candidate <= 1) metadata[key] = candidate;
+    }
     return [{
       id: typeof item.id === "string" && item.id.trim() ? item.id.trim().slice(0, 180) : undefined,
       source: normalizedSource, kind, subject: compact(item.subject || item.name || item.title, 180), status: compact(item.status, 80),
-      createdAt: boundedTimestamp(item.createdAt, now), updatedAt: boundedTimestamp(item.updatedAt, now), dueAt: boundedTimestamp(item.dueAt, now), lastActivityAt: boundedTimestamp(item.lastActivityAt, now), repliedAt: boundedTimestamp(item.repliedAt, now), assignedTo: compact(item.assignedTo, 100), expectedCount: count(item.expectedCount), actualCount: count(item.actualCount), amount, currency: compact(item.currency, 8),
+      createdAt: boundedTimestamp(item.createdAt, now), updatedAt: boundedTimestamp(item.updatedAt, now), dueAt: boundedTimestamp(item.dueAt, now), lastActivityAt: boundedTimestamp(item.lastActivityAt, now), repliedAt: boundedTimestamp(item.repliedAt, now), assignedTo: compact(item.assignedTo, 100), expectedCount: count(item.expectedCount), actualCount: count(item.actualCount), amount, currency: compact(item.currency, 8), ...(Object.keys(metadata).length ? { metadata } : {}),
     } satisfies NormalizedBusinessSignal];
   });
 }
@@ -129,12 +139,39 @@ async function defaultExecute(userId: number, watch: AutonomyWatchRecord, toolSl
 }
 
 async function resolveToolSlugs(userId: number, watch: AutonomyWatchRecord): Promise<string[]> {
+  if (watch.toolkit?.trim().toLowerCase() === "treg") return ["CHUCK_TREG_SEARCH", "CHUCK_TREG_RESOLVE"];
   const explicit = (watch.toolSlugs ?? []).map((slug) => String(slug).trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug));
   if (explicit.length) return [...new Set(explicit)].slice(0, 12);
   if (!watch.query && !watch.toolkit) return [];
   const { searchTools } = await import("../agent.js");
   const results = await searchTools(userId, `${watch.toolkit ?? ""} ${watch.query ?? watch.objective}`.trim());
   return [...new Set(results.map((item: any) => String(item?.function?.name ?? item?.name ?? item?.slug ?? "").trim()).filter((slug) => /^[A-Z][A-Z0-9]{1,31}_[A-Z0-9_]+$/.test(slug) && isReadOnlyToolSlug(slug) && (!watch.toolkit || slug.toLowerCase().startsWith(`${watch.toolkit.toLowerCase().replace(/[^a-z0-9]/g, "")}_`))))].slice(0, 8);
+}
+
+function signalIdentity(watch: AutonomyWatchRecord, signal: NormalizedBusinessSignal): string {
+  const identity = signal.id ? `${signal.source}:${signal.id}` : `${signal.source}:${signal.kind}:${signal.subject ?? ""}:${signal.createdAt ?? ""}`;
+  return createHash("sha256").update(`${watch.id}:${identity}`).digest("hex");
+}
+
+async function recordNewLeadSignals(userId: number, watch: AutonomyWatchRecord, signals: NormalizedBusinessSignal[], now: number): Promise<{ count: number; seenSignalKeys: string[] }> {
+  const seen = new Set(watch.seenSignalKeys ?? []);
+  let count = 0;
+  for (const signal of signals) {
+    const signalKey = signalIdentity(watch, signal);
+    if (seen.has(signalKey)) continue;
+    seen.add(signalKey);
+    count += 1;
+    const url = typeof signal.metadata?.url === "string" ? signal.metadata.url : undefined;
+    const summary = compact([signal.subject || "Unspecified target", signal.kind, typeof signal.metadata?.signal === "string" ? signal.metadata.signal : undefined, typeof signal.metadata?.evidence === "string" ? signal.metadata.evidence : undefined, url].filter(Boolean).join(" · "), 4000);
+    await createAttentionRecord(userId, "observation", {
+      source: `treg:${signal.source}`, eventType: "lead_signal.detected", summary, entityId: watch.id,
+      dedupeKey: `treg-watch:${watch.id}:${signalKey}`,
+      metadata: { watchId: watch.id, signalKey, ...(url ? { url } : {}), ...(typeof signal.metadata?.company === "string" ? { company: signal.metadata.company } : {}), ...(typeof signal.metadata?.domain === "string" ? { domain: signal.metadata.domain } : {}), ...(typeof signal.metadata?.score === "number" ? { score: signal.metadata.score } : {}), ...(typeof signal.metadata?.confidence === "number" ? { confidence: signal.metadata.confidence } : {}) },
+      occurredAt: now, importance: 0.8, novelty: 1, confidence: typeof signal.metadata?.confidence === "number" ? signal.metadata.confidence : 0.7,
+      privacyScope: "private", status: "new",
+    });
+  }
+  return { count, seenSignalKeys: [...seen].slice(-2000) };
 }
 
 async function resolveComposioAccount(userId: number, watch: AutonomyWatchRecord, toolSlugs: string[]): Promise<string | undefined> {
@@ -212,15 +249,20 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
     const leaseRenewal = setInterval(() => { void renewAutonomyWatchLock(userId, watch.id, leaseToken).catch(() => undefined); }, 60_000);
     const nextCheckAt = now + watch.cadenceSeconds * 1000;
     try {
+      const tregMonitor = watch.toolkit?.trim().toLowerCase() === "treg";
+      if (tregMonitor && !(options.tregEnabled ?? config.tregEnabled)) throw new Error("Treg is disabled. Enable TREG_ENABLED and configure its token before running this signal monitor.");
       const toolSlugs = await resolveToolSlugs(userId, watch);
       if (!toolSlugs.length) throw new Error("No read-only connected tool was resolved for this watch. Add exact toolSlugs or connect the requested app.");
-      const composioAccount = options.execute ? undefined : await resolveComposioAccount(userId, watch, toolSlugs);
-      const prompt = [`Reconcile the owner’s standing watch “${compact(watch.name, 160)}” for domain ${compact(watch.domain, 100)}.`, `Objective: ${compact(watch.objective, 1500)}`, watch.query ? `Query: ${compact(watch.query, 800)}` : "", watch.cursor ? `Last cursor/checkpoint: ${compact(watch.cursor, 300)}` : "", composioAccount ? `Use only connected account ${compact(composioAccount, 200)} for every provider call.` : "", `Inspect at most ${watch.maxItems} records. Compare with the checkpoint and report only new, changed, overdue, missing, or unresolved items. Never mutate provider state.`, "Return AUTONOMY_RESULT: {changed, summary, cursor?, signals:[{id,source,kind,subject,status,createdAt,updatedAt,dueAt,lastActivityAt,repliedAt,assignedTo,expectedCount,actualCount,amount,currency}] }"].filter(Boolean).join("\n");
+      const composioAccount = options.execute || tregMonitor ? undefined : await resolveComposioAccount(userId, watch, toolSlugs);
+      const prompt = [`Reconcile the owner’s standing watch “${compact(watch.name, 160)}” for domain ${compact(watch.domain, 100)}.`, `Objective: ${compact(watch.objective, 1500)}`, watch.query ? `Query: ${compact(watch.query, 800)}` : "", watch.cursor ? `Last cursor/checkpoint: ${compact(watch.cursor, 300)}` : "", composioAccount ? `Use only connected account ${compact(composioAccount, 200)} for every provider call.` : "", tregMonitor ? `This is an explicitly owner-configured Treg external lead-signal monitor. Use CHUCK_TREG_SEARCH to discover relevant data/signal endpoints, then CHUCK_TREG_RESOLVE for at most ${watch.maxItems} results. Keep each check within the configured Treg mission budget ($${config.tregMissionBudgetUsd.toFixed(2)} maximum), plus all provider/daily caps. Search for signals newer than the last check (${watch.lastCheckedAt ? new Date(watch.lastCheckedAt).toISOString() : "the first run"}) when supported. Score relevance to the owner's stated objective; do not invent contacts or intent. Return stable provider signal IDs, company/person or account, signal type/date, fit reason, and an HTTPS source URL if supplied. Never contact anyone or write to CRM/sheets.` : "", `Inspect at most ${watch.maxItems} records. Compare with the checkpoint and report only new, changed, overdue, missing, or unresolved items. Never mutate provider state.`, "Return AUTONOMY_RESULT: {changed, summary, cursor?, signals:[{id,source,kind,subject,status,createdAt,updatedAt,dueAt,lastActivityAt,repliedAt,assignedTo,expectedCount,actualCount,amount,currency,metadata:{company,domain,url,signal,evidence,confidence,score}}] }"].filter(Boolean).join("\n");
       const executed = await (options.execute ? options.execute({ userId, watch, toolSlugs, prompt }) : defaultExecute(userId, watch, toolSlugs, prompt, composioAccount));
-      if (!options.execute && (!executed.toolsSucceeded || executed.toolsSucceeded.length === 0)) throw new Error("Reconciliation did not complete a read-only provider tool call.");
+      if (!options.execute && (!executed.toolsSucceeded || executed.toolsSucceeded.length === 0)) throw new Error("Reconciliation did not complete an allowed provider data call.");
       const parsed = parseAutonomyResult(executed.text, watch.domain, now);
-      const changed = parsed.changed;
-      const summary = parsed.summary || "No changes found.";
+      const newLeadSignals = tregMonitor ? await recordNewLeadSignals(userId, watch, parsed.signals, now) : undefined;
+      const changed = newLeadSignals ? newLeadSignals.count > 0 : parsed.changed;
+      const summary = newLeadSignals
+        ? newLeadSignals.count ? `${newLeadSignals.count} new lead signal${newLeadSignals.count === 1 ? "" : "s"}. ${parsed.summary}`.slice(0, 4000) : `No new lead signals. ${parsed.summary}`.slice(0, 4000)
+        : parsed.summary || "No changes found.";
       const signals = parsed.signals;
       const gaps = mode === "business" ? [...detectBusinessGaps(signals, { now }), ...detectBusinessOpportunities(signals, now)] : detectBusinessGaps(signals, { now });
       await recordGaps(userId, gaps);
@@ -238,7 +280,7 @@ export async function runDueAutonomyWatches(userId: number, options: Reconciliat
       if (changed && digestKey !== watch.lastDigestKey) {
         await recordWatchObservation(userId, watch, "watch.changed", summary, digestKey, now);
       }
-      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, lastDigestKey: digestKey, consecutiveFailures: 0 });
+      await updateAttentionRecord(userId, "autonomy_watch", watch.id, { lastCheckedAt: now, lastObservedAt: now, nextCheckAt, lastChangedAt: changed ? now : watch.lastChangedAt, lastResult: summary, lastError: undefined, cursor: parsed.cursor ?? watch.cursor, ...(newLeadSignals ? { seenSignalKeys: newLeadSignals.seenSignalKeys } : {}), lastDigestKey: digestKey, consecutiveFailures: 0 });
       results.push({ watchId: watch.id, status: "completed", changed, summary, toolSlugs, gaps: gaps.length, nextCheckAt });
     } catch (error) {
       const message = safeErrorMessage(error);

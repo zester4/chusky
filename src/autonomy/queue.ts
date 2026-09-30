@@ -103,7 +103,7 @@ export async function getAutonomyQueue(userId: number, mode: "personal" | "busin
     ...loops.filter((item) => isActiveStatus(item.status)).map(openLoopItem),
     ...reminders.filter((item) => isActiveStatus(item.status)).map(reminderItem),
     ...jobs.filter((item) => isActiveStatus(item.status)).map(jobItem),
-    ...watches.filter((item) => item.status === "active").map((watch) => ({ id: watch.id, kind: "watch" as const, title: watch.name, status: watch.status, source: `watch:${watch.domain}`, priority: mode === "business" ? 65 : 50, nextAction: watch.objective, nextCheckAt: watch.nextCheckAt, ...(watch.lastError ? { blockedReason: watch.lastError } : {}), updatedAt: watch.updatedAt })),
+    ...watches.filter((item) => item.status === "active" && (item.mode ?? "personal") === mode).map((watch) => ({ id: watch.id, kind: "watch" as const, title: watch.name, status: watch.lastError ? "failed" : watch.status, source: `watch:${watch.domain}`, priority: mode === "business" ? 65 : 50, nextAction: watch.objective, nextCheckAt: watch.nextCheckAt, ...(watch.lastError ? { blockedReason: watch.lastError } : {}), updatedAt: watch.updatedAt })),
     ...meetings.filter((item) => item.status === "prepared").map((meeting) => ({ id: meeting.id, kind: "meeting" as const, title: meeting.title ?? "Prepared meeting", status: meeting.status, source: "calendar_preparation", priority: 80, nextAction: "Review the private meeting brief and decide whether to join", ...(meeting.startAt && Number.isFinite(Date.parse(meeting.startAt)) ? { nextCheckAt: Date.parse(meeting.startAt) } : {}), updatedAt: meeting.updatedAt })),
   ];
   const now = Date.now();
@@ -123,12 +123,13 @@ export async function getAutonomySnapshot(userId: number, mode: "personal" | "bu
     getAutonomyQueue(userId, mode, 100),
   ]);
   const profile = { ...(profiles.find((item) => item.mode === mode) ?? DEFAULT_PROFILE(userId, mode)), ...profileOverrides };
-  const counts = { task: 0, mission: 0, open_loop: 0, reminder: 0, job: 0, watch: 0, meeting: 0, blocked: 0, overdue: 0 } as AutonomySnapshot["counts"];
+  const activeWatches = watches.filter((item) => item.status === "active" && (item.mode ?? "personal") === mode);
   const now = Date.now();
+  const counts = { task: 0, mission: 0, open_loop: 0, reminder: 0, job: 0, watch: 0, meeting: 0, blocked: 0, overdue: 0 } as AutonomySnapshot["counts"];
   for (const item of queue) {
     counts[item.kind] += 1;
     if (item.blockedReason) counts.blocked += 1;
     if (item.nextCheckAt !== undefined && item.nextCheckAt <= now) counts.overdue += 1;
   }
-  return { userId, mode, profile, watches: watches.filter((item) => item.status === "active"), queue, counts, generatedAt: now };
+  return { userId, mode, profile, watches: activeWatches, queue, counts, generatedAt: now };
 }

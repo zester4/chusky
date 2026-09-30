@@ -66,6 +66,28 @@ Load **workspace-pro** for inbox/CRM trigger handling after leads exist.
 | Browse a page only when no API fits | E2B browser (verification) |
 | Remember owner ICP, voice, floors | Memory / scratchpad |
 
+## Scheduled buyer-signal monitoring
+
+When the owner asks for ongoing prospect or buying-signal discovery, create an
+owner-scoped `autonomy_watch` with `toolkit: "treg"`. Put the ICP, geography,
+excluded segments, qualifying signal types (such as hiring, funding, role
+changes, technology adoption, or public requests for help), and the definition
+of a qualified lead in its objective/query. Use `mode: "business"` for a
+company pipeline and `mode: "personal"` for an individual's research.
+
+The Treg reconciliation path searches its live catalog and uses the bounded
+`CHUCK_TREG_RESOLVE` path. It persists hashed first-seen signal identities and
+private observations so repeated provider results do not reappear as new leads.
+Keep `maxItems` modest, obey configured Treg mission/daily spend limits, and
+retain source URLs and evidence when supplied. A signal is a reason to qualify
+a lead, not proof that a person wants to buy. Do not contact leads or write them
+to CRM/sheets automatically; those are separate actions governed by the
+owner's request and existing approval rules.
+
+The recurring check is driven by Chusky's enabled attention pulse. Tell the
+owner if the pulse or Treg is not configured; do not claim the monitor is
+running until its watch is saved and the scheduler is active.
+
 ## Authority
 
 - Stay inside owner ICP, geo, industry, and budget policies
