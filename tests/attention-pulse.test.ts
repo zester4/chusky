@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery } from "../src/attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
 import { blockTask, createAttentionRecord, createMission, createTask, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
@@ -23,6 +23,25 @@ test("attention pulse defaults to Telegram delivery and honors explicit controls
   assert.equal(attentionPulseDeliveryDecision([preference({ quietHoursUtc: { startMinute: 12 * 60, endMinute: 12 * 60 } })], Date.UTC(2026, 0, 1, 12, 0)).reason, undefined);
   assert.equal(attentionPulseDeliveryDecision([preference({ quietHoursUtc: { startMinute: 0, endMinute: 1439 } })], Date.UTC(2026, 0, 1, 12, 0)).reason, "quiet_hours");
   assert.equal(attentionPulseDeliveryDecision([preference({ maxPerDay: 2 })], Date.UTC(2026, 0, 1, 12, 0), 2).reason, "daily_limit");
+});
+
+test("attention pulse prefers only an active, opted-in private iMessage link and respects its preference", () => {
+  const linked = { accountId: "account_1", userId: 1, provider: "sendblue" as const, externalUserId: "+15550001", verifiedAt: 1, createdAt: 1, updatedAt: 1 };
+  const telegram = { provider: "telegram" as const, conversationId: "99" };
+  const preferences = [preference({ mode: "silent" })];
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], preferences, telegram, true), { provider: "sendblue", conversationId: "+15550001" });
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, proactiveOptIn: false }], preferences, telegram, true), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([{ ...linked, disabledAt: 2 }], preferences, telegram, true), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], [preference({ provider: "sendblue", conversationId: linked.externalUserId, enabled: false })], telegram, true), telegram);
+  assert.deepEqual(selectAttentionPulseDeliveryTarget([linked], preferences, telegram, false), telegram);
+});
+
+test("attention pulse delivery controls are scoped to the selected channel", () => {
+  const telegramSilent = preference({ mode: "silent" });
+  const sendblueQuiet = preference({ provider: "sendblue", conversationId: "+15550001", quietHoursUtc: { startMinute: 0, endMinute: 1439 } });
+  const now = Date.UTC(2026, 0, 1, 12, 0);
+  assert.equal(attentionPulseDeliveryDecision([telegramSilent], now, 0, { provider: "sendblue", conversationId: "+15550001" }).suppressed, false);
+  assert.equal(attentionPulseDeliveryDecision([sendblueQuiet], now, 0, { provider: "sendblue", conversationId: "+15550001" }).reason, "quiet_hours");
 });
 
 test("attention pulse counts delivered digests on the job and resets at UTC midnight", () => {

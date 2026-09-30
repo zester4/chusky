@@ -6,6 +6,8 @@ import {
   type AttentionCandidateRecord,
   type AutonomyWatchRecord,
   type DeliveryPreferenceRecord,
+  type ChannelIdentityRecord,
+  type ReminderDeliveryTarget,
   type MissionRecord,
   type AutonomyProfileRecord,
   type OpenLoopRecord,
@@ -137,8 +139,38 @@ export function isWithinQuietHours(minuteUtc: number, quietHours: DeliveryPrefer
   return start < end ? minute >= start && minute < end : minute >= start || minute < end;
 }
 
-export function attentionPulseDeliveryDecision(preferences: DeliveryPreferenceRecord[], now = Date.now(), deliveredToday = 0): AttentionPulseDeliveryDecision {
-  const preference = preferences.find((item) => item.enabled) ?? preferences[0];
+/** Prefer a currently linked, opted-in private iMessage identity for Pulse.
+ * Group authorizations are stored separately and are never considered here. */
+export function selectAttentionPulseDeliveryTarget(
+  linkedChannels: readonly ChannelIdentityRecord[],
+  preferences: readonly DeliveryPreferenceRecord[],
+  telegramTarget: ReminderDeliveryTarget | undefined,
+  sendblueAvailable: boolean,
+): ReminderDeliveryTarget | undefined {
+  if (sendblueAvailable) {
+    for (const identity of linkedChannels) {
+      if (identity.provider !== "sendblue" || identity.disabledAt || identity.proactiveOptIn === false) continue;
+      const preference = preferences.find((item) => item.provider === "sendblue" && item.conversationId === identity.externalUserId)
+        ?? preferences.find((item) => item.provider === "sendblue" && !item.conversationId);
+      if (preference && (!preference.enabled || preference.mode === "silent")) continue;
+      return { provider: "sendblue", conversationId: identity.externalUserId };
+    }
+  }
+  return telegramTarget;
+}
+
+export function attentionPulseDeliveryDecision(
+  preferences: DeliveryPreferenceRecord[],
+  now = Date.now(),
+  deliveredToday = 0,
+  target?: Pick<ReminderDeliveryTarget, "provider" | "conversationId">,
+): AttentionPulseDeliveryDecision {
+  const relevantPreferences = target
+    ? preferences.filter((item) => item.provider === target.provider && (!item.conversationId || item.conversationId === target.conversationId))
+    : preferences;
+  const preference = target
+    ? relevantPreferences.find((item) => item.conversationId === target.conversationId) ?? relevantPreferences.find((item) => !item.conversationId)
+    : relevantPreferences.find((item) => item.enabled) ?? relevantPreferences[0];
   // Telegram is the safe default delivery target for an explicitly enabled
   // pulse. A preference record is optional; an explicit disabled/silent record
   // still suppresses delivery.

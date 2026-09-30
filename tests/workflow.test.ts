@@ -130,6 +130,34 @@ test("attention pulse delivery is confirmed only after the channel send succeeds
   assert.equal(confirmations, 0);
 });
 
+test("attention pulse resolves a fresh linked iMessage route for execution and delivery", async () => {
+  let runnerTarget: string | undefined;
+  const state = deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", deliveryTarget: { provider: "telegram", conversationId: "99" } }),
+    resolveJobDeliveryTarget: async () => ({ provider: "sendblue", conversationId: "+15550001" }),
+    runAgent: async (job) => { runnerTarget = job.deliveryTarget?.provider; return { text: "Pulse completed." }; },
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-imessage" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(runnerTarget, "sendblue");
+  assert.equal(state.sent.length, 0);
+  assert.deepEqual(state.sentChannels, [{ provider: "sendblue", conversationId: "+15550001", text: "🧭 Chusky attention pulse\n\nPulse completed." }]);
+});
+
+test("attention pulse can clear an obsolete linked-channel route and use Telegram fallback", async () => {
+  let runnerTarget: string | undefined;
+  const state = deps({
+    getJob: async () => ({ ...deps().job, kind: "attention_pulse", mode: "act", deliveryTarget: { provider: "sendblue", conversationId: "+15550000" } }),
+    resolveJobDeliveryTarget: async () => ({ provider: "telegram", conversationId: "99" }),
+    runAgent: async (job) => { runnerTarget = job.deliveryTarget?.provider; return { text: "Pulse completed." }; },
+  });
+  const result = await deliverJob({ jobId: "job-1", userId: 1, occurrenceId: "pulse-telegram-fallback" }, state);
+  assert.deepEqual(result, { delivered: true });
+  assert.equal(runnerTarget, "telegram");
+  assert.equal(state.sentChannels.length, 0);
+  assert.equal(state.sent[0].chatId, 99);
+});
+
 test("a post-send pulse failure cannot send the same occurrence twice", async () => {
   const completed = new Set<string>();
   const state = deps({

@@ -42,7 +42,7 @@ import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery } from "./attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -2125,6 +2125,23 @@ async function main(): Promise<void> {
       const occurrenceId = workflow.workflowRunId ?? `run-${Date.now()}`;
       await workflow.run("deliver-job", () => deliverJob({ ...payload, occurrenceId }, {
         getReminder, updateReminder, getJob, updateJob, getTelegramChatId, claimDelivery, completeDelivery,
+        resolveJobDeliveryTarget: async (userId, job) => {
+          if (job.kind !== "attention_pulse") return undefined;
+          const [linkedChannels, preferenceRecords, telegramChatId] = await Promise.all([
+            listLinkedChannels(userId),
+            listAttentionRecords(userId, "delivery_preference", { limit: 50 }),
+            getTelegramChatId(userId),
+          ]);
+          const telegramTarget = job.deliveryTarget?.provider === "telegram"
+            ? job.deliveryTarget
+            : telegramChatId ? { provider: "telegram" as const, conversationId: String(telegramChatId) } : undefined;
+          return selectAttentionPulseDeliveryTarget(
+            linkedChannels,
+            preferenceRecords as DeliveryPreferenceRecord[],
+            telegramTarget,
+            config.sendblueEnabled,
+          ) ?? null;
+        },
         getJobOccurrence, createJobOccurrence, updateJobOccurrence,
         confirmDelivery: async (userId, job, confirmation) => {
           if (confirmation.kind !== "attention_pulse") return;
@@ -2158,7 +2175,7 @@ async function main(): Promise<void> {
             const preferences = await listAttentionRecords(payload.userId, "delivery_preference", { limit: 20 });
             const now = Date.now();
             const deliveredToday = attentionPulseDeliveredToday(job.attentionPulse, now);
-            const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday);
+            const delivery = attentionPulseDeliveryDecision(preferences as DeliveryPreferenceRecord[], now, deliveredToday, job.deliveryTarget);
             if (delivery.suppressed) return { text: "", suppressDelivery: true };
             const plan = await buildAttentionPulsePlan(payload.userId);
             if (!plan.hasWork) return { text: "", suppressDelivery: true };

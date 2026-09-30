@@ -12,6 +12,8 @@ export interface WorkflowDependencies {
   getJob(userId: number, id: string): Promise<JobRecord | undefined>;
   updateJob(userId: number, id: string, patch: Partial<JobRecord>): Promise<boolean>;
   getTelegramChatId(userId: number): Promise<number | undefined>;
+  /** Return null to explicitly clear a stale saved route, undefined to keep it. */
+  resolveJobDeliveryTarget?(userId: number, job: JobRecord): Promise<ReminderDeliveryTarget | null | undefined>;
   sendMessage(chatId: number, text: string, options: { parse_mode: "HTML" }): Promise<unknown>;
   sendChannelMessage?(target: ReminderDeliveryTarget, text: string, idempotencyKey: string): Promise<unknown>;
   rescheduleReminder?(reminder: ReminderRecord, runAt: number): Promise<void>;
@@ -110,6 +112,8 @@ export async function deliverReminder(payload: ReminderWorkflowPayload, deps: Wo
 export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDependencies): Promise<{ skipped?: boolean; delivered: boolean }> {
   const job = await deps.getJob(payload.userId, payload.jobId);
   if (!job || job.status !== "active") return { skipped: true, delivered: false };
+  const resolvedTarget = await deps.resolveJobDeliveryTarget?.(payload.userId, job);
+  const deliveryJob = resolvedTarget === undefined ? job : { ...job, deliveryTarget: resolvedTarget ?? undefined };
   const deliveryKey = `job:${payload.jobId}:${payload.occurrenceId ?? "legacy"}${payload.approvalId ? `:approval:${payload.approvalId}` : ""}`;
   if (deps.claimDelivery && !(await deps.claimDelivery(deliveryKey, 15 * 60 * 1000))) return { skipped: true, delivered: false };
   const occurrenceId = payload.occurrenceId ?? "legacy";
@@ -128,7 +132,7 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
       occurrence = await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "running", startedAt: occurrence.startedAt ?? Date.now(), error: undefined }, occurrence.version);
     }
   }
-  const target = job.deliveryTarget;
+  const target = deliveryJob.deliveryTarget;
   const chatId = target?.provider === "telegram" ? Number(target.conversationId) : (!target ? await deps.getTelegramChatId(payload.userId) : undefined);
   if ((!target && !chatId) || (target?.provider === "telegram" && !Number.isSafeInteger(chatId)) || (target && target.provider !== "telegram" && !deps.sendChannelMessage)) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: target ? `No adapter for ${target.provider}` : "No Telegram mapping", completedAt: Date.now() }, occurrence.version);
@@ -138,11 +142,11 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
   try {
     const result = job.mode === "notify"
       ? { text: job.text }
-      : job.workerBinding && deps.runWorker
-      ? await deps.runWorker(job)
+      : deliveryJob.workerBinding && deps.runWorker
+      ? await deps.runWorker(deliveryJob)
         : deps.runAgent
-        ? await deps.runAgent(job)
-        : { text: job.text };
+        ? await deps.runAgent(deliveryJob)
+        : { text: deliveryJob.text };
     if (occurrence && deps.updateJobOccurrence) {
       occurrence = await deps.updateJobOccurrence(payload.userId, occurrence.id, {
         status: result.status === "waiting" || result.status === "blocked" ? result.status : "running",
@@ -173,7 +177,7 @@ export async function deliverJob(payload: JobWorkflowPayload, deps: WorkflowDepe
     // persistence. Those operations are retried independently and must not
     // cause a second external delivery.
     if (deps.completeDelivery) await deps.completeDelivery(deliveryKey, 7 * 24 * 60 * 60);
-    if (result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, job, result.deliveryConfirmation);
+    if (result.deliveryConfirmation && deps.confirmDelivery) await deps.confirmDelivery(payload.userId, deliveryJob, result.deliveryConfirmation);
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "completed", completedAt: Date.now() }, occurrence.version);
   } catch (error) {
     if (occurrence && deps.updateJobOccurrence) await deps.updateJobOccurrence(payload.userId, occurrence.id, { status: "failed", error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500), completedAt: Date.now() }, occurrence.version);
