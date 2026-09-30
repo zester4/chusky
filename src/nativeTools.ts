@@ -16,7 +16,7 @@ import {
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
-  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, completeMissionStep, createMission, getMission, listMissions, missionProof, pauseMission, replanMission, resumeMission, startMission, updateMission, waitMission, recordMissionEvidence, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight,
+  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset,
   type TaskStatus, type MissionStatus,
@@ -53,7 +53,7 @@ import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
-import { scheduleMissionSteps } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
@@ -135,6 +135,8 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** Optional workflow publisher for deterministic mission scheduling tests and internal recovery. */
+  enqueueMissionTask?: MissionTaskEnqueuer;
   /** Trusted company workspace scope; never accepted from model tool arguments. */
   organizationId?: string;
   /** Exact model-visible tool catalog and safe owner connection snapshot for read-only diagnostics. */
@@ -531,7 +533,7 @@ async function autonomyPlaybookTool(userId: number, args: Record<string, unknown
   const mission = await createMission(userId, { title: planned.outcome.name, objective: planned.objective, definitionOfDone: planned.definitionOfDone, idempotencyKey: `gap:${gap.key}`, requiredEvidence: planned.outcome.evidenceRequired, verificationMode: "strict", steps: planned.steps, budget: planned.outcome.budget });
   if (mission.status === "queued") {
     const started = await startMission(userId, mission.id);
-    if (started && !started.rootTaskId) return (await scheduleMissionSteps(userId, started, enqueueTaskWorkflow)) ?? started;
+    if (started) return (await reconcileMissionExecution(userId, started.id, enqueueTaskWorkflow)) ?? started;
     return started ?? mission;
   }
   return mission;
@@ -604,6 +606,8 @@ async function ensureAttentionPulseDeliveryPreference(userId: number, runtime: N
     conversationId,
     enabled: true,
     mode: "immediate",
+    // Hourly pulse runs should never turn into an unbounded notification stream.
+    maxPerDay: 4,
   });
 }
 
@@ -620,7 +624,10 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
   const cron = validateCronExpression(args.cron ? text(args.cron) : "0 * * * *");
   const existing = active.find((job) => job.id === ATTENTION_PULSE_JOB_ID(userId));
   if (existing) {
-    if (existing.cron === cron) return existing;
+    if (existing.cron === cron) {
+      await ensureAttentionPulseDeliveryPreference(userId, runtime);
+      return existing;
+    }
     const client = new QStashClient({ token: requireQStash() });
     const schedule = (scheduledCron: string) => ({
       scheduleId: existing.scheduleId,
@@ -643,6 +650,7 @@ export async function configureAttentionPulse(userId: number, args: Record<strin
       }
       throw error;
     }
+    await ensureAttentionPulseDeliveryPreference(userId, runtime);
     return { ...existing, cron };
   }
   const qstashToken = requireQStash();
@@ -1362,6 +1370,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
     case "CHUCK_MISSION_START": {
+      const invalidSteps = validateMissionStepsPayload(args.steps);
+      if (invalidSteps) throw new Error(invalidSteps);
       const mission = await createMission(userId, {
         title: missionText(args.title, "title", 240),
         objective: missionText(args.objective, "objective", 8000),
@@ -1391,16 +1401,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       });
       if (mission.status === "queued") {
         const started = await startMission(userId, mission.id);
-        if (started && !started.rootTaskId) {
+        if (started) {
           try {
-            return (await scheduleMissionSteps(userId, started, enqueueTaskWorkflow)) ?? started;
+            return (await reconcileMissionExecution(userId, started.id, runtime.enqueueMissionTask ?? enqueueTaskWorkflow)) ?? started;
           } catch (error) {
             await blockMission(userId, started.id, `Mission could not be scheduled: ${error instanceof Error ? error.message : String(error)}`, "Retry after the durable workflow service is available.");
             throw error;
           }
         }
-        if (started) return started;
       }
+      if (mission.status === "running") return (await reconcileMissionExecution(userId, mission.id, runtime.enqueueMissionTask ?? enqueueTaskWorkflow)) ?? mission;
       return mission;
     }
     case "CHUCK_MISSION_LIST": return listMissions(userId, missionStatuses(args.statuses));
@@ -1435,9 +1445,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         if (resumed.status === "task_running") throw new Error("The approved mission task is already running; wait for that worker to settle.");
         throw new Error("The mission approval no longer matches a resumable task. Inspect the mission checkpoint before retrying.");
       }
-      const mission = await resumeMission(userId, missionId);
-      if (!mission) throw new Error("Only paused, blocked, or failed missions you own can be resumed");
-      return (await scheduleMissionSteps(userId, mission, enqueueTaskWorkflow)) ?? mission;
+      const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow);
+      if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");
+      return mission;
     }
     case "CHUCK_MISSION_CANCEL": {
       const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason, 2000) : undefined);
@@ -1447,11 +1457,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_WAIT_EVENT": {
       const mission = await getMission(userId, text(args.id));
-      if (!mission || !["running", "waiting"].includes(mission.status)) throw new Error("Only a running mission you own can wait for a provider event");
-      const provider = text(args.provider).slice(0, 120);
-      const providerEventId = text(args.providerEventId).slice(0, 240);
-      const request: MissionWaitRequest = { provider, providerEventId, stepId: args.stepId ? text(args.stepId, 160) : mission.currentStepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
-      runtime.requestMissionWait?.(request);
+      if (!mission || mission.status !== "running") throw new Error("Only a running mission you own can wait for a provider event");
+      if (!runtime.taskId || runtime.missionId !== mission.id || !runtime.requestMissionWait) throw new Error("CHUCK_MISSION_WAIT_EVENT is only available inside the active durable mission task");
+      const provider = text(args.provider).trim().slice(0, 120);
+      const providerEventId = text(args.providerEventId).trim().slice(0, 240);
+      if (!provider || !providerEventId) throw new Error("provider and providerEventId must be non-empty");
+      const stepId = args.stepId ? text(args.stepId, 160) : mission.currentStepId;
+      const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
+      if (!stepId || !active.has(stepId) || mission.steps.find((step) => step.id === stepId)?.status !== "running") throw new Error("The provider wait must belong to an active mission step");
+      const request: MissionWaitRequest = { provider, providerEventId, stepId, checkpoint: args.checkpoint ? text(args.checkpoint, 8000) : mission.checkpoint, nextAction: args.nextAction ? text(args.nextAction, 2000) : `Waiting for ${provider} event ${providerEventId}.`, timeoutSeconds: args.timeoutSeconds === undefined ? undefined : Number(args.timeoutSeconds) };
+      runtime.requestMissionWait(request);
       return { status: "waiting", provider, providerEventId, nextAction: request.nextAction };
     }
     case "CHUCK_MISSION_STEP_COMPLETE": {
@@ -1459,17 +1474,21 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const stepId = text(args.stepId, 160);
       const before = await getMission(userId, missionId);
       const alreadyCompleted = before?.steps.some((step) => step.id === stepId && step.status === "completed") === true;
-      const mission = await completeMissionStep(userId, missionId, stepId, text(args.result, 12000));
+      const mission = await completeMissionStepAndAdvance(userId, missionId, stepId, text(args.result, 12000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
       if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
+      const finalized = mission;
+      const blockers = finalized.status === "completed" ? [] : finalized.verification?.unresolved?.length
+        ? finalized.verification.unresolved
+        : finalized.steps.filter((step) => step.status !== "completed").slice(0, 20).map((step) => `Step “${step.title}” is ${step.status}.`);
       return alreadyCompleted
-        ? { ...mission, stepCompletion: "already_completed", note: "This exact mission step was already completed; its original result was preserved." }
-        : mission;
+        ? { ...finalized, stepCompletion: "already_completed", note: "This exact mission step was already completed; its original result was preserved.", closeout: { status: finalized.status === "completed" ? "completed" : finalized.status === "blocked" ? "blocked" : "not_ready", blockers, ...(finalized.status !== "completed" && finalized.nextAction ? { nextAction: finalized.nextAction } : {}) } }
+        : { ...finalized, closeout: { status: finalized.status === "completed" ? "completed" : finalized.status === "blocked" ? "blocked" : "not_ready", blockers, ...(finalized.status !== "completed" && finalized.nextAction ? { nextAction: finalized.nextAction } : {}) } };
     }
     case "CHUCK_MISSION_EVIDENCE": {
       const rawEvidence = Array.isArray(args.evidence) ? args.evidence : [];
       if (!rawEvidence.length) throw new Error("At least one evidence record is required");
       const evidence = rawEvidence.map((item: Record<string, unknown>) => ({ id: `evidence_${randomUUID()}`, kind: text(item.kind) as "source", summary: text(item.summary, 2000), ...(item.source ? { source: text(item.source, 500) } : {}), ...(item.ref ? { ref: text(item.ref, 500) } : {}), ...(item.hash ? { hash: text(item.hash, 128) } : {}), verified: item.verified === true, ...(item.verifiedBy ? { verifiedBy: text(item.verifiedBy) as "agent" } : {}) }));
-      const mission = await recordMissionEvidence(userId, text(args.id), evidence, args.stepId ? text(args.stepId, 160) : undefined);
+      const mission = await recordMissionEvidenceAndCloseout(userId, text(args.id), evidence, args.stepId ? text(args.stepId, 160) : undefined);
       if (!mission) throw new Error("Mission not found, finished, or not owned by you");
       return mission;
     }
@@ -1478,7 +1497,24 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (Array.isArray(args.checks)) {
         const checks = args.checks.filter((item: unknown): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50);
         const verification = await executeOutcomeVerification({ ownerId: userId, missionId, checks, adapter: runtime.outcomeReadAdapter });
-        if (verification.status !== "verified") return { missionId, verification, mission: await getMission(userId, missionId) };
+        if (verification.status !== "verified") {
+          let current = await getMission(userId, missionId);
+          const allStepsComplete = current?.steps.every((step) => step.status === "completed") === true;
+          if (current?.status === "running" && allStepsComplete) {
+            const reason = verification.unresolved.slice(0, 5).join("; ") || `Outcome verification ${verification.status}.`;
+            current = await blockMission(userId, missionId, `Mission outcome verification is ${verification.status}: ${reason}`, "Resolve the listed outcome checks, obtain fresh read-back evidence, then resume and verify the mission.") ?? current;
+          }
+          return {
+            missionId,
+            verification,
+            mission: current,
+            closeout: {
+              status: current?.status === "blocked" ? "blocked" : "not_ready",
+              blockers: verification.unresolved,
+              ...(current?.nextAction ? { nextAction: current.nextAction } : {}),
+            },
+          };
+        }
         const trustedReadEvidence = verification.results.flatMap((result) => {
           if (result.status !== "passed" || !result.provider || !result.evidenceRef) return [];
           const check = checks.find((candidate) => candidate.id === result.checkId);
@@ -1489,7 +1525,15 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
       const mission = await verifyMission(userId, missionId, { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");
-      return mission;
+      const finalized = await finalizeMissionCloseout(userId, missionId) ?? mission;
+      return {
+        ...finalized,
+        closeout: {
+          status: finalized.status === "completed" ? "completed" : finalized.status === "blocked" ? "blocked" : "not_ready",
+          blockers: finalized.verification?.verified ? [] : finalized.verification?.unresolved ?? [],
+          ...(finalized.status !== "completed" && finalized.nextAction ? { nextAction: finalized.nextAction } : {}),
+        },
+      };
     }
     case "CHUCK_MISSION_COMPENSATE": {
       const id = text(args.compensationId);
@@ -1559,6 +1603,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_OUTCOME_LIST": return listOutcomePackages();
     case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
     case "CHUCK_MISSION_REPLAN": {
+      const invalidSteps = validateMissionStepsPayload(args.steps, { requireNonEmpty: true });
+      if (invalidSteps) throw new Error(invalidSteps);
       const steps = Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
         id: typeof step.id === "string" ? text(step.id, 160) : undefined,
         title: text(step.title, 240),
@@ -1566,9 +1612,40 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined,
         retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit),
       })) : [];
-      const mission = await replanMission(userId, text(args.id), steps, text(args.reason, 2000));
-      if (!mission) throw new Error("Only an unfinished mission you own can be replanned");
-      return mission;
+      const missionId = text(args.id);
+      const existing = await getMission(userId, missionId);
+      if (!existing) throw new Error("Mission not found or not owned by you");
+      const rejected = (mission: NonNullable<typeof existing>, completedStepIds: string[], reason: string) => ({
+        operation: "mission_replan" as const,
+        status: "rejected" as const,
+        reason,
+        completedStepIds,
+        nextAction: completedStepIds.length
+          ? "Include every completed step unchanged, then replan only unfinished work."
+          : "Inspect the current mission proof and continue through its normal resume or closeout path.",
+        mission,
+      });
+      if (["completed", "cancelled"].includes(existing.status)) {
+        return rejected(existing, existing.steps.filter((step) => step.status === "completed").map((step) => step.id), `This ${existing.status} mission can no longer be replanned.`);
+      }
+      const completedStepIds = existing.steps.filter((step) => step.status === "completed").map((step) => step.id).sort();
+      const proposedStepIds = new Set(steps.flatMap((step) => step.id ? [step.id] : []));
+      const omittedCompletedStepIds = completedStepIds.filter((stepId) => !proposedStepIds.has(stepId));
+      if (omittedCompletedStepIds.length) {
+        return rejected(existing, omittedCompletedStepIds, "Completed mission steps are immutable and must be preserved.");
+      }
+      try {
+        const mission = await replanMissionAndSchedule(userId, missionId, steps, text(args.reason, 2000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
+        if (mission) return mission;
+        const latest = await getMission(userId, missionId);
+        if (latest && ["completed", "cancelled"].includes(latest.status)) {
+          return rejected(latest, latest.steps.filter((step) => step.status === "completed").map((step) => step.id), `This ${latest.status} mission can no longer be replanned.`);
+        }
+        throw new Error("Mission changed before replanning; inspect its current state and retry only if it remains unfinished.");
+      } catch (error) {
+        if (!(error instanceof MissionReplanConflictError)) throw error;
+        return rejected(await getMission(userId, missionId) ?? existing, error.completedStepIds, "Completed mission steps are immutable and must be preserved.");
+      }
     }
     case "CHUCK_MISSION_BLOCK": {
       const mission = await blockMission(userId, text(args.id), text(args.reason, 2000), args.nextAction ? text(args.nextAction, 2000) : undefined);
@@ -1576,9 +1653,33 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return mission;
     }
     case "CHUCK_MISSION_COMPLETE": {
-      const mission = await completeMission(userId, text(args.id), text(args.result, 12000));
-      if (!mission) throw new Error("Only unfinished missions you own can be completed");
-      return mission;
+      const missionId = text(args.id);
+      const existing = await getMission(userId, missionId);
+      if (!existing) throw new Error("Mission not found or not owned by you");
+      if (existing.status === "completed") return { ...existing, closeout: { status: "completed", alreadyCompleted: true, blockers: [] } };
+      const unfinishedSteps = existing.steps.filter((step) => step.status !== "completed");
+      if (unfinishedSteps.length) {
+        return {
+          ...existing,
+          closeout: {
+            status: "not_ready",
+            blockers: unfinishedSteps.slice(0, 20).map((step) => `Step “${step.title}” is ${step.status}.`),
+            nextAction: existing.nextAction ?? "Complete and verify the remaining mission steps before closing it.",
+          },
+        };
+      }
+      const finalized = await finalizeMissionIfReady(userId, missionId, { blockOnUnresolved: true, result: text(args.result, 12000) }) ?? existing;
+      const blockers = finalized.status === "completed" ? [] : finalized.verification?.unresolved?.length
+        ? finalized.verification.unresolved
+        : [finalized.error ?? `Mission is ${finalized.status}; resume it only after resolving its recorded blocker.`];
+      return {
+        ...finalized,
+        closeout: {
+          status: finalized.status === "completed" ? "completed" : finalized.status === "blocked" ? "blocked" : "not_ready",
+          blockers,
+          ...(finalized.status !== "completed" && finalized.nextAction ? { nextAction: finalized.nextAction } : {}),
+        },
+      };
     }
     case "CHUCK_DAYTONA_WORKSPACE": return daytonaCall(runtime, () => daytonaEngine.workspace(userId, (args.action as "get" | "create" | "status" | "pause" | "archive") ?? "status"));
     case "CHUCK_DAYTONA_SANDBOX": return daytonaCall(runtime, () => daytonaEngine.sandbox(userId, args));

@@ -112,13 +112,14 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
-test("trigger management preset documents live catalogue, account binding, and safe event policy", () => {
+test("trigger preset documents durable outcomes, recovery, and safe event policy", () => {
   const bullets = getAgentUpgradePreset("triggers");
   assert.equal(bullets.length, 3);
   assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.triggers]);
   assert.match(bullets[0], /authenticated dashboard or typed SDK/);
-  assert.match(bullets[1], /exact active connected account/);
-  assert.match(bullets[2], /approval and safety policy/);
+  assert.match(bullets[1], /owner-scoped result and notification state in the dashboard/);
+  assert.match(bullets[1], /Attention Pulse follow-up/);
+  assert.match(bullets[2], /never blindly replays the original external action/);
 });
 
 test("Web Bot Auth upgrade preset describes identity without claiming access bypass", () => {
@@ -178,13 +179,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces the connected-app trigger management release", async () => {
+test("current upgrade manifest announces durable trigger outcomes and recovery", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.29.0");
-  assert.equal(notice?.version, "4.29.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /authenticated dashboard or typed SDK/);
-  assert.match(formatAgentUpgradeNotice(notice!), /exact active connected account/);
-  assert.match(formatAgentUpgradeNotice(notice!), /approval and safety policy/);
+  assert.equal(notice?.id, "release-4.30.0");
+  assert.equal(notice?.version, "4.30.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /owner-scoped result and notification state in the dashboard/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Attention Pulse follow-up/);
+  assert.match(formatAgentUpgradeNotice(notice!), /never blindly replays the original external action/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

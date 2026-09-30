@@ -380,7 +380,7 @@ test("image requests fail closed when Composio groups multiple actions", async (
     ] },
     selection,
     runtime: { currentImages: [{ data: Buffer.from("png"), mediaType: "image/png" }] },
-  }), /grouped several actions together.*no batched actions were attempted/i);
+  }), /cannot use COMPOSIO_MULTI_EXECUTE_TOOL.*no connected-app provider action was attempted.*retry with COMPOSIO_EXECUTE_TOOL/i);
 });
 
 test("URL-based actions reuse the saved asset for a generated image", async () => {

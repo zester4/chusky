@@ -158,7 +158,28 @@ export function buildComposioBatchActions(
   });
 }
 
-type BatchOutcome = { toolSlug: string; status: "completed" | "failed"; summary: string };
+type BatchOutcome = { toolSlug: string; index?: number; status: "completed" | "failed"; summary: string };
+
+function composioBatchOutcome(record: Record<string, unknown>): BatchOutcome | undefined {
+  const toolSlug = normalizeToolSlug(record.tool_slug ?? record.toolSlug);
+  if (!toolSlug) return undefined;
+  const response = record.response && typeof record.response === "object" && !Array.isArray(record.response)
+    ? record.response as Record<string, unknown>
+    : undefined;
+  const successful = typeof response?.successful === "boolean" ? response.successful
+    : typeof response?.success === "boolean" ? response.success
+      : typeof record.successful === "boolean" ? record.successful
+        : typeof record.success === "boolean" ? record.success
+          : typeof response?.error === "string" || typeof record.error === "string" ? false : undefined;
+  if (successful === undefined) return undefined;
+  const index = Number.isInteger(record.index) && Number(record.index) >= 0 ? Number(record.index) : undefined;
+  return {
+    toolSlug,
+    ...(index !== undefined ? { index } : {}),
+    status: successful ? "completed" : "failed",
+    summary: successful ? "Provider confirmed this action" : "Provider reported this action failed",
+  };
+}
 
 /** Only correlate per-action outcomes when the provider explicitly returns the same tool slug. */
 export function correlateComposioBatchOutcomes(input: unknown): Map<string, BatchOutcome> {
@@ -194,24 +215,55 @@ export function correlateComposioBatchOutcomes(input: unknown): Map<string, Batc
   }
   const outcomes = new Map<string, BatchOutcome>();
   for (const record of records) {
-    const toolSlug = normalizeToolSlug(record.tool_slug ?? record.toolSlug)!;
-    if (counts.get(toolSlug) !== 1) continue;
-    const explicitSuccess = typeof record.successful === "boolean" ? record.successful
-      : typeof record.success === "boolean" ? record.success
-        : typeof record.error === "string" ? false : undefined;
-    if (explicitSuccess === undefined) continue;
-    outcomes.set(toolSlug, { toolSlug, status: explicitSuccess ? "completed" : "failed", summary: explicitSuccess ? "Provider confirmed this action" : "Provider reported this action failed" });
+    const outcome = composioBatchOutcome(record);
+    if (!outcome || counts.get(outcome.toolSlug) !== 1) continue;
+    outcomes.set(outcome.toolSlug, outcome);
   }
   return outcomes;
 }
 
 export function settleComposioBatchActions(actions: ComposioBatchAction[], result: unknown, fallbackSummary?: string): ComposioBatchAction[] {
   const outcomes = correlateComposioBatchOutcomes(result);
+  const actionCounts = new Map<string, number>();
+  for (const action of actions) actionCounts.set(action.toolSlug, (actionCounts.get(action.toolSlug) ?? 0) + 1);
+  const records: Array<Record<string, unknown>> = [];
+  let root = result;
+  if (typeof root === "string") {
+    try { root = JSON.parse(root) as unknown; } catch { root = undefined; }
+  }
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: root, depth: 0 }];
+  const seen = new Set<object>();
+  let visited = 0;
+  while (pending.length && visited < 500) {
+    const current = pending.pop()!;
+    visited++;
+    if (!current.value || typeof current.value !== "object" || current.depth > 6 || seen.has(current.value)) continue;
+    seen.add(current.value);
+    if (Array.isArray(current.value)) {
+      for (const child of current.value.slice(0, 100)) pending.push({ value: child, depth: current.depth + 1 });
+      continue;
+    }
+    const record = current.value as Record<string, unknown>;
+    if (normalizeToolSlug(record.tool_slug ?? record.toolSlug)) records.push(record);
+    for (const [key, child] of Object.entries(record)) {
+      if (["arguments", "input", "result", "response"].includes(key)) continue;
+      if (child && typeof child === "object") pending.push({ value: child, depth: current.depth + 1 });
+    }
+  }
+  const indexedOutcomes = new Map<number, BatchOutcome>();
+  for (const record of records) {
+    const outcome = composioBatchOutcome(record);
+    if (outcome?.index !== undefined) indexedOutcomes.set(outcome.index, outcome);
+  }
   return actions.map((action) => {
     if (action.status !== "started") return action;
-    const outcome = outcomes.get(action.toolSlug);
+    const actionIndex = Number(action.id.match(/:(\d+)$/)?.[1]);
+    const indexed = Number.isInteger(actionIndex) ? indexedOutcomes.get(actionIndex) : undefined;
+    const outcome = indexed?.toolSlug === action.toolSlug
+      ? indexed
+      : actionCounts.get(action.toolSlug) === 1 ? outcomes.get(action.toolSlug) : undefined;
     return outcome
       ? { ...action, status: outcome.status, summary: outcome.summary }
-      : { ...action, status: "unknown", summary: fallbackSummary ?? "Batch response received; individual outcome was not identified" };
+      : { ...action, status: "unknown", summary: fallbackSummary ?? "The batch response did not include a matchable status for this action" };
   });
 }

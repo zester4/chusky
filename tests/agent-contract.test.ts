@@ -150,7 +150,7 @@ test("ordinary conversation sends an attached image through the normal Composio 
   }
 });
 
-test("a reattached image resumes the pending Composio email through multi-execute with the image staged", async () => {
+test("an image retry exposes single-action Composio execution and recovers a rejected batch", async () => {
   const userId = 830072;
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
@@ -168,6 +168,7 @@ test("a reattached image resumes the pending Composio email through multi-execut
     sessionId: "reattached-image-retry-session",
     tools: async () => [
       { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "COMPOSIO_EXECUTE_TOOL", parameters: { type: "object" } } },
       { type: "function", function: { name: "GMAIL_SEND_EMAIL", parameters: emailSchema } },
     ],
     execute: async (slug: string, args: Record<string, unknown>) => {
@@ -192,13 +193,17 @@ test("a reattached image resumes the pending Composio email through multi-execut
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text", "image"] }, supported_parameters: { tools: true } } }), { status: 200 });
     if (url.includes("/chat/completions")) {
       requests.push(JSON.parse(String(init?.body)));
-      return chatIndex++ === 0
-        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
+      const responseIndex = chatIndex++;
+      if (responseIndex === 0) return toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
           tools: [{ tool_slug: "GMAIL_SEND_EMAIL", arguments: { recipient_email: "team@example.com", subject: "Gratitude", body: "We don't walk alone." } }],
           current_step: "SENDING_EMAIL", current_step_metric: "0/1 emails", session_id: "reattached-image-retry-session",
           sync_response_to_workbench: false, thought: "Send the requested image with the email.",
-        }))
-        : chatResponse({ role: "assistant", content: "The email was sent with the reattached image." });
+        }));
+      if (responseIndex === 1) return toolResponse("COMPOSIO_EXECUTE_TOOL", JSON.stringify({
+        tool_slug: "GMAIL_SEND_EMAIL",
+        arguments: { recipient_email: "team@example.com", subject: "Gratitude", body: "We don't walk alone." },
+      }));
+      return chatResponse({ role: "assistant", content: "The email was sent with the reattached image." });
     }
     return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
@@ -220,6 +225,12 @@ test("a reattached image resumes the pending Composio email through multi-execut
       attachment: { name: "chusky-image-1.png", mimetype: "image/png", s3key: "staged/reattached-image" },
     } }]);
     assert.match(JSON.stringify(requests[0]?.messages), /IMAGE ACTION RETRY/);
+    const firstRoundTools = requests[0]?.tools as Array<{ function?: { name?: string } }>;
+    assert.equal(firstRoundTools.some((tool) => tool.function?.name === "COMPOSIO_MULTI_EXECUTE_TOOL"), false);
+    assert.equal(firstRoundTools.some((tool) => tool.function?.name === "COMPOSIO_EXECUTE_TOOL"), true);
+    assert.match(JSON.stringify(requests[0]?.messages), /single connected-app action.*COMPOSIO_EXECUTE_TOOL/i);
+    assert.match(JSON.stringify(requests[1]?.messages), /No connected-app provider action was attempted.*COMPOSIO_EXECUTE_TOOL/i);
+    assert.doesNotMatch(JSON.stringify(executed), /COMPOSIO_MULTI_EXECUTE_TOOL/);
   } finally {
     globalThis.fetch = originalFetch;
     setAgentDependenciesForTests({ composio: { create: async () => ({ sessionId: "test-reset-session", tools: async () => [], execute: async () => ({ successful: true, data: {} }) }) } });
@@ -249,7 +260,10 @@ test("a later Instagram retry stages the original saved attachment before publis
   const executed: Array<{ slug: string; args: Record<string, unknown> }> = [];
   const session = {
     sessionId: "saved-image-instagram-retry",
-    tools: async () => [{ type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } }],
+    tools: async () => [
+      { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "COMPOSIO_EXECUTE_TOOL", parameters: { type: "object" } } },
+    ],
     search: async ({ query }: { query: string }) => {
       const slug = query.match(/INSTAGRAM_[A-Z_]+/)?.[0] ?? "INSTAGRAM_GET_IG_MEDIA";
       return { toolSchemas: { [slug]: { toolSlug: slug, inputSchema: slug === "INSTAGRAM_POST_IG_USER_MEDIA" ? postSchema : slug === "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH" ? publishSchema : readSchema } } };
@@ -272,7 +286,7 @@ test("a later Instagram retry stages the original saved attachment before publis
     const url = String(input);
     if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
     if (url.includes("/chat/completions")) return chatIndex++ === 0
-      ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({ tools: [{ tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "owner", caption: "New caption" } }] }))
+      ? toolResponse("COMPOSIO_EXECUTE_TOOL", JSON.stringify({ tool_slug: "INSTAGRAM_POST_IG_USER_MEDIA", arguments: { ig_user_id: "owner", caption: "New caption" } }))
       : chatResponse({ role: "assistant", content: "The image post was published and verified." });
     return new Response("{}", { status: 200 });
   }) as typeof fetch;
@@ -296,7 +310,7 @@ test("a later Instagram retry stages the original saved attachment before publis
   }
 });
 
-test("a reattached image is uploaded before a pending LinkedIn multi-execute post", async () => {
+test("a reattached image is uploaded before a single-action LinkedIn post", async () => {
   const userId = 830074;
   await initStore({ memoryOnly: true });
   invalidateSession(userId);
@@ -314,6 +328,7 @@ test("a reattached image is uploaded before a pending LinkedIn multi-execute pos
     sessionId: "reattached-linkedin-retry-session",
     tools: async () => [
       { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "COMPOSIO_EXECUTE_TOOL", parameters: { type: "object" } } },
       { type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: postSchema } },
     ],
     search: async () => ({ toolSchemas: { LINKEDIN_REGISTER_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", inputSchema: uploadSchema } } }),
@@ -332,10 +347,9 @@ test("a reattached image is uploaded before a pending LinkedIn multi-execute pos
     if (url.includes("/chat/completions")) {
       requests.push(JSON.parse(String(init?.body)));
       return chatIndex++ === 0
-        ? toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
-          tools: [{ tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { author: "urn:li:person:owner", commentary: "Grateful for everyone who guides us." } }],
-          current_step: "PUBLISHING_POST", current_step_metric: "0/1 posts", session_id: "reattached-linkedin-retry-session",
-          sync_response_to_workbench: false, thought: "Publish the requested post with its attached image.",
+        ? toolResponse("COMPOSIO_EXECUTE_TOOL", JSON.stringify({
+          tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST",
+          arguments: { author: "urn:li:person:owner", commentary: "Grateful for everyone who guides us." },
         }))
         : chatResponse({ role: "assistant", content: "The LinkedIn post was published with the reattached image." });
     }
@@ -426,6 +440,7 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
     sessionId: "saved-image-linkedin-session",
     tools: async () => [
       { type: "function", function: { name: "COMPOSIO_MULTI_EXECUTE_TOOL", parameters: { type: "object" } } },
+      { type: "function", function: { name: "COMPOSIO_EXECUTE_TOOL", parameters: { type: "object" } } },
       { type: "function", function: { name: "LINKEDIN_CREATE_LINKED_IN_POST", parameters: postSchema } },
     ],
     search: async () => ({ toolSchemas: { LINKEDIN_REGISTER_IMAGE_UPLOAD: { toolSlug: "LINKEDIN_REGISTER_IMAGE_UPLOAD", inputSchema: uploadSchema } } }),
@@ -446,10 +461,9 @@ test("an image fetched from saved assets is uploaded on a referential LinkedIn p
       const index = chatIndex++;
       if (index === 0) return toolResponse("CHUCK_SEARCH_IMAGE_ASSETS", JSON.stringify({ query: "prayer elder" }), "search-images");
       if (index === 1) return toolResponse("CHUCK_GET_IMAGE_ASSET", JSON.stringify({ id: selectedAsset.id }), "get-prayer-image");
-      if (index === 2) return toolResponse("COMPOSIO_MULTI_EXECUTE_TOOL", JSON.stringify({
-        tools: [{ tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST", arguments: { author: "urn:li:person:owner", commentary: "Grateful for the people whose prayers guide us." } }],
-        current_step: "PUBLISHING_POST", current_step_metric: "0/1 posts", session_id: "saved-image-linkedin-session",
-        sync_response_to_workbench: false, thought: "Publish the requested gratitude post with the image just retrieved.",
+      if (index === 2) return toolResponse("COMPOSIO_EXECUTE_TOOL", JSON.stringify({
+        tool_slug: "LINKEDIN_CREATE_LINKED_IN_POST",
+        arguments: { author: "urn:li:person:owner", commentary: "Grateful for the people whose prayers guide us." },
       }), "publish-prayer-post");
       return chatResponse({ role: "assistant", content: "The LinkedIn post was published with the saved prayer image." });
     }

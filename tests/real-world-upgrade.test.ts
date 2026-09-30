@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, createTask, initStore, createMission, getMission, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight } from "../src/store.js";
+import { claimTask, createTask, initStore, createMission, getMission, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
@@ -76,6 +76,94 @@ test("mission scheduler materializes each parallel branch as an idempotent durab
   const again = await scheduleMissionSteps(userId, linked!, async (_owner, taskId) => { enqueued.push(taskId); return `duplicate_${taskId}`; });
   assert.equal(enqueued.length, 2);
   assert.equal(again?.rootTaskId, linked?.rootTaskId);
+  assert.equal(again?.events.length, linked?.events.length, "an idempotent schedule replay does not append duplicate progress events");
+});
+
+test("resuming an already-running mission repairs missing task scheduling without duplicating it", async () => {
+  const userId = 972014;
+  const mission = await createMission(userId, { title: "Resume recovery", objective: "Continue a running step", definitionOfDone: "The step is completed", steps: [
+    { id: "only", title: "Only step", objective: "Continue from the saved checkpoint" },
+  ] });
+  await startMission(userId, mission.id);
+  const enqueued: string[] = [];
+  const enqueueMissionTask = async (_ownerId: number, taskId: string) => {
+    enqueued.push(taskId);
+    return `workflow_${taskId}`;
+  };
+
+  const resumed = await nativeTool(userId, "CHUCK_MISSION_RESUME", { id: mission.id }, { enqueueMissionTask });
+  assert.equal((resumed as { status: string }).status, "running");
+  assert.equal(enqueued.length, 1, "the missing ready-step workflow is recovered");
+  assert.equal((await listTasks(userId)).filter((task) => task.missionId === mission.id).length, 1);
+
+  const replay = await nativeTool(userId, "CHUCK_MISSION_RESUME", { id: mission.id }, { enqueueMissionTask });
+  assert.equal((replay as { status: string }).status, "running");
+  assert.equal(enqueued.length, 1, "repeating resume does not publish a second workflow");
+  assert.equal((await listTasks(userId)).filter((task) => task.missionId === mission.id).length, 1);
+});
+
+test("native replan reports a completed-step conflict without mutating the mission", async () => {
+  const userId = 972015;
+  const mission = await createMission(userId, { title: "Preserve completed work", objective: "Replan only unfinished work", definitionOfDone: "The remaining step is complete", steps: [
+    { id: "done", title: "Completed research", objective: "Gather verified sources" },
+    { id: "next", title: "Draft", objective: "Write the brief", dependsOn: ["done"] },
+  ] });
+  await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, "done", "Three sources verified");
+
+  const before = await getMission(userId, mission.id);
+  const result = await nativeTool(userId, "CHUCK_MISSION_REPLAN", {
+    id: mission.id,
+    reason: "Updated positioning",
+    steps: [{ id: "replacement", title: "Draft with new positioning", objective: "Write the updated brief" }],
+  }) as { status: string; reason?: string; completedStepIds?: string[]; nextAction?: string; mission?: { status: string } };
+
+  assert.equal(result.status, "rejected");
+  assert.match(result.reason ?? "", /completed.*preserv/i);
+  assert.deepEqual(result.completedStepIds, ["done"]);
+  assert.match(result.nextAction ?? "", /include.*completed step/i);
+  assert.equal(result.mission?.status, "running");
+  const after = await getMission(userId, mission.id);
+  assert.deepEqual(after, before, "a rejected replan leaves the mission exactly unchanged");
+});
+
+test("native mission replan schedules every newly dependency-ready branch", async () => {
+  const userId = 972016;
+  const mission = await createMission(userId, { title: "Replan and resume", objective: "Replace stale work", definitionOfDone: "Both branches complete", steps: [
+    { id: "root", title: "Root", objective: "Prepare input" },
+    { id: "old", title: "Old", objective: "Obsolete work", dependsOn: ["root"] },
+  ] });
+  await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, "root", "Root complete");
+  const queued: string[] = [];
+  const result = await nativeTool(userId, "CHUCK_MISSION_REPLAN", {
+    id: mission.id,
+    reason: "Split remaining work into independent branches",
+    steps: [
+      { id: "root", title: "Root", objective: "Prepare input" },
+      { id: "new-a", title: "New A", objective: "First branch", dependsOn: ["root"] },
+      { id: "new-b", title: "New B", objective: "Second branch", dependsOn: ["root"] },
+    ],
+  }, { enqueueMissionTask: async (_ownerId, taskId) => { queued.push(taskId); return `workflow_${taskId}`; } }) as { activeStepIds?: string[]; steps: Array<{ id: string; taskId?: string }> };
+  assert.deepEqual(result.activeStepIds, ["new-a", "new-b"]);
+  assert.equal(queued.length, 2);
+  assert.deepEqual(result.steps.filter((step) => step.id.startsWith("new-") && step.taskId).map((step) => step.id), ["new-a", "new-b"]);
+});
+
+test("mission provider-event waits require the owning durable mission task", async () => {
+  const userId = 972017;
+  const mission = await createMission(userId, { title: "Wait for event", objective: "Wait for provider callback", definitionOfDone: "Callback processed" });
+  await startMission(userId, mission.id);
+  await assert.rejects(() => nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
+    id: mission.id, provider: "crm", providerEventId: "event-1",
+  }), /active durable mission task/i);
+
+  let captured: { provider: string; providerEventId: string } | undefined;
+  const result = await nativeTool(userId, "CHUCK_MISSION_WAIT_EVENT", {
+    id: mission.id, provider: "crm", providerEventId: "event-1",
+  }, { taskId: "task_mission_wait", missionId: mission.id, requestMissionWait: (request) => { captured = request; } }) as { status: string };
+  assert.equal(result.status, "waiting");
+  assert.deepEqual(captured && { provider: captured.provider, providerEventId: captured.providerEventId }, { provider: "crm", providerEventId: "event-1" });
 });
 
 test("strict missions cannot be completed before independent verification", async () => {
@@ -98,6 +186,37 @@ test("native mission verification cannot claim a human verifier", async () => {
   const mission = await createMission(userId, { title: "Attribution", objective: "Verify metadata", definitionOfDone: "Verification is recorded" });
   const result = await nativeTool(userId, "CHUCK_MISSION_VERIFY", { id: mission.id }) as { verification?: { verifiedBy?: string } };
   assert.equal(result.verification?.verifiedBy, "agent");
+});
+
+test("native mission closeout completes verified work and returns exact evidence blockers instead of a generic failure", async () => {
+  const userId = 972052;
+  const legacy = await createMission(userId, { title: "Legacy closeout", objective: "Finish one step", definitionOfDone: "The step is verified", steps: [{ id: "only", title: "Only step", objective: "Complete the task" }] });
+  const startedLegacy = await startMission(userId, legacy.id);
+  const legacyResult = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: legacy.id, stepId: startedLegacy!.currentStepId, result: "The task was completed and verified" }) as { status: string; closeout?: { status?: string } };
+  assert.equal(legacyResult.status, "completed");
+  assert.equal(legacyResult.closeout?.status, "completed");
+
+  const strict = await createMission(userId, { title: "Strict closeout", objective: "Finish with receipt proof", definitionOfDone: "The task and receipt are verified", requiredEvidence: ["receipt"], steps: [{ id: "only", title: "Only step", objective: "Complete the task" }] });
+  const startedStrict = await startMission(userId, strict.id);
+  const stepResult = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: strict.id, stepId: startedStrict!.currentStepId, result: "The task was completed" }) as { status: string; closeout?: { status?: string; blockers?: string[] }; verification?: { unresolved?: string[] } };
+  assert.equal(stepResult.status, "blocked");
+  assert.equal(stepResult.closeout?.status, "blocked");
+  assert.match(stepResult.verification?.unresolved?.join(" ") ?? "", /receipt/i);
+
+  const blockedComplete = await nativeTool(userId, "CHUCK_MISSION_COMPLETE", { id: strict.id, result: "Done" }) as { status: string; closeout?: { status?: string; blockers?: string[]; nextAction?: string } };
+  assert.equal(blockedComplete.status, "blocked");
+  assert.equal(blockedComplete.closeout?.status, "blocked");
+  assert.match(blockedComplete.closeout?.blockers?.join(" ") ?? "", /receipt/i);
+  assert.ok(blockedComplete.closeout?.nextAction);
+
+  await recordTrustedMissionEvidence(userId, strict.id, [{ id: "receipt-proof", kind: "tool_receipt", summary: "Provider receipt independently read back", source: "gmail", ref: "receipt://verified", verified: true, verifiedBy: "system" }]);
+  await resumeMission(userId, strict.id);
+  const completed = await nativeTool(userId, "CHUCK_MISSION_VERIFY", { id: strict.id }) as { status: string; closeout?: { status?: string } };
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.closeout?.status, "completed");
+  const replay = await nativeTool(userId, "CHUCK_MISSION_COMPLETE", { id: strict.id, result: "Repeat" }) as { status: string; closeout?: { alreadyCompleted?: boolean } };
+  assert.equal(replay.status, "completed");
+  assert.equal(replay.closeout?.alreadyCompleted, true);
 });
 
 test("mission verification tool rejects caller supplied provider outcome results", async () => {

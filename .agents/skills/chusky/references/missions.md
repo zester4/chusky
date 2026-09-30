@@ -157,6 +157,14 @@ strict missions are verified from persisted evidence and become blocked with a
 concrete recovery action if proof is still missing. This prevents an empty
 dependency frontier from becoming an infinite requeue loop.
 
+Direct `CHUCK_MISSION_STEP_COMPLETE` uses the same closeout path.
+`CHUCK_MISSION_VERIFY` and `CHUCK_MISSION_COMPLETE` return the resulting
+mission state plus explicit blockers and next action; incomplete evidence is a
+recoverable blocker, not a generic tool error and not a reason to repeat the
+same verification. Closeout only advances a running mission: an owner-paused,
+waiting, queued, failed, or blocked mission retains that state until its normal
+resume/recovery path is used.
+
 When a step fails, preserve its result/error and attempts. Retry only within its
 `retryLimit` and bounded backoff. If the failure changes the plan, use replan to
 replace unfinished steps while preserving completed work and validating the new
@@ -232,8 +240,11 @@ uncertain until backed by trusted server-side evidence.
 - Pause stops future scheduling and preserves the checkpoint. In-flight work
   must observe cancellation at its next safe checkpoint; do not report an active
   worker as stopped before it settles.
-- Resume is valid only for an owner-owned paused/blocked/waiting mission whose
-  continuation condition is satisfied. Re-read state and schedule ready steps.
+- Resume an owned paused, blocked, or failed mission from its checkpoint;
+  waiting missions resume only when their exact persisted continuation
+  condition is satisfied. Repeating resume on an already-running mission is
+  idempotent and reconciles missing deterministic step tasks without duplicating
+  work. Re-read owner-scoped state before scheduling.
 - Cancel marks the mission cancelled and requests cancellation for linked tasks;
   late workers must settle as cancelled and must not deliver a success result.
 - Repair moves an inconsistent or failed mission to an honest blocked state with

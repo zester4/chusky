@@ -75,6 +75,27 @@ test("correlates outcomes only by an explicit unique action slug and explicit re
   assert.equal(duplicate.size, 0);
 });
 
+test("reads Composio SDK 0.21 batch response envelopes and matches duplicate slugs by request index", () => {
+  const args = { tools: [
+    { tool_slug: "GMAIL_FETCH_EMAILS", arguments: {} },
+    { tool_slug: "GMAIL_FETCH_EMAILS", arguments: {} },
+    { tool_slug: "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", arguments: {} },
+  ] };
+  const actions = buildComposioBatchActions(args, "sdk-call", new Map());
+  const settled = settleComposioBatchActions(actions, { successful: false, data: { results: [
+    { index: 0, tool_slug: "GMAIL_FETCH_EMAILS", response: { successful: true, data: { messages: [{ id: "private" }] } } },
+    { index: 1, tool_slug: "GMAIL_FETCH_EMAILS", response: { successful: false, error: "provider rejected this request", data: {} }, error: "provider rejected this request" },
+    { index: 2, tool_slug: "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", response: { successful: true, data: { updatedCells: 4 } } },
+  ] } });
+  assert.deepEqual(settled.map(({ status }) => status), ["completed", "failed", "completed"]);
+  assert.deepEqual(settled.map(({ summary }) => summary), [
+    "Provider confirmed this action",
+    "Provider reported this action failed",
+    "Provider confirmed this action",
+  ]);
+  assert.equal(JSON.stringify(settled).includes("private"), false);
+});
+
 test("leaves individual batch outcomes unknown when the provider gives only a batch receipt", () => {
   const actions = buildComposioBatchActions({ tools: [{ tool_slug: "GMAIL_SEARCH_EMAILS", arguments: {} }] }, "call-3", new Map());
   assert.deepEqual(settleComposioBatchActions(actions, { successful: true })[0], {
@@ -82,6 +103,6 @@ test("leaves individual batch outcomes unknown when the provider gives only a ba
     toolSlug: "GMAIL_SEARCH_EMAILS",
     actionLabel: "Search Emails",
     status: "unknown",
-    summary: "Batch response received; individual outcome was not identified",
+    summary: "The batch response did not include a matchable status for this action",
   });
 });

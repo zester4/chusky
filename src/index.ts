@@ -7,11 +7,12 @@ import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
 import { appendSdkRunHistoryToSession, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
 import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
+import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, resumeMission, cancelMission, cancelMissionTasks, completeMissionStep, recordMissionEvidence, verifyMission, repairMission, replanMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -20,7 +21,7 @@ import { Readable } from "node:stream";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
-import { scheduleMissionSteps } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
@@ -42,7 +43,7 @@ import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
 import { twilioVoiceInstructions } from "./calls/twilioContext.js";
 import { buildMeetingInput, isDirectMeetingAddress, MeetingSpeechGate, parseCopilotOutput, validateMeetingContext } from "./meetings/context.js";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isNoActionPulseOutput, markAttentionPulseDelivered, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "./attentionPulse.js";
 import { resolveRecallMeetingSpeaker } from "./meetings/participants.js";
 import { createVoiceBridgeTicket } from "./calls/bridgeAuth.js";
 import { createSignedWebBotAuthDirectory, WEB_BOT_AUTH_DIRECTORY_CONTENT_TYPE, WEB_BOT_AUTH_DIRECTORY_PATH, webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthSigningEnabled } from "./webBotAuth.js";
@@ -113,6 +114,14 @@ function redactMeetingLinks(text: string): string {
   return text.replace(/https:\/\/[^\s<>()]+/gi, (url) => /(?:meet\.google\.com|\.zoom\.us|teams\.microsoft\.com|\.teams\.microsoft\.com|\.webex\.com)/i.test(url) ? "[private meeting link]" : url);
 }
 
+async function createTriggerRecoveryCandidate(event: { eventId: string; userId: number; triggerSlug: string }): Promise<void> {
+  await createAttentionRecord(event.userId, "attention_candidate", {
+    candidateType: "act", status: "pending", score: 1, sourceTriggerEventId: event.eventId,
+    reason: `Trigger ${event.triggerSlug} needs owner follow-up; its durable result is saved in Recent trigger events.`,
+    proposedAction: `Notify the owner to review trigger event ${event.eventId} in the dashboard. Verify provider state before any retry; never replay its external action automatically.`,
+  });
+}
+
 function meetingRoomToolPolicy(meeting: { roomAllowedComposioTools?: string[]; roomAllowedNativeTools?: string[] }) {
   return meeting.roomAllowedComposioTools || meeting.roomAllowedNativeTools
     ? { allowedComposioTools: meeting.roomAllowedComposioTools ?? [], allowedNativeTools: meeting.roomAllowedNativeTools ?? [] }
@@ -162,7 +171,7 @@ async function resumeMissionsFromComposioEvent(userId: number, providerEventId: 
     // A mission may have several independent branches. Re-scheduling the
     // dependency-ready set wakes the exact waiting branch instead of assuming
     // that rootTaskId is the only executable task.
-    const scheduled = await scheduleMissionSteps(userId, resumed, enqueueTaskWorkflow);
+    const scheduled = await reconcileMissionExecution(userId, mission.id, enqueueTaskWorkflow);
     if (scheduled?.activeStepIds?.length) resumedCount += scheduled.activeStepIds.length;
   }
   return resumedCount;
@@ -1294,29 +1303,32 @@ async function main(): Promise<void> {
       const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
       const title = String(body.title ?? "").trim(); const objective = String(body.objective ?? "").trim(); const definitionOfDone = String(body.definitionOfDone ?? "").trim();
       if (!title || !objective || !definitionOfDone) return c.json({ ok: false, error: "title, objective, and definitionOfDone are required" }, 400);
+      const invalidSteps = validateMissionStepsPayload(body.steps);
+      if (invalidSteps) return c.json({ ok: false, error: invalidSteps }, 400);
       try {
         const mission = await createMission(device.userId, { title, objective, definitionOfDone, idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined, requiredEvidence: Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined, verificationMode: body.verificationMode === "strict" ? "strict" : body.verificationMode === "legacy" ? "legacy" : undefined, steps: Array.isArray(body.steps) ? body.steps.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((step) => ({ id: typeof step.id === "string" ? step.id : undefined, title: String(step.title ?? ""), objective: String(step.objective ?? ""), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined, budget: { maxDurationSeconds: typeof body.maxDurationSeconds === "number" ? body.maxDurationSeconds : undefined, maxSteps: typeof body.maxSteps === "number" ? body.maxSteps : undefined, maxToolCalls: typeof body.maxToolCalls === "number" ? body.maxToolCalls : undefined, maxCost: typeof body.maxCost === "number" ? body.maxCost : undefined } });
-        if (mission.rootTaskId) return c.json({ ok: true, mission });
-        const started = await startMission(device.userId, mission.id); if (!started) return c.json({ ok: false, error: "mission could not start" }, 409);
-        const linked = await scheduleMissionSteps(device.userId, started, enqueueTaskWorkflow);
-        return c.json({ ok: true, mission: linked ?? started }, 201);
-      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission creation failed" }, 400); }
+        const started = mission.status === "queued" ? await startMission(device.userId, mission.id) : mission.status === "running" ? mission : undefined;
+        if (!started) return c.json({ ok: true, mission }, mission.status === "queued" ? 409 : 200);
+        const linked = await reconcileMissionExecution(device.userId, started.id, enqueueTaskWorkflow);
+        return c.json({ ok: true, mission: linked ?? started }, mission.status === "queued" ? 201 : 200);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission creation failed" }, error instanceof MissionEnqueueError ? 503 : 400); }
     });
     app.post("/cli/missions/:id/action", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const action = String(((await c.req.json().catch(() => ({}))) as { action?: unknown }).action ?? ""); const id = c.req.param("id");
       try {
-        const mission = action === "pause" ? await pauseMission(device.userId, id, "Mission paused from CLI.") : action === "resume" ? await resumeMission(device.userId, id) : action === "cancel" ? await cancelMission(device.userId, id, "Mission cancelled from CLI.") : action === "repair" ? await repairMission(device.userId, id, { reason: "Operator requested mission recovery from CLI." }) : undefined;
+        const mission = action === "pause" ? await pauseMission(device.userId, id, "Mission paused from CLI.") : action === "resume" ? await resumeMissionAndSchedule(device.userId, id, enqueueTaskWorkflow) : action === "cancel" ? await cancelMission(device.userId, id, "Mission cancelled from CLI.") : action === "repair" ? await repairMission(device.userId, id, { reason: "Operator requested mission recovery from CLI." }) : undefined;
         if (!mission) return c.json({ ok: false, error: "mission action is not valid for the current state" }, 409);
         if (action === "pause" || action === "cancel") await cancelMissionTasks(device.userId, id);
-        if (action === "resume" || action === "repair") await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
         return c.json({ ok: true, mission: await getMission(device.userId, id) ?? mission });
-      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission action failed" }, 409); }
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission action failed" }, action === "resume" ? 503 : 409); }
     });
     app.post("/cli/missions/:id/replan", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
       const reason = typeof body.reason === "string" ? body.reason.trim() : "Verified information changed the remaining plan.";
+      const invalidSteps = validateMissionStepsPayload(body.steps, { requireNonEmpty: true });
+      if (invalidSteps) return c.json({ ok: false, error: invalidSteps }, 400);
       const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
         if (!value || typeof value !== "object") return [];
         const step = value as Record<string, unknown>;
@@ -1325,9 +1337,9 @@ async function main(): Promise<void> {
       }) : [];
       if (!reason || reason.length > 2_000 || !steps.length) return c.json({ ok: false, error: "reason and at least one valid step are required" }, 400);
       try {
-        const mission = await replanMission(device.userId, c.req.param("id"), steps, reason);
+        const mission = await replanMissionAndSchedule(device.userId, c.req.param("id"), steps, reason, enqueueTaskWorkflow);
         return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission is not replannable" }, 409);
-      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission replan failed" }, 400); }
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission replan failed" }, error instanceof MissionEnqueueError ? 503 : 400); }
     });
     app.post("/cli/missions/:id/events", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -1335,8 +1347,10 @@ async function main(): Promise<void> {
       if (typeof body.provider !== "string" || typeof body.providerEventId !== "string") return c.json({ ok: false, error: "provider and providerEventId are required" }, 400);
       const mission = await resumeMissionFromProviderEvent(device.userId, c.req.param("id"), body.provider, body.providerEventId);
       if (!mission) return c.json({ ok: false, error: "mission is not waiting for that provider event" }, 409);
-      await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
-      return c.json({ ok: true, mission: await getMission(device.userId, mission.id) ?? mission }, 202);
+      try {
+        const reconciled = await reconcileMissionExecution(device.userId, mission.id, enqueueTaskWorkflow);
+        return c.json({ ok: true, mission: reconciled ?? mission }, 202);
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission continuation could not be scheduled" }, 503); }
     });
     app.post("/cli/missions/:id/evidence", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -1350,22 +1364,24 @@ async function main(): Promise<void> {
         return [{ id: typeof value.id === "string" ? value.id : `evidence_${randomUUID()}`, kind: value.kind as "source", summary: value.summary, ...(typeof value.source === "string" ? { source: value.source } : {}), ...(typeof value.ref === "string" ? { ref: value.ref } : {}), ...(typeof value.hash === "string" ? { hash: value.hash } : {}), verified: value.verified, ...(value.verifiedBy === "agent" || value.verifiedBy === "system" || value.verifiedBy === "human" ? { verifiedBy: value.verifiedBy as "agent" | "system" | "human" } : {}) }];
       }) : [];
       if (!evidence.length) return c.json({ ok: false, error: "at least one valid evidence record is required" }, 400);
-      const mission = await recordMissionEvidence(device.userId, c.req.param("id"), evidence, typeof body.stepId === "string" ? body.stepId : undefined);
+      const mission = await recordMissionEvidenceAndCloseout(device.userId, c.req.param("id"), evidence, typeof body.stepId === "string" ? body.stepId : undefined);
       return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "evidence could not be recorded" }, 409);
     });
     app.post("/cli/missions/:id/verify", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-      const mission = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: "agent" });
+      const verified = await verifyMission(device.userId, c.req.param("id"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: "agent" });
+      const mission = verified ? await finalizeMissionCloseout(device.userId, verified.id) ?? verified : undefined;
       return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
     });
     app.post("/cli/missions/:id/steps/:stepId/complete", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const result = String(((await c.req.json().catch(() => ({}))) as { result?: unknown }).result ?? "").trim(); if (!result) return c.json({ ok: false, error: "result is required" }, 400);
-      const mission = await completeMissionStep(device.userId, c.req.param("id"), c.req.param("stepId"), result);
+      let mission: Awaited<ReturnType<typeof completeMissionStepAndAdvance>>;
+      try { mission = await completeMissionStepAndAdvance(device.userId, c.req.param("id"), c.req.param("stepId"), result, enqueueTaskWorkflow); }
+      catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission continuation could not be scheduled" }, 503); }
       if (!mission) return c.json({ ok: false, error: "mission step is not completable" }, 409);
-      const linked = await scheduleMissionSteps(device.userId, mission, enqueueTaskWorkflow);
-      return c.json({ ok: true, mission: linked ?? mission });
+      return c.json({ ok: true, mission });
     });
     app.get("/cli/context", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
@@ -2242,11 +2258,13 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             }
             const noAction = isNoActionPulseOutput(result.output);
             const handled = attentionPulseHasHandlingEvidence(result.toolCallsLog);
-            const deliveryConfirmation = !noAction && handled
-              ? { kind: "attention_pulse" as const, candidateIds: plan.candidateIds, dedupeKey: plan.dedupeKey }
-              : undefined;
+            // A successfully delivered owner digest should suppress an identical
+            // hourly repeat even when the signal only needs the owner's decision.
+            // Candidate records remain pending unless the worker actually handled
+            // or delegated the underlying work.
+            const deliveryConfirmation = attentionPulseDeliveryConfirmation(plan, result.output, handled);
             const text = !noAction && !handled
-              ? `The attention pulse did not complete or delegate an actionable step, so the loop remains open for the next run.\n\n${result.output}`
+              ? `The attention pulse did not complete or delegate an actionable step. The unchanged item remains open and will be reconsidered when its state changes or new evidence arrives.\n\n${result.output}`
               : result.output;
             return { text, suppressDelivery: noAction, ...(deliveryConfirmation ? { deliveryConfirmation } : {}) };
           }
@@ -2525,7 +2543,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 if (finalized?.status === "blocked" || finalized?.status === "failed") return { status: "blocked" as const, message: finalized.error ?? "Autonomous mission needs evidence or repair", checkpoint: finalized.checkpoint, nextAction: finalized.nextAction };
                 const refreshed = await getMission(task.userId, mission.id);
                 if (refreshed) {
-                  await scheduleMissionSteps(task.userId, refreshed, enqueueTaskWorkflow);
+                  await reconcileMissionExecution(task.userId, mission.id, enqueueTaskWorkflow, task.id);
                   if (task.missionStepId && refreshed.activeStepIds?.length && !refreshed.activeStepIds.includes(task.missionStepId)) {
                     return { status: "completed" as const, message: "Mission branch completed; the next dependency-ready branch was scheduled.", result: result.text, checkpoint: refreshed.checkpoint };
                   }
@@ -2742,18 +2760,27 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             ? `I’ve ${result.status === "rescheduled" ? "updated my scheduled join for" : "scheduled myself to join"}${title}${preparation.startAt ? ` at ${preparation.startAt}` : ""}. I’ll enter the supported meeting through your authorized calendar connection.`
             : result.status === "kept"
               ? `My automatic join for${title} is already active; I left it unchanged.`
-              : result.status === "cancelled"
+            : result.status === "cancelled"
                 ? `I cancelled my pending automatic join for${title}. I won’t interrupt a meeting already in progress.`
                 : `I didn’t schedule a join for${title}: ${result.reason === "missing-link" ? "the event has no supported meeting link" : result.reason === "invalid-time" ? "the event start time is missing or invalid" : result.reason === "expired" ? "the event has already ended" : result.reason === "too-far" ? "Recall can schedule at most 30 days ahead; I’ll need a Google Calendar starting-soon trigger to schedule it later" : "this event does not qualify for automatic joining"}.`;
+          await updateTriggerEvent(event.eventId, { status: "running", result: notice, notificationStatus: "pending" });
           const chatId = await getTelegramChatId(event.userId);
           if (chatId) await workflow.run("deliver-calendar-auto-join-result", async () => {
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: notice, idempotencyKey: `trigger:${event.eventId}:calendar-autojoin:${chatId}`, correlationId: event.eventId, kind: "notification" });
           });
-          await updateTriggerEvent(event.eventId, { status: "completed", result: notice });
+          await updateTriggerEvent(event.eventId, { status: "completed", notificationStatus: chatId ? "delivered" : "unavailable" });
+          if (!chatId) await createTriggerRecoveryCandidate(event);
           return;
         } catch (error) {
           if (isWorkflowControlFlow(error)) throw error;
-          await updateTriggerEvent(event.eventId, { status: "failed", error: "Calendar automatic join could not be reconciled" });
+          const saved = await getTriggerEvent(event.eventId);
+          if (saved?.result) {
+            await updateTriggerEvent(event.eventId, { status: "completed", notificationStatus: "failed", error: "Calendar action was reconciled, but the owner notification failed. Review the saved result in the dashboard." });
+            await createTriggerRecoveryCandidate(event);
+          } else {
+            await updateTriggerEvent(event.eventId, { status: "failed", notificationStatus: "failed", error: "Calendar automatic join could not be reconciled" });
+            await createTriggerRecoveryCandidate(event);
+          }
           throw error;
         }
       }
@@ -2791,21 +2818,23 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         )));
         const closeout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(result.text), toolsUsed: result.toolsUsed, toolsSucceeded: result.toolsSucceeded });
         const safeResult = redactMeetingLinks(closeout.text);
-        await updateTriggerEvent(event.eventId, { status: "running", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
-        const chatId = await getTelegramChatId(event.userId);
-        if (!chatId) {
-          await updateTriggerEvent(event.eventId, { status: "failed", error: "No Telegram delivery destination is linked to this account; the trigger result is saved but could not be delivered." });
-          return;
-        }
+        await updateTriggerEvent(event.eventId, { status: "running", notificationStatus: "pending", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
         await workflow.run("append-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResult }]));
         const triggerCost = result.cost;
         if (triggerCost) await workflow.run("record-trigger-usage", async () => addUsage(event.userId, triggerCost));
+        const chatId = await getTelegramChatId(event.userId);
+        if (!chatId) {
+          await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
+          await createTriggerRecoveryCandidate(event);
+          return;
+        }
         await workflow.run("deliver-trigger-result", async () => {
           for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 **Chusky trigger**\n\n${safeResult}`), 3900).entries()) {
             await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(chatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${chatId}:${index}`, correlationId: event.eventId, kind: "notification" });
           }
         });
-        await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+        await updateTriggerEvent(event.eventId, { status: closeout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResult.slice(0, 12000), error: closeout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+        if (closeout.reportMissing) await createTriggerRecoveryCandidate(event);
       } catch (error) {
         // `workflow.run`, `sleep`, and `waitForEvent` deliberately throw this
         // after persisting a step. Do not mark the trigger failed; the Upstash
@@ -2815,10 +2844,14 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           await updateTriggerEvent(event.eventId, { status: "awaiting_approval", approvalId: error.approvalId });
           const approval = await getApproval(event.userId, error.approvalId);
           const chatId = await getTelegramChatId(event.userId);
+          if (!chatId) {
+            await updateTriggerEvent(event.eventId, { notificationStatus: "unavailable" });
+            await createTriggerRecoveryCandidate(event);
+          }
           if (chatId && approval) await workflow.run("request-trigger-approval", async () => bot.api.sendMessage(chatId, `⚠️ <b>Approval needed</b>\n\nI need your approval to run <code>${error.toolSlug}</code>.\nApproval ID: <code>${error.approvalId}</code>`, { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✅ Approve", `appr:approve:${error.approvalId}`).text("🛑 Deny", `appr:deny:${error.approvalId}`) }));
           const decision = await workflow.waitForEvent<{ approved: boolean }>("trigger-approval", workflowEventId("trigger-approval", error.approvalId), { timeout: "24h" });
           if (decision.timeout || !decision.eventData?.approved) {
-            await updateTriggerEvent(event.eventId, { status: "completed", result: "The requested triggered action was denied or expired." });
+            await updateTriggerEvent(event.eventId, { status: "completed", result: "The requested triggered action was denied or expired.", notificationStatus: chatId ? "delivered" : "unavailable" });
             return;
           }
           const resumed = await workflow.run("resume-trigger-agent", async () => withUserLock(event.userId, undefined, () => runAgent(
@@ -2827,24 +2860,37 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           )));
           const resumedCloseout = ensureTriggerCloseout({ triggerSlug: event.triggerSlug, summary: event.summary, text: redactMeetingLinks(resumed.text), toolsUsed: resumed.toolsUsed, toolsSucceeded: resumed.toolsSucceeded });
           const safeResumed = redactMeetingLinks(resumedCloseout.text);
-          await updateTriggerEvent(event.eventId, { status: "running", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
-          const resumedChatId = await getTelegramChatId(event.userId);
-          if (!resumedChatId) {
-            await updateTriggerEvent(event.eventId, { status: "failed", error: "No Telegram delivery destination is linked to this account; the trigger result is saved but could not be delivered." });
-            return;
-          }
+          await updateTriggerEvent(event.eventId, { status: "running", notificationStatus: "pending", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; a transparent fallback notice will be delivered." : undefined });
           await workflow.run("append-resumed-trigger-history", async () => appendMessages(event.userId, [{ role: "user", content: `[Trigger ${event.triggerSlug}] ${event.summary}` }, { role: "assistant", content: safeResumed }]));
           const resumedTriggerCost = resumed.cost;
           if (resumedTriggerCost) await workflow.run("record-resumed-trigger-usage", async () => addUsage(event.userId, resumedTriggerCost));
+          const resumedChatId = await getTelegramChatId(event.userId);
+          if (!resumedChatId) {
+            await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "unavailable", error: "No private Telegram destination is linked; the result remains available in the dashboard." });
+            await createTriggerRecoveryCandidate(event);
+            return;
+          }
           await workflow.run("deliver-resumed-trigger-result", async () => {
             for (const [index, chunk] of splitHtml(mdToTelegramHtml(`🔔 **Chusky trigger**\n\n${safeResumed}`), 3900).entries()) {
               await channelGateway.send({ accountId: `account_${event.userId}`, userId: event.userId, target: { provider: "telegram", conversationId: String(resumedChatId) }, text: chunk, idempotencyKey: `trigger:${event.eventId}:telegram:${resumedChatId}:${index}`, correlationId: event.eventId, kind: "notification" });
             }
           });
-          await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+          await updateTriggerEvent(event.eventId, { status: resumedCloseout.reportMissing ? "failed" : "completed", notificationStatus: "delivered", result: safeResumed.slice(0, 12000), error: resumedCloseout.reportMissing ? "Agent returned no owner-facing closeout; transparent fallback notice delivered." : undefined });
+          if (resumedCloseout.reportMissing) await createTriggerRecoveryCandidate(event);
           return;
         }
-        await updateTriggerEvent(event.eventId, { status: "failed", error: String(error).slice(0, 2000) });
+        const saved = await getTriggerEvent(event.eventId);
+        if (saved?.result) {
+          await updateTriggerEvent(event.eventId, {
+            status: saved.status === "awaiting_approval" ? "awaiting_approval" : saved.status === "failed" ? "failed" : "completed",
+            notificationStatus: "failed",
+            error: "A trigger result was saved, but owner notification failed. Review the saved result in the dashboard before retrying anything.",
+          });
+          await createTriggerRecoveryCandidate(event);
+        } else {
+          await updateTriggerEvent(event.eventId, { status: "failed", notificationStatus: "failed", error: String(error).slice(0, 2000) });
+          await createTriggerRecoveryCandidate(event);
+        }
         throw error;
       }
     }, { url: triggerWorkflowUrl() }));

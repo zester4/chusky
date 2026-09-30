@@ -9,7 +9,7 @@ import {
   claimTelegramUpdate,
   claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease,
   type DaytonaWorkspaceRecord, type SdkRunRecord, type TriggerEventRecord,
-  createTriggerEvent, getTriggerEvent, updateTriggerEvent,
+  createTriggerEvent, getTriggerEvent, listTriggerEvents, updateTriggerEvent,
   backfillSdkPrivateRunHistory, createWebTelegramLinkCode, getTelegramUserIdForWebAuth, mergeLinkedWebSession, redeemWebTelegramLinkCode,
   createVideoJob, getVideoJob, listVideoJobs, updateVideoJob,
   addRecallMeeting, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, updateRecallMeeting, claimRecallCopilotEvaluation,
@@ -562,12 +562,16 @@ test("trigger events are idempotent", async () => {
   assert.equal(await claimTriggerEvent(eventId), false);
 });
 
-test("trigger event records are durable and stateful", async () => {
+test("trigger event records are durable, owner-scoped, and listed newest first", async () => {
   const record: TriggerEventRecord = { eventId: "evt-record-1", userId: 810099, triggerId: "trig-1", triggerSlug: "GITHUB_COMMIT_EVENT", summary: "Trigger: GITHUB_COMMIT_EVENT", status: "queued", createdAt: Date.now(), updatedAt: Date.now() };
   assert.deepEqual(await createTriggerEvent(record), record);
   assert.deepEqual(await createTriggerEvent({ ...record, status: "failed" }), record);
-  assert.equal((await updateTriggerEvent(record.eventId, { status: "running", workflowRunId: "wfr_evt-record-1" }))?.status, "running");
+  assert.equal((await updateTriggerEvent(record.eventId, { status: "completed", notificationStatus: "unavailable", result: "Event handled; open the dashboard for details.", workflowRunId: "wfr_evt-record-1" }))?.status, "completed");
   assert.equal((await getTriggerEvent(record.eventId))?.workflowRunId, "wfr_evt-record-1");
+  assert.equal((await getTriggerEvent(record.eventId))?.notificationStatus, "unavailable");
+  const otherOwner = { ...record, eventId: "evt-record-other-owner", userId: 810100, createdAt: record.createdAt + 1 };
+  await createTriggerEvent(otherOwner);
+  assert.deepEqual((await listTriggerEvents(810099)).map((item) => item.eventId), [record.eventId]);
 });
 
 test("Telegram update claims deduplicate retries", async () => {

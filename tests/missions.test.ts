@@ -50,10 +50,22 @@ test("missions are owner-scoped, resumable, and complete through explicit lifecy
   const resumed = await resumeMission(userId, created.id);
   assert.equal(resumed?.status, "running");
 
+  const stepDone = await completeMissionStep(userId, created.id, resumed!.currentStepId!, "Research and verification are complete.");
+  assert.equal(stepDone?.steps.every((step) => step.status === "completed"), true);
   const done = await completeMission(userId, created.id, "Verified launch brief is ready.");
   assert.equal(done?.status, "completed");
   assert.equal(done?.result, "Verified launch brief is ready.");
   assert.equal((await completeMission(userId, created.id, "duplicate")), undefined);
+});
+
+test("a mission cannot be completed while any planned step is unfinished", async () => {
+  const userId = 951032;
+  const mission = await createMission(userId, input({ idempotencyKey: "mission-closeout-requires-all-steps", steps: [
+    { id: "first", title: "First", objective: "Finish the first step." },
+    { id: "second", title: "Second", objective: "Finish the second step.", dependsOn: ["first"] },
+  ] }));
+  await startMission(userId, mission.id);
+  assert.equal(await completeMission(userId, mission.id, "Premature closeout."), undefined);
 });
 
 test("mission idempotency returns the original mission instead of starting duplicate work", async () => {
@@ -62,6 +74,16 @@ test("mission idempotency returns the original mission instead of starting dupli
   const second = await createMission(userId, input({ idempotencyKey: "same-request", title: "A different title" }));
   assert.equal(second.id, first.id);
   assert.equal(second.title, first.title);
+});
+
+test("mission plans reject unknown and self-referential dependencies instead of silently dropping them", async () => {
+  const userId = 951030;
+  await assert.rejects(() => createMission(userId, input({ idempotencyKey: "unknown-dependency", steps: [
+    { id: "research", title: "Research", objective: "Collect sources.", dependsOn: ["missing"] },
+  ] })), /unknown dependency/i);
+  await assert.rejects(() => createMission(userId, input({ idempotencyKey: "self-dependency", steps: [
+    { id: "research", title: "Research", objective: "Collect sources.", dependsOn: ["research"] },
+  ] })), /depend on itself/i);
 });
 
 test("mission slice accounting blocks work when a budget is exhausted", async () => {
@@ -84,6 +106,8 @@ test("mission revisions prevent lost concurrent updates and provider events resu
   const mission = await createMission(userId, input({ idempotencyKey: "provider-wait-1" }));
   await startMission(userId, mission.id);
   await waitMission(userId, mission.id, { kind: "provider_event", provider: "stripe", providerEventId: "evt_123", expiresAt: Date.now() + 60_000 }, "Payment intent created.", "Wait for payment completion.");
+  assert.equal(await waitMission(userId, mission.id, { kind: "provider_event", provider: "stripe", providerEventId: "evt_other", expiresAt: Date.now() + 60_000 }), undefined, "a concurrent stale worker cannot replace the mission's active wait");
+  assert.equal((await getMission(userId, mission.id))?.waiting?.providerEventId, "evt_123");
   const resumed = await resumeMissionFromProviderEvent(userId, mission.id, "stripe", "evt_123");
   assert.equal(resumed?.status, "running");
   assert.equal((await resumeMissionFromProviderEvent(userId, mission.id, "stripe", "evt_123"))?.status, "running");
@@ -134,6 +158,19 @@ test("mission step completion is idempotent for a replay but never revives cance
   assert.equal(await completeMissionStep(userId, mission.id, "research", "Late replay."), undefined);
 });
 
+test("waiting mission steps cannot be completed or checkpointed by a stale worker", async () => {
+  const userId = 951031;
+  const mission = await createMission(userId, input({ idempotencyKey: "mission-wait-completion-gate", steps: [
+    { id: "research", title: "Research", objective: "Collect sources." },
+  ] }));
+  await startMission(userId, mission.id);
+  await waitMission(userId, mission.id, { kind: "provider_event", provider: "crm", providerEventId: "evt-wait-gate", expiresAt: Date.now() + 60_000 });
+  assert.equal(await completeMissionStep(userId, mission.id, "research", "Stale worker result."), undefined);
+  assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+  assert.equal(await checkpointMission(userId, mission.id, "This must not clear the event wait."), undefined);
+  assert.equal((await getMission(userId, mission.id))?.waiting?.providerEventId, "evt-wait-gate");
+});
+
 test("server-side mission closeout completes legacy work after the final slice", async () => {
   const userId = 951009;
   const mission = await createMission(userId, input({ idempotencyKey: "server-closeout-legacy", steps: [
@@ -146,6 +183,22 @@ test("server-side mission closeout completes legacy work after the final slice",
   assert.match(finalized?.result ?? "", /Research/);
 });
 
+test("concurrent mission closeout callers return the persisted completed state", async () => {
+  const userId = 951013;
+  const mission = await createMission(userId, input({ idempotencyKey: "concurrent-closeout", steps: [
+    { id: "only", title: "Only", objective: "Complete" },
+  ] }));
+  const started = await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Verified result.");
+
+  const closeouts = await Promise.all([
+    finalizeMissionIfReady(userId, mission.id),
+    finalizeMissionIfReady(userId, mission.id),
+  ]);
+  assert.deepEqual(closeouts.map((record) => record?.status), ["completed", "completed"]);
+  assert.equal((await getMission(userId, mission.id))?.status, "completed");
+});
+
 test("strict server-side closeout blocks honestly until evidence verifies", async () => {
   const userId = 951010;
   const mission = await createMission(userId, input({ idempotencyKey: "server-closeout-strict", requiredEvidence: ["kind:tool_receipt"], verificationMode: "strict", steps: [
@@ -156,6 +209,23 @@ test("strict server-side closeout blocks honestly until evidence verifies", asyn
   const blocked = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
   assert.equal(blocked?.status, "blocked");
   assert.match(blocked?.nextAction ?? "", /evidence|verify/i);
+});
+
+test("server closeout does not override an owner-paused mission", async () => {
+  const userId = 951012;
+  const mission = await createMission(userId, input({ idempotencyKey: "paused-closeout", steps: [
+    { id: "only", title: "Only", objective: "Complete" },
+  ] }));
+  const started = await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Verified result");
+  const paused = await pauseMission(userId, mission.id, "Owner paused this mission before closeout.");
+  assert.equal(paused?.status, "paused");
+  const unchanged = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
+  assert.equal(unchanged?.status, "paused");
+  const resumed = await resumeMission(userId, mission.id);
+  assert.equal(resumed?.status, "running");
+  const completed = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
+  assert.equal(completed?.status, "completed");
 });
 
 test("strict missions cannot be created or verified without evidence criteria", async () => {
@@ -180,6 +250,18 @@ test("strict missions cannot be created or verified without evidence criteria", 
   assert.equal(await completeMission(userId, legacy.id, "Do not complete without evidence."), undefined);
 });
 
+test("explicit completion cannot override a pause", async () => {
+  const userId = 951034;
+  const mission = await createMission(userId, input({ idempotencyKey: "paused-explicit-complete", steps: [
+    { id: "only", title: "Only", objective: "Complete" },
+  ] }));
+  const started = await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, started!.currentStepId!, "Step verified.");
+  await pauseMission(userId, mission.id, "Owner paused before closeout.");
+  assert.equal(await completeMission(userId, mission.id, "Do not close while paused."), undefined);
+  assert.equal((await getMission(userId, mission.id))?.status, "paused");
+});
+
 test("mission replanning preserves verified steps and selects the next dependency-ready step", async () => {
   const userId = 951006;
   const mission = await createMission(userId, input({ idempotencyKey: "replan-1", steps: [
@@ -189,11 +271,14 @@ test("mission replanning preserves verified steps and selects the next dependenc
   await startMission(userId, mission.id);
   await completeMissionStep(userId, mission.id, "research", "Sources verified.");
   const replanned = await replanMission(userId, mission.id, [
-    { id: "research", title: "Research", objective: "Collect sources." },
+    { id: "research", title: "Rewritten completed step", objective: "Replace the verified work." },
     { id: "draft", title: "Draft", objective: "Write the brief with the new positioning." , dependsOn: ["research"] },
     { id: "review", title: "Review", objective: "Check the revised brief.", dependsOn: ["draft"] },
   ], "The positioning changed after source verification.");
   assert.equal(replanned?.steps.find((step) => step.id === "research")?.status, "completed");
+  assert.equal(replanned?.steps.find((step) => step.id === "research")?.title, "Research");
+  assert.equal(replanned?.steps.find((step) => step.id === "research")?.objective, "Collect sources.");
+  assert.equal(replanned?.steps.find((step) => step.id === "research")?.result, "Sources verified.");
   assert.equal(replanned?.steps.find((step) => step.id === "draft")?.status, "running");
   assert.equal(replanned?.currentStepId, "draft");
   assert.match(replanned?.events.at(-1)?.message ?? "", /replanned/i);
@@ -202,4 +287,36 @@ test("mission replanning preserves verified steps and selects the next dependenc
     { id: "draft", title: "Draft", objective: "Draft", dependsOn: ["review"] },
     { id: "review", title: "Review", objective: "Review", dependsOn: ["draft"] },
   ], "Invalid cycle"), /dependency cycle/);
+});
+
+test("mission replanning replaces stale active steps and starts every ready branch", async () => {
+  const userId = 951032;
+  const mission = await createMission(userId, input({ idempotencyKey: "replan-replaces-active", steps: [
+    { id: "root", title: "Root", objective: "Prepare input." },
+    { id: "old", title: "Old plan", objective: "Obsolete task.", dependsOn: ["root"] },
+  ] }));
+  await startMission(userId, mission.id);
+  await completeMissionStep(userId, mission.id, "root", "Root done.");
+  const replanned = await replanMission(userId, mission.id, [
+    { id: "root", title: "Root", objective: "Prepare input." },
+    { id: "new-a", title: "New A", objective: "First branch.", dependsOn: ["root"] },
+    { id: "new-b", title: "New B", objective: "Second branch.", dependsOn: ["root"] },
+    { id: "join", title: "Join", objective: "Combine branches.", dependsOn: ["new-a", "new-b"] },
+  ], "The work split changed.");
+  assert.deepEqual(replanned?.activeStepIds, ["new-a", "new-b"]);
+  assert.equal(replanned?.currentStepId, "new-a");
+  assert.deepEqual(replanned?.steps.filter((step) => step.status === "running").map((step) => step.id), ["new-a", "new-b"]);
+});
+
+test("mission replanning rejects unknown dependencies without mutating existing state", async () => {
+  const userId = 951033;
+  const mission = await createMission(userId, input({ idempotencyKey: "replan-unknown-dependency", steps: [
+    { id: "research", title: "Research", objective: "Collect sources." },
+  ] }));
+  await startMission(userId, mission.id);
+  const before = await getMission(userId, mission.id);
+  await assert.rejects(() => replanMission(userId, mission.id, [
+    { id: "draft", title: "Draft", objective: "Write brief.", dependsOn: ["missing"] },
+  ], "Invalid reference."), /unknown dependency/i);
+  assert.deepEqual(await getMission(userId, mission.id), before);
 });

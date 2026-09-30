@@ -9,14 +9,14 @@ import type {
 } from "../store.js";
 
 const MAX_TEXT = 240;
-const MAX_ITEMS = 40;
+const MAX_ITEMS = 64;
 const MAX_ORDERS = 12;
 const MAX_WATCHES = 8;
 const MAX_PROFILES = 4;
 const MAX_CONTEXT_CHARS = 8_000;
 
 export type AutonomyDecisionItem = {
-  kind: "open_loop" | "attention_candidate" | "task" | "mission";
+  kind: "open_loop" | "attention_candidate" | "task" | "mission" | "operational_signal";
   id: string;
   title: string;
   status: string;
@@ -91,6 +91,7 @@ export function buildAutonomyDecisionContext(input: {
   candidates?: AttentionCandidateRecord[];
   tasks?: TaskRecord[];
   missions?: MissionRecord[];
+  signals?: Array<{ id: string; title: string; status: string; nextAction?: string; priority?: number }>;
   watches?: AutonomyWatchRecord[];
   orders?: StandingOrderRecord[];
   profiles?: AutonomyProfileRecord[];
@@ -100,6 +101,10 @@ export function buildAutonomyDecisionContext(input: {
     ...(input.candidates ?? []).map(itemFromCandidate),
     ...(input.tasks ?? []).map(itemFromTask),
     ...(input.missions ?? []).map(itemFromMission),
+    ...(input.signals ?? []).slice(0, MAX_ITEMS).map((item): AutonomyDecisionItem => ({
+      kind: "operational_signal", id: clean(item.id, 120), title: clean(item.title), status: clean(item.status, 40),
+      ...(item.nextAction ? { nextAction: clean(item.nextAction) } : {}), priority: item.priority,
+    })),
   ].slice(0, MAX_ITEMS);
   const watches = (input.watches ?? []).slice(0, MAX_WATCHES).map((item) => ({
     id: clean(item.id, 120), name: clean(item.name, 120), mode: (item.mode ?? "personal") as "personal" | "business",

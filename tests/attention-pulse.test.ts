@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attentionPulseDeliveredToday, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
+import { attentionPulseDeliveredToday, attentionPulseDeliveryConfirmation, attentionPulseDeliveryDecision, attentionPulseHasHandlingEvidence, buildAttentionPulsePlan, isWithinQuietHours, isNoActionPulseOutput, recordAttentionPulseDelivery, selectAttentionPulseDeliveryTarget } from "../src/attentionPulse.js";
 import { validateNativeToolArguments } from "../src/agentTools.js";
 import { configureAttentionPulse } from "../src/nativeTools.js";
-import { blockTask, createAttentionRecord, createMission, createTask, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, updateAttentionRecord, type DeliveryPreferenceRecord } from "../src/store.js";
+import { addJob, addRecallMeeting, addReminder, blockTask, createApproval, createAttentionRecord, createJobOccurrence, createMission, createTask, createTriggerEvent, initStore, listAttentionRecords, listHandoffRecords, pauseMission, repairMission, saveCalendarMeetingPreparation, updateAttentionRecord, updateTask, type DeliveryPreferenceRecord } from "../src/store.js";
 import { executeDelegation } from "../src/subagents/executor.js";
 
 const preference = (patch: Partial<DeliveryPreferenceRecord> = {}): DeliveryPreferenceRecord => ({
@@ -69,6 +69,17 @@ test("attention pulse native contract and no-action sentinel are stable", () => 
   assert.equal(attentionPulseHasHandlingEvidence([{ tool: "CHUCK_TASK_COMPLETE", status: "failed" }]), false);
 });
 
+test("attention pulse checkpoints delivered owner digests without falsely completing candidates", () => {
+  const plan = { candidateIds: ["candidate_1"], dedupeKey: "digest_1" };
+  assert.deepEqual(attentionPulseDeliveryConfirmation(plan, "An approval is waiting.", false), {
+    kind: "attention_pulse", candidateIds: [], dedupeKey: "digest_1",
+  });
+  assert.deepEqual(attentionPulseDeliveryConfirmation(plan, "Handled the follow-up.", true), {
+    kind: "attention_pulse", candidateIds: ["candidate_1"], dedupeKey: "digest_1",
+  });
+  assert.equal(attentionPulseDeliveryConfirmation(plan, "NO_ACTION", false), undefined);
+});
+
 test("attention pulse executes Elena's real handle-or-delegate boundary", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910008;
@@ -99,6 +110,45 @@ test("attention pulse cannot be enabled from a shared conversation", async () =>
   );
 });
 
+test("re-enabling an active pulse repairs a missing capped delivery preference", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910017;
+  await addJob(userId, {
+    id: `pulse_${userId}`, userId, text: "Run the owner's proactive attention pulse.", cron: "0 * * * *",
+    scheduleId: `chuck-attention-pulse-${userId}`, status: "active", kind: "attention_pulse", createdAt: Date.now(),
+  });
+
+  const result = await configureAttentionPulse(userId, { action: "enable" });
+  const preferences = await listAttentionRecords(userId, "delivery_preference") as DeliveryPreferenceRecord[];
+
+  assert.equal((result as { id: string }).id, `pulse_${userId}`);
+  assert.equal(preferences.length, 1);
+  assert.equal(preferences[0]?.provider, "telegram");
+  assert.equal(preferences[0]?.enabled, true);
+  assert.equal(preferences[0]?.mode, "immediate");
+  assert.equal(preferences[0]?.maxPerDay, 4);
+});
+
+test("re-enabling a pulse preserves an existing owner delivery preference", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910018;
+  await addJob(userId, {
+    id: `pulse_${userId}`, userId, text: "Run the owner's proactive attention pulse.", cron: "0 * * * *",
+    scheduleId: `chuck-attention-pulse-${userId}`, status: "active", kind: "attention_pulse", createdAt: Date.now(),
+  });
+  await createAttentionRecord(userId, "delivery_preference", {
+    provider: "telegram", conversationId: String(userId), enabled: false, mode: "silent", maxPerDay: 1,
+  });
+
+  await configureAttentionPulse(userId, { action: "enable" });
+  const preferences = await listAttentionRecords(userId, "delivery_preference") as DeliveryPreferenceRecord[];
+
+  assert.equal(preferences.length, 1);
+  assert.equal(preferences[0]?.enabled, false);
+  assert.equal(preferences[0]?.mode, "silent");
+  assert.equal(preferences[0]?.maxPerDay, 1);
+});
+
 test("attention pulse bounds context and deduplicates unchanged state", async () => {
   await initStore({ memoryOnly: true });
   const userId = 910005;
@@ -115,6 +165,24 @@ test("attention pulse bounds context and deduplicates unchanged state", async ()
   if (record && "id" in record) await updateAttentionRecord(userId, "open_loop", record.id, { nextAction: "Book the partner review" });
   const changed = await buildAttentionPulsePlan(userId);
   assert.notEqual(changed.dedupeKey, first.dedupeKey);
+});
+
+test("attention pulse preserves a durable trigger recovery without creating duplicate follow-up work", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910016;
+  const recovery = {
+    candidateType: "act" as const, score: 1, status: "pending" as const,
+    sourceTriggerEventId: "trigger-event-unnotified-1",
+    reason: "A Gmail trigger finished, but no private delivery channel was available.",
+    proposedAction: "Review the saved trigger result and notify the owner; never replay its external action.",
+  };
+  const first = await createAttentionRecord(userId, "attention_candidate", recovery);
+  const replay = await createAttentionRecord(userId, "attention_candidate", recovery);
+  assert.equal(first.id, replay.id);
+  const plan = await buildAttentionPulsePlan(userId);
+  assert.equal(plan.hasWork, true);
+  assert.match(plan.prompt, /Review the saved trigger result and notify the owner/);
+  assert.match(plan.prompt, /never replay its external action/);
 });
 
 test("attention pulse finds blocked durable work and due watches without waking paused or future work", async () => {
@@ -171,4 +239,41 @@ test("attention pulse reopens dedupe when a due watch's autonomy profile changes
   assert.equal(watch.status, "active");
   const nextUtcDay = await buildAttentionPulsePlan(userId, now + 24 * 60 * 60 * 1000);
   assert.notEqual(nextUtcDay.dedupeKey, after.dedupeKey);
+});
+
+test("attention pulse covers overdue work, trigger delivery, approvals, meetings, and failed automations safely", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 910019;
+  const now = Date.now();
+  const queuedTask = await createTask(userId, { title: "Overdue report", objective: "Finish the report" });
+  await updateTask(userId, queuedTask.id, { runAt: now - 60_000 });
+  await createTriggerEvent({ eventId: "pulse-trigger-undelivered", userId, triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "private message contents must not enter the pulse prompt", status: "completed", notificationStatus: "unavailable", result: "private provider response", createdAt: now - 1000, updatedAt: now - 500 });
+  const approval = await createApproval({ userId, toolSlug: "CHUCK_SEND_EMAIL", args: { secret: "do not include" }, request: "private approval text", history: [], model: "test/model", channelScope: "private" });
+  await createApproval({ userId, toolSlug: "CHUCK_SEND_EMAIL", args: {}, request: "shared approval", history: [], model: "test/model", channelScope: "shared" });
+  await saveCalendarMeetingPreparation(userId, {
+    id: "cmp_pulse_upcoming", userId, sourceTriggerEventId: "calendar-trigger-pulse", lifecycle: "created", status: "prepared",
+    title: "Quarterly planning", startAt: new Date(now + 30 * 60_000).toISOString(), participants: [], createdAt: now, updatedAt: now,
+  });
+  await addRecallMeeting(userId, {
+    id: "mtg_pulse_followthrough", userId, platform: "zoom", status: "ended", meetingUrlHash: "a".repeat(64), history: [],
+    outcomeStatus: "pending", title: "Customer review", createdAt: now - 60_000, updatedAt: now - 30_000,
+  });
+  const jobId = `job_pulse_failure_${userId}`;
+  await addJob(userId, { id: jobId, userId, text: "Review shipment exceptions", cron: "0 * * * *", scheduleId: `schedule_${userId}`, status: "active", createdAt: now - 86_400_000 });
+  await createJobOccurrence({ id: "occ_pulse_failure", userId, jobId, occurrenceId: "run_1", status: "failed", mode: "act", idempotencyKey: "run_1", error: "provider unavailable", createdAt: now - 1000, updatedAt: now - 500, version: 0 });
+  await addReminder(userId, { id: "rem_pulse_failure", userId, text: "Send the launch follow-up", runAt: now - 60_000, status: "failed", deliveryError: "delivery unavailable", createdAt: now - 120_000 });
+
+  const plan = await buildAttentionPulsePlan(userId, now);
+
+  assert.equal(plan.hasWork, true);
+  assert.match(plan.prompt, /Overdue report/);
+  assert.match(plan.prompt, /GMAIL_NEW_GMAIL_MESSAGE/);
+  assert.match(plan.prompt, /without claiming its contents or replaying the event/);
+  assert.match(plan.prompt, new RegExp(approval.id));
+  assert.match(plan.prompt, /Quarterly planning/);
+  assert.match(plan.prompt, /Customer review/);
+  assert.match(plan.prompt, /Review shipment exceptions/);
+  assert.match(plan.prompt, /Send the launch follow-up/);
+  assert.doesNotMatch(plan.prompt, /private message contents|private provider response|private approval text|shared approval|do not include/);
+  assert.ok(plan.decisionContext.items.some((item) => item.kind === "operational_signal" && item.id === `trigger:pulse-trigger-undelivered`));
 });

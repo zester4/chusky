@@ -8,7 +8,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -677,6 +677,10 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   const invalidMode = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Invalid mode", objective: "Do the task.", definitionOfDone: "The result is verified.", verificationMode: "strcit", requiredEvidence: ["kind:tool_receipt"] }) }));
   assert.equal(invalidMode.status, 400);
   assert.match(await invalidMode.text(), /verificationMode must be either legacy or strict/i);
+  const malformedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Malformed plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: [{ title: "Keep this", objective: "Do this." }, null] }) }));
+  assert.equal(malformedPlan.status, 400, "the API must reject rather than silently drop malformed plan steps");
+  const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 101 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
+  assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over 100 steps");
   const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
   const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(first.status, 201);
@@ -694,15 +698,35 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   const resumed = await api.fetch(new Request(`http://local/v1/missions/${created.id}/resume`, { method: "POST", headers }));
   assert.equal(resumed.status, 200);
   assert.equal((await resumed.json() as { status: string }).status, "running");
+  const resumedAgain = await api.fetch(new Request(`http://local/v1/missions/${created.id}/resume`, { method: "POST", headers }));
+  assert.equal(resumedAgain.status, 200, "resuming a running mission reconciles scheduling idempotently");
   const step = await api.fetch(new Request(`http://local/v1/missions/${created.id}/steps/research/complete`, { method: "POST", headers, body: JSON.stringify({ result: "Sources verified." }) }));
   assert.equal(step.status, 200);
   assert.equal((await step.json() as { currentStepId?: string }).currentStepId, "draft");
-  const replanned = await api.fetch(new Request(`http://local/v1/missions/${created.id}/replan`, { method: "POST", headers, body: JSON.stringify({ reason: "Add an explicit review gate.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }, { id: "review", title: "Review", objective: "Review the brief.", dependsOn: ["draft"] }] }) }));
+  const replanned = await api.fetch(new Request(`http://local/v1/missions/${created.id}/replan`, { method: "POST", headers, body: JSON.stringify({ reason: "Add an explicit review gate.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft-v2", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }, { id: "review", title: "Review", objective: "Review the brief.", dependsOn: ["draft-v2"] }] }) }));
   assert.equal(replanned.status, 200);
-  assert.equal((await replanned.json() as { steps: Array<{ id: string; status: string }> }).steps.find((item) => item.id === "research")?.status, "completed");
+  const replannedMission = await replanned.json() as { steps: Array<{ id: string; status: string; taskId?: string }> };
+  assert.equal(replannedMission.steps.find((item) => item.id === "research")?.status, "completed");
+  assert.equal(replannedMission.steps.find((item) => item.id === "draft-v2")?.status, "running");
+  assert.ok(replannedMission.steps.find((item) => item.id === "draft-v2")?.taskId, "API replan schedules its new ready step");
+  const invalidReplan = await api.fetch(new Request(`http://local/v1/missions/${created.id}/replan`, { method: "POST", headers, body: JSON.stringify({ reason: "Do not silently lose a requested step.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, null] }) }));
+  assert.equal(invalidReplan.status, 400, "the API must reject malformed replans instead of retaining only valid entries");
   const cancelled = await api.fetch(new Request(`http://local/v1/missions/${created.id}/cancel`, { method: "POST", headers }));
   assert.equal(cancelled.status, 200);
   assert.equal((await cancelled.json() as { status: string }).status, "cancelled");
+
+  const strictResponse = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers: { ...headers, "Idempotency-Key": "strict-closeout-api" }, body: JSON.stringify({ title: "Strict closeout", objective: "Complete and verify the work.", definitionOfDone: "A trusted receipt exists.", verificationMode: "strict", requiredEvidence: ["kind:tool_receipt"], steps: [{ id: "action", title: "Perform action", objective: "Perform the action." }] }) }));
+  assert.equal(strictResponse.status, 201);
+  const strictMission = await strictResponse.json() as { id: string; status: string };
+  assert.equal(strictMission.status, "running");
+  const strictStep = await api.fetch(new Request(`http://local/v1/missions/${strictMission.id}/steps/action/complete`, { method: "POST", headers, body: JSON.stringify({ result: "Provider action completed." }) }));
+  assert.equal(strictStep.status, 200);
+  assert.equal((await strictStep.json() as { status: string }).status, "blocked", "strict closeout blocks until trusted evidence is present");
+  const missionOwnerId = Number.parseInt(createHash("sha256").update("sdk:root:mission-owner").digest("hex").slice(0, 12), 16);
+  await recordTrustedMissionEvidence(missionOwnerId, strictMission.id, [{ id: "trusted_receipt", kind: "tool_receipt", summary: "Provider returned a successful receipt.", source: "test-provider", ref: "receipt_123", verified: true, verifiedBy: "system" }]);
+  const verified = await api.fetch(new Request(`http://local/v1/missions/${strictMission.id}/verify`, { method: "POST", headers, body: JSON.stringify({}) }));
+  assert.equal(verified.status, 200);
+  assert.equal((await verified.json() as { status: string }).status, "completed", "API verification closes a mission when all steps and trusted criteria are satisfied");
 });
 
 test("context, outcome, evidence, and A2A surfaces share the same owner-scoped runtime", async () => {
@@ -1452,6 +1476,8 @@ test("linked dashboard memory and account overview share one active, owner-scope
   assert.equal(await redeemWebTelegramLinkCode(link.code, 820006), "linked");
   await upsertMemory(820006, { category: "fact", key: "preferred_crm", value: "HubSpot", confidence: 1, sensitivity: "normal", source: "telegram" });
   await upsertMemory(820006, { category: "fact", key: "expired_fact", value: "must not be shown", confidence: 1, sensitivity: "normal", source: "telegram", expiresAt: Date.now() - 1 });
+  await createTriggerEvent({ eventId: "web-trigger-event-owned", userId: 820006, triggerSlug: "GMAIL_NEW_GMAIL_MESSAGE", summary: "subject: Project question", status: "completed", notificationStatus: "unavailable", result: "I replied in the original thread.", createdAt: Date.now(), updatedAt: Date.now() });
+  await createTriggerEvent({ eventId: "web-trigger-event-foreign", userId: 820007, triggerSlug: "SLACK_MESSAGE", summary: "private other account", status: "completed", createdAt: Date.now(), updatedAt: Date.now() });
 
   const api = app();
   const headers = { "X-Test-Web-User": "memory-owner" };
@@ -1460,12 +1486,14 @@ test("linked dashboard memory and account overview share one active, owner-scope
   assert.equal(listed.status, 200);
   assert.equal(overview.status, 200);
   const listData = (await listed.json() as { data: Array<{ id: string; key: string; source?: string }> }).data;
-  const overviewBody = await overview.json() as { memory: Array<{ id: string; key: string; source?: string }>; telegramLink: { linked: boolean } };
+  const overviewBody = await overview.json() as { memory: Array<{ id: string; key: string; source?: string }>; telegramLink: { linked: boolean }; triggerEvents: Array<{ id: string; result?: string; notificationStatus: string }> };
   const overviewData = overviewBody.memory;
   assert.equal(overviewBody.telegramLink.linked, true);
   assert.deepEqual(overviewData.map(({ id, key, source }) => ({ id, key, source })), listData.map(({ id, key, source }) => ({ id, key, source })));
   assert.equal(listData.some((item) => item.key === "expired_fact"), false);
   assert.equal(overviewData.some((item) => item.key === "expired_fact"), false);
+  assert.deepEqual(overviewBody.triggerEvents.map(({ id, result, notificationStatus }) => ({ id, result, notificationStatus })), [{ id: "web-trigger-event-owned", result: "I replied in the original thread.", notificationStatus: "unavailable" }]);
+  assert.equal(JSON.stringify(overviewBody).includes("web-trigger-event-foreign"), false);
 });
 
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {

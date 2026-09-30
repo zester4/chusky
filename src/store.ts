@@ -1261,7 +1261,7 @@ export interface OpenLoopRecord {
 export interface AttentionCandidateRecord {
   id: string; userId: number; candidateType: "nudge" | "digest" | "prepare" | "ask" | "act";
   status: "pending" | "delivered" | "accepted" | "dismissed" | "snoozed" | "expired";
-  observationId?: string; openLoopId?: string; score: number; reason: string;
+  observationId?: string; openLoopId?: string; sourceTriggerEventId?: string; score: number; reason: string;
   proposedAction?: string; channel?: ChannelProvider; availableAt?: number; expiresAt?: number;
   createdAt: number; updatedAt: number;
 }
@@ -1354,6 +1354,8 @@ export interface TriggerEventRecord {
   operatingCommitmentId?: string;
   result?: string;
   error?: string;
+  /** Delivery is separate from processing: a missing channel must not erase a completed result. */
+  notificationStatus?: "pending" | "delivered" | "unavailable" | "failed";
   createdAt: number;
   updatedAt: number;
 }
@@ -1585,6 +1587,7 @@ interface Backend {
   createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord>;
   getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined>;
   updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined>;
+  listTriggerEvents(userId: number, limit?: number): Promise<TriggerEventRecord[]>;
   getDaytonaWorkspace(userId: number): Promise<DaytonaWorkspaceRecord | undefined>;
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
@@ -1860,6 +1863,7 @@ class RedisBackend implements Backend {
   private tregSpendKey = (userId: number, dayKey: string) => `chuck:treg:spend:${userId}:${dayKey}`;
   private tregReceiptKey = (userId: number) => `chuck:treg:receipts:${userId}`;
   private triggerEventKey = (id: string) => `chuck:trigger:event:${createHash("sha256").update(id).digest("hex")}`;
+  private triggerEventsIndexKey = (userId: number) => `chuck:user:${userId}:trigger-events`;
   private recallChatEventKey = (id: string) => `chuck:recall:chat-event:${createHash("sha256").update(id).digest("hex")}`;
   private recallVisualDigest = (userId: number, meetingId: string) => createHash("sha256").update(`${userId}:${meetingId}`).digest("hex");
   private recallVisualFrameKey = (userId: number, meetingId: string) => `chuck:recall:visual:frame:${this.recallVisualDigest(userId, meetingId)}`;
@@ -2161,7 +2165,13 @@ class RedisBackend implements Backend {
 
   async createTriggerEvent(record: TriggerEventRecord): Promise<TriggerEventRecord> {
     const key = this.triggerEventKey(record.eventId);
-    await this.r.set(key, JSON.stringify(record), "EX", 30 * 24 * 60 * 60, "NX");
+    const index = this.triggerEventsIndexKey(record.userId);
+    const transaction = this.r.multi();
+    transaction.set(key, JSON.stringify(record), "EX", 30 * 24 * 60 * 60, "NX");
+    transaction.zremrangebyscore(index, "-inf", Date.now() - 30 * 24 * 60 * 60 * 1000);
+    transaction.zadd(index, record.createdAt, record.eventId);
+    transaction.expire(index, 30 * 24 * 60 * 60);
+    await transaction.exec();
     return (await this.getTriggerEvent(record.eventId)) ?? record;
   }
   async getTriggerEvent(eventId: string): Promise<TriggerEventRecord | undefined> {
@@ -2173,8 +2183,20 @@ class RedisBackend implements Backend {
     const current = await this.getTriggerEvent(eventId);
     if (!current) return undefined;
     const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
-    await this.r.set(this.triggerEventKey(eventId), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    const index = this.triggerEventsIndexKey(next.userId);
+    const transaction = this.r.multi();
+    transaction.set(this.triggerEventKey(eventId), JSON.stringify(next), "EX", 30 * 24 * 60 * 60);
+    transaction.zremrangebyscore(index, "-inf", Date.now() - 30 * 24 * 60 * 60 * 1000);
+    transaction.zadd(index, next.updatedAt, eventId);
+    transaction.expire(index, 30 * 24 * 60 * 60);
+    await transaction.exec();
     return next;
+  }
+  async listTriggerEvents(userId: number, limit = 50): Promise<TriggerEventRecord[]> {
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit) || 1));
+    const ids = await this.r.zrevrange(this.triggerEventsIndexKey(userId), 0, boundedLimit - 1);
+    const records = await Promise.all(ids.map((id) => this.getTriggerEvent(id)));
+    return records.filter((record): record is TriggerEventRecord => Boolean(record && record.userId === userId)).sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async createRecallChatEvent(record: RecallChatEventRecord): Promise<RecallChatEventRecord> {
@@ -3310,6 +3332,10 @@ class MemoryBackend implements Backend {
     const next = { ...current, ...patch, eventId: current.eventId, updatedAt: Date.now() };
     this.triggerEvents.set(eventId, next);
     return next;
+  }
+  async listTriggerEvents(userId: number, limit = 50) {
+    return [...this.triggerEvents.values()].filter((record) => record.userId === userId)
+      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.max(1, Math.min(200, Math.floor(limit))));
   }
   async createRecallChatEvent(record: RecallChatEventRecord) {
     const existing = await this.getRecallChatEvent(record.eventId);
@@ -5696,7 +5722,32 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string }>;
 };
 
+function validateMissionStepGraph(steps: Array<{ id: string; dependsOn: string[] }>, completedIds: ReadonlySet<string> = new Set()): void {
+  const known = new Set(steps.map((step) => step.id));
+  for (const step of steps) {
+    if (step.dependsOn.length > 20) throw new Error(`Mission step ${step.id} has more than 20 dependencies`);
+    for (const dependency of step.dependsOn) {
+      if (typeof dependency !== "string" || !dependency.trim()) throw new Error(`Mission step ${step.id} has an invalid dependency`);
+      if (dependency === step.id) throw new Error(`Mission step ${step.id} cannot depend on itself`);
+      if (!known.has(dependency)) throw new Error(`Mission step ${step.id} references unknown dependency ${dependency}`);
+    }
+  }
+  const resolved = new Set(completedIds);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const step of steps) if (!resolved.has(step.id) && step.dependsOn.every((dependency) => resolved.has(dependency))) {
+      resolved.add(step.id);
+      changed = true;
+    }
+  }
+  if (steps.some((step) => !resolved.has(step.id))) throw new Error("Mission steps contain a dependency cycle");
+}
+
 export async function createMission(userId: number, input: MissionCreateInput): Promise<MissionRecord> {
+  if (!input.title?.trim() || input.title.length > 240) throw new Error("Mission title is required and must be 240 characters or fewer");
+  if (!input.objective?.trim() || input.objective.length > 8000) throw new Error("Mission objective is required and must be 8000 characters or fewer");
+  if (!input.definitionOfDone?.trim() || input.definitionOfDone.length > 4000) throw new Error("Mission definitionOfDone is required and must be 4000 characters or fewer");
   if (input.id !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(input.id)) throw new Error("Mission ID is invalid");
   const requiredEvidence = [...new Set((input.requiredEvidence ?? [])
     .map((item) => typeof item === "string" ? item.trim().slice(0, 500) : "")
@@ -5704,6 +5755,13 @@ export async function createMission(userId: number, input: MissionCreateInput): 
   const verificationMode = input.verificationMode ?? (requiredEvidence.length > 0 ? "strict" : "legacy");
   if (verificationMode === "strict" && requiredEvidence.length === 0) {
     throw new Error("Strict mission verification requires at least one non-empty required evidence criterion.");
+  }
+  if (input.steps !== undefined && !Array.isArray(input.steps)) throw new Error("Mission steps must be an array");
+  if (input.steps && input.steps.length > 100) throw new Error("Mission plans can contain at most 100 steps");
+  if (input.steps?.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every mission step must be an object");
+  for (const [index, step] of (input.steps ?? []).entries()) {
+    if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Mission step ${index + 1} has an invalid ID`);
+    if (step.retryLimit !== undefined && (!Number.isInteger(step.retryLimit) || step.retryLimit < 0 || step.retryLimit > 20)) throw new Error(`Mission step ${index + 1} has an invalid retry limit`);
   }
   const idempotencyKey = input.idempotencyKey?.slice(0, 200);
   const missions = (await backend.getMissions(userId)).map(normalizeMission);
@@ -5716,23 +5774,20 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     if (existing) return existing;
   }
   const now = Date.now();
-  const rawSteps = Array.isArray(input.steps) && input.steps.length ? input.steps.slice(0, 100) : [{ title: input.title, objective: input.objective }];
+  const rawSteps = Array.isArray(input.steps) && input.steps.length ? input.steps : [{ title: input.title, objective: input.objective }];
   const stepIds = rawSteps.map((step) => step.id?.trim() || `mstep_${randomUUID()}`);
   if (new Set(stepIds).size !== stepIds.length) throw new Error("Mission step IDs must be unique");
-  const knownStepIds = new Set(stepIds);
   const steps = rawSteps.map((step, index) => {
-    const dependsOn = [...new Set((step.dependsOn ?? []).filter((dependency) => knownStepIds.has(dependency) && dependency !== stepIds[index]))];
-    return { id: stepIds[index], title: step.title, objective: step.objective, status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}) };
+    if (!step.title?.trim() || step.title.length > 240) throw new Error(`Mission step ${stepIds[index]} title is required and must be 240 characters or fewer`);
+    if (!step.objective?.trim() || step.objective.length > 4000) throw new Error(`Mission step ${stepIds[index]} objective is required and must be 4000 characters or fewer`);
+    const dependencies = step.dependsOn ?? [];
+    if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepIds[index]} has invalid dependencies`);
+    const dependsOn = [...new Set(dependencies.map((dependency) => dependency.trim()))];
+    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}) };
   });
+  validateMissionStepGraph(steps);
   const ready = steps.find((step) => step.dependsOn.length === 0);
   if (!ready) throw new Error("Mission steps must include at least one dependency-free starting step");
-  const resolvable = new Set<string>();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const step of steps) if (!resolvable.has(step.id) && step.dependsOn.every((dependency) => resolvable.has(dependency))) { resolvable.add(step.id); changed = true; }
-  }
-  if (resolvable.size !== steps.length) throw new Error("Mission steps contain a dependency cycle");
   const stableId = idempotencyKey
     ? `mis_${createHash("sha256").update(`mission:${userId}:${idempotencyKey}`).digest("hex").slice(0, 48)}`
     : undefined;
@@ -5822,27 +5877,50 @@ export async function releaseMissionLease(userId: number, id: string, token: str
   return undefined;
 }
 
+export class MissionReplanConflictError extends Error {
+  constructor(readonly completedStepIds: string[]) {
+    super("A replan cannot remove a completed mission step");
+    this.name = "MissionReplanConflictError";
+  }
+}
+
 export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>, reason: string): Promise<MissionRecord | undefined> {
+  if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > 100) throw new Error("Replanned missions require between 1 and 100 steps");
+  if (!reason?.trim() || reason.length > 2000) throw new Error("A replan reason is required and must be 2000 characters or fewer");
+  if (rawSteps.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every replanned mission step must be an object");
+  for (const [index, step] of rawSteps.entries()) {
+    if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Replanned mission step ${index + 1} has an invalid ID`);
+    if (step.retryLimit !== undefined && (!Number.isInteger(step.retryLimit) || step.retryLimit < 0 || step.retryLimit > 20)) throw new Error(`Replanned mission step ${index + 1} has an invalid retry limit`);
+    if (step.dependsOn !== undefined && (!Array.isArray(step.dependsOn) || step.dependsOn.length > 20 || step.dependsOn.some((dependency) => typeof dependency !== "string" || !dependency.trim()))) throw new Error(`Replanned mission step ${index + 1} has invalid dependencies`);
+  }
+  const stepIds = rawSteps.map((step) => step.id?.trim() || `mstep_${randomUUID()}`);
+  if (new Set(stepIds).size !== stepIds.length) throw new Error("Replanned mission steps must have unique IDs");
   return mutateMission(userId, id, (mission) => {
     if (["completed", "cancelled"].includes(mission.status)) return undefined;
     const now = Date.now();
-    const steps: MissionStepRecord[] = rawSteps.slice(0, 100).map((step) => {
-      const stepId = step.id?.trim() || `mstep_${randomUUID()}`;
+    const steps: MissionStepRecord[] = rawSteps.map((step, index) => {
+      const stepId = stepIds[index];
       const previous = mission.steps.find((candidate) => candidate.id === stepId);
-      return { id: stepId, title: step.title, objective: step.objective, status: previous?.status === "completed" ? "completed" as const : "pending" as const, dependsOn: [...new Set((step.dependsOn ?? []).filter((dependency) => dependency !== stepId))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result };
+      if (previous?.status === "completed") return { ...previous, dependsOn: [...previous.dependsOn] };
+      if (!step.title?.trim() || step.title.length > 240) throw new Error(`Mission step ${stepId} title is required and must be 240 characters or fewer`);
+      if (!step.objective?.trim() || step.objective.length > 4000) throw new Error(`Mission step ${stepId} objective is required and must be 4000 characters or fewer`);
+      const dependencies = step.dependsOn ?? [];
+      if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
+      return { id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result };
     });
-    if (!steps.length || new Set(steps.map((step) => step.id)).size !== steps.length) throw new Error("Replanned mission steps must have unique IDs");
-    const known = new Set(steps.map((step) => step.id));
-    for (const step of steps) step.dependsOn = step.dependsOn.filter((dependency) => known.has(dependency));
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
-    if (![...completedIds].every((stepId) => steps.some((step) => step.id === stepId && step.status === "completed"))) throw new Error("A replan cannot remove a completed mission step");
-    const resolvable = new Set<string>();
-    let changed = true;
-    while (changed) { changed = false; for (const step of steps) if (!resolvable.has(step.id) && step.dependsOn.every((dependency) => resolvable.has(dependency) || completedIds.has(dependency))) { resolvable.add(step.id); changed = true; } }
-    if (resolvable.size !== steps.length) throw new Error("Replanned mission steps contain a dependency cycle");
-    const next = steps.find((step) => step.status === "pending" && step.dependsOn.every((dependency) => completedIds.has(dependency) || steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
-    if (next) next.status = "running";
-    return { steps, currentStepId: next?.id, nextAction: next ? `Continue with replanned step: ${next.title}.` : "Verify the replanned definition of done, then complete the mission.", events: [...mission.events, missionEvent("checkpointed", `Mission replanned: ${reason}`)] };
+    const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
+    if (removedCompletedIds.length) throw new MissionReplanConflictError(removedCompletedIds.sort());
+    validateMissionStepGraph(steps, completedIds);
+    const ready = steps.filter((step) => step.status === "pending" && step.dependsOn.every((dependency) => completedIds.has(dependency) || steps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+    for (const step of ready) {
+      const index = steps.findIndex((candidate) => candidate.id === step.id);
+      if (index >= 0) steps[index] = { ...steps[index], status: "running", attempts: steps[index].attempts + 1, updatedAt: now };
+    }
+    const activeStepIds = ready.map((step) => step.id);
+    const current = activeStepIds[0];
+    const currentTitle = current ? steps.find((step) => step.id === current)?.title : undefined;
+    return { steps, activeStepIds, currentStepId: current, nextAction: current ? `Continue with replanned ${activeStepIds.length > 1 ? `${activeStepIds.length} parallel steps` : `step: ${currentTitle}`}.` : "Verify the replanned definition of done, then complete the mission.", events: [...mission.events, missionEvent("checkpointed", `Mission replanned: ${reason}`)] };
   });
 }
 
@@ -5856,7 +5934,7 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     // replay into a failing tool call.  A cancelled mission is deliberately
     // never revived, and unknown/pending steps still fail closed below.
     if (step?.status === "completed" && mission.status !== "cancelled") return mission;
-    if (["completed", "cancelled"].includes(mission.status)) return undefined;
+    if (mission.status !== "running") return undefined;
     // Re-evaluate the active step and every dependency after each CAS retry.
     // This prevents a stale worker from completing a step that another worker
     // has already advanced or from bypassing the dependency graph.
@@ -5943,9 +6021,9 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
  * evidence is still missing; callers handling a manual step completion can
  * leave the mission running so evidence can still be attached before closeout.
  */
-export async function finalizeMissionIfReady(userId: number, id: string, options: { blockOnUnresolved?: boolean } = {}): Promise<MissionRecord | undefined> {
+export async function finalizeMissionIfReady(userId: number, id: string, options: { blockOnUnresolved?: boolean; result?: string } = {}): Promise<MissionRecord | undefined> {
   let mission = await getMission(userId, id);
-  if (!mission || ["completed", "cancelled"].includes(mission.status) || mission.steps.some((step) => step.status !== "completed")) return mission;
+  if (!mission || mission.status !== "running" || mission.steps.some((step) => step.status !== "completed")) return mission;
 
   if (mission.verification?.mode === "strict") {
     mission = await verifyMission(userId, id) ?? mission;
@@ -5956,8 +6034,11 @@ export async function finalizeMissionIfReady(userId: number, id: string, options
     }
   }
 
-  const result = mission.result ?? mission.steps.map((step) => `${step.title}: ${step.result ?? "completed"}`).join("\n");
-  return await completeMission(userId, id, result.slice(0, 12000)) ?? mission;
+  const result = options.result?.trim() || mission.result || mission.steps.map((step) => `${step.title}: ${step.result ?? "completed"}`).join("\n");
+  const completed = await completeMission(userId, id, result.slice(0, 12000));
+  // Another worker may win the terminal compare-and-swap between our read and
+  // closeout. Return the persisted winner instead of a stale running snapshot.
+  return completed ?? await getMission(userId, id) ?? mission;
 }
 
 export async function repairMission(userId: number, id: string, input: { reason: string; nextAction?: string; replan?: boolean }): Promise<MissionRecord | undefined> {
@@ -6064,8 +6145,19 @@ export async function resumeMissionFromApproval(userId: number, id: string, appr
 }
 
 export async function waitMission(userId: number, id: string, waiting: MissionRecord["waiting"], checkpoint?: string, nextAction?: string): Promise<MissionRecord | undefined> {
+  const initial = await getMission(userId, id);
+  if (!initial) return undefined;
+  if (initial.status === "waiting") {
+    const current = initial.waiting;
+    const sameWait = current?.kind === waiting?.kind && current?.stepId === waiting?.stepId && (
+      current?.kind === "provider_event" && waiting?.kind === "provider_event" && current.provider === waiting.provider && current.providerEventId === waiting.providerEventId
+      || current?.kind === "approval" && waiting?.kind === "approval" && current.key === waiting.key
+      || current?.kind === "timer" && waiting?.kind === "timer" && current.runAt === waiting.runAt
+    );
+    return sameWait ? initial : undefined;
+  }
   return mutateMission(userId, id, (mission) => {
-    if (!["running", "waiting"].includes(mission.status)) return undefined;
+    if (mission.status !== "running") return undefined;
     const message = nextAction ?? "Mission is waiting for an external event.";
     const event = waiting?.kind === "approval" && typeof waiting.key === "string" && waiting.key.length > 0
       ? missionEvent("approval_waiting", message, Date.now(), waiting.stepId, { approvalId: waiting.key })
@@ -6088,7 +6180,7 @@ export async function resumeMissionFromProviderEvent(userId: number, id: string,
 }
 
 export async function checkpointMission(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<MissionRecord | undefined> {
-  return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "running", checkpoint: checkpoint.slice(0, 8000), nextAction: nextAction?.slice(0, 2000), waiting: undefined, events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")] });
+  return mutateMission(userId, id, (mission) => mission.status !== "running" ? undefined : { checkpoint: checkpoint.slice(0, 8000), nextAction: nextAction?.slice(0, 2000), events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")] });
 }
 
 export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number }): Promise<MissionRecord | undefined> {
@@ -6107,8 +6199,9 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
 
 export async function completeMission(userId: number, id: string, result: string): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
-    if (["completed", "cancelled"].includes(mission.status)) return undefined;
-    if (mission.verification?.mode === "strict" && (!mission.verification.verified || mission.steps.some((step) => step.status !== "completed"))) return undefined;
+    if (mission.status !== "running") return undefined;
+    if (mission.steps.some((step) => step.status !== "completed")) return undefined;
+    if (mission.verification?.mode === "strict" && !mission.verification.verified) return undefined;
     const now = Date.now();
     return { status: "completed", result: result.slice(0, 12000), nextAction: undefined, waiting: undefined, error: undefined, completedAt: now, events: [...mission.events, missionEvent("completed", "Mission completed", now)] };
   });
@@ -6396,6 +6489,9 @@ export async function getTriggerEvent(eventId: string): Promise<TriggerEventReco
 export async function updateTriggerEvent(eventId: string, patch: Partial<TriggerEventRecord>): Promise<TriggerEventRecord | undefined> {
   return backend.updateTriggerEvent(eventId, patch);
 }
+export async function listTriggerEvents(userId: number, limit = 50): Promise<TriggerEventRecord[]> {
+  return backend.listTriggerEvents(userId, limit);
+}
 
 export async function addReminder(uid: number, reminder: ReminderRecord): Promise<void> {
   await backend.addReminder(uid, reminder, 80);
@@ -6403,6 +6499,11 @@ export async function addReminder(uid: number, reminder: ReminderRecord): Promis
 
 export async function listReminders(uid: number): Promise<ReminderRecord[]> {
   return (await backend.getReminders(uid)).filter((r) => r.status === "scheduled" || r.status === "waiting" || r.status === "paused").sort((a, b) => a.runAt - b.runAt);
+}
+
+/** Owner-scoped reminder history for diagnostics; normal user listings stay active-only. */
+export async function listAllReminders(uid: number): Promise<ReminderRecord[]> {
+  return (await backend.getReminders(uid)).slice(-100).sort((a, b) => b.runAt - a.runAt);
 }
 
 export async function getReminder(uid: number, id: string): Promise<ReminderRecord | undefined> {
@@ -7083,7 +7184,7 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
     case "attention-candidates": return {
       ...base, candidateType: attentionStatus(raw.candidateType, ["nudge", "digest", "prepare", "ask", "act"], "nudge") as AttentionCandidateRecord["candidateType"],
       status: attentionStatus(raw.status, ["pending", "delivered", "accepted", "dismissed", "snoozed", "expired"], "pending") as AttentionCandidateRecord["status"],
-      observationId: attentionText(raw.observationId, "observationId", 160), openLoopId: attentionText(raw.openLoopId, "openLoopId", 160), score: attentionNumber(raw.score, "score", 0.5, 0, 1),
+      observationId: attentionText(raw.observationId, "observationId", 160), openLoopId: attentionText(raw.openLoopId, "openLoopId", 160), sourceTriggerEventId: attentionText(raw.sourceTriggerEventId, "sourceTriggerEventId", 200), score: attentionNumber(raw.score, "score", 0.5, 0, 1),
       reason: attentionText(raw.reason, "reason", 1000, true)!, proposedAction: attentionText(raw.proposedAction, "proposedAction"), channel: attentionProvider(raw.channel, "channel"),
       availableAt: attentionTimestamp(raw.availableAt, "availableAt"), expiresAt: attentionTimestamp(raw.expiresAt, "expiresAt"),
     };
@@ -7161,7 +7262,8 @@ export async function createAttentionRecord(userId: number, kind: AttentionEntit
     const normalized = records.map((item) => safeAttentionRecord(collection, item)).filter((item): item is AttentionRecord => Boolean(item));
     const dedupeKey = kind === "observation" ? (created as ObservationRecord).dedupeKey : undefined;
     const preference = kind === "delivery_preference" ? created as DeliveryPreferenceRecord : undefined;
-    const existing = normalized.find((item) => (dedupeKey && kind === "observation" && (item as ObservationRecord).dedupeKey === dedupeKey) || (preference && kind === "delivery_preference" && (item as DeliveryPreferenceRecord).provider === preference.provider && (item as DeliveryPreferenceRecord).conversationId === preference.conversationId));
+    const triggerEventId = kind === "attention_candidate" ? (created as AttentionCandidateRecord).sourceTriggerEventId : undefined;
+    const existing = normalized.find((item) => (dedupeKey && kind === "observation" && (item as ObservationRecord).dedupeKey === dedupeKey) || (preference && kind === "delivery_preference" && (item as DeliveryPreferenceRecord).provider === preference.provider && (item as DeliveryPreferenceRecord).conversationId === preference.conversationId) || (triggerEventId && kind === "attention_candidate" && (item as AttentionCandidateRecord).sourceTriggerEventId === triggerEventId));
     if (existing) { result = existing; return normalized; }
     return [...normalized, created].slice(-200);
   });

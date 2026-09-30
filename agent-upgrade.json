@@ -1,11 +1,11 @@
 {
-  "id": "release-4.29.0",
-  "version": "4.29.0",
+  "id": "release-4.30.0",
+  "version": "4.30.0",
   "title": "Chusky has been upgraded",
   "bullets": [
     "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
-    "Bind each event to an exact active connected account, configure fields from provider metadata, and save owner-authored handling instructions for future events.",
-    "Trigger setup rejects credential-shaped config, scopes trigger and instruction state to its owner, and retains normal approval and safety policy for event-driven actions."
+    "Every event now keeps its owner-scoped result and notification state in the dashboard, even when no private Telegram destination is linked; unresolved delivery creates durable Attention Pulse follow-up.",
+    "Trigger work preserves approval and safety policy, and recovery never blindly replays the original external action."
   ],
-  "createdAt": "2026-09-29T19:51:32.225Z"
+  "createdAt": "2026-09-30T04:08:22.735Z"
 }

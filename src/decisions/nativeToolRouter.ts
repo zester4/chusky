@@ -58,6 +58,9 @@ const CORE_TOOLS = new Set([
   "CHUCK_CONTEXT_SEARCH",
   "CHUCK_AUTONOMY_STATUS",
   "CHUCK_TASK_WAIT",
+  // The owner and scheduled attention worker must be able to inspect the
+  // durable preference that governs whether and how a pulse is delivered.
+  "CHUCK_ATTENTION_STATE",
 ]);
 
 const STOP_WORDS = new Set([
@@ -159,7 +162,9 @@ function candidateSet(tools: ToolSchema[], query: string): { candidates: NativeT
   const core = available.filter((item) => item.alwaysAvailable);
   const selected = [...core, ...scored.map((entry) => entry.item)]
     .filter((item, index, all) => all.findIndex((candidate) => candidate.slug === item.slug) === index)
-    .slice(0, max);
+    // Core tools are a contract, not candidates to evict when the configured
+    // supplemental-tool budget is smaller than the core set.
+    .slice(0, Math.max(max, core.length));
   return { candidates: selected, matched: true };
 }
 

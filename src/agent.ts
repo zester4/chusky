@@ -659,13 +659,13 @@ export async function dispatchComposioActionWithImageContext(
   }
   if (!target && input.invokedSlug !== "COMPOSIO_EXECUTE_TOOL" && input.invokedSlug !== "COMPOSIO_MULTI_EXECUTE_TOOL") return undefined;
   if (target === "multi_action_batch") {
-    throw new Error("The request includes an image attachment, but the connected-app call grouped several actions together. Split the image post or email into its own action; no batched actions were attempted.");
+    throw new Error("This image-bearing request cannot use COMPOSIO_MULTI_EXECUTE_TOOL. No connected-app provider action was attempted. Retry with COMPOSIO_EXECUTE_TOOL for one exact provider action and schema-valid arguments; preserve the normal approval and account-scope checks, then verify the provider result.");
   }
   if (target?.toolSlug === "SHOPIFY_GRAPH_QL_PRODUCTS" && target.arguments.operation !== "create_media") return undefined;
   if (target && !isPotentialImageDestinationAction(target.toolSlug)) return undefined;
   if ("ambiguous" in input.selection) throw new Error(`${input.selection.reason} No connected-app action was attempted.`);
   if (!target && (input.invokedSlug === "COMPOSIO_EXECUTE_TOOL" || input.invokedSlug === "COMPOSIO_MULTI_EXECUTE_TOOL")) {
-    throw new Error("The connected-app action could not be identified from the execution request. Ask for a direct action call before attaching the image; no provider action was attempted.");
+    throw new Error("The connected-app action could not be identified from the execution request. No provider action was attempted. Retry through COMPOSIO_EXECUTE_TOOL with one exact provider action slug and schema-valid arguments; do not batch or use a text-only fallback.");
   }
   if (!target) return undefined;
   if (input.deniedToolSlugs?.has(target.toolSlug)) throw new Error(`The ${target.toolSlug} action is denied for this run; no image transfer or provider action was attempted.`);
@@ -1906,6 +1906,14 @@ function safeToolActivitySummary(result: unknown): string {
   if (Array.isArray(result)) return `${result.length} ${result.length === 1 ? "item" : "items"} returned`;
   if (result && typeof result === "object") {
     const record = result as Record<string, unknown>;
+    const closeout = record.closeout && typeof record.closeout === "object" && !Array.isArray(record.closeout)
+      ? record.closeout as Record<string, unknown>
+      : undefined;
+    if (record.operation === "mission_replan" && record.status === "rejected") return "Mission replan rejected; completed steps were preserved";
+    if (closeout?.status === "completed") return closeout.alreadyCompleted === true ? "Mission already completed" : "Mission completed";
+    if (closeout?.status === "blocked") return "Mission blocked; review its listed evidence or next action";
+    if (closeout?.status === "not_ready") return "Mission is not ready; remaining steps are listed";
+    if (record.status === "completed" && Array.isArray(record.steps)) return "Mission completed";
     for (const key of ["items", "results", "files", "rows", "events", "accounts", "data"]) {
       if (Array.isArray(record[key])) {
         const count = (record[key] as unknown[]).length;
@@ -2152,6 +2160,7 @@ export async function runAgent(
     && availableTools.some((tool) => ["CHUCK_CREATE_PDF", "CHUCK_CREATE_DOCUMENT", "CHUCK_CREATE_PRESENTATION", "CHUCK_CREATE_SPREADSHEET", "CHUCK_ARTIFACT"].includes(toolName(tool)));
   let malformedToolCallPending = false;
   let meetingCalendarAvailabilityChecked = false;
+  let imageComposioDirectActionGuidanceAdded = false;
 
   if (!options?.ephemeral && !voiceTurn) {
     const capabilityModel = model.replace(/^~/, "");
@@ -2490,9 +2499,19 @@ export async function runAgent(
 
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
     const roundMediaSelection = selectMediaForAction(generatedReferenceImages.length);
+    if (roundMediaSelection && !imageComposioDirectActionGuidanceAdded) {
+      messages.splice(2, 0, {
+        role: "system",
+        content: "IMAGE ATTACHMENT EXECUTION: When a connected-app action must carry the selected image, use a single connected-app action through COMPOSIO_EXECUTE_TOOL with the exact action slug and schema-valid arguments. COMPOSIO_MULTI_EXECUTE_TOOL is unavailable for image-bearing actions because its batch path cannot stage the image. If a batch is attempted, no provider action ran; recover with the direct action when it is available. Keep normal approval, account-scope, and verification requirements. Never fall back to a text-only send or post.",
+      });
+      imageComposioDirectActionGuidanceAdded = true;
+    }
     const routedTools = nativeToolRoute.tools;
+    const imageSafeTools = roundMediaSelection
+      ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
+      : routedTools;
     const modelAvailableTools = roundMediaSelection
-      ? routedTools.map((tool) => {
+      ? imageSafeTools.map((tool) => {
         const slug = toolSchemaName(tool);
         const schema = tool?.function?.parameters;
         if (!slug || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_")
@@ -2637,7 +2656,19 @@ export async function runAgent(
         // supplied (an empty allowlist means no tools at all).
         const toolIsAllowed = modelAvailableTools.some((tool) => toolSchemaName(tool) === slug)
           && (!allow || allow.has(slug));
-        if (!toolIsAllowed) throw new Error(`Tool ${slug} is not enabled for this run.`);
+        if (!toolIsAllowed) {
+          const directImageActionAvailable = roundMediaSelection
+            && slug === "COMPOSIO_MULTI_EXECUTE_TOOL"
+            && modelAvailableTools.some((tool) => toolSchemaName(tool) === "COMPOSIO_EXECUTE_TOOL")
+            && (!allow || allow.has("COMPOSIO_EXECUTE_TOOL"))
+            && !deny.has("COMPOSIO_EXECUTE_TOOL");
+          if (roundMediaSelection && slug === "COMPOSIO_MULTI_EXECUTE_TOOL") {
+            throw new Error(directImageActionAvailable
+              ? "This image-bearing action cannot use COMPOSIO_MULTI_EXECUTE_TOOL. No connected-app provider action was attempted. Retry with COMPOSIO_EXECUTE_TOOL for one exact provider action and schema-valid arguments; preserve the normal approval and account-scope checks, then verify the provider result."
+              : "This image-bearing action cannot use COMPOSIO_MULTI_EXECUTE_TOOL. No connected-app provider action was attempted, and direct COMPOSIO_EXECUTE_TOOL is not available to this run. Use an allowed single-action path or request the required access; do not send or post a text-only fallback.");
+          }
+          throw new Error(`Tool ${slug} is not enabled for this run.`);
+        }
         const previousResult = toolResultsByCallId.get(call.id);
         if (previousResult !== undefined) {
           messages.push({ role: "tool", tool_call_id: call.id, content: previousResult });

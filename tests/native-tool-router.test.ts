@@ -15,6 +15,7 @@ function withConfig(overrides: Record<string, unknown>): () => void {
 function tools(): any[] {
   return [
     { type: "function", function: { name: "CHUCK_TOOL_PREFLIGHT", description: "Check the next tool call before execution", parameters: { type: "object", properties: {} } } },
+    { type: "function", function: { name: "CHUCK_ATTENTION_STATE", description: "Read or explicitly update durable attention state and delivery preferences", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_CREATE_PDF", description: "Create a verified PDF report", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_BROWSER", description: "Browse a website, inspect pages, and fill forms", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_SEARCH_MEMORY", description: "Search the owner's saved memory", parameters: { type: "object", properties: {} } } },
@@ -49,6 +50,17 @@ test("Link outcome reporting is published to native routing as a shopping write 
   assert.equal(descriptor.bundle, "shopping");
   assert.equal(descriptor.risk, "write");
   assert.equal(descriptor.alwaysAvailable, false);
+});
+
+test("enforce routing always retains attention state, even below the core-tool candidate budget", async () => {
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 4, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
+  try {
+    const route = await computeNativeToolRoute("Create a PDF report", tools(), { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool() }) });
+    const names = route.tools.map((tool: any) => tool.function.name);
+    assert.equal(route.source, "jev");
+    assert.ok(names.includes("CHUCK_ATTENTION_STATE"));
+    assert.equal(nativeToolManifest.find((item) => item.slug === "CHUCK_ATTENTION_STATE")?.alwaysAvailable, true);
+  } finally { restore(); }
 });
 
 test("enforce mode exposes only Jev-selected native schemas and preserves non-native tools", async () => {

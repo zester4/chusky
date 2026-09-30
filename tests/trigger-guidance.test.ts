@@ -6,6 +6,9 @@ import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "../src/triggerG
 test("default trigger policy authorizes clear routine email handling but protects sensitive decisions", () => {
   assert.match(TRIGGER_DEFAULT_HANDLING, /No custom per-trigger instructions are required/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Reply in that same thread when it asks a clear, routine question/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /acknowledge the triggering sender in the original thread before beginning that work/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /Never substitute a separate prospect\/customer outreach for this acknowledgement/i);
+  assert.match(TRIGGER_DEFAULT_HANDLING, /not that the task is finished/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /pricing or financial decisions, legal\/HR\/medical\/security matters/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /create a provider draft when supported, otherwise prepare a concise recommended reply/i);
   assert.match(TRIGGER_DEFAULT_HANDLING, /Do not ask the owner to authorize each routine event or reply individually/i);
