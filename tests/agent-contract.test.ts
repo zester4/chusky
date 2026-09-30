@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, getApproval, getSession, initStore, listAgentRuns, listMissions, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, claimAgentUpgrade, getApproval, getSession, initStore, listAgentRuns, listMissions, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
+import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
@@ -85,6 +86,35 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
     globalThis.fetch = originalFetch;
   }
 }
+
+test("agent retains trusted release context after the one-time upgrade notice was shown", async () => {
+  const userId = 831234;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const notice = await loadAgentUpgrade();
+  assert.ok(notice);
+  assert.equal(await claimAgentUpgrade(userId, notice), true);
+
+  const requests: Array<Record<string, any>> = [];
+  let responseText = "This release manifest lists lead-signal watches as a Chusky capability; whether one is active depends on your account setup.";
+  await withAgentMocks([chatResponse({ role: "assistant", content: responseText })], async () => undefined, async () => {
+    const result = await runAgent(userId, "Is the upgrade true? Is the feature active for me?", [
+      { role: "assistant", content: formatAgentUpgradeNotice(notice) },
+    ], "test/model");
+    assert.equal(result.text, responseText);
+  }, false, undefined, (body) => requests.push(body));
+
+  const systemText = (requests[0]?.messages ?? [])
+    .filter((message: Record<string, unknown>) => message.role === "system")
+    .map((message: Record<string, unknown>) => String(message.content ?? ""))
+    .join("\n");
+  assert.match(systemText, /TRUSTED CHUSKY PRODUCT RELEASE METADATA/);
+  assert.ok(systemText.includes(notice.version));
+  assert.match(systemText, /release label.*not.*npm package version/i);
+  assert.match(systemText, /does not prove that an optional integration is configured/i);
+  assert.match(systemText, /a feature is enabled for this account/i);
+  assert.match(systemText, /Owners can create scheduled personal or business lead-signal watches/);
+});
 
 test("ordinary conversation sends an attached image through the normal Composio email action", async () => {
   const userId = 830071;

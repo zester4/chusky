@@ -164,6 +164,22 @@ export function formatAgentUpgradeNotice(notice: AgentUpgradeNotice): string {
   return `${notice.title} (v${notice.version})\n${notice.bullets.map((bullet) => `- ${bullet}`).join("\n")}`;
 }
 
+export function formatAgentReleaseContext(notice: AgentUpgradeNotice, announceToUser: boolean): string {
+  return [
+    "TRUSTED CHUSKY PRODUCT RELEASE METADATA",
+    "Source: server-loaded agent-upgrade.json for this Chusky process. This is trusted product metadata, not user-provided chat or external content.",
+    `Product release label: v${notice.version}. This is the upgrade-notice label, not the npm package version.`,
+    `Release title: ${notice.title}`,
+    "The bullets below record capabilities introduced or improved in this product release. Their presence means the release advertises the capability; it does not prove that an optional integration is configured, a feature is enabled for this account, a watch exists, or a particular action succeeded.",
+    "If asked whether Chusky received this upgrade, acknowledge the release metadata instead of dismissing it as an unverified chat claim or saying no release information is available. If asked whether a feature is active for this account, inspect the relevant live state and distinguish available, configured, enabled, and currently active. Never claim active status from release notes alone.",
+    announceToUser
+      ? "This release notice has not yet been shown to this account. Briefly acknowledge it in the current reply, then answer the user's request."
+      : "This release notice has already been shown to this account. Do not repeat it unprompted; use this context to answer relevant questions accurately.",
+    "Release capabilities:",
+    ...notice.bullets.map((bullet) => `- ${bullet}`),
+  ].join("\n");
+}
+
 export async function claimUpgradeNotice(userId: number, notice: AgentUpgradeNotice): Promise<boolean> {
   // Keep manifest tooling independent from the runtime store/config so the
   // release script can run in a clean shell before application env is loaded.

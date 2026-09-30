@@ -52,7 +52,7 @@ import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComp
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
 import { createRoutingDeadline } from "./decisions/jev.js";
 import { routeNativeToolsForTurn } from "./decisions/nativeToolRouter.js";
-import { claimUpgradeNotice, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
+import { claimUpgradeNotice, formatAgentReleaseContext, formatAgentUpgradeNotice, isUpgradeNoticeClaimed, loadAgentUpgrade, type AgentUpgradeNotice } from "./upgradeNotice.js";
 import { abortable, safeToolAudit, throwIfAborted } from "./cancellation.js";
 import { reconcileComposioTriggerSubscription, type ComposioTriggerSetupStatus } from "./composioTriggerSetup.js";
 import { SHOPPING_AGENT_PLAYBOOK } from "./shopping/shopping.js";
@@ -2411,8 +2411,8 @@ export async function runAgent(
   }
   const tregRouteContext = tregTurnContext(tregRoute);
   if (tregRouteContext) composioRouteContext = composioRouteContext ? `${composioRouteContext}\n\n${tregRouteContext}` : tregRouteContext;
-  const upgradeContext = announceUpgrade && pendingUpgrade
-    ? `\n\nINTERNAL RELEASE UPDATE — This is a new Chusky upgrade. Briefly acknowledge it in this reply using the exact details below, then continue with the user's request. Do not claim capabilities beyond these bullets.\n${formatAgentUpgradeNotice(pendingUpgrade)}`
+  const upgradeContext = pendingUpgrade
+    ? `\n\n${formatAgentReleaseContext(pendingUpgrade, announceUpgrade)}`
     : "";
   const temporalContext = buildTemporalContext(history, { ...options?.temporalContext, timezone: options?.temporalContext?.timezone ?? config.timezone });
   const triggerAutonomy = triggerAutonomyInstructions(channelContext?.triggerEventId);
