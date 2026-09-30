@@ -5,7 +5,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { config } from "./config.js";
-import { appendSdkRunHistoryToSession, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts } from "./store.js";
+import { appendSdkRunHistoryToSession, claimRecallCopilotEvaluation, getMeetingRepresentativeProfile, listMeetingContacts, getAttentionRecord } from "./store.js";
 import { getJobOccurrence, listJobOccurrences, createJobOccurrence, updateJobOccurrence } from "./store.js";
 import { createAttentionRecord } from "./store.js";
 import { registerHandlers } from "./handlers.js";
@@ -17,10 +17,12 @@ import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, Ap
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { receiveTinyFishMonitorWebhook } from "./tinyfishMonitors.js";
 import { Readable } from "node:stream";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
+import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
@@ -38,6 +40,7 @@ import { TelegramAdapter } from "./channels/telegram.js";
 import { parseTelegramWebhookUpdate, verifyTelegramWebhookSecret } from "./telegramWebhook.js";
 import { enqueueAutonomyApprovalResume, enqueueTaskWorkflow, triggerWorkflowUrl, workflowClient, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
+import type { TinyFishResearchRunRecord } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { mdToTelegramHtml, splitHtml } from "./markdown.js";
 import { hasBridgeAuthorization } from "./calls/bridgeAuth.js";
@@ -261,6 +264,36 @@ async function main(): Promise<void> {
   const channelGateway = new ChannelGateway(createAgentChannelHandler());
   channelGateway.register(new TelegramAdapter(bot));
   const app = new Hono();
+  app.post("/tinyfish/monitor/:userId/:monitorKey/:signature", async (c) => {
+    if (!config.tinyFishApiKey) return c.json({ ok: false, error: "monitor callbacks are not configured" }, 503);
+    const userId = Number(c.req.param("userId"));
+    try {
+      const declaredLength = Number(c.req.header("content-length"));
+      if (Number.isFinite(declaredLength) && declaredLength > 1_000_000) return c.json({ ok: false, error: "monitor callback exceeds the size limit" }, 413);
+      const reader = c.req.raw.body?.getReader();
+      if (!reader) return c.json({ ok: false, error: "monitor callback body is required" }, 400);
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          total += next.value.byteLength;
+          if (total > 1_000_000) {
+            await reader.cancel();
+            return c.json({ ok: false, error: "monitor callback exceeds the size limit" }, 413);
+          }
+          chunks.push(next.value);
+        }
+      } finally { reader.releaseLock(); }
+      const rawBody = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+      const result = await receiveTinyFishMonitorWebhook({ userId, internalId: c.req.param("monitorKey"), signature: c.req.param("signature"), apiKey: config.tinyFishApiKey, rawBody });
+      return c.json({ ok: true, ...result });
+    } catch (error) {
+      const status = error instanceof Error && error.message === "Invalid monitor callback authorization." ? 401 : error instanceof Error && /not active|identity does not match|owner record disappeared/.test(error.message) ? 403 : 400;
+      return c.json({ ok: false, error: status === 401 ? "invalid callback authorization" : status === 403 ? "monitor callback was rejected" : "invalid monitor callback" }, status);
+    }
+  });
   app.get(WEB_BOT_AUTH_DIRECTORY_PATH, async (c) => {
     const status = webBotAuthConfigurationStatus();
     if (status === "disabled") return c.notFound();
@@ -1981,6 +2014,29 @@ async function main(): Promise<void> {
         }));
       } catch (e) { return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500); }
     });
+
+    app.post("/workflows/tinyfish-research", serveWorkflow(async (workflow) => {
+      const payload = workflow.requestPayload as { userId?: unknown; runRecordId?: unknown };
+      const userId = Number(payload.userId);
+      const runRecordId = typeof payload.runRecordId === "string" ? payload.runRecordId : "";
+      if (!Number.isSafeInteger(userId) || userId <= 0 || !/^tf_run_[0-9a-f-]{36}$/i.test(runRecordId)) throw new WorkflowNonRetryableError("Invalid TinyFish Research workflow payload.");
+      if (!config.tinyFishApiKey) throw new WorkflowNonRetryableError("TinyFish Research is not configured.");
+      for (let attempt = 0; attempt < 90; attempt++) {
+        const saved = await workflow.run(`load-research-run-${attempt}`, async () => getAttentionRecord(userId, "tinyfish_research_run", runRecordId) as Promise<TinyFishResearchRunRecord | undefined>);
+        if (!saved) throw new WorkflowNonRetryableError("Owner-scoped TinyFish Research record is missing.");
+        if (saved.status !== "RUNNING") return;
+        if (saved.workflowRunId && saved.workflowRunId !== workflow.workflowRunId) return;
+        const reconciled = await workflow.run(`reconcile-research-run-${attempt}`, async () => reconcileTinyFishResearchRun(userId, runRecordId, config.tinyFishApiKey));
+        if (reconciled.status !== "RUNNING") return;
+        await workflow.sleep(`wait-research-run-${attempt}`, 30);
+      }
+      await workflow.run("record-research-poll-budget-exhausted", async () => createAttentionRecord(userId, "observation", {
+        source: "tinyfish_research", eventType: "research_reconciliation_delayed",
+        summary: `Background status checks reached their 45-minute limit for the research report “${runRecordId}”. The provider run may still be active; inspect it before retrying.`,
+        entityId: runRecordId, dedupeKey: `tinyfish-research:${runRecordId}:reconcile-delayed`, occurredAt: Date.now(),
+        importance: 0.65, novelty: 0.8, confidence: 1, privacyScope: "private", status: "new", metadata: { reportId: runRecordId },
+      }));
+    }, { url: triggerWorkflowUrl() }));
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
       const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string; duration?: number; aspectRatio?: string; resolution?: string; size?: string; generateAudio?: boolean; frameMode?: "reference" | "first_frame" | "last_frame"; inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }> };

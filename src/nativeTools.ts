@@ -2,14 +2,16 @@
 import { Client as QStashClient } from "@upstash/qstash";
 import { createTregEndpointJudge } from "./decisions/tregRouter.js";
 import { Client as WorkflowClient } from "@upstash/workflow";
-import { enqueueTaskWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
+import { enqueueTaskWorkflow, enqueueTinyFishResearchWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { getAttentionPulseWatchCoverage } from "./attentionPulse.js";
-import { createTinyFishClient } from "./tinyfish.js";
+import { assertPublicHttpUrl, createTinyFishClient } from "./tinyfish.js";
+import { receiveTinyFishMonitorWebhook, tinyFishMonitorSignature, tinyFishMonitorSnapshotHash, validateTinyFishMonitorSchedule } from "./tinyfishMonitors.js";
+import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import {
   addJob, addReminder, clearScratchpad, getJob, getReminder, getSession, getRecallMeeting, listJobs, listReminders, claimHandoffBudget,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile,
@@ -19,7 +21,7 @@ import {
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
   blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
-  type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset,
+  type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
   type TaskStatus, type MissionStatus,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
@@ -213,6 +215,15 @@ export function setPhoneCallLauncherForTests(launcher?: PhoneCallLauncherForTest
 function text(value: unknown, max = MAX_TEXT): string {
   const result = String(value ?? "").trim();
   if (!result || result.length > max) throw new Error(`Text must be 1-${max} characters`);
+  return result;
+}
+
+function optionalText(value: unknown, max: number, field: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new Error(`${field} must be text when provided.`);
+  const result = value.trim();
+  if (!result) return undefined;
+  if (result.length > max) throw new Error(`${field} must be at most ${max} characters when provided.`);
   return result;
 }
 
@@ -1016,22 +1027,196 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
       return createTinyFishClient(config.tinyFishApiKey).search({
         query: text(args.query, 500),
-        location: args.location === undefined ? undefined : text(args.location, 100),
-        language: args.language === undefined ? undefined : text(args.language, 20),
+        purpose: optionalText(args.purpose, 2_000, "purpose"),
+        location: optionalText(args.location, 100, "location"),
+        language: optionalText(args.language, 20, "language"),
         recencyMinutes: args.recencyMinutes === undefined ? undefined : Number(args.recencyMinutes),
-        afterDate: args.afterDate === undefined ? undefined : text(args.afterDate, 10),
-        beforeDate: args.beforeDate === undefined ? undefined : text(args.beforeDate, 10),
+        afterDate: optionalText(args.afterDate, 10, "afterDate"),
+        beforeDate: optionalText(args.beforeDate, 10, "beforeDate"),
         page: args.page === undefined ? undefined : Number(args.page),
+        includeDomains: Array.isArray(args.includeDomains) ? args.includeDomains.map((item) => text(item, 253)) : undefined,
+        excludeDomains: Array.isArray(args.excludeDomains) ? args.excludeDomains.map((item) => text(item, 253)) : undefined,
+        domainType: args.domainType as "web" | "news" | "research_paper" | undefined,
+        pubYearMin: args.pubYearMin === undefined ? undefined : Number(args.pubYearMin),
+        pubYearMax: args.pubYearMax === undefined ? undefined : Number(args.pubYearMax),
       }, runtime.signal);
     }
     case "CHUCK_TINYFISH_FETCH": {
       if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
       return createTinyFishClient(config.tinyFishApiKey).fetch({
         urls: Array.isArray(args.urls) ? args.urls.map((url) => text(url, 2_000)) : [],
+        purpose: args.purpose === undefined ? undefined : text(args.purpose, 2_000),
         format: args.format as "markdown" | "html" | "json" | undefined,
         links: args.links === true,
         imageLinks: args.imageLinks === true,
+        ttl: args.ttl === undefined ? undefined : Number(args.ttl),
+        perUrlTimeoutMs: args.perUrlTimeoutMs === undefined ? undefined : Number(args.perUrlTimeoutMs),
+        ifNoneMatch: args.ifNoneMatch === undefined ? undefined : text(args.ifNoneMatch, 500),
+        ifModifiedSince: args.ifModifiedSince === undefined ? undefined : text(args.ifModifiedSince, 200),
+        includeEtagAndLastModified: args.includeEtagAndLastModified === true,
+        includeSelectors: Array.isArray(args.includeSelectors) ? args.includeSelectors.map((item) => text(item, 1_000)) : undefined,
+        excludeSelectors: Array.isArray(args.excludeSelectors) ? args.excludeSelectors.map((item) => text(item, 1_000)) : undefined,
+        highlights: args.highlights && typeof args.highlights === "object" ? {
+          query: text((args.highlights as Record<string, unknown>).query, 2_000),
+          maxCount: (args.highlights as Record<string, unknown>).maxCount === undefined ? undefined : Number((args.highlights as Record<string, unknown>).maxCount),
+          maxCharacters: (args.highlights as Record<string, unknown>).maxCharacters === undefined ? undefined : Number((args.highlights as Record<string, unknown>).maxCharacters),
+        } : undefined,
       }, runtime.signal);
+    }
+    case "CHUCK_TINYFISH_RESEARCH": {
+      if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
+      const action = text(args.action, 20);
+      const runs = await listAttentionRecords(userId, "tinyfish_research_run", { limit: 200 }) as TinyFishResearchRunRecord[];
+      const client = createTinyFishClient(config.tinyFishApiKey);
+      if (action === "list") {
+        const limit = args.limit === undefined ? 20 : Number(args.limit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("Research list limit must be an integer from 1 to 50.");
+        const statusFilter = args.status === undefined ? "" : text(args.status, 20).toUpperCase();
+        if (statusFilter && !["RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(statusFilter)) throw new Error("Unsupported TinyFish Research status filter.");
+        const queryFilter = args.query === undefined ? "" : text(args.query, 500).toLowerCase();
+        const filtered = runs.filter((item) => (!statusFilter || item.status === statusFilter) && (!queryFilter || item.query.toLowerCase().includes(queryFilter)));
+        return { runs: filtered.slice(0, limit).map(({ id, query: savedQuery, mode, status, citations, createdAt, updatedAt }) => ({ id, query: savedQuery, mode, status, citationCount: citations.length, createdAt, updatedAt })), source: "owner-scoped Chusky saved research records" };
+      }
+      const local = action === "start" ? undefined : runs.find((item) => item.id === text(args.id, 160));
+      if (action !== "start" && !local) throw new Error("Saved TinyFish research run not found for this owner.");
+      if (action === "get") {
+        return { run: await reconcileTinyFishResearchRun(userId, local!.id, config.tinyFishApiKey), contentIsUntrusted: true };
+      }
+      if (action === "cancel") {
+        const provider = await client.cancelResearchRun(local!.providerRunId);
+        const status = String(provider.status ?? local!.status).toUpperCase() as TinyFishResearchRunRecord["status"];
+        const deep = provider.deep_result && typeof provider.deep_result === "object" ? provider.deep_result as Record<string, unknown> : {};
+        const quick = provider.quick_result && typeof provider.quick_result === "object" ? provider.quick_result as Record<string, unknown> : {};
+        const report = typeof deep.result === "string" ? deep.result : typeof quick.answer === "string" ? quick.answer : local!.report;
+        const citationsValue = deep.citations ?? quick.citations ?? local!.citations;
+        const citations = Array.isArray(citationsValue) ? citationsValue.slice(0, 100).flatMap((item) => {
+          if (typeof item === "string") { try { return [{ url: assertPublicHttpUrl(item).slice(0, 2_000) }]; } catch { return []; } }
+          if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+          const citation = item as Record<string, unknown>;
+          if (typeof citation.url !== "string") return [];
+          try { return [{ url: assertPublicHttpUrl(citation.url).slice(0, 2_000), ...(typeof citation.title === "string" ? { title: citation.title.slice(0, 500) } : {}), ...(typeof citation.snippet === "string" ? { snippet: citation.snippet.slice(0, 1_500) } : {}) }]; } catch { return []; }
+        }) : [];
+        const errorValue = provider.failure_reason ?? provider.error ?? provider.termination_reason;
+        const failureReason = typeof errorValue === "string" ? errorValue.slice(0, 1_000) : undefined;
+        const updated = await updateAttentionRecord(userId, "tinyfish_research_run", local!.id, { status: ["RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"].includes(status) ? status : local!.status, report, citations, failureReason, progress: typeof provider.progress === "string" ? provider.progress.slice(0, 1_000) : local!.progress }) as TinyFishResearchRunRecord | undefined;
+        return { run: updated ?? local, contentIsUntrusted: true };
+      }
+      if (action !== "start") throw new Error("Unsupported TinyFish research action.");
+      if (!config.webhookUrl || !config.qstashToken) throw new Error("Background TinyFish Research requires WEBHOOK_URL and QSTASH_TOKEN so the saved run can be monitored after this chat turn.");
+      const query = text(args.query, 2_000);
+      const mode = args.mode === "deep" ? "deep" : "standard";
+      const existing = runs.find((run) => run.status === "RUNNING" && run.query.toLowerCase() === query.toLowerCase() && run.mode === mode);
+      if (existing) return { run: existing, status: existing.status, alreadyRunning: true, note: "An identical owner-scoped TinyFish research run is already active; inspect it instead of starting a duplicate." };
+      let saved: TinyFishResearchRunRecord | undefined;
+      const result = await client.startResearch({
+        query,
+        mode,
+        outputLanguage: args.outputLanguage === undefined ? undefined : text(args.outputLanguage, 35),
+        domainType: args.domainType as "web" | "news" | "research_paper" | undefined,
+        afterDate: args.afterDate === undefined ? undefined : text(args.afterDate, 10),
+        beforeDate: args.beforeDate === undefined ? undefined : text(args.beforeDate, 10),
+        recencyMinutes: args.recencyMinutes === undefined ? undefined : Number(args.recencyMinutes),
+        includeDomains: Array.isArray(args.includeDomains) ? args.includeDomains.map((item) => text(item, 253)) : undefined,
+        excludeDomains: Array.isArray(args.excludeDomains) ? args.excludeDomains.map((item) => text(item, 253)) : undefined,
+        onRunCreated: async (providerRunId) => {
+          saved = await createAttentionRecord(userId, "tinyfish_research_run", { providerRunId, query, mode, status: "RUNNING", progress: "TinyFish accepted the saved research run; waiting for report results.", citations: [] }) as TinyFishResearchRunRecord;
+        },
+      }, runtime.signal);
+      if (!saved) throw new Error("TinyFish created a report but its owner-scoped run record could not be saved.");
+      let workflowRunId: string | undefined;
+      try {
+        workflowRunId = await enqueueTinyFishResearchWorkflow(userId, saved.id);
+        saved = await updateAttentionRecord(userId, "tinyfish_research_run", saved.id, { workflowRunId }) as TinyFishResearchRunRecord ?? saved;
+      } catch (error) {
+        return { run: saved, status: "RUNNING", recovery: "The TinyFish run was saved, but automatic reconciliation could not be queued. Use this run ID with action=get to inspect it; do not start a duplicate." };
+      }
+      return { run: saved, status: result.status, workflowRunId, note: "The cited report is being prepared in the background. Use CHUCK_TINYFISH_RESEARCH action=get or list to inspect it; do not start a duplicate while it is running." };
+    }
+    case "CHUCK_TINYFISH_MONITOR": {
+      if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");
+      const client = createTinyFishClient(config.tinyFishApiKey);
+      const action = text(args.action, 20);
+      const monitors = await listAttentionRecords(userId, "tinyfish_monitor", { limit: 200 }) as TinyFishMonitorRecord[];
+      if (action === "list") return { monitors: monitors.filter((item) => item.status !== "deleted"), source: "owner-scoped Chusky monitor records" };
+      const monitor = action === "create" ? undefined : monitors.find((item) => item.id === text(args.id, 160));
+      if (action !== "create" && !monitor) throw new Error("TinyFish monitor not found for this owner.");
+      if (action === "get") {
+        const response = await client.getMonitor(monitor!.providerMonitorId);
+        const providerMonitor = response.monitor && typeof response.monitor === "object" ? response.monitor as Record<string, unknown> : response;
+        return { monitor: { ...monitor, status: ["active", "paused"].includes(String(providerMonitor.status)) ? providerMonitor.status : monitor!.status } };
+      }
+      if (action === "create") {
+        if (monitors.filter((item) => item.status !== "deleted").length >= 10) throw new Error("This account has reached Chusky's limit of 10 active TinyFish monitors.");
+        const type = args.type as "fetch" | "search";
+        if (type !== "fetch" && type !== "search") throw new Error("Monitor type must be fetch (page) or search (topic).");
+        const scheduleCron = validateTinyFishMonitorSchedule(type, text(args.scheduleCron, 120));
+        const name = args.name === undefined ? (type === "fetch" ? text(args.url, 2000) : text(args.query, 2000)).slice(0, 100) : text(args.name, 100);
+        const purpose = args.purpose === undefined ? undefined : text(args.purpose, 2_000);
+        const targetUrl = type === "fetch" ? assertPublicHttpUrl(text(args.url, 2_000)) : undefined;
+        const query = type === "search" ? text(args.query, 2_000) : undefined;
+        if (type === "search" && query!.trim().length < 2) throw new Error("Topic monitor query must contain at least 2 characters.");
+        const duplicate = monitors.find((item) => item.status !== "deleted" && item.monitorType === type && item.scheduleCron === scheduleCron && item.targetUrl === targetUrl && item.query === query);
+        if (duplicate) return { monitor: duplicate, alreadyExists: true };
+        let callbackBase: URL;
+        try { callbackBase = new URL(config.webhookUrl); } catch { throw new Error("TinyFish monitors require WEBHOOK_URL to be configured with the public HTTPS Chusky webhook origin."); }
+        if (callbackBase.protocol !== "https:") throw new Error("TinyFish monitor callbacks require a public HTTPS WEBHOOK_URL.");
+        assertPublicHttpUrl(callbackBase.origin);
+        const callbackId = randomUUID();
+        const callbackSignature = tinyFishMonitorSignature(config.tinyFishApiKey, userId, callbackId);
+        const webhookUrl = `${callbackBase.origin}/tinyfish/monitor/${userId}/${callbackId}/${callbackSignature}`;
+        const response = await client.createMonitor({
+          type, name, schedule_cron: scheduleCron, purpose, webhook_url: webhookUrl,
+          config: type === "fetch" ? { url: targetUrl, format: args.format ?? "markdown", links: false, image_links: false } : { query, ...(args.recencyMinutes !== undefined ? { recency_minutes: Number(args.recencyMinutes) } : {}), result_limit: args.resultLimit === undefined ? 5 : Number(args.resultLimit) },
+        });
+        const providerMonitor = response.monitor && typeof response.monitor === "object" ? response.monitor as Record<string, unknown> : {};
+        const providerMonitorId = typeof providerMonitor.id === "string" ? providerMonitor.id : "";
+        if (!providerMonitorId) throw new Error("TinyFish created no identifiable monitor; check the TinyFish dashboard before retrying.");
+        const initialRun = response.run && typeof response.run === "object" ? response.run as Record<string, unknown> : {};
+        const initialHash = type === "fetch" ? tinyFishMonitorSnapshotHash(initialRun) : undefined;
+        try {
+          const record = await createAttentionRecord(userId, "tinyfish_monitor", {
+            providerMonitorId, callbackId, monitorType: type, name, purpose, scheduleCron, targetUrl, query,
+            status: "active", snapshotHash: initialHash, lastRunId: typeof initialRun.id === "string" ? initialRun.id : undefined,
+            lastRunAt: Date.now(), lastSummary: "Baseline captured.", runHistory: typeof initialRun.id === "string" ? [{ id: initialRun.id, occurredAt: Date.now(), status: "unchanged", summary: "Baseline captured." }] : [],
+          }) as TinyFishMonitorRecord;
+          return { monitor: record, baselineCaptured: true };
+        } catch (error) {
+          try { await client.deleteMonitor(providerMonitorId); } catch { /* Provider may retain it; error message below is explicit. */ }
+          throw new Error(`TinyFish monitor was created but Chusky could not save its owner record; provider cleanup was attempted. ${error instanceof Error ? error.message : ""}`);
+        }
+      }
+      if (action === "pause" || action === "resume") {
+        await client.updateMonitor(monitor!.providerMonitorId, { status: action === "pause" ? "paused" : "active" });
+        const updated = await updateAttentionRecord(userId, "tinyfish_monitor", monitor!.id, { status: action === "pause" ? "paused" : "active", lastError: "" });
+        return { monitor: updated };
+      }
+      if (action === "edit") {
+        if (args.url !== undefined || args.query !== undefined || args.type !== undefined || args.format !== undefined || args.recencyMinutes !== undefined || args.resultLimit !== undefined) {
+          throw new Error("Changing a monitor's target or extraction settings is not supported yet. Delete it and create a replacement with the desired target; the existing monitor is unchanged.");
+        }
+        const patch: Record<string, unknown> = {};
+        if (args.scheduleCron !== undefined) patch.schedule_cron = validateTinyFishMonitorSchedule(monitor!.monitorType, text(args.scheduleCron, 120));
+        if (args.name !== undefined) patch.name = text(args.name, 100);
+        if (args.purpose !== undefined) patch.purpose = text(args.purpose, 2_000);
+        if (!Object.keys(patch).length) throw new Error("Provide at least one monitor field to edit.");
+        await client.updateMonitor(monitor!.providerMonitorId, patch);
+        const updated = await updateAttentionRecord(userId, "tinyfish_monitor", monitor!.id, { name: patch.name, purpose: patch.purpose, scheduleCron: patch.schedule_cron });
+        return { monitor: updated };
+      }
+      if (action === "delete") {
+        await client.deleteMonitor(monitor!.providerMonitorId);
+        const updated = await updateAttentionRecord(userId, "tinyfish_monitor", monitor!.id, { status: "deleted" });
+        return { deleted: true, monitorId: monitor!.id, retainedRunHistory: updated && "runHistory" in updated ? updated.runHistory : [] };
+      }
+      if (action === "run_now") {
+        const response = await client.runMonitorNow(monitor!.providerMonitorId);
+        const run = response.run && typeof response.run === "object" ? response.run as Record<string, unknown> : {};
+        const webhookPayload = { ...run, id: typeof run.id === "string" ? run.id : randomUUID(), [monitor!.monitorType === "fetch" ? "fetch_monitor_id" : "search_monitor_id"]: monitor!.providerMonitorId, is_baseline: false };
+        const callbackSignature = tinyFishMonitorSignature(config.tinyFishApiKey, userId, monitor!.callbackId);
+        await receiveTinyFishMonitorWebhook({ userId, internalId: monitor!.callbackId, signature: callbackSignature, apiKey: config.tinyFishApiKey, rawBody: Buffer.from(JSON.stringify(webhookPayload)) });
+        return { monitor: await getAttentionRecord(userId, "tinyfish_monitor", monitor!.id), runId: webhookPayload.id, contentIsUntrusted: true };
+      }
+      throw new Error("Unsupported TinyFish monitor action.");
     }
     case "CHUCK_TREG_SEARCH": return tregGateway().search(text(args.q, 500), args.limit === undefined ? 8 : Number(args.limit), runtime.organizationId);
     case "CHUCK_TREG_GET": return tregGateway().getEndpoint(text(args.endpointId, 200), runtime.organizationId);

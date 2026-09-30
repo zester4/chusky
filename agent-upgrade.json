@@ -1,11 +1,11 @@
 {
-  "id": "release-4.32.0",
-  "version": "4.32.0",
+  "id": "release-4.33.0",
+  "version": "4.33.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Owners can create scheduled personal or business lead-signal watches that discover relevant external signal providers through Treg and return evidence-backed candidates.",
-    "First-seen signal identities are hashed and persisted per owner/watch, so repeated provider results are suppressed and new signals become private durable observations.",
-    "Checks run only when the owner enables the Attention Pulse, require Treg configuration, obey existing spend controls, and never contact leads or write to connected apps."
+    "Added owner-scoped TinyFish Research reports with durable run tracking, citations, cancellation without an approval pause, and Attention Pulse completion or failure observations.",
+    "Added autonomous page and topic monitoring with signed, deduplicated callbacks, bounded history, and private Pulse observations for meaningful changes or failed checks.",
+    "Expanded TinyFish Search and Fetch with source filters, research-paper metadata, structured extraction, conditional fetches, selectors, ranked highlights, and per-page errors; browser-agent APIs remain excluded."
   ],
-  "createdAt": "2026-09-30T16:37:21.602Z"
+  "createdAt": "2026-09-30T18:47:23.336Z"
 }

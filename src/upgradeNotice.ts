@@ -112,6 +112,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",
     "Web Bot Auth identifies Chusky transparently but does not bypass CAPTCHA, site policies, authentication, regional controls, or guarantee universal website access.",
   ],
+  tinyfishResearch: [
+    "Added owner-scoped TinyFish Research reports with durable run tracking, citations, cancellation without an approval pause, and Attention Pulse completion or failure observations.",
+    "Added autonomous page and topic monitoring with signed, deduplicated callbacks, bounded history, and private Pulse observations for meaningful changes or failed checks.",
+    "Expanded TinyFish Search and Fetch with source filters, research-paper metadata, structured extraction, conditional fetches, selectors, ranked highlights, and per-page errors; browser-agent APIs remain excluded.",
+  ],
 } as const;
 
 export type AgentUpgradePreset = keyof typeof AGENT_UPGRADE_PRESETS;

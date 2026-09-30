@@ -74,8 +74,13 @@ test("TinyFish web tools expose bounded search and public page fetch schemas", (
   const names = new Set(chuckTools.map((tool) => tool.function.name));
   assert.equal(names.has("CHUCK_TINYFISH_SEARCH"), true);
   assert.equal(names.has("CHUCK_TINYFISH_FETCH"), true);
+  assert.equal(names.has("CHUCK_TINYFISH_RESEARCH"), true);
+  assert.equal(names.has("CHUCK_TINYFISH_MONITOR"), true);
   validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "latest AI news", recencyMinutes: 60, page: 0 });
-  validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "markdown", links: true });
+  validateNativeToolArguments("CHUCK_TINYFISH_SEARCH", { query: "papers", domainType: "research_paper", pubYearMin: 2020, pubYearMax: 2025, includeDomains: ["arxiv.org"] });
+  validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "markdown", links: true, includeSelectors: ["main"], highlights: { query: "what changed?", maxCount: 3 } });
+  validateNativeToolArguments("CHUCK_TINYFISH_RESEARCH", { action: "start", query: "Compare official policy sources", mode: "standard" });
+  validateNativeToolArguments("CHUCK_TINYFISH_MONITOR", { action: "create", type: "fetch", url: "https://example.com/pricing", scheduleCron: "0 9 * * *" });
   assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: [] }), /at least 1/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_TINYFISH_FETCH", { urls: ["https://example.com"], format: "text" }), /unsupported value/i);
 });

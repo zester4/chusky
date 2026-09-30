@@ -51,3 +51,108 @@ test("TinyFish search rejects conflicting or invalid date filters", async () => 
   await assert.rejects(() => client.search({ query: "news", afterDate: "2026-02-30" }), /valid YYYY-MM-DD/i);
   await assert.rejects(() => client.search({ query: "news", afterDate: "2026-09-20", beforeDate: "2026-09-01" }), /on or before/i);
 });
+
+test("TinyFish search ignores blank optional filters and reports an actionable location limit", async () => {
+  let requestUrl = "";
+  const client = createTinyFishClient("server-secret", async (input) => {
+    requestUrl = String(input);
+    return Response.json({ results: [] });
+  });
+  await client.search({ query: "latest product updates", location: "  ", language: "", purpose: " ", afterDate: "", beforeDate: "" });
+  const params = new URL(requestUrl).searchParams;
+  for (const field of ["location", "language", "purpose", "after_date", "before_date"]) assert.equal(params.has(field), false, `${field} should be omitted when blank`);
+  await assert.rejects(() => client.search({ query: "latest product updates", location: "x".repeat(101) }), /location.*100 characters/i);
+});
+
+test("TinyFish search supports source filters and publication metadata", async () => {
+  let requestUrl = "";
+  const client = createTinyFishClient("server-secret", async (input) => {
+    requestUrl = String(input);
+    return Response.json({ results: [{ title: "Paper", url: "https://example.org/paper", authors: ["A. Author"], venue: "Journal", year: 2025, cited_by_count: 7 }] });
+  });
+  const result = await client.search({ query: "agents", purpose: "Find peer-reviewed agent evaluations", includeDomains: ["arxiv.org"], excludeDomains: ["example.com"], domainType: "research_paper", pubYearMin: 2020, pubYearMax: 2025 });
+  const params = new URL(requestUrl).searchParams;
+  assert.equal(params.get("purpose"), "Find peer-reviewed agent evaluations");
+  assert.equal(params.get("include_domains"), "arxiv.org");
+  assert.equal(params.get("exclude_domains"), "example.com");
+  assert.equal(params.get("domain_type"), "research_paper");
+  assert.equal(params.get("pub_year_min"), "2020");
+  assert.equal(result.results[0]?.citation_count, 7);
+});
+
+test("TinyFish Fetch exposes extraction controls and supports ten URLs", async () => {
+  let body: Record<string, unknown> = {};
+  const client = createTinyFishClient("server-secret", async (_input, init) => {
+    body = JSON.parse(String(init?.body));
+    return Response.json({ results: [{ url: "https://example.com", text: null, not_modified: true, highlights: [{ text: "Relevant", rank: 1 }] }], errors: [] });
+  });
+  const urls = Array.from({ length: 10 }, (_, i) => `https://example.com/${i}`);
+  const result = await client.fetch({ urls, ttl: 0, perUrlTimeoutMs: 90_000, includeEtagAndLastModified: true, includeSelectors: ["main"], excludeSelectors: ["nav"], highlights: { query: "release date", maxCount: 3, maxCharacters: 2_000 } });
+  assert.equal((body.urls as string[]).length, 10);
+  assert.equal(body.per_url_timeout_ms, 90_000);
+  assert.deepEqual(body.highlights, { query: "release date", max_snippets: 3, max_characters: 2_000 });
+  assert.equal(result.results[0]?.not_modified, true);
+  assert.equal(result.results[0]?.highlights?.[0]?.text, "Relevant");
+});
+
+test("TinyFish Research persists the run id before returning a cited, browser-free report", async () => {
+  let body: Record<string, unknown> = {};
+  let savedRunId = "";
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"event":"created","research_run_id":"run-1"}\n\n'));
+      controller.enqueue(encoder.encode('data: {"event":"final_result","result":"A cited report","citations":[{"url":"https://example.org","title":"Source"}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"event":"done"}\n\n'));
+      controller.close();
+    },
+  });
+  const client = createTinyFishClient("server-secret", async (_input, init) => {
+    body = JSON.parse(String(init?.body));
+    return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+  });
+  const result = await client.research({ query: "Compare current policies", mode: "deep", onRunCreated: async (id) => { savedRunId = id; } });
+  assert.equal(body.mode, "deep");
+  assert.equal(Object.hasOwn(body, "browser_enabled"), false);
+  assert.equal(body.stream, false);
+  assert.equal(savedRunId, "run-1");
+  assert.equal(result.result, "A cited report");
+  assert.deepEqual(result.citations, [{ url: "https://example.org/", title: "Source", snippet: undefined }]);
+});
+
+test("TinyFish Research start returns at the saved run ID and closes the provider event stream", async () => {
+  const encoder = new TextEncoder();
+  let streamCancelled = false;
+  let savedId = "";
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(encoder.encode('data: {"event":"created","research_run_id":"run-async"}\n\n')); },
+    cancel() { streamCancelled = true; },
+  });
+  const client = createTinyFishClient("server-secret", async () => new Response(stream, { headers: { "content-type": "text/event-stream" } }));
+  const result = await client.startResearch({ query: "Find official sources", onRunCreated: async (id) => { savedId = id; } });
+  assert.equal(savedId, "run-async");
+  assert.equal(result.researchRunId, "run-async");
+  assert.equal(streamCancelled, true);
+});
+
+test("TinyFish Monitor lifecycle uses the current Monitor API host and owner-supplied public callback", async () => {
+  const requests: Array<{ url: string; method: string; body?: Record<string, unknown>; auth: string }> = [];
+  const client = createTinyFishClient("server-secret", async (input, init) => {
+    requests.push({
+      url: String(input), method: String(init?.method),
+      body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined,
+      auth: new Headers(init?.headers).get("X-API-Key") ?? "",
+    });
+    if (init?.method === "POST") return Response.json({ monitor: { id: "monitor-1" }, run: { id: "baseline-1" } }, { status: 201 });
+    if (init?.method === "PATCH") return Response.json({ monitor: { id: "monitor-1", status: "paused" } });
+    if (init?.method === "DELETE") return new Response(null, { status: 204 });
+    return Response.json({ monitor: { id: "monitor-1", status: "active" } });
+  });
+  await client.createMonitor({ type: "fetch", name: "Pricing", config: { url: "https://example.org/pricing" }, schedule_cron: "0 9 * * *", webhook_url: "https://chusky.example/tinyfish/monitor/callback" });
+  await client.getMonitor("monitor-1");
+  await client.updateMonitor("monitor-1", { status: "paused" });
+  await client.deleteMonitor("monitor-1");
+  assert.equal(requests.every((request) => request.url.startsWith("https://agent.tinyfish.chat/v1/monitors")), true);
+  assert.equal(requests.every((request) => request.auth === "server-secret"), true);
+  assert.equal((requests[0]?.body?.webhook_url as string).startsWith("https://chusky.example/"), true);
+});

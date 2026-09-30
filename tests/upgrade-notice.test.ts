@@ -131,6 +131,15 @@ test("Web Bot Auth upgrade preset describes identity without claiming access byp
   assert.match(bullets[2], /does not bypass CAPTCHA/);
 });
 
+test("TinyFish upgrade preset describes durable research, monitored changes, and browser exclusion", () => {
+  const bullets = getAgentUpgradePreset("tinyfishResearch");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.tinyfishResearch]);
+  assert.match(bullets[0], /durable run tracking, citations, cancellation/);
+  assert.match(bullets[1], /signed, deduplicated callbacks/);
+  assert.match(bullets[2], /browser-agent APIs remain excluded/);
+});
+
 test("Treg upgrade preset describes live provider data and spend controls", () => {
   const bullets = getAgentUpgradePreset("treg");
   assert.equal(bullets.length, 3);
@@ -189,13 +198,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces durable Treg lead-signal monitoring", async () => {
+test("current upgrade manifest announces durable TinyFish research and monitoring", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.32.0");
-  assert.equal(notice?.version, "4.32.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /scheduled personal or business lead-signal watches/);
-  assert.match(formatAgentUpgradeNotice(notice!), /hashed and persisted per owner\/watch/);
-  assert.match(formatAgentUpgradeNotice(notice!), /never contact leads or write to connected apps/);
+  assert.equal(notice?.id, "release-4.33.0");
+  assert.equal(notice?.version, "4.33.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /owner-scoped TinyFish Research reports/);
+  assert.match(formatAgentUpgradeNotice(notice!), /signed, deduplicated callbacks/);
+  assert.match(formatAgentUpgradeNotice(notice!), /browser-agent APIs remain excluded/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

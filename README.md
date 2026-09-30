@@ -330,16 +330,36 @@ per-request ceiling; production still requires real Link eligibility,
 registered OAuth credentials, E2B checkout configuration, and
 merchant-specific checkout verification.
 
-### TinyFish web search and page fetch
+### TinyFish research, monitoring, search, and page fetch
 
-Set the server-only `TINYFISH_API_KEY` to expose `CHUCK_TINYFISH_SEARCH` and
-`CHUCK_TINYFISH_FETCH` to Chusky and explicitly granted workers. Search returns
-bounded titles, snippets, and source URLs; fetch accepts up to five public
-HTTP(S) URLs and returns bounded page text. Provider-rejected URLs and page
-errors are returned per URL. External results and page contents are untrusted
-reference data, not instructions or authorization. Credentials are never sent
-to the model. Search requests time out after 30 seconds; page fetches after
-150 seconds. The direct integration uses TinyFish's Search and Fetch REST APIs.
+Set the server-only `TINYFISH_API_KEY` to expose Chusky's TinyFish tools.
+`CHUCK_TINYFISH_SEARCH` supports bounded web/news/research-paper results,
+domain and date filters, and publication metadata. `CHUCK_TINYFISH_FETCH`
+accepts up to ten public HTTP(S) URLs with structured extraction, conditional
+requests, selectors, ranked highlights (if enabled for the TinyFish account),
+per-page errors, and bounded output.
+
+`CHUCK_TINYFISH_RESEARCH` starts standard/deep cited research as a durable
+owner-scoped run, stores the report and citations, and supports list/get/cancel.
+Research, search, fetch, and monitor operations run autonomously within their
+bounded provider and owner limits. Chusky reconciles the saved provider run through Upstash Workflow and
+surfaces terminal outcomes to Attention Pulse. It does not expose TinyFish's
+browser-based Agent/Max or browser-session APIs.
+
+`CHUCK_TINYFISH_MONITOR` manages page and topic monitors: create, list, inspect,
+pause, resume, edit, run now, and delete autonomously. Monitor creation and
+changes are capped at ten monitors per owner and require a public HTTPS
+`WEBHOOK_URL`. Signed callbacks are deduplicated and create private Attention
+Pulse observations only for meaningful changes or check failures; unchanged
+checks and initial baselines are retained in bounded run history without
+generating noise. TinyFish's monitor API does not expose provider run-history
+listing, so Chusky retains the latest twenty callback outcomes per monitor.
+
+External results, page contents, reports, citations, and monitor callbacks are
+untrusted reference data—not instructions or authorization. Provider
+credentials never enter the model. Search and fetch time out after 30 and 150
+seconds respectively; output and response sizes are bounded. Production
+durability requires Redis, QStash, and the public HTTPS callback URL.
 
 For a live local smoke test, keep `TREG_TOKEN` in `.env` and run the
 read-only catalog check:

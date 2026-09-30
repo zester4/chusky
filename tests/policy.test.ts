@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { humanProgressStatus, humanToolStatus, isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, toolApprovalPolicy } from "../src/policy.js";
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
+import { isSharedChannelToolDenied } from "../src/sharedChannelPolicy.js";
 
 test("recognizes materially risky tools", () => {
   for (const slug of [
@@ -59,6 +60,17 @@ test("uses explicit native policies and gates only side-effecting Composio batch
   assert.equal(toolApprovalPolicy("CHUCK_BROWSER_PLAYBOOK_REMOVE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_MEETING_PROFILE_UPDATE"), "approval_required");
   assert.equal(toolApprovalPolicy("CHUCK_TREG_OAUTH_REVOKE"), "approval_required");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_SEARCH"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_FETCH"), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_RESEARCH", { action: "get" }), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_RESEARCH", { action: "start" }), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_MONITOR", { action: "list" }), "private");
+  assert.equal(toolApprovalPolicy("CHUCK_TINYFISH_MONITOR", { action: "create" }), "private");
+  for (const [slug, args] of [["CHUCK_TINYFISH_SEARCH", {}], ["CHUCK_TINYFISH_FETCH", {}], ["CHUCK_TINYFISH_RESEARCH", { action: "start" }], ["CHUCK_TINYFISH_MONITOR", { action: "delete" }]] as const) {
+    assert.equal(requiresToolApproval(slug, args, true), false, `${slug} must ignore the generic force-approval override`);
+  }
+  assert.equal(isSharedChannelToolDenied("CHUCK_TINYFISH_RESEARCH"), true);
+  assert.equal(isSharedChannelToolDenied("CHUCK_TINYFISH_MONITOR"), true);
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE"), "approval_required");
   assert.equal(requiresToolApproval("CHUCK_MISSION_COMPENSATE"), true);
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_COMPENSATE", { action: "inspect" }), "private");

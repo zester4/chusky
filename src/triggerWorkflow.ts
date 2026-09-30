@@ -3,6 +3,7 @@ import { config } from "./config.js";
 import { getTriggerEvent } from "./store.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { workflowEventId } from "./workflowIds.js";
+import { createHash } from "node:crypto";
 
 export { resolveWorkflowEndpoint } from "./workflowUrls.js";
 
@@ -40,6 +41,21 @@ export async function enqueueTaskWorkflow(userId: number, taskId: string, runAt 
     retryDelay: "1000 * (1 + retried)",
     ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
     flowControl: { key: `chusky-task-user-${userId}`, parallelism: 1, rate: 1, period: "1s" },
+  });
+  return workflow.workflowRunId;
+}
+
+export async function enqueueTinyFishResearchWorkflow(userId: number, runRecordId: string): Promise<string> {
+  if (!config.webhookUrl) throw new Error("Background TinyFish Research requires WEBHOOK_URL and QStash configuration.");
+  const stable = createHash("sha256").update(`${userId}:${runRecordId}`).digest("hex").slice(0, 40);
+  const workflow = await workflowClient().trigger({
+    url: `${config.webhookUrl.replace(/\/+$/, "")}/workflows/tinyfish-research`,
+    body: { userId, runRecordId },
+    workflowRunId: `tinyfish-research-${stable}`,
+    retries: 3,
+    retryDelay: "1000 * (1 + retried)",
+    ...(workflowFailureUrl() ? { failureUrl: workflowFailureUrl() } : {}),
+    flowControl: { key: `chusky-tinyfish-research-user-${userId}`, parallelism: 2, rate: 2, period: "1s" },
   });
   return workflow.workflowRunId;
 }

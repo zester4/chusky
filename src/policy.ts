@@ -20,6 +20,16 @@ const KNOWN_COMPOSIO_TOOLKIT_PATTERN = /^(GMAIL|GOOGLECALENDAR|CALENDLY|SLACK|X|
 
 export type ToolApprovalPolicy = "private" | "approval_required";
 
+// TinyFish is a bounded, server-side web capability. Its inputs and outputs
+// remain constrained and untrusted, but it must be usable by autonomous runs
+// without turning every search, report, or monitor operation into a prompt.
+const TINYFISH_AUTONOMOUS_TOOLS = new Set([
+  "CHUCK_TINYFISH_SEARCH",
+  "CHUCK_TINYFISH_FETCH",
+  "CHUCK_TINYFISH_RESEARCH",
+  "CHUCK_TINYFISH_MONITOR",
+]);
+
 function canonicalPolicySlug(slug: string): string {
   return slug;
 }
@@ -164,6 +174,7 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
  */
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   slug = canonicalPolicySlug(slug);
+  if (TINYFISH_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (slug === "CHUCK_BROWSER") {
     // Unknown browser claims are validated by the E2B/vault guard against the
     // freshly inspected accessible control. Do not turn an ambiguous model
@@ -389,6 +400,7 @@ export function isDeletionToolCall(slug: string, args: Record<string, unknown> =
 }
 
 export function requiresToolApproval(slug: string, args: Record<string, unknown> = {}, forceApproval = false, ownerPrivateRun = false): boolean {
+  if (TINYFISH_AUTONOMOUS_TOOLS.has(canonicalPolicySlug(slug))) return false;
   if (slug === "CHUCK_TREG_CALL" && isAutonomousTregCatalogCall(args)) return false;
   if (TREG_AUTONOMOUS_TOOLS.has(slug)) return false;
   if (ownerPrivateRun) {

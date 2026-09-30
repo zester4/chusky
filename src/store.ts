@@ -1231,7 +1231,9 @@ export type AttentionEntityKind =
   | "autonomy_profile"
   | "delivery_preference"
   | "relationship"
-  | "project_state";
+  | "project_state"
+  | "tinyfish_research_run"
+  | "tinyfish_monitor";
 export type AttentionCollection =
   | "observations"
   | "open-loops"
@@ -1241,7 +1243,9 @@ export type AttentionCollection =
   | "autonomy-profiles"
   | "delivery-preferences"
   | "relationships"
-  | "project-states";
+  | "project-states"
+  | "tinyfish-research-runs"
+  | "tinyfish-monitors";
 export type AttentionMetadata = Record<string, string | number | boolean | null>;
 
 export interface ObservationRecord {
@@ -1312,7 +1316,21 @@ export interface ProjectStateRecord {
   summary: string; currentPhase?: string; nextAction?: string; blockers?: string[];
   lastActivityAt?: number; confidence: number; createdAt: number; updatedAt: number;
 }
-export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | AutonomyWatchRecord | AutonomyProfileRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord;
+export interface TinyFishResearchRunRecord {
+  id: string; userId: number; providerRunId: string; query: string; mode: "standard" | "deep";
+  status: "RUNNING" | "COMPLETED" | "FAILED" | "CANCELLED" | "TIMED_OUT";
+    report?: string; progress?: string; failureReason?: string; citations: Array<{ url: string; title?: string; snippet?: string }>;
+  workflowRunId?: string;
+  createdAt: number; updatedAt: number;
+}
+export interface TinyFishMonitorRunRecord { id: string; occurredAt: number; status: "changed" | "unchanged" | "failed"; summary: string; }
+export interface TinyFishMonitorRecord {
+  id: string; userId: number; providerMonitorId: string; callbackId: string; monitorType: "fetch" | "search";
+  name: string; purpose?: string; scheduleCron: string; targetUrl?: string; query?: string;
+  status: "active" | "paused" | "failed" | "deleted"; lastRunId?: string; lastRunAt?: number; lastSummary?: string; lastError?: string;
+  snapshotHash?: string; runHistory: TinyFishMonitorRunRecord[]; createdAt: number; updatedAt: number;
+}
+export type AttentionRecord = ObservationRecord | OpenLoopRecord | AttentionCandidateRecord | StandingOrderRecord | AutonomyWatchRecord | AutonomyProfileRecord | DeliveryPreferenceRecord | RelationshipRecord | ProjectStateRecord | TinyFishResearchRunRecord | TinyFishMonitorRecord;
 export interface AttentionListOptions { query?: string; status?: string; limit?: number; }
 
 export interface ApprovalRecord {
@@ -7101,11 +7119,11 @@ export async function forgetImageAsset(uid: number, idOrName: string): Promise<b
 const attentionCollections: Record<AttentionEntityKind, AttentionCollection> = {
   observation: "observations", open_loop: "open-loops", attention_candidate: "attention-candidates",
   standing_order: "standing-orders", autonomy_watch: "autonomy-watches", autonomy_profile: "autonomy-profiles", delivery_preference: "delivery-preferences",
-  relationship: "relationships", project_state: "project-states",
+  relationship: "relationships", project_state: "project-states", tinyfish_research_run: "tinyfish-research-runs", tinyfish_monitor: "tinyfish-monitors",
 };
 const attentionPrefixes: Record<AttentionEntityKind, string> = {
   observation: "obs", open_loop: "loop", attention_candidate: "cand", standing_order: "order",
-  autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj",
+  autonomy_watch: "watch", autonomy_profile: "profile", delivery_preference: "pref", relationship: "rel", project_state: "proj", tinyfish_research_run: "tf_run", tinyfish_monitor: "tf_monitor",
 };
 const channelProviders: ChannelProvider[] = ["telegram", "slack", "whatsapp", "sendblue", "sms", "x", "xchat", "voice", "cli", "webhook"];
 
@@ -7221,6 +7239,30 @@ function attentionRecord(collection: AttentionCollection, raw: Record<string, un
       status: attentionStatus(raw.status, ["active", "paused", "completed", "archived"], "active") as ProjectStateRecord["status"], summary: attentionText(raw.summary, "summary", 4000, true)!,
       currentPhase: attentionText(raw.currentPhase, "currentPhase", 300), nextAction: attentionText(raw.nextAction, "nextAction"), blockers: attentionArray(raw.blockers, "blockers"),
       lastActivityAt: attentionTimestamp(raw.lastActivityAt, "lastActivityAt"), confidence: attentionNumber(raw.confidence, "confidence", 0.5, 0, 1),
+    };
+    case "tinyfish-research-runs": return {
+      ...base, providerRunId: attentionText(raw.providerRunId, "providerRunId", 160, true)!, query: attentionText(raw.query, "query", 2000, true)!,
+      mode: raw.mode === "deep" ? "deep" : "standard", status: attentionStatus(raw.status, ["RUNNING", "COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"], "RUNNING") as TinyFishResearchRunRecord["status"],
+      report: attentionText(raw.report, "report", 40_000), progress: attentionText(raw.progress, "progress", 1_000), failureReason: attentionText(raw.failureReason, "failureReason", 1_000), citations: Array.isArray(raw.citations) ? raw.citations.slice(0, 100).flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const citation = item as Record<string, unknown>;
+        const url = attentionText(citation.url, "citation.url", 2000, true);
+        if (!url) return [];
+        return [{ url, title: attentionText(citation.title, "citation.title", 500), snippet: attentionText(citation.snippet, "citation.snippet", 1500) }];
+      }) : [], workflowRunId: attentionText(raw.workflowRunId, "workflowRunId", 200),
+    };
+    case "tinyfish-monitors": return {
+      ...base, providerMonitorId: attentionText(raw.providerMonitorId, "providerMonitorId", 160, true)!, callbackId: attentionText(raw.callbackId, "callbackId", 160, true)!, monitorType: attentionStatus(raw.monitorType, ["fetch", "search"], "fetch") as TinyFishMonitorRecord["monitorType"],
+      name: attentionText(raw.name, "name", 100, true)!, purpose: attentionText(raw.purpose, "purpose", 2000), scheduleCron: attentionText(raw.scheduleCron, "scheduleCron", 120, true)!,
+      targetUrl: attentionText(raw.targetUrl, "targetUrl", 2000), query: attentionText(raw.query, "query", 2000), status: attentionStatus(raw.status, ["active", "paused", "failed", "deleted"], "active") as TinyFishMonitorRecord["status"],
+      lastRunId: attentionText(raw.lastRunId, "lastRunId", 160), lastRunAt: attentionTimestamp(raw.lastRunAt, "lastRunAt"), lastSummary: attentionText(raw.lastSummary, "lastSummary", 1000), lastError: attentionText(raw.lastError, "lastError", 500),
+      snapshotHash: attentionText(raw.snapshotHash, "snapshotHash", 64), runHistory: Array.isArray(raw.runHistory) ? raw.runHistory.slice(-20).flatMap((item) => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+        const run = item as Record<string, unknown>;
+        const id = attentionText(run.id, "run.id", 160, true);
+        if (!id) return [];
+        return [{ id, occurredAt: attentionTimestamp(run.occurredAt, "run.occurredAt", base.createdAt)!, status: attentionStatus(run.status, ["changed", "unchanged", "failed"], "unchanged") as TinyFishMonitorRunRecord["status"], summary: attentionText(run.summary, "run.summary", 500, true)! }];
+      }) : [],
     };
   }
 }
