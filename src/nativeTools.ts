@@ -36,7 +36,7 @@ import { startBlandCallForUser } from "./calls/bland.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
 import type { ComposioToolPresentation } from "./toolActivity.js";
-import { WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective } from "./subagents/capabilities.js";
+import { ATTENTION_PULSE_TOOLS, WORKER_CAPABILITIES, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective } from "./subagents/capabilities.js";
 import { enqueueSubagentToolContinuation, resolveSubagentToolRequest } from "./subagents/workflow.js";
 import { listSkillFiles, readSkillFile, searchSkills } from "./skills/catalog.js";
 import { abortable, throwIfAborted } from "./cancellation.js";
@@ -575,25 +575,6 @@ function requireQStash(): string {
 
 const ATTENTION_PULSE_JOB_ID = (userId: number) => `pulse_${userId}`;
 const ATTENTION_PULSE_SCHEDULE_ID = (userId: number) => `chuck-attention-pulse-${userId}`;
-const ATTENTION_PULSE_TOOLS = [
-  "CHUCK_TASK_LIST",
-  "CHUCK_TASK_GET",
-  "CHUCK_MISSION_LIST",
-  "CHUCK_MISSION_GET",
-  "CHUCK_MISSION_PROOF",
-  "CHUCK_TASK_CHECKPOINT",
-  "CHUCK_TASK_BLOCK",
-  "CHUCK_TASK_COMPLETE",
-  "CHUCK_SET_REMINDER",
-  "CHUCK_LIST_REMINDERS",
-  "CHUCK_CANCEL_REMINDER",
-  "CHUCK_ATTENTION_STATE",
-  "CHUCK_LIST_JOBS",
-  "CHUCK_HANDOFF_SUBAGENT",
-  "CHUCK_REQUEST_ADDITIONAL_TOOLS",
-  "CHUCK_AUTONOMY_RECONCILE",
-  "CHUCK_AUTONOMY_PLAYBOOK",
-];
 const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
   worker: "elena",
   objective: "Review the owner's attention state and act within standing-order authority.",
@@ -602,7 +583,7 @@ const ATTENTION_PULSE_BINDING: ScheduledWorkerBinding = {
   // Pulse runs are deliberately narrower than ordinary Elena work. They can
   // inspect and update attention/task/reminder state, but cannot directly use
   // connected-app actions without an explicit capability expansion.
-  allowedTools: ATTENTION_PULSE_TOOLS,
+  allowedTools: [...ATTENTION_PULSE_TOOLS],
   allowedComposioTools: [],
   approvalPolicy: "require_chusky_approval",
   timeoutSeconds: 90,

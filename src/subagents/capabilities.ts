@@ -21,6 +21,36 @@ export interface CapabilityManifest {
 const SKILL_TOOLS = ["CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE"];
 
 /**
+ * Private, bounded tools used by the scheduled attention pulse. Keep this
+ * contract shared with the job binding so a deployed worker cannot request a
+ * tool its manifest rejects, and existing jobs can receive safe grant updates.
+ */
+export const ATTENTION_PULSE_TOOLS = [
+  "CHUCK_TASK_LIST",
+  "CHUCK_TASK_GET",
+  "CHUCK_MISSION_LIST",
+  "CHUCK_MISSION_GET",
+  "CHUCK_MISSION_PROOF",
+  "CHUCK_TASK_CHECKPOINT",
+  "CHUCK_TASK_BLOCK",
+  "CHUCK_TASK_COMPLETE",
+  "CHUCK_SET_REMINDER",
+  "CHUCK_LIST_REMINDERS",
+  "CHUCK_CANCEL_REMINDER",
+  "CHUCK_ATTENTION_STATE",
+  "CHUCK_LIST_JOBS",
+  "CHUCK_HANDOFF_SUBAGENT",
+  "CHUCK_REQUEST_ADDITIONAL_TOOLS",
+  "CHUCK_AUTONOMY_STATUS",
+  "CHUCK_AUTONOMY_RECONCILE",
+  "CHUCK_AUTONOMY_PLAYBOOK",
+  "CHUCK_MEETING_LIST",
+  "CHUCK_MEETING_STATUS",
+  "CHUCK_MEETING_PREPARATION_LIST",
+  "CHUCK_MEETING_CONTEXT_PREPARE",
+] as const;
+
+/**
  * A small compatibility boundary for external agent/tool vocabularies.
  *
  * `web_search` is used by some generic agent frameworks (including Foundry),
@@ -263,28 +293,16 @@ Operating Rules:
     domain: "Durable task governance, checkpoint tracking, recurring cron job scheduling, attention state loop tracking",
     allowedTools: [
       ...SKILL_TOOLS,
+      ...ATTENTION_PULSE_TOOLS,
       "CHUCK_TASK_CREATE",
-      "CHUCK_TASK_LIST",
-      "CHUCK_TASK_GET",
-      "CHUCK_TASK_CHECKPOINT",
-      "CHUCK_TASK_BLOCK",
-      "CHUCK_TASK_COMPLETE",
       "CHUCK_TASK_CANCEL",
       "CHUCK_TASK_RETRY",
       "CHUCK_TASK_SCHEDULE",
-      "CHUCK_SET_REMINDER",
-      "CHUCK_LIST_REMINDERS",
-      "CHUCK_CANCEL_REMINDER",
       "CHUCK_SCHEDULE_JOB",
-      "CHUCK_LIST_JOBS",
       "CHUCK_CANCEL_JOB",
-      "CHUCK_ATTENTION_STATE",
-      "CHUCK_MISSION_PROOF",
       "CHUCK_MISSION_EVIDENCE",
       "CHUCK_MISSION_VERIFY",
       "CHUCK_MISSION_REPAIR",
-      "CHUCK_HANDOFF_SUBAGENT",
-      "CHUCK_REQUEST_ADDITIONAL_TOOLS",
     ],
     allowedComposioPrefixes: ["GOOGLECALENDAR_", "LINEAR_", "JIRA_", "SLACK_"],
     starterComposioTools: [],

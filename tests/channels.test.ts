@@ -49,6 +49,10 @@ test("native execution enforces the full shared-channel private-tool boundary", 
   for (const slug of SHARED_CHANNEL_TOOL_DENY) {
     await assert.rejects(nativeTool(42, slug, {}, { sharedConversation: true }), /private owner conversation/i, slug);
   }
+  for (const slug of ["CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK"]) {
+    assert.ok(SHARED_CHANNEL_TOOL_DENY.includes(slug as typeof SHARED_CHANNEL_TOOL_DENY[number]), `${slug} must remain private`);
+    await assert.rejects(nativeTool(42, slug, {}, { sharedConversation: true }), /private owner conversation/i, slug);
+  }
 });
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });

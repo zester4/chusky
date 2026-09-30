@@ -56,7 +56,7 @@ import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
 import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
-import { delegationStageObjective, WORKER_CAPABILITIES } from "./subagents/capabilities.js";
+import { ATTENTION_PULSE_TOOLS, delegationStageObjective, WORKER_CAPABILITIES } from "./subagents/capabilities.js";
 import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
 import { workflowEventId } from "./workflowIds.js";
@@ -2192,7 +2192,13 @@ async function main(): Promise<void> {
             const selectedBinding = selectedWorker === binding.worker ? binding : undefined;
             const selectedManifest = WORKER_CAPABILITIES[selectedWorker];
             const selectedObjective = selectedBinding ? plan.prompt : delegationStageObjective(selectedWorker);
-            const selectedTools = selectedBinding?.allowedTools ?? selectedManifest.allowedTools;
+            // Pulse schedules persist their binding. Resolve the current
+            // bounded Elena grant at execution time so an existing hourly job
+            // receives safe capability additions after deploy, without
+            // widening ordinary scheduled workers or accepting stale grants.
+            const selectedTools = job.kind === "attention_pulse" && selectedWorker === "elena"
+              ? [...ATTENTION_PULSE_TOOLS]
+              : selectedBinding?.allowedTools ?? selectedManifest.allowedTools;
             const selectedComposioTools = proactiveRoute?.allowedComposioTools?.length
               ? proactiveRoute.allowedComposioTools
               : (selectedBinding?.allowedComposioTools ?? []);

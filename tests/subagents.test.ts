@@ -2,7 +2,8 @@ import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { delegationStartedStatus, executeDelegation, resumeApprovedDelegation, setSubagentExecutorDependenciesForTests } from "../src/subagents/executor.js";
 import { nativeTool, setPhoneCallLauncherForTests } from "../src/nativeTools.js";
-import { WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { ATTENTION_PULSE_TOOLS, WORKER_CAPABILITIES, classifyDelegationObjective, isComposioToolAllowedForWorker, normalizeDelegationToolScopes, planDelegationObjective, validateDelegationTarget } from "../src/subagents/capabilities.js";
+import { chuckTools } from "../src/agentTools.js";
 import { initStore, getSession, listHandoffRecords, listTasks, createMission, claimApproval, claimHandoffBudget } from "../src/store.js";
 import { config } from "../src/config.js";
 import { UnavailableComposioToolsError } from "../src/agent.js";
@@ -27,6 +28,18 @@ test("validates capability registry manifests for all worker capabilities", () =
     assert.ok(Array.isArray(cap.skills.supporting));
     assert.ok(cap.systemPrompt.length > 20);
     assert.ok(cap.reflectionChecklist.length > 0);
+  }
+});
+
+test("attention pulse grant is catalogued and permitted by Elena's manifest", () => {
+  const catalog = new Set(chuckTools.map((tool) => tool.function.name));
+  const elena = new Set(WORKER_CAPABILITIES.elena.allowedTools);
+  for (const tool of ATTENTION_PULSE_TOOLS) {
+    assert.equal(catalog.has(tool), true, `${tool} must have a native schema and dispatcher`);
+    assert.equal(elena.has(tool), true, `${tool} must be permitted by Elena's manifest`);
+  }
+  for (const tool of ["CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK", "CHUCK_MEETING_LIST", "CHUCK_MEETING_STATUS", "CHUCK_MEETING_PREPARATION_LIST"]) {
+    assert.ok(ATTENTION_PULSE_TOOLS.includes(tool as typeof ATTENTION_PULSE_TOOLS[number]), `${tool} must support an attention-pulse work category`);
   }
 });
 
