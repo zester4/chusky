@@ -5,8 +5,8 @@ This document is the implementation contract for the SDK. It prevents the existi
 ## Principles
 
 1. `/v1` is the only public prefix. Existing `/cli`, Telegram, channel, and workflow routes remain private transport endpoints.
-2. `CHUSKY_PROJECT_KEY` is the root bootstrap/admin key on the Oracle server. It creates project-scoped `chsk_` keys, returned once and persisted as hashes only. A developer puts their scoped key in `CHUSKY_API_KEY` in their own server environment. An end-user identifier is supplied in `X-Chusky-User-Id` and is never inferred from a phone number, display name, or channel identity. The first-party web dashboard may use its Better Auth session cookie for user-scoped `/v1` resources; API keys remain server-side credentials.
-3. Project keys are revocable and scope-enforced (`resource:read`, `resource:write`, `resource:*`, or `*`). Never use CLI device tokens for the SDK.
+2. Developers create an API key in the Chusky dashboard and configure it as `CHUSKY_API_KEY` in their server environment. An end-user identifier is supplied in `X-Chusky-User-Id` and is never inferred from a phone number, display name, or channel identity. The first-party web dashboard may use its Better Auth session cookie for user-scoped `/v1` resources; API keys remain server-side credentials.
+3. API keys are revocable and scope-enforced (`resource:read`, `resource:write`, `resource:*`, or `*`). Never use CLI device tokens for the SDK.
 4. Durable mutations accept `Idempotency-Key`; persist method, normalized path, body digest, response status/body, and a 24-hour replay window. A reused key with a different body returns `409 idempotency_mismatch`. Live streaming is not replayable; reconnect through persisted run state and events.
 5. Every response has `X-Request-Id`. Errors use `{ "error": { "code", "message", "requestId" } }`.
 6. Runs may require approval. The server persists the exact pending action and binds a decision to its end user; neither the SDK nor a webhook payload is authorization.
@@ -15,20 +15,20 @@ This document is the implementation contract for the SDK. It prevents the existi
 
 Verified Better Auth users may manage only their own projects through
 `/v1/account/projects`. These cookie-authenticated routes create, list, update
-scopes, rotate, and revoke project keys. They never accept or return
-`CHUSKY_PROJECT_KEY`; raw `chsk_` keys are returned only by create and rotation.
+scopes, rotate, and revoke API keys. Keys are shown only through the dashboard
+when they are created or rotated.
 Each verified account may have at most 10 active projects. Root-created projects
 remain ownerless operator records and are not visible through account routes.
 
-Company projects attach to a Better Auth organization ID. Owners/admins can
-create and manage project credentials, policy, and up to 20 agent profiles;
+Company workspaces attach to a Better Auth organization ID. Owners/admins can
+manage API-key access, policy, and up to 20 agent profiles;
 verified members can list those project resources. Default company scopes are
-least-privilege and intentionally exclude `approvals:write`, so a project key
+least-privilege and intentionally exclude `approvals:write`, so an API key
 cannot approve its own external tool actions. Composio app/OAuth and trigger
 endpoints remain the existing integration surface and retain the stable Chusky
 end-user identity supplied in `X-Chusky-User-Id`.
 
-Company telemetry is project-scoped rather than caller-scoped: keys with the
+Company telemetry is workspace-scoped rather than caller-scoped: API keys with the
 `company:read` scope can read status-only run summaries, bounded audit events,
 and monthly completed-run/model-cost totals at `/v1/company/runs`,
 `/v1/company/audit-events`, and `/v1/company/usage`. The authenticated
@@ -59,7 +59,7 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Triggers | `GET /v1/triggers`, `POST /v1/triggers`, `PATCH /v1/triggers/:triggerId`, `DELETE /v1/triggers/:triggerId` | Owner-scoped trigger lifecycle. Creation requires an `Idempotency-Key`, an exact provider-catalogue slug, and may pin to a verified `connectedAccountId`; optional `instructions` (max 2,000 characters) are stored privately with the trigger and applied to future events without overriding safety or approval rules. `PATCH` accepts exactly one of `{ enabled: boolean }` or `{ instructions: string }`. |
 | Trigger catalogue | `GET /v1/triggers/catalog/toolkits`, `GET /v1/triggers/catalog/toolkits/:toolkit` | Composio-backed, paginated trigger types for connected apps; the dashboard uses the same catalogue as Telegram. Field metadata is bounded and credential-shaped fields are marked sensitive rather than offered for input. |
 | Observability | `GET /v1/audit-events`, `GET /v1/usage` | Bounded per-user audit trail and current usage snapshot. |
-| Company telemetry | `GET /v1/company/runs`, `/v1/company/audit-events`, `/v1/company/usage`; dashboard `GET /v1/account/projects/:id/company/{runs,audit-events,usage}` | Requires `company:read` for project keys; dashboard reads require workspace owner/admin. Run summaries contain no prompt or output. |
+| Company telemetry | `GET /v1/company/runs`, `/v1/company/audit-events`, `/v1/company/usage`; dashboard `GET /v1/account/projects/:id/company/{runs,audit-events,usage}` | Requires `company:read` for API keys; dashboard reads require workspace owner/admin. Run summaries contain no prompt or output. |
 | Calls | `GET/POST /v1/account/calls` | Lists redacted call metadata and starts a validated outbound call. SDK callers use `calls:read/write`; dashboard callers must be verified and Telegram-linked. |
 | Voice | `GET /v1/account/voice-options`, `PATCH /v1/account/preferences` | Lists Flux and optional Bland catalogue entries and stores the account's live voice preference. Use `voice:read` for the catalogue and `account:write` for preferences. |
 | Meetings | `GET/POST /v1/meetings`, `POST /v1/meetings/prepare`, `GET/PATCH /v1/meetings/profile`, `POST /v1/meetings/preparations/:id/join`, `GET /v1/meetings/:id`, `POST /v1/meetings/:id/leave`, `GET /v1/meetings/:id/context`, `DELETE /v1/meetings/contacts/:id` | Recall lifecycle for Zoom, Google Meet, Microsoft Teams, and Webex. SDK callers use `meetings:read/write`; meeting URLs and sealed calendar links are never returned by list endpoints. |

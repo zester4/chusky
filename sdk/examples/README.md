@@ -23,7 +23,7 @@ npx tsx examples/quickstart.ts
 ```
 
 Set `CHUSKY_BASE_URL` when using a self-hosted or staging API. Use a test
-project key and test identity. Some examples create durable state, upload a
+API key and test identity. Some examples create durable state, upload a
 file, register a webhook, or display an approval; review the source before
 running them against production.
 

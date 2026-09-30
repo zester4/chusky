@@ -24,17 +24,17 @@ paths:
     get: { summary: List root control-plane audit events, responses: { '200': { description: OK } } }
   /admin/projects/{projectId}:
     patch: { summary: Replace scopes for an active project, responses: { '200': { description: Updated } } }
-    delete: { summary: Revoke a developer project key, responses: { '204': { description: Revoked } } }
+    delete: { summary: Revoke a developer API key, responses: { '204': { description: Revoked } } }
   /admin/projects/{projectId}/rotate-key:
-    post: { summary: Replace a project key and return the new value exactly once, responses: { '201': { description: Rotated } } }
+    post: { summary: Replace an API key and return the new value exactly once, responses: { '201': { description: Rotated } } }
   /account/projects:
     get: { summary: List personal projects or projects attached to a verified organization member, responses: { '200': { description: OK } } }
     post: { summary: Create a personal or organization project and return its key exactly once, responses: { '201': { description: Created }, '403': { description: Dashboard session, verified email, or organization admin required }, '409': { description: Active key limit reached } } }
   /account/projects/{projectId}:
-    patch: { summary: Replace scopes for the authenticated owner's active project key, responses: { '200': { description: Updated }, '404': { description: Not found } } }
-    delete: { summary: Revoke the authenticated owner's project key, responses: { '204': { description: Revoked }, '404': { description: Not found } } }
+    patch: { summary: Replace scopes for the authenticated owner's active API key, responses: { '200': { description: Updated }, '404': { description: Not found } } }
+    delete: { summary: Revoke the authenticated owner's API key, responses: { '204': { description: Revoked }, '404': { description: Not found } } }
   /account/projects/{projectId}/rotate-key:
-    post: { summary: Rotate the authenticated owner's project key and return it exactly once, responses: { '201': { description: Rotated }, '404': { description: Not found } } }
+    post: { summary: Rotate the authenticated owner's API key and return it exactly once, responses: { '201': { description: Rotated }, '404': { description: Not found } } }
   /account/projects/{projectId}/company/runs:
     get: { summary: List status-only company run summaries for a workspace owner or admin, responses: { '200': { description: OK }, '404': { description: Not found } } }
   /account/projects/{projectId}/company/audit-events:
@@ -65,7 +65,7 @@ paths:
   /agents/templates:
     get: { summary: List built-in company agent templates, responses: { '200': { description: OK } } }
   /agents:
-    get: { summary: List agent profiles belonging to the current project key, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
+    get: { summary: List agent profiles available to the current API key, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Create a template-based agent profile within the current project, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created }, '403': { description: Invalid template or grant } } }
   /agents/{agentId}:
     get: { summary: Get one current-project agent profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }

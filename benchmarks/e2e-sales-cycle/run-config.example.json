@@ -1,11 +1,7 @@
 {
-  "scenarioVersion": "e2e-sales-cycle-v1",
+  "scenarioVersion": "e2e-sales-cycle-v3",
   "runId": "replace-with-a-fresh-unique-run-id",
-  "sandboxConfirmed": false,
-  "composioAccountAliases": {
-    "gmail": "",
-    "hubspot": ""
-  },
+  "externalActionsAuthorized": false,
   "salesInboxEmail": "replace-with-the-address-of-the-connected-test-mailbox",
   "buyerEmail": "replace-with-a-controlled-test-mailbox"
 }

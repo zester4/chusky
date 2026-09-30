@@ -31,6 +31,18 @@ test("SDK uses the v1 API, bearer key, and idempotency key", async () => {
   assert.match(captured?.body ?? "", /user_1/);
 });
 
+test("SDK uses the hosted API when baseUrl is omitted", async () => {
+  let url = "";
+  const sdk = new Chusky({ apiKey: "chsk_default_test", userId: "customer_default", fetch: mockFetch((requestUrl) => {
+    url = requestUrl;
+    return new Response(JSON.stringify({ id: "thr_default", metadata: {}, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }), { status: 201 });
+  }) });
+
+  await sdk.threads.create();
+
+  assert.equal(url, "https://chusky.up.railway.app/v1/threads");
+});
+
 test("SDK creates provider-catalogued triggers with exact account and instructions, then updates their policy", async () => {
   const calls: Array<{ url: string; method: string; body: Record<string, unknown>; idempotencyKey: string | null }> = [];
   const sdk = new Chusky({ apiKey: "chsk_trigger_test", userId: "trigger-owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

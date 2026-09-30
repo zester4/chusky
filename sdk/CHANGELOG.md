@@ -2,6 +2,11 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.7.1 - 2026-09-30
+
+- Default the SDK to the hosted Chusky API so `baseUrl` is optional for normal
+  use; explicit overrides remain available for staging and self-hosted APIs.
+
 ## 1.7.0 - 2026-09-29
 
 - Expose typed trigger catalogue schemas, connected-account binding, and

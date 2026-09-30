@@ -1,9 +1,9 @@
 ---
 title: Embedded chat
-description: Add a safe customer-facing Chusky chat without exposing project credentials.
+description: Add a safe customer-facing Chusky chat without exposing API credentials.
 ---
 
-The widget is a browser UI only. It never talks to Chusky with a project key.
+The widget is a browser UI only. It never talks to Chusky with an API key.
 Your server owns the key, authenticates the visitor, chooses the stable Chusky
 user ID, and proxies the stream.
 
@@ -38,7 +38,7 @@ The route should:
 1. Authenticate the visitor using your own session.
 2. Derive a stable, non-PII customer identifier.
 3. Create or recover a Chusky thread for that customer.
-4. Call `threads.runs.stream()` with the server-side project key.
+4. Call `threads.runs.stream()` with the server-side API key.
 5. Forward only bounded run events; never forward raw tool arguments, provider
    payloads, prompts, tokens, or private account details.
 

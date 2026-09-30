@@ -1,6 +1,6 @@
 {
   "name": "@chusky/sdk",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "TypeScript SDK for Chusky's developer API.",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,7 @@
   "files": [
     "dist",
     "README.md",
+    "cookbook",
     "examples",
     "docs",
     "docs.json",

@@ -13,10 +13,11 @@ npm install @chusky/sdk
 
 ```env
 CHUSKY_API_KEY=chsk_your_project_key
-CHUSKY_BASE_URL=https://chusky.up.railway.app
 ```
 
 Keep `CHUSKY_API_KEY` in a trusted server environment. Never bundle it into browser JavaScript.
+The SDK uses the hosted Chusky API automatically. Set `baseUrl` explicitly only
+for staging or self-hosted deployments.
 
 ## Create a thread and run the agent
 
@@ -25,7 +26,6 @@ import { Chusky } from "@chusky/sdk";
 
 const chusky = new Chusky({
   apiKey: process.env.CHUSKY_API_KEY!,
-  baseUrl: process.env.CHUSKY_BASE_URL,
   userId: "customer_123",
 });
 

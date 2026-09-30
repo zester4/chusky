@@ -4,7 +4,9 @@ import type { A2AMessageInput } from "./types.js";
 import type { ImageDownload } from "./types.js";
 import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
-const DEFAULT_BASE_URL = "https://api.chusky.ai";
+// Hosted SDK users do not need to configure an API origin. Keep `baseUrl` as
+// an explicit escape hatch for staging and self-hosted deployments.
+const DEFAULT_BASE_URL = "https://chusky.up.railway.app";
 
 export class Chusky {
   readonly threads: ThreadsResource;
@@ -225,7 +227,7 @@ export class Chusky {
   }
 }
 
-/** Trusted-server client for provisioning project keys. */
+/** Trusted-server client for administrative API operations. */
 export function createChuskyAdmin(options: Omit<ChuskyClientOptions, "userId"> & { userId?: string }): Chusky {
   return new Chusky({ ...options, userId: options.userId ?? "operator" });
 }

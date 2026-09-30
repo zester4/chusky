@@ -6,6 +6,8 @@ export function createClient(): Chusky {
 
   return new Chusky({
     apiKey,
+    // Omit this for the hosted API. Set CHUSKY_BASE_URL only for staging or
+    // self-hosted deployments.
     baseUrl: process.env.CHUSKY_BASE_URL,
     userId: process.env.CHUSKY_USER_ID ?? "example-user",
   });

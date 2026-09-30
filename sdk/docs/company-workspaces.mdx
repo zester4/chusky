@@ -50,7 +50,7 @@ const { thread, run } = await chusky.runs.create({
 const latest = await chusky.runs.get(thread.id, run.id);
 ```
 
-The run is durable and task-backed when `wait: false` is used with the configured Redis/QStash execution service. Poll run/task status or receive signed webhook events. A human approves pending external actions through the authenticated dashboard or a separately authorized application. Company-project keys have approval-read scope, not approval-write scope, by default; the MCP server also cannot approve its own actions.
+The run is durable and task-backed when `wait: false` is used with the configured Redis/QStash execution service. Poll run/task status or receive signed webhook events. A human approves pending external actions through the authenticated dashboard or a separately authorized application. Company API keys have approval-read scope, not approval-write scope, by default; the MCP server also cannot approve its own actions.
 
 ## Read company-wide outcomes
 
@@ -67,7 +67,7 @@ console.log(runs.data.map(({ id, status, agentName }) => ({ id, status, agentNam
 console.log(usage.currentMonth.completedRuns, usage.currentMonth.costUsd);
 ```
 
-These reads require the project key's `company:read` scope. The dashboard shows the same project-scoped view to workspace owners/admins. Audit entries contain bounded action paths, status, request IDs, and timestamps—not request bodies. Successful durable completion is counted once per project/run even if a workflow completion is retried.
+These reads require the API key's `company:read` scope. The dashboard shows the same workspace-scoped view to workspace owners/admins. Audit entries contain bounded action paths, status, request IDs, and timestamps—not request bodies. Successful durable completion is counted once per project/run even if a workflow completion is retried.
 
 ## Integrate a company system
 

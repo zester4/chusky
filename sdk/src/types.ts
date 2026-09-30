@@ -417,6 +417,7 @@ export interface ChuskyClientOptions {
   apiKey: string;
   /** Stable developer-owned identifier for the end user whose Chusky state is used. */
   userId: string;
+  /** Optional API origin override for staging or self-hosted deployments. */
   baseUrl?: string;
   fetch?: typeof globalThis.fetch;
   timeoutMs?: number;
