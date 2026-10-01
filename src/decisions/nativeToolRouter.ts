@@ -175,7 +175,19 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
   });
 }
 
-function retainLifecycleToolFamilies(tools: ToolSchema[], selected: Set<string>, context: string): void {
+function requestsLifecycleCreation(query: string, family: "mission" | "task"): boolean {
+  const slug = family === "mission" ? "CHUCK_MISSION_START" : "CHUCK_TASK_CREATE";
+  const modifiers = "a|an|one|single|new|fresh|real|strict(?:-verification)?|verification|durable|autonomous|reliability|smoke|test|bounded|another";
+  const pattern = new RegExp(`\\b(?:(?:start|create|launch|begin|run)\\s+(?:(?:${modifiers})[\\s-]+){0,8}${family}s?|(?:call|use|execute)\\s+${slug})\\b`, "gi");
+  for (const match of query.matchAll(pattern)) {
+    const before = query.slice(0, match.index);
+    if (!/\b(?:do\s+not|don['’]t|never|not\s+to)\s*$/i.test(before)) return true;
+  }
+  return false;
+}
+
+function retainLifecycleToolFamilies(tools: ToolSchema[], selected: Set<string>, query: string, recentContext?: string): void {
+  const context = [query, recentContext].filter(Boolean).join("\n");
   const families = [
     { prefix: "CHUCK_MISSION_", mentioned: /\bmissions?\b|\bmission[-_ ](?:id|resume|start|checkpoint|proof|verification)\b/i },
     { prefix: "CHUCK_TASK_", mentioned: /\b(?:durable\s+)?tasks?\b|\btask[-_ ](?:id|resume|retry|checkpoint)\b/i },
@@ -189,10 +201,10 @@ function retainLifecycleToolFamilies(tools: ToolSchema[], selected: Set<string>,
     }
   }
   const existingMissionRecovery = (/\bmis_[a-z0-9_-]+\b|\bexisting\s+mission\b/i.test(context))
-    && !/\bnew\s+mission\b/i.test(context);
+    && !requestsLifecycleCreation(query, "mission");
   if (existingMissionRecovery) selected.delete("CHUCK_MISSION_START");
   const existingTaskRecovery = (/\btask_[a-z0-9_-]+\b|\bexisting\s+task\b/i.test(context))
-    && !/\bnew\s+task\b/i.test(context);
+    && !requestsLifecycleCreation(query, "task");
   if (existingTaskRecovery) selected.delete("CHUCK_TASK_CREATE");
 }
 
@@ -252,7 +264,9 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   // must not hide the recovery action needed after that action is attempted.
   // The closure is bounded to the requested mission/task family, not the full
   // native catalog, and only exposes schemas; execution authority is unchanged.
-  retainLifecycleToolFamilies(tools, selectedSet, routingContext);
+  // The current request determines create versus recovery. Old IDs in recent
+  // context must not suppress an explicitly requested fresh mission or task.
+  retainLifecycleToolFamilies(tools, selectedSet, query, options.recentContext);
   const routed = modelToolsForSelection(tools, selectedSet);
   return {
     tools: routed,

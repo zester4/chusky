@@ -89,6 +89,13 @@ the provider state or record a concrete blocker.
 
 ## Starting a mission
 
+Jev native routing retains the mission lifecycle tools for mission requests.
+An explicit request to start or create a fresh mission takes precedence over
+old mission IDs in recent conversation history. Existing-mission recovery keeps
+resume and repair controls available while suppressing new-mission creation.
+Preflight checks the same tool catalog exposed to the current model round;
+it cannot grant a tool removed by routing or the run's permissions.
+
 Use `CHUCK_MISSION_START` or `POST /v1/missions` with:
 
 1. A specific objective, not “work on this.”

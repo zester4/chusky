@@ -110,6 +110,24 @@ test("mission controls are not added to unrelated enforce-mode turns", async () 
   } finally { restore(); }
 });
 
+test("a fresh mission test retains creation despite an old mission ID and a no-duplicates instruction", async () => {
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
+  try {
+    const missionTools = ["CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_COMPLETE"]
+      .map((name) => ({ type: "function", function: { name, description: `${name.replaceAll("_", " ")} durable mission control`, parameters: { type: "object", properties: {} } } }));
+    const route = await computeNativeToolRoute(`Run one real mission test with a maximum duration of 5 minutes.
+Start a strict-verification mission titled "Mission Reliability Test".
+After waking, continue the same mission ID and read the sheet again.
+Do not create another mission, sheet, or duplicate rows.`, [...tools(), ...missionTools], {
+      recentContext: "assistant: The original mission mis_previous remains blocked because its budget expired.",
+      client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool("CHUCK_TASK_WAIT") }),
+    });
+    assert.equal(route.source, "jev");
+    const names = route.tools.map((tool: any) => tool.function.name);
+    for (const tool of missionTools) assert.ok(names.includes(tool.function.name), `${tool.function.name} must remain callable for the new mission`);
+  } finally { restore(); }
+});
+
 test("existing-task recovery exposes task lifecycle controls and suppresses task creation", async () => {
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
   try {
@@ -121,6 +139,31 @@ test("existing-task recovery exposes task lifecycle controls and suppresses task
     const names = route.tools.map((tool: any) => tool.function.name);
     assert.ok(!names.includes("CHUCK_TASK_CREATE"), "recovery must not be routed to new-task creation");
     for (const tool of taskTools.filter((item) => item.function.name !== "CHUCK_TASK_CREATE")) assert.ok(names.includes(tool.function.name), `${tool.function.name} must remain available`);
+  } finally { restore(); }
+});
+
+test("current lifecycle intent takes precedence over stale history without widening the granted catalog", async () => {
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
+  try {
+    const lifecycleTools = ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME", "CHUCK_TASK_CREATE", "CHUCK_TASK_GET"]
+      .map((name) => ({ type: "function", function: { name, description: `${name.replaceAll("_", " ")} durable control`, parameters: { type: "object", properties: {} } } }));
+    const cases = [
+      { query: "Create a new durable task for the report", recentContext: "Existing task task_previous is blocked", create: "CHUCK_TASK_CREATE", expected: true },
+      { query: "Resume the existing mission mis_previous. Do not start a new mission.", recentContext: "Start a new mission", create: "CHUCK_MISSION_START", expected: false },
+      { query: "Continue the existing mission mis_previous. Don’t create another mission.", recentContext: "Start a fresh mission", create: "CHUCK_MISSION_START", expected: false },
+      { query: "Continue task_previous. Never create a new task.", recentContext: "Create a new task", create: "CHUCK_TASK_CREATE", expected: false },
+    ];
+    for (const fixture of cases) {
+      const route = await computeNativeToolRoute(fixture.query, [...tools(), ...lifecycleTools], {
+        recentContext: fixture.recentContext,
+        client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool(fixture.create) }),
+      });
+      assert.equal(route.source, "jev");
+      assert.equal(route.tools.some((tool) => tool.function?.name === fixture.create), fixture.expected, fixture.query);
+    }
+    const granted = [...tools(), ...lifecycleTools.filter((tool) => tool.function.name !== "CHUCK_MISSION_START")];
+    const route = await computeNativeToolRoute("Start a new mission", granted, { client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool("CHUCK_MISSION_RESUME") }) });
+    assert.ok(!route.tools.some((tool) => tool.function?.name === "CHUCK_MISSION_START"), "routing must not add a tool absent from the granted catalog");
   } finally { restore(); }
 });
 

@@ -7,6 +7,7 @@ import { config } from "../src/config.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/index.js";
 import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "../src/autonomy/operatingLoop.js";
+import { JevClient, setJevClientForTests } from "../src/decisions/jev.js";
 
 // Agent contract tests mock provider HTTP calls; never send their fetch stubs
 // to a developer's configured Upstash Vector instance.
@@ -1314,6 +1315,52 @@ test("agent distinguishes a failed tool attempt from a successful side effect", 
     assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
     assert.deepEqual(result.toolsSucceeded, []);
   });
+});
+
+test("a fresh mission request exposes start and preflight agrees with the routed model catalog", async () => {
+  const userId = 830023;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = { jevMode: config.jevMode, jevSurfaces: config.jevSurfaces, jevNativeToolRouting: config.jevNativeToolRouting, jevTurnBudgetMs: config.jevTurnBudgetMs };
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["native"]);
+  config.jevNativeToolRouting = true;
+  config.jevTurnBudgetMs = 5000;
+  setJevClientForTests(new JevClient({ apiKey: "test-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const probabilities = Object.fromEntries(Object.keys(body.questions.rank.criteria).map((id) => [id, id === "CHUCK_TASK_WAIT" ? 0.9 : 0]));
+    return new Response(JSON.stringify({ answers: { rank: { type: "choice", choice: "CHUCK_TASK_WAIT", confidence: 0.9, probabilities } } }), { status: 200 });
+  }) as typeof fetch }));
+  const requests: Array<Record<string, any>> = [];
+  try {
+    await withAgentMocks([
+      toolResponse("CHUCK_TOOL_PREFLIGHT", JSON.stringify({ toolName: "CHUCK_MISSION_START", arguments: { title: "Mission Reliability Test", objective: "Create and verify two rows", definitionOfDone: "Two rows verified after a durable wait" } }), "preflight-start"),
+      toolResponse("CHUCK_TOOL_PREFLIGHT", JSON.stringify({ toolName: "CHUCK_BROWSER", arguments: { action: "status" } }), "preflight-hidden"),
+      chatResponse({ role: "assistant", content: "The mission start is available and its arguments are valid. The browser is not exposed for this run." }),
+    ], async () => assert.fail("Preflight must not execute a provider action"), async () => {
+      await runAgent(userId, `Run one real mission test with a maximum duration of 5 minutes.
+Start a strict-verification mission titled "Mission Reliability Test".
+After waking, continue the same mission ID. Do not create another mission.`, [
+        { role: "assistant", content: "The original mission mis_previous remains blocked." },
+      ], "test/model");
+    }, false, undefined, (body) => requests.push(body));
+    for (const request of requests) {
+      const names = request.tools.map((tool: any) => tool.function.name);
+      for (const slug of ["CHUCK_MISSION_START", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_COMPLETE"]) assert.ok(names.includes(slug), `${slug} must stay callable`);
+      assert.ok(!names.includes("CHUCK_BROWSER"));
+    }
+    const results = requests.at(-1)?.messages.filter((message: any) => message.role === "tool") ?? [];
+    const start = JSON.parse(results.find((message: any) => message.tool_call_id === "preflight-start").content);
+    assert.equal(start.available, true);
+    assert.equal(start.argumentsValid, true);
+    const hidden = JSON.parse(results.find((message: any) => message.tool_call_id === "preflight-hidden").content);
+    assert.equal(hidden.available, false);
+    assert.equal(hidden.status, "unavailable");
+    assert.deepEqual(await listMissions(userId), [], "preflight must not create a mission");
+  } finally {
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+  }
 });
 
 test("a Jev-routed mission recovery rejects a stray start-with-id call with a usable correction", async () => {
