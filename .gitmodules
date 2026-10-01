@@ -1,0 +1,3 @@
+[submodule "chusky-web"]
+	path = chusky-web
+	url = https://github.com/zester4/chusky-web.git
