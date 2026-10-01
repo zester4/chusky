@@ -7037,6 +7037,16 @@ export async function searchMemories(uid: number, query?: string, options: { cat
   return [...ranked.values()].sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt).slice(0, limit).map((item) => item.memory);
 }
 
+/** Read one active memory by its exact owner-scoped key without invoking semantic search. */
+export async function getMemoryByKey(uid: number, key: string): Promise<MemoryFact | undefined> {
+  const normalizedKey = key.trim();
+  if (!normalizedKey || normalizedKey.length > 200) return undefined;
+  const now = Date.now();
+  return (await getSession(uid)).memories
+    .filter((memory) => memory.status !== "deleted" && memory.key === normalizedKey && (!memory.expiresAt || memory.expiresAt > now) && (!memory.reviewAt || memory.reviewAt > now))
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+}
+
 export async function forgetMemory(uid: number, key: string): Promise<boolean> {
   const s = await getSession(uid);
   const before = s.memories.length;

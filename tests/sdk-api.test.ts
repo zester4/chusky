@@ -1525,6 +1525,26 @@ test("linked dashboard memory and account overview share one active, owner-scope
   assert.equal(JSON.stringify(overviewBody).includes("web-trigger-event-foreign"), false);
 });
 
+test("dashboard onboarding completion uses an exact owner-scoped memory key", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const api = app();
+  const headers = { "X-Test-Web-User": "onboarding-exact-owner", "Content-Type": "application/json" };
+  const saved = await api.fetch(new Request("http://local/v1/memory", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ category: "profile", key: "chusky_onboarding_profile", value: JSON.stringify({ name: "Seyyid", completedAt: new Date().toISOString(), version: 1 }), confidence: 1, sensitivity: "normal" }),
+  }));
+  assert.equal(saved.status, 201);
+  const exact = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile", { headers }));
+  assert.equal(exact.status, 200);
+  const body = await exact.json() as { data: Array<{ key: string; value: string }> };
+  assert.deepEqual(body.data.map((item) => item.key), ["chusky_onboarding_profile"]);
+  assert.match(body.data[0]!.value, /Seyyid/);
+  const unrelated = await api.fetch(new Request("http://local/v1/memory?key=chusky_onboarding_profile_other", { headers }));
+  assert.deepEqual((await unrelated.json() as { data: unknown[] }).data, []);
+});
+
 test("dashboard devices are revocable by opaque owner-scoped IDs, without exposing token hashes", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);

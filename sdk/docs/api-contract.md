@@ -74,7 +74,7 @@ ledger. Durable run completion accounting is idempotent by project and run ID.
 | Workflow composer | `GET/POST /v1/workflows/composer`, `PATCH /v1/workflows/composer/:workflowId`, `POST .../:workflowId/start` | Persist dependency-aware stages, fan out ready work, join dependencies, carry bounded results forward, and pause at approval checkpoints. |
 | Operating context | `GET/POST /v1/context` | Sensitivity-aware context graph with scope, purpose, review, expiry, and owner isolation. Sensitive values are excluded unless explicitly selected by trusted server policy. |
 | Departments and outcomes | `GET /v1/departments/catalog`, `GET/POST /v1/departments`, `POST /v1/departments/:department/handoffs`, `GET /v1/outcomes`, `GET /v1/outcomes/:slug`, `POST .../plan` | Typed department spaces, handoff packets, and business outcome plans with approved tools, evidence requirements, escalation rules, and budgets. |
-| Memory and scratchpad | `GET/POST/DELETE /v1/memory`, `GET/PUT/DELETE /v1/scratchpad` | Explicit structured memory and temporary working notes; both are user-scoped. |
+| Memory and scratchpad | `GET/POST/DELETE /v1/memory`, `GET/PUT/DELETE /v1/scratchpad` | Explicit structured memory and temporary working notes; both are user-scoped. `GET /v1/memory?key=...` performs an exact active-key lookup without semantic search. |
 | Channel and device management | `GET/POST/PATCH/DELETE /v1/channels`, `GET/DELETE /v1/devices` | Link supported channels, control proactive delivery, and revoke CLI devices without exposing credentials. |
 
 ## Event stream
