@@ -18,6 +18,14 @@ function providerErrorMessage(value: unknown): string {
 }
 
 function validateReadArguments(value: unknown, path = "arguments", depth = 0): asserts value is Record<string, unknown> {
+  if (Array.isArray(value) && depth > 0) {
+    if (depth > 6 || value.length > 100) throw new Error(`${path} exceeds provider read array limits.`);
+    for (const [index, entry] of value.entries()) {
+      if (entry && typeof entry === "object") validateReadArguments(entry, `${path}[${index}]`, depth + 1);
+      else if (typeof entry === "function" || typeof entry === "symbol" || typeof entry === "bigint" || entry === undefined) throw new Error(`${path}[${index}] is not JSON data.`);
+    }
+    return;
+  }
   if (!value || typeof value !== "object" || Array.isArray(value) || depth > 6) throw new Error("Provider read arguments must be a bounded JSON object.");
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     if (SECRET_FIELD.test(key)) throw new Error(`${path}.${key} is not allowed in a provider read check.`);
@@ -61,6 +69,8 @@ export function createComposioOutcomeReadAdapter(input: {
   allowedToolSlugs?: readonly string[];
   deniedToolSlugs?: readonly string[];
   execute: (toolSlug: string, args: Record<string, unknown>) => Promise<unknown>;
+  /** Resolve an exact provider action when the session exposes meta-tools only. */
+  resolve?: (toolSlug: string, args: Record<string, unknown>) => Promise<boolean>;
   now?: () => number;
 }): OutcomeReadAdapter {
   const available = new Set(input.availableToolSlugs);
@@ -68,12 +78,12 @@ export function createComposioOutcomeReadAdapter(input: {
   const denied = new Set(input.deniedToolSlugs ?? []);
   return {
     read: async ({ toolSlug, check }: { toolSlug: string; provider?: string; check: OutcomeCheck }) => {
-      if (!available.has(toolSlug)) throw new Error("Provider read action is not available in this execution context.");
       if ((allowed && !allowed.has(toolSlug)) || denied.has(toolSlug)) throw new Error("Provider read action is not granted by the active tool policy.");
       if (!isReadOnlyToolSlug(toolSlug) || isRiskyToolSlug(toolSlug)) throw new Error("Provider outcome checks must use an exact read-only tool.");
       const args = check.arguments ?? {};
       validateReadArguments(args);
       validateReadArguments(check.expected, "expected");
+      if (!available.has(toolSlug) && !await input.resolve?.(toolSlug, args)) throw new Error("Provider read action is not available in this execution context.");
       const result = await input.execute(toolSlug, args);
       const observedAt = (input.now ?? Date.now)();
       const argumentsHash = createHash("sha256").update(JSON.stringify(args)).digest("hex").slice(0, 24);

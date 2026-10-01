@@ -1699,10 +1699,7 @@ export function createUserOutcomeReadAdapter(userId: number): OutcomeReadAdapter
       adapterPromise ??= (async () => {
         const sessionObj = (await getOrCreateComposioSession(userId)).sessionObj;
         const tools = await sessionObj.tools();
-        return createComposioOutcomeReadAdapter({
-          availableToolSlugs: tools.map(toolSchemaName),
-          execute: (toolSlug, args) => composioExecute(sessionObj, toolSlug, args),
-        });
+        return createSessionOutcomeReadAdapter(userId, sessionObj, tools);
       })();
       try {
         return await (await adapterPromise).read(input);
@@ -1838,6 +1835,36 @@ ${TRIGGER_DEFAULT_HANDLING}
 3. Execute routine in-scope work now and verify tool results. Routine replies in the triggering email thread or directly addressed messaging thread are permitted by the owner's default trigger policy above; financial, legal, HR, medical, sensitive, materially committing, destructive, permission-changing, or otherwise high-impact actions retain the normal exact approval or draft/escalation boundary.
 4. Always close out to the owner with a concise, truthful result. If no external action is warranted, explain why and what you checked instead of returning NO_ACTION.
 Do not merely restate the event. Do not create a durable attention record, open loop, reminder, or standing order from a guess; durable tracking needs a concrete owner-authorized purpose.`;
+}
+
+function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools: any[], allow?: Set<string>, deny = new Set<string>(), signal?: AbortSignal): OutcomeReadAdapter {
+  const resolved = new Map<string, { schema: Record<string, unknown>; accountId: string; alias?: string; version: string }>();
+  return createComposioOutcomeReadAdapter({
+    availableToolSlugs: tools.map(toolSchemaName),
+    allowedToolSlugs: allow ? [...allow] : undefined,
+    deniedToolSlugs: [...deny],
+    resolve: async (slug, args) => {
+      if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug) || /^(CHUCK|COMPOSIO|MCP)_/.test(slug)) return false;
+      const raw = await abortable(composio.tools.getRawComposioToolBySlug(slug), signal) as any;
+      const schema = linkedInRawToolSchema(raw);
+      if (raw?.slug !== slug || !schema) return false;
+      const toolkit = String(raw.toolkit?.slug ?? raw.toolkit ?? slug.split("_")[0]).toLowerCase();
+      const accounts = (await listConnectedAccounts(userId, toolkit)).filter((account) => account.status.toUpperCase() === "ACTIVE");
+      const selector = splitAccountSelector(args).account;
+      const account = selector ? accounts.find((item) => item.id === selector || item.alias === selector) : accounts.length === 1 ? accounts[0] : undefined;
+      if (!account) throw new Error("Provider verification requires an active owned connection; select the account explicitly when multiple accounts are connected.");
+      resolved.set(slug, { schema, accountId: account.id, alias: account.alias, version: raw.version ?? "latest" });
+      return true;
+    },
+    execute: async (slug, args) => {
+      const action = resolved.get(slug);
+      if (!action) return composioExecute(sessionObj, slug, args, signal);
+      const selected = splitAccountSelector(args);
+      if (selected.account && selected.account !== action.accountId && selected.account !== action.alias) throw new Error("Provider verification account does not match the active owned connection.");
+      validateToolArgumentsAgainstSchema(slug, selected.arguments, action.schema);
+      return abortable(composio.tools.execute(slug, { userId: composioUserId(userId), connectedAccountId: action.accountId, version: action.version, arguments: selected.arguments }, signal ? { signal } : undefined), signal);
+    },
+  });
 }
 
 export interface AgentRunOptions {
@@ -2993,12 +3020,7 @@ export async function runAgent(
                 await failExternalAction(userId, claim.logicalActionId, dispatchFailure);
               }
             }
-            const readAdapter = createComposioOutcomeReadAdapter({
-              availableToolSlugs: availableTools.map(toolSchemaName),
-              allowedToolSlugs: allow ? [...allow] : undefined,
-              deniedToolSlugs: [...deny],
-              execute: (readSlug, readArgs) => composioExecute(sessionObj, readSlug, readArgs, signal),
-            });
+            const readAdapter = createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal);
             const outcomeCheck: OutcomeCheck = {
               id: `compensation_${input.compensationId}`,
               kind: "provider_read",
@@ -3025,7 +3047,7 @@ export async function runAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-          execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createComposioOutcomeReadAdapter({ availableToolSlugs: availableTools.map(toolSchemaName), allowedToolSlugs: allow ? [...allow] : undefined, deniedToolSlugs: [...deny], execute: (toolSlug, readArgs) => composioExecute(sessionObj, toolSlug, readArgs, signal) }) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {

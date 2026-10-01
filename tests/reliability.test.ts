@@ -210,6 +210,23 @@ test("Composio outcome reads preserve bounded provider failure details", async (
   );
 });
 
+test("verification resolves read actions behind meta-tools while enforcing grants before discovery", async () => {
+  const calls: string[] = [];
+  const input = {
+    availableToolSlugs: ["COMPOSIO_MULTI_EXECUTE_TOOL"],
+    resolve: async (slug: string) => { calls.push(`resolve:${slug}`); return slug === "GOOGLESHEETS_VALUES_GET"; },
+    execute: async (slug: string) => { calls.push(`execute:${slug}`); return { successful: true, data: { values: [["Item", "Status"], ["Test A", "Ready"], ["Test B", "Ready"]] } }; },
+  };
+  const check = { id: "sheet", kind: "provider_read" as const, description: "Exact rows", arguments: { range: "Sheet1!A1:D20" }, expected: { values: [["Item", "Status"], ["Test A", "Ready"], ["Test B", "Ready"]] } };
+  const observed = await createComposioOutcomeReadAdapter(input).read({ toolSlug: "GOOGLESHEETS_VALUES_GET", check });
+  assert.deepEqual(observed.observed?.values, check.expected.values);
+  assert.deepEqual(calls, ["resolve:GOOGLESHEETS_VALUES_GET", "execute:GOOGLESHEETS_VALUES_GET"]);
+  calls.length = 0;
+  await assert.rejects(() => createComposioOutcomeReadAdapter({ ...input, deniedToolSlugs: ["GOOGLESHEETS_VALUES_GET"] }).read({ toolSlug: "GOOGLESHEETS_VALUES_GET", check }), /active tool policy/);
+  await assert.rejects(() => createComposioOutcomeReadAdapter(input).read({ toolSlug: "GOOGLESHEETS_UPDATE_VALUES", check }), /read-only/);
+  assert.deepEqual(calls, []);
+});
+
 test("outcome engine ignores model-supplied provider pass results without a provider read", async () => {
   await initStore({ memoryOnly: true });
   const result = await executeOutcomeVerification({
