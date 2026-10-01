@@ -4,6 +4,13 @@ This document is the implementation contract for the SDK. It prevents the existi
 
 ## Principles
 
+Outcome checks of kind `receipt`, `artifact`, or `human` require `missionId`
+and a per-check `evidenceId` referencing that owner's persisted mission proof.
+Only system-verified receipts/artifacts or human-verified confirmations qualify.
+Expected fields compare recorded `id`, `kind`, `source`, `ref`, and `hash`;
+descriptions are not assertions of verified provider state. Provider reads still
+execute live and cannot be replaced with stored receipts or submitted results.
+
 1. `/v1` is the only public prefix. Existing `/cli`, Telegram, channel, and workflow routes remain private transport endpoints.
 2. Developers create an API key in the Chusky dashboard and configure it as `CHUSKY_API_KEY` in their server environment. An end-user identifier is supplied in `X-Chusky-User-Id` and is never inferred from a phone number, display name, or channel identity. The first-party web dashboard may use its Better Auth session cookie for user-scoped `/v1` resources; API keys remain server-side credentials.
 3. API keys are revocable and scope-enforced (`resource:read`, `resource:write`, `resource:*`, or `*`). Never use CLI device tokens for the SDK.

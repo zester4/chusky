@@ -6,6 +6,16 @@ function mockFetch(responder: (url: string, init?: RequestInit) => Response | Pr
   return (async (input: string | URL | Request, init?: RequestInit) => responder(String(input), init)) as typeof fetch;
 }
 
+test("SDK forwards exact mission evidence references for outcome verification", async () => {
+  const input = { missionId: "mis_existing", checks: [{ id: "execution", kind: "receipt", description: "Receipt exists", evidenceId: "receipt_existing" }] };
+  const sdk = new Chusky({ apiKey: "chsk_test", userId: "owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    assert.equal(url, "https://example.test/v1/operator/outcomes/verify");
+    assert.deepEqual(JSON.parse(String(init?.body)), input);
+    return new Response(JSON.stringify({ id: "verify_test", status: "verified" }), { status: 200 });
+  }) });
+  assert.equal((await sdk.operator.verifyOutcome(input)).status, "verified");
+});
+
 test("admin factory supplies a server-only operator identity", async () => {
   let userHeader = "";
   const admin = createChuskyAdmin({ apiKey: "root_secret", baseUrl: "https://example.test", fetch: mockFetch((_url, init) => {

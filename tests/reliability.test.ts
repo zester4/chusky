@@ -6,7 +6,7 @@ import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
 import { compensationView, executeCompensation, listCompensations, queueCompensation, updateCompensation } from "../src/reliability/persistence.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, type MissionRecord } from "../src/store.js";
+import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, recordTrustedMissionEvidence, recordMissionEvidence, type MissionRecord } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
 import { createComposioOutcomeReadAdapter } from "../src/reliability/composioReadAdapter.js";
@@ -19,6 +19,32 @@ import { runProviderSmokeSuite } from "../src/reliability/providerSmoke.js";
 import type { ProviderProof, ProviderSmokeCapability } from "../src/reliability/contracts.js";
 import { buildReadinessReport } from "../src/reliability/readiness.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability/quotas.js";
+
+test("receipt checks resolve exact owned trusted evidence and reject forged or mismatched references", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 9821;
+  const mission = await createMission(ownerId, { title: "Receipt proof", objective: "Check receipts", definitionOfDone: "Trusted receipt exists" });
+  await recordTrustedMissionEvidence(ownerId, mission.id, [{ id: "receipt_saved", kind: "tool_receipt", summary: "Provider succeeded", source: "GOOGLESHEETS_VALUES_GET", ref: "log_real", verified: true }]);
+  await recordMissionEvidence(ownerId, mission.id, [{ id: "receipt_forged", kind: "tool_receipt", summary: "Claimed success", ref: "fake", verified: true, verifiedBy: "system" }]);
+  const check = { id: "receipt", kind: "receipt" as const, description: "A stored receipt exists", evidenceId: "receipt_saved", toolSlug: "GOOGLESHEETS_VALUES_GET" };
+  assert.equal((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [check] })).status, "verified");
+  for (const variant of [{ ...check, evidenceId: undefined }, { ...check, evidenceId: "receipt_forged" }, { ...check, toolSlug: "GMAIL_SEND_EMAIL" }, { ...check, kind: "artifact" as const }]) {
+    assert.equal((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [variant] })).status, "uncertain");
+  }
+  assert.equal((await executeOutcomeVerification({ ownerId: ownerId + 1, missionId: mission.id, checks: [check] })).status, "uncertain");
+  const otherMission = await createMission(ownerId, { title: "Other mission", objective: "Separate proof", definitionOfDone: "Separate evidence" });
+  assert.equal((await executeOutcomeVerification({ ownerId, missionId: otherMission.id, checks: [check] })).status, "uncertain");
+  assert.notEqual((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, freshnessMs: 1 }], now: Date.now() + 100_000 })).status, "verified");
+  assert.equal((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, kind: "checkpoint" as never }] })).status, "uncertain");
+  await recordTrustedMissionEvidence(ownerId, mission.id, [{ id: "artifact_saved", kind: "artifact", summary: "Verified artifact", ref: "artifact_real", verified: true }]);
+  assert.equal((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, kind: "artifact", evidenceId: "artifact_saved", toolSlug: undefined }] })).status, "verified");
+  assert.equal((await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, evidenceId: "fake" }], suppliedResults: [{ checkId: check.id, status: "passed", evidenceRef: "fake" }] })).status, "uncertain");
+  const mismatch = await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, expected: { ref: "wrong" } }] });
+  assert.notEqual(mismatch.status, "verified");
+  const live = await executeOutcomeVerification({ ownerId, missionId: mission.id, checks: [{ ...check, kind: "provider_read", expected: { values: [] } }] });
+  assert.equal(live.status, "uncertain");
+  assert.match(live.unresolved.join(" "), /adapter/);
+});
 
 test("outcome verification rejects stale or missing provider evidence and accepts fresh matching evidence", () => {
   const now = 1_000_000;
@@ -197,6 +223,21 @@ test("Composio outcome reads execute only exact available read tools and bound t
   await assert.rejects(() => mixedAction.read({ toolSlug: "GMAIL_GET_AND_SEND_EMAIL", check: { id: "mixed", kind: "provider_read", description: "must fail closed", arguments: {} } }), /read-only/);
   await assert.rejects(() => adapter.read({ toolSlug: "GMAIL_GET_MESSAGE", check: { id: "secret", kind: "provider_read", description: "read", arguments: { password: "never" } } }), /not allowed/);
   assert.equal(executed.length, 1);
+});
+
+test("native strict mission closes with an exact trusted receipt and completed steps", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 9823;
+  const mission = await createMission(ownerId, { title: "Receipt closeout", objective: "Verify existing work", definitionOfDone: "Trusted receipt and completed step", verificationMode: "strict", requiredEvidence: ["kind:tool_receipt", "kind:before_after"], steps: [{ id: "work", title: "Work", objective: "Record provider execution" }] });
+  await startMission(ownerId, mission.id);
+  await recordTrustedMissionEvidence(ownerId, mission.id, [{ id: "real_receipt", kind: "tool_receipt", summary: "Provider executed", source: "provider", ref: "log_real", verified: true }]);
+  await completeMissionStep(ownerId, mission.id, "work", "Work done");
+  const result = await nativeTool(ownerId, "CHUCK_MISSION_VERIFY", { id: mission.id, evidenceIds: ["real_receipt"], checks: [
+    { id: "execution", kind: "receipt", description: "Recorded execution exists", evidenceId: "real_receipt" },
+    { id: "state", kind: "provider_read", description: "Sheet matches", toolSlug: "GOOGLESHEETS_VALUES_GET", expected: { values: [["Item", "Status"], ["Test A", "Ready"], ["Test B", "Ready"]] } },
+  ] }, { outcomeReadAdapter: { read: async () => ({ observed: { values: [["Item", "Status"], ["Test A", "Ready"], ["Test B", "Ready"]] }, provider: "sheets", evidenceRef: "read_real", observedAt: Date.now() }) } });
+  assert.equal((result as { status: string }).status, "completed");
+  assert.equal((await getMission(ownerId, mission.id))?.verification?.verified, true);
 });
 
 test("Composio outcome reads preserve bounded provider failure details", async () => {

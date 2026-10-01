@@ -503,6 +503,7 @@ paths:
                     properties:
                       id: { type: string, maxLength: 160 }
                       kind: { type: string, enum: [provider_read, receipt, artifact, human] }
+                      evidenceId: { type: string, maxLength: 200, description: Exact trusted evidence ID in the owned mission for receipt, artifact, or human checks. Agent assertions are not accepted. }
                       description: { type: string, maxLength: 1000 }
                       provider: { type: string, maxLength: 120 }
                       toolSlug: { type: string, maxLength: 200, description: Required for provider_read; must be available in the owner's Composio session and read-only. }

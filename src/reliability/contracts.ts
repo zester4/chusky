@@ -10,6 +10,8 @@ export interface OutcomeCheck {
   description: string;
   provider?: string;
   toolSlug?: string;
+  /** Exact persisted evidence ID in this owner's mission, never a model assertion. */
+  evidenceId?: string;
   /** Bounded, non-secret input for the exact provider read being verified. */
   arguments?: Record<string, unknown>;
   /** A provider read result must be no older than this many milliseconds. */

@@ -108,6 +108,19 @@ test("operator timeline joins mission receipts, child traces, verifications, and
   assert.doesNotMatch(JSON.stringify(items), /PRIVATE_PROVIDER_PAYLOAD_MARKER|must-not-be-exposed|foreign-hash/);
 });
 
+test("operator receipt checks resolve owned persisted evidence and reject foreign mission access", async () => {
+  const externalUserId = "receipt-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const mission = await createMission(ownerId, { title: "Receipt verification", objective: "Check existing receipt", definitionOfDone: "Receipt confirmed" });
+  await recordTrustedMissionEvidence(ownerId, mission.id, [{ id: "api_receipt", kind: "tool_receipt", summary: "Provider succeeded", source: "provider", ref: "log_existing", verified: true }]);
+  const api = app();
+  const request = (user: string) => new Request("http://local/v1/operator/outcomes/verify", { method: "POST", headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": user, "Content-Type": "application/json" }, body: JSON.stringify({ missionId: mission.id, checks: [{ id: "execution", kind: "receipt", description: "Receipt exists", evidenceId: "api_receipt", expected: { ref: "log_existing" } }] }) });
+  const response = await api.fetch(request(externalUserId));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as { status: string }).status, "verified");
+  assert.equal((await api.fetch(request("other-owner"))).status, 404);
+});
+
 test("operator outcome verification reads current provider state instead of trusting submitted provider results", async () => {
   const externalUserId = "outcome-owner";
   const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);

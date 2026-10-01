@@ -2,6 +2,7 @@ import { isReadOnlyToolSlug } from "../policy.js";
 import type { OutcomeCheck, OutcomeCheckResult, OutcomeVerification } from "./contracts.js";
 import { appendTraceEvent, saveOutcomeVerification } from "./persistence.js";
 import { verifyOutcome } from "./evaluator.js";
+import { getMission } from "../store.js";
 
 export interface OutcomeReadAdapter {
   read: (input: { toolSlug: string; provider?: string; check: OutcomeCheck }) => Promise<{ observed?: Record<string, unknown>; evidenceRef?: string; provider?: string; observedAt?: number }>;
@@ -30,13 +31,26 @@ export async function executeOutcomeVerification(input: {
   now?: number;
 }): Promise<OutcomeVerification> {
   const now = input.now ?? Date.now();
-  const supplied = new Map((input.suppliedResults ?? []).map((result) => [result.checkId, result]));
   const results: OutcomeCheckResult[] = [];
+  const mission = input.missionId ? await getMission(input.ownerId, input.missionId) : undefined;
   for (const check of input.checks.slice(0, 50)) {
-    const existing = supplied.get(check.id);
-    if (existing && check.kind !== "provider_read") { results.push(existing); continue; }
+    if (!["provider_read", "receipt", "artifact", "human"].includes(check.kind)) {
+      results.push({ checkId: check.id, status: "uncertain", reason: "Unsupported check kind; use provider_read, receipt, artifact, or human." });
+      continue;
+    }
     if (check.kind !== "provider_read") {
-      results.push(existing ?? { checkId: check.id, status: "uncertain", observedAt: now, reason: "This check requires an explicit receipt, artifact, or human confirmation." });
+      const evidence = mission?.evidence?.find((item) => item.id === check.evidenceId);
+      const kinds = check.kind === "receipt" ? ["tool_receipt"] : check.kind === "artifact" ? ["artifact"] : ["human_confirmation"];
+      const trustedBy = check.kind === "human" ? "human" : "system";
+      if (!evidence || !kinds.includes(evidence.kind) || !evidence.verified || evidence.verifiedBy !== trustedBy
+        || !evidence.verifiedAt || evidence.verifiedAt > now || !(evidence.source || evidence.ref || evidence.hash)
+        || (check.provider && check.provider !== evidence.source) || (check.toolSlug && check.toolSlug !== evidence.source)) {
+        results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: "Supply evidenceId referencing a matching trusted record in this owned mission. Agent-authored evidence, other owners' records, and mismatched kinds or sources cannot verify this check." });
+        continue;
+      }
+      results.push({ checkId: check.id, status: "passed", observedAt: evidence.verifiedAt,
+        evidenceRef: check.kind === "human" ? `human:${evidence.id}` : `mission-evidence:${evidence.id}`,
+        provider: evidence.source, observed: { id: evidence.id, kind: evidence.kind, source: evidence.source, ref: evidence.ref, hash: evidence.hash } });
       continue;
     }
     if (!check.toolSlug || !isReadOnlyToolSlug(check.toolSlug)) {

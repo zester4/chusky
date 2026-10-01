@@ -1751,6 +1751,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_VERIFY": {
       const missionId = text(args.id);
+      if (!await getMission(userId, missionId)) throw new Error("Mission not found or not owned by you");
+      const selectedEvidenceIds = Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined;
       if (Array.isArray(args.checks)) {
         const checks = args.checks.filter((item: unknown): item is OutcomeCheck => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string" && typeof (item as Record<string, unknown>).description === "string").slice(0, 50);
         const verification = await executeOutcomeVerification({ ownerId: userId, missionId, checks, adapter: runtime.outcomeReadAdapter });
@@ -1778,9 +1780,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           if (check?.kind !== "provider_read") return [];
           return [{ id: `outcome_${verification.id}_${result.checkId}`, kind: "before_after" as const, summary: verifiedOutcomeEvidenceSummary(check), source: result.provider, ref: result.evidenceRef, verified: true, verifiedBy: "system" as const }];
         });
-        if (trustedReadEvidence.length) await recordTrustedMissionEvidence(userId, missionId, trustedReadEvidence);
+        if (trustedReadEvidence.length) {
+          await recordTrustedMissionEvidence(userId, missionId, trustedReadEvidence);
+          selectedEvidenceIds?.push(...trustedReadEvidence.map((item) => item.id));
+        }
       }
-      const mission = await verifyMission(userId, missionId, { evidenceIds: Array.isArray(args.evidenceIds) ? args.evidenceIds.filter((value: unknown): value is string => typeof value === "string") : undefined, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
+      const mission = await verifyMission(userId, missionId, { evidenceIds: selectedEvidenceIds, confidence: args.confidence === undefined ? undefined : Number(args.confidence), verifiedBy: "agent" });
       if (!mission) throw new Error("Mission not found or not owned by you");
       const finalized = await finalizeMissionCloseout(userId, missionId) ?? mission;
       return {

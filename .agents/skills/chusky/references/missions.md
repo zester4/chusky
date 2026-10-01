@@ -89,6 +89,15 @@ the provider state or record a concrete blocker.
 
 ## Starting a mission
 
+Receipt, artifact, and human outcome checks bind an individual `evidenceId` from
+the same owned mission's proof. Top-level `evidenceIds` only select records for
+mission closeout; they do not bind individual checks. Receipt/artifact records
+must be system-verified, while human confirmation must be human-verified.
+Optional `expected` fields compare the stored record's `id`, `kind`, `source`,
+`ref`, and `hash`. A receipt proves that recorded execution only, not arbitrary
+claims in a check description; use fresh provider reads to prove current state.
+Only `provider_read`, `receipt`, `artifact`, and `human` are valid check kinds.
+
 Jev native routing retains the mission lifecycle tools for mission requests.
 An explicit request to start or create a fresh mission takes precedence over
 old mission IDs in recent conversation history. Existing-mission recovery keeps

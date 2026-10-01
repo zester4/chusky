@@ -2,6 +2,12 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.8.1 - 2026-10-01
+
+- Outcome verification accepts per-check `evidenceId` references to owned,
+  trusted mission receipts, artifacts, and human confirmations. Submitted
+  pass results and agent-authored evidence cannot bypass verification.
+
 ## 1.8.0 - 2026-10-01
 
 - Expose catalog-declared MCP authentication headers through `mcp.connect()`;
