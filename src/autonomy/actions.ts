@@ -3,6 +3,12 @@ import { claimDelivery, completeDelivery, getExternalAction, getMission, recordT
 import { logger } from "../logger.js";
 import { queueCompensation, appendTraceEvent, appendReliabilitySample } from "../reliability/persistence.js";
 
+export interface TrustedProviderAction {
+  toolSlug: string;
+  argumentsHash: string;
+  index?: number;
+}
+
 function stableValue(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(stableValue).join(",")}]`;
@@ -74,7 +80,7 @@ export async function beginExternalAction(input: {
   return { state: "new", receipt, logicalActionId };
 }
 
-export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string): Promise<void> {
+export async function finishExternalAction(userId: number, logicalActionId: string, resultSummary: string, providerId?: string, providerActions: TrustedProviderAction[] = []): Promise<void> {
   const receipt = await updateExternalAction(userId, logicalActionId, { status: "succeeded", resultSummary: resultSummary.slice(0, 8_000), ...(providerId ? { providerId: providerId.slice(0, 240) } : {}), receiptVerification: "provider_response", verifiedAt: Date.now(), error: undefined });
   await appendReliabilitySample({ ownerId: userId, operation: receipt?.tool ?? "external_action", status: "success", at: Date.now(), provider: receipt?.provider }).catch(() => undefined);
   await appendTraceEvent({ ownerId: userId, kind: "receipt", type: "external_action.succeeded", at: Date.now(), correlationId: logicalActionId, summary: `${receipt?.tool ?? "External action"} was confirmed by the provider.`, metadata: { providerId: providerId ?? null } }).catch(() => undefined);
@@ -83,6 +89,16 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
   // model can request evidence, but it cannot manufacture this system proof.
   if (receipt?.sourceKind === "mission" && receipt.sourceId) {
     try {
+      const actionEvidence = providerActions.slice(0, 50).map((action) => ({
+        id: `evidence_${receipt.id}_${action.index ?? 0}_${createHash("sha256").update(`${action.toolSlug}:${action.argumentsHash}`).digest("hex").slice(0, 16)}`,
+        kind: "tool_receipt" as const,
+        summary: `${action.toolSlug} completed successfully inside a confirmed provider batch.`,
+        source: action.toolSlug,
+        ref: `tool-receipt:${receipt.id}:${action.index ?? 0}`,
+        hash: action.argumentsHash,
+        verified: true,
+        verifiedBy: "system" as const,
+      }));
       const recorded = await recordTrustedMissionEvidence(userId, receipt.sourceId, [{
         id: `evidence_${receipt.id}`,
         kind: "tool_receipt",
@@ -91,7 +107,7 @@ export async function finishExternalAction(userId: number, logicalActionId: stri
         hash: receipt.argumentsHash,
         verified: true,
         verifiedBy: "system",
-      }], receipt.missionStepId);
+      }, ...actionEvidence], receipt.missionStepId);
       if (!recorded) throw new Error("mission evidence target was unavailable or changed concurrently");
       await updateExternalAction(userId, logicalActionId, { missionEvidenceStatus: "persisted", missionEvidenceError: undefined });
     } catch (error) {

@@ -2,6 +2,7 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import {
   checkpointMission,
+  blockMission,
   cancelMission,
   completeMissionStep,
   completeMission,
@@ -41,6 +42,18 @@ test("expired mission resume stays blocked until its total duration is explicitl
   assert.equal((await resumeMission(userId, mission.id, 300))?.budget.maxDurationSeconds, 300);
   assert.equal((await completeMissionStep(userId, mission.id, resumed!.currentStepId!, "Verified existing work"))?.steps[0]?.status, "completed");
   assert.equal(await resumeMission(userId + 1, mission.id, 300), undefined);
+});
+
+test("blocking a mission with verbose diagnostics persists a bounded recovery reason", async () => {
+  const userId = 951098;
+  const mission = await createMission(userId, input({ idempotencyKey: "bounded-block-reason" }));
+  await startMission(userId, mission.id);
+  const verboseReason = `Provider verification failed. ${"diagnostic detail ".repeat(300)}`;
+  const blocked = await blockMission(userId, mission.id, verboseReason, "Inspect the provider receipt and resume this same mission.");
+  assert.equal(blocked?.status, "blocked");
+  assert.ok((blocked?.error?.length ?? 0) <= 2000);
+  assert.ok((blocked?.events.at(-1)?.message.length ?? 0) <= 1000);
+  assert.match(blocked?.error ?? "", /Provider verification failed/);
 });
 
 test("settling a slice records usage without reviving a blocked or paused mission", async () => {

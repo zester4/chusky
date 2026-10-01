@@ -33,7 +33,7 @@ import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
-import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim } from "./autonomy/actions.js";
+import { beginExternalAction, externalArgumentsHash, failExternalAction, finishExternalAction, isExternalWriteTool, reconcileExternalActionByRead, type ExternalActionClaim, type TrustedProviderAction } from "./autonomy/actions.js";
 import { isReadOnlyToolSlug, isRiskyToolSlug, requiresToolApproval, humanProgressStatus, humanToolStatus } from "./policy.js";
 import { registerComposioToolMetadata } from "./composioRisk.js";
 import { canonicalNativeToolSlug, chuckTools, modelFacingChuckTools, validateNativeToolArguments, validateToolArgumentsAgainstSchema } from "./agentTools.js";
@@ -72,7 +72,7 @@ import { AUTONOMY_OPERATING_KERNEL, needsAutonomyCloseoutNudge } from "./autonom
 import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdapter.js";
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
-import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -1838,6 +1838,13 @@ ${TRIGGER_DEFAULT_HANDLING}
 Do not merely restate the event. Do not create a durable attention record, open loop, reminder, or standing order from a guess; durable tracking needs a concrete owner-authorized purpose.`;
 }
 
+function providerActionReceipt(result: unknown, toolSlug: string, arguments_: Record<string, unknown>): TrustedProviderAction[] {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return [];
+  const record = result as Record<string, unknown>;
+  if (record.successful !== true && record.success !== true) return [];
+  return [{ toolSlug, argumentsHash: externalArgumentsHash(arguments_) }];
+}
+
 function createSessionOutcomeReadAdapter(userId: number, sessionObj: any, tools: any[], allow?: Set<string>, deny = new Set<string>(), signal?: AbortSignal): OutcomeReadAdapter {
   const resolved = new Map<string, { schema: Record<string, unknown>; accountId: string; alias?: string; version: string }>();
   return createComposioOutcomeReadAdapter({
@@ -3205,7 +3212,17 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
         toolResultsByCallId.set(call.id, result);
         if (externalClaim?.state === "new") {
           if (toolFailed) await failExternalAction(userId, externalClaim.logicalActionId, "The provider returned an explicit unsuccessful execution receipt.");
-          else await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult));
+          else {
+            const trustedProviderActions: TrustedProviderAction[] = slug === "COMPOSIO_MULTI_EXECUTE_TOOL"
+              ? successfulComposioBatchActions(args, execResult).map((action) => ({ toolSlug: action.toolSlug, index: action.index, argumentsHash: externalArgumentsHash(action.arguments) }))
+              : slug === "COMPOSIO_EXECUTE_TOOL"
+                ? (() => {
+                  const target = composioMediaTarget(slug, args);
+                  return target && typeof target === "object" ? providerActionReceipt(execResult, target.toolSlug, target.arguments) : [];
+                })()
+                : [];
+            await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult), trustedProviderActions);
+          }
         }
         if (approvedForTool) await setApprovalStatus(userId, approvedApprovalId!, "consumed");
       } catch (e) {

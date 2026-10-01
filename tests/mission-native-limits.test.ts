@@ -50,3 +50,25 @@ test("mission start accepts its published objective and step text limits", async
   assert.equal(returned.objective, existing.objective);
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_START", { ...args, objective: "O".repeat(8001) }), /objective.*8000/);
 });
+
+test("mission block accepts verbose recovery diagnostics and persists a bounded reason", async () => {
+  const userId = 951102;
+  const mission = await createMission(userId, {
+    title: "Verbose recovery mission",
+    objective: "Exercise the mission blocker boundary.",
+    definitionOfDone: "A blocked mission records a usable recovery path.",
+  });
+  await startMission(userId, mission.id);
+
+  const args = {
+    id: mission.id,
+    reason: `Provider verification failed after a recoverable execution boundary. ${"diagnostic detail ".repeat(300)}`,
+    nextAction: "Inspect the persisted provider receipt and resume this same mission.",
+  };
+  validateNativeToolArguments("CHUCK_MISSION_BLOCK", args);
+  const blocked = await nativeTool(userId, "CHUCK_MISSION_BLOCK", args) as { status: string; error?: string };
+
+  assert.equal(blocked.status, "blocked");
+  assert.ok((blocked.error?.length ?? 0) <= 2000);
+  assert.match(blocked.error ?? "", /Provider verification failed/);
+});

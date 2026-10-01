@@ -75,3 +75,35 @@ test("successful mission external writes create server-trusted receipt evidence"
   assert.match(evidence?.ref ?? "", /^tool-receipt:/);
   await completeMissionStep(userId, mission.id, started!.currentStepId!, "Sent");
 });
+
+test("successful batched provider actions create per-action trusted receipt evidence", async () => {
+  await initStore({ memoryOnly: true });
+  const userId = 950005;
+  const mission = await createMission(userId, {
+    title: "Batch receipts",
+    objective: "Record each confirmed provider action",
+    definitionOfDone: "Each provider action has a trusted receipt",
+    requiredEvidence: ["kind:tool_receipt"],
+  });
+  const started = await startMission(userId, mission.id);
+  assert.ok(started?.currentStepId);
+  const batchArgs = { tools: [{ tool_slug: "GOOGLESHEETS_UPDATE_VALUES_BATCH", arguments: { spreadsheet_id: "sheet-1", range: "Sheet1!A1:B3" } }] };
+  const claim = await beginExternalAction({
+    userId,
+    provider: "composio",
+    tool: "COMPOSIO_MULTI_EXECUTE_TOOL",
+    args: batchArgs,
+    runId: "mission-batch-run",
+    source: { kind: "mission", id: mission.id, missionStepId: started!.currentStepId },
+  });
+  await finishExternalAction(userId, claim.logicalActionId, "batch confirmed", "batch-log-1", [{
+    toolSlug: "GOOGLESHEETS_UPDATE_VALUES_BATCH",
+    index: 0,
+    argumentsHash: "args-hash-1",
+  }]);
+  const evidence = (await getMission(userId, mission.id))?.evidence ?? [];
+  const providerEvidence = evidence.find((item) => item.source === "GOOGLESHEETS_UPDATE_VALUES_BATCH");
+  assert.equal(providerEvidence?.verifiedBy, "system");
+  assert.equal(providerEvidence?.verified, true);
+  assert.match(providerEvidence?.ref ?? "", /^tool-receipt:.*:0$/);
+});

@@ -46,6 +46,12 @@ test("mission lifecycle tool descriptions distinguish creation from recovery", (
   assert.match(resume, /never.*create/i);
 });
 
+test("mission recovery diagnostics accept bounded verbose provider failures", () => {
+  const reason = `Provider verification failed after a recoverable execution boundary. ${"detail ".repeat(1400)}`;
+  validateNativeToolArguments("CHUCK_MISSION_BLOCK", { id: "mis_verbose", reason, nextAction: "Inspect the persisted provider receipt and resume the same mission." });
+  validateNativeToolArguments("CHUCK_MISSION_REPAIR", { id: "mis_verbose", reason, nextAction: "Inspect the persisted provider receipt and repair the same mission." });
+});
+
 test("task creation gives an actionable correction when an existing task ID is passed", () => {
   assert.throws(
     () => validateNativeToolArguments("CHUCK_TASK_CREATE", { id: "task_existing" }),

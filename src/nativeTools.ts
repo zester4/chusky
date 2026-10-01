@@ -1876,7 +1876,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const existing = await getMission(userId, missionId);
       if (!existing) throw new Error("Mission not found, finished, or not owned by you");
       const diagnosis = diagnoseMissionRepair({ mission: existing, compensations: await listCompensations(userId, ["pending", "failed", "blocked"]) });
-      const mission = await repairMission(userId, missionId, { reason: `${text(args.reason, 2000)} [diagnosis: ${diagnosis.causes.join(", ")}]`, nextAction: args.nextAction ? text(args.nextAction, 2000) : diagnosis.safeNextActions.join("; ") });
+      const mission = await repairMission(userId, missionId, { reason: `${text(args.reason, 12000)} [diagnosis: ${diagnosis.causes.join(", ")}]`, nextAction: args.nextAction ? text(args.nextAction, 2000) : diagnosis.safeNextActions.join("; ") });
       if (!mission) throw new Error("Mission not found, finished, or not owned by you");
       return { mission, diagnosis };
     }
@@ -1938,7 +1938,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       }
     }
     case "CHUCK_MISSION_BLOCK": {
-      const mission = await blockMission(userId, text(args.id), text(args.reason, 2000), args.nextAction ? text(args.nextAction, 2000) : undefined);
+      const mission = await blockMission(userId, text(args.id), text(args.reason, 12000), args.nextAction ? text(args.nextAction, 2000) : undefined);
       if (!mission) throw new Error("Only unfinished missions you own can be blocked");
       return mission;
     }

@@ -267,3 +267,32 @@ export function settleComposioBatchActions(actions: ComposioBatchAction[], resul
       : { ...action, status: "unknown", summary: fallbackSummary ?? "The batch response did not include a matchable status for this action" };
   });
 }
+
+export interface SuccessfulComposioBatchAction {
+  toolSlug: string;
+  index: number;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * Return only batch items whose provider response explicitly confirms the
+ * same action. This is used at the trusted receipt boundary; UI activity
+ * status and model-authored summaries are deliberately not sufficient.
+ */
+export function successfulComposioBatchActions(args: Record<string, unknown>, result: unknown): SuccessfulComposioBatchAction[] {
+  const inputs = Array.isArray(args.tools) ? args.tools : Array.isArray(args.items) ? args.items : [];
+  const settled = settleComposioBatchActions(buildComposioBatchActions(args, "batch", new Map()), result);
+  return settled.flatMap((action) => {
+    if (action.status !== "completed") return [];
+    const match = /:(\d+)$/.exec(action.id);
+    const index = match ? Number(match[1]) : Number.NaN;
+    const input = Number.isInteger(index) ? inputs[index] : undefined;
+    if (!Number.isInteger(index) || !input || typeof input !== "object" || Array.isArray(input)) return [];
+    const record = input as Record<string, unknown>;
+    const argumentsValue = record.arguments ?? record.input;
+    if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return [];
+    const toolSlug = normalizeToolSlug(record.tool_slug ?? record.toolSlug ?? record.slug);
+    if (toolSlug !== action.toolSlug) return [];
+    return [{ toolSlug, index, arguments: argumentsValue as Record<string, unknown> }];
+  });
+}

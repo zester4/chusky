@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildComposioBatchActions, collectComposioToolPresentations, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions } from "../src/toolActivity.js";
+import { buildComposioBatchActions, collectComposioToolPresentations, correlateComposioBatchOutcomes, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions } from "../src/toolActivity.js";
 
 test("extracts explicit, safe app metadata from nested Composio discovery output", () => {
   const metadata = collectComposioToolPresentations({ data: { tools: [{ tool_slug: "GMAIL_SEARCH_EMAILS", name: "Search emails", human_description: "Find matching messages", toolkit: { slug: "gmail", name: "Gmail", logo: "https://assets.example/gmail.svg" }, arguments: { query: "private search" } }] } });
@@ -105,4 +105,21 @@ test("leaves individual batch outcomes unknown when the provider gives only a ba
     status: "unknown",
     summary: "The batch response did not include a matchable status for this action",
   });
+});
+
+test("returns only explicitly successful batch actions for trusted receipt evidence", () => {
+  const args = { tools: [
+    { tool_slug: "GOOGLESHEETS_UPDATE_VALUES_BATCH", arguments: { spreadsheet_id: "sheet-1", range: "Sheet1!A1:B3" } },
+    { tool_slug: "GOOGLESHEETS_VALUES_GET", arguments: { spreadsheet_id: "sheet-1", range: "Sheet1!A1:D20" } },
+  ] };
+  const result = { data: { results: [
+    { index: 0, tool_slug: "GOOGLESHEETS_UPDATE_VALUES_BATCH", response: { successful: true, data: { updatedCells: 6 } } },
+    { index: 1, tool_slug: "GOOGLESHEETS_VALUES_GET", response: { successful: false, error: "provider failure" } },
+  ] } };
+  assert.deepEqual(successfulComposioBatchActions(args, result), [{
+    toolSlug: "GOOGLESHEETS_UPDATE_VALUES_BATCH",
+    index: 0,
+    arguments: { spreadsheet_id: "sheet-1", range: "Sheet1!A1:B3" },
+  }]);
+  assert.deepEqual(successfulComposioBatchActions(args, { successful: true }), []);
 });
