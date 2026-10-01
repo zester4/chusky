@@ -2655,7 +2655,18 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   const noProgressMessage = externalAttempt
                     ? `Mission worker attempted an external tool but persisted no progress for ${currentMissionStep?.title ?? "the active step"}. The mission is paused for provider-state inspection so a retry cannot duplicate an uncertain action.`
                     : `Mission worker ended the slice without persisting progress for ${currentMissionStep?.title ?? "the active step"}. No provider action, checkpoint, wait, evidence, or step completion was recorded.`;
-                  return { status: externalAttempt ? "blocked" as const : "failed" as const, message: noProgressMessage, checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: externalAttempt ? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known." : missionNoProgressNextAction(currentMissionStep) };
+                  const noProgressNextAction = externalAttempt ? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known." : missionNoProgressNextAction(currentMissionStep);
+                  const accounted = await recordMissionSlice(task.userId, mission.id, {
+                    checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint,
+                    nextAction: noProgressNextAction,
+                    toolCalls: result.toolsUsed.length,
+                    cost: result.cost,
+                    ...(externalAttempt ? { blockedReason: noProgressMessage } : {}),
+                  });
+                  if (externalAttempt || accounted?.status === "blocked") {
+                    return { status: "blocked" as const, message: accounted?.error ?? noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? noProgressNextAction };
+                  }
+                  return { status: "failed" as const, message: noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: noProgressNextAction };
                 }
                 const beforeAccounting = await getMission(task.userId, mission.id);
                 const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: beforeAccounting?.checkpoint ?? result.text, nextAction: beforeAccounting?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });

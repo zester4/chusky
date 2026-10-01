@@ -6318,7 +6318,7 @@ export async function checkpointMission(userId: number, id: string, checkpoint: 
   return mutateMission(userId, id, (mission) => mission.status !== "running" ? undefined : { checkpoint: checkpoint.slice(0, 8000), nextAction: nextAction?.slice(0, 2000), events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")] });
 }
 
-export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number }): Promise<MissionRecord | undefined> {
+export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string }): Promise<MissionRecord | undefined> {
   const saved = await mutateMission(userId, id, (mission) => {
     if (mission.status === "queued") return undefined;
     const now = Date.now();
@@ -6330,7 +6330,12 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
     const durationExceeded = durationPreflight.remaining.durationSeconds <= 0;
     const budgetExceeded = durationExceeded || consumedSteps > mission.budget.maxSteps || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
     const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSteps > mission.budget.maxSteps ? "Mission step budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
-    return { status: budgetExceeded ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction: budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction, error: reason, consumedSteps, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : "checkpointed", reason ?? input.nextAction ?? "Mission slice completed.", now)] };
+    const blocked = Boolean(input.blockedReason?.trim()) || budgetExceeded;
+    const blockedReason = input.blockedReason?.trim().slice(0, 2000) || reason;
+    const nextAction = blocked
+      ? budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction
+      : input.nextAction?.slice(0, 2000) ?? mission.nextAction;
+    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
   return saved;

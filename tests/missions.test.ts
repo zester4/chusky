@@ -69,6 +69,25 @@ test("settling a slice records usage without reviving a blocked or paused missio
   assert.equal(accounted?.cost, 0.2);
 });
 
+test("uncertain external progress charges the slice before atomically blocking the mission", async () => {
+  const userId = 951097;
+  const mission = await createMission(userId, input({ idempotencyKey: "uncertain-external-slice" }));
+  await startMission(userId, mission.id);
+  const blocked = await recordMissionSlice(userId, mission.id, {
+    checkpoint: "Before provider outcome reconciliation",
+    nextAction: "Inspect the provider receipt before resuming",
+    toolCalls: 2,
+    cost: 0.35,
+    blockedReason: "An external provider action was attempted without a durable receipt.",
+  });
+  assert.equal(blocked?.status, "blocked");
+  assert.equal(blocked?.consumedSteps, 1);
+  assert.equal(blocked?.toolCalls, 2);
+  assert.equal(blocked?.cost, 0.35);
+  assert.match(blocked?.error ?? "", /without a durable receipt/);
+  assert.equal(blocked?.events.at(-1)?.type, "blocked");
+});
+
 function input(overrides: Partial<Pick<MissionRecord, "title" | "objective" | "definitionOfDone">> & { idempotencyKey?: string; budget?: Partial<MissionRecord["budget"]>; steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[] }> } = {}) {
   return {
     title: overrides.title ?? "Prepare a verified launch brief",
