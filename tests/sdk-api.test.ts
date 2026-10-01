@@ -46,6 +46,27 @@ test("onboarding website research rejects unsafe URLs before agent execution", a
   assert.equal((await response.json() as { error?: { code?: string } }).error?.code, "unsafe_website_url");
 });
 
+test("account overview exposes durable mission approvals without an active chat run", async () => {
+  const externalUserId = "mission-approval-feed-owner";
+  const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);
+  const approval = await createApproval({
+    userId: ownerId,
+    missionId: "mis_feed_owner",
+    toolSlug: "CHUCK_MISSION_RESUME",
+    args: { id: "mis_feed_owner", maxDurationSeconds: 900 },
+    request: "Approve the saved mission resume.",
+    history: [],
+    model: "test/model",
+  });
+  const response = await app().fetch(new Request("http://local/v1/account/overview", { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalUserId } }));
+  assert.equal(response.status, 200);
+  const overview = await response.json() as { approvals: Array<{ id: string; missionId?: string; toolSlug: string }> };
+  const visible = overview.approvals.find((item) => item.id === approval.id);
+  assert.ok(visible);
+  assert.equal(visible.toolSlug, "CHUCK_MISSION_RESUME");
+  assert.equal(visible.missionId, "mis_feed_owner");
+});
+
 test("native tool discovery returns executable JSON schemas for all reliability capabilities", async () => {
   const api = app();
   const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "tool-catalog-owner" };

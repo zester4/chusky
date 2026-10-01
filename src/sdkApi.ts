@@ -682,8 +682,8 @@ function memoryView(memory: {
     updatedAt: new Date(memory.updatedAt).toISOString(),
   };
 }
-function approvalView(approval: { id: string; status: string; toolSlug: string; args: Record<string, unknown>; request?: string; channelProvider?: string; handoffId?: string; createdAt: number; expiresAt: number }) {
-  return { id: approval.id, status: approval.status, toolSlug: approval.toolSlug, args: approval.args, request: approval.request, channelProvider: approval.channelProvider, handoffId: approval.handoffId, createdAt: new Date(approval.createdAt).toISOString(), expiresAt: new Date(approval.expiresAt).toISOString() };
+function approvalView(approval: { id: string; status: string; toolSlug: string; args: Record<string, unknown>; request?: string; missionId?: string; channelProvider?: string; handoffId?: string; createdAt: number; expiresAt: number }) {
+  return { id: approval.id, status: approval.status, toolSlug: approval.toolSlug, args: approval.args, request: approval.request, missionId: approval.missionId, channelProvider: approval.channelProvider, handoffId: approval.handoffId, createdAt: new Date(approval.createdAt).toISOString(), expiresAt: new Date(approval.expiresAt).toISOString() };
 }
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
@@ -1338,7 +1338,7 @@ export function registerSdkApi(app: Hono): void {
     const owner = sdkUser(c)!;
     const webAuthUserId = (c as any).get("webAuthUserId") as string | undefined;
     const session = await getSession(owner.userId);
-    const [channels, devices, reminders, jobs, workspace, deliveries, memory, triggerEvents] = await Promise.all([
+    const [channels, devices, reminders, jobs, workspace, deliveries, memory, triggerEvents, approvals] = await Promise.all([
       listChannelIdentities(owner.userId),
       listCliDevices(owner.userId),
       listReminders(owner.userId),
@@ -1349,12 +1349,13 @@ export function registerSdkApi(app: Hono): void {
       // expired facts must not reappear in another dashboard surface.
       searchMemories(owner.userId, undefined, { limit: 20 }),
       listTriggerEvents(owner.userId, 50),
+      listApprovals(owner.userId, 100),
     ]);
     return c.json({
       model: session.model,
       voiceReplies: Boolean(session.voiceReplies),
       voicePreferences: session.voicePreferences ?? {},
-      approvals: session.approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
+      approvals: approvals.filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map((item) => ({ id: item.id, toolSlug: item.toolSlug, request: item.request, status: item.status, ...(item.missionId ? { missionId: item.missionId } : {}), channelProvider: item.channelProvider, createdAt: new Date(item.createdAt).toISOString(), expiresAt: new Date(item.expiresAt).toISOString() })),
       channels: channels.filter((item) => !item.disabledAt).map((item) => ({ id: identityFingerprint(item), provider: item.provider, externalUserId: item.externalUserId, workspaceId: item.workspaceId, displayName: item.displayName, verifiedAt: new Date(item.verifiedAt).toISOString(), proactiveOptIn: item.proactiveOptIn !== false })),
       reminders: reminders.map((item) => ({ ...item, runAt: new Date(item.runAt).toISOString(), createdAt: new Date(item.createdAt).toISOString() })),
       jobs: jobs.map((item) => ({ ...item, createdAt: new Date(item.createdAt).toISOString() })),
@@ -2916,7 +2917,9 @@ export function registerSdkApi(app: Hono): void {
           return apiError(c, 502, "call_start_failed", error instanceof Error ? error.message : "Phone call could not be started.");
         }
       }
-      const missionResume = await resumeMissionTaskAfterApproval(owner.userId, approval.id, sdkTaskWorkflowEnqueuer);
+      const missionResume = await resumeMissionTaskAfterApproval(owner.userId, approval.id, sdkTaskWorkflowEnqueuer, approval.toolSlug === "CHUCK_MISSION_RESUME" && approval.args.maxDurationSeconds !== undefined
+        ? { maxDurationSeconds: Number(approval.args.maxDurationSeconds) }
+        : undefined);
       if (missionResume.status !== "not_mission") {
         if (missionResume.status === "task_running") return apiError(c, 409, "mission_task_running", "The mission task is already running; its current worker will settle before another slice starts.");
         if (missionResume.status === "not_resumable") return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");

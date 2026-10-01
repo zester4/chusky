@@ -17,6 +17,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Owners can pre-authorize bounded automatic time extensions; each extension requires new trusted completed-step progress and never raises spend, tool-call, or step limits.",
     "Timing and extensions are persisted under mission concurrency controls, with audited reasons and legacy wall-clock limits preserved for existing missions.",
   ],
+  missionRecovery: [
+    "When a mission exhausts its execution allowance, Chusky now pauses the same mission and creates one owner-visible approval with the exact bounded resume arguments instead of asking for approval in prose.",
+    "Approving the saved action resumes the original durable task exactly once; repeated worker wakes are deduplicated and no new mission, sheet, row, or external write is created.",
+    "The dashboard and account approval feed surface mission approvals even when the original chat run is idle, and the mission remains paused until the owner decision is recorded.",
+  ],
   autonomy: [
     "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",

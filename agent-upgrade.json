@@ -1,11 +1,11 @@
 {
-  "id": "release-4.35.0",
-  "version": "4.35.0",
+  "id": "release-4.36.0",
+  "version": "4.36.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "New missions count active worker time separately from their overall deadline; durable waits, pauses, blockers, and scheduling gaps preserve remaining execution time.",
-    "Owners can pre-authorize bounded automatic time extensions; each extension requires new trusted completed-step progress and never raises spend, tool-call, or step limits.",
-    "Timing and extensions are persisted under mission concurrency controls, with audited reasons and legacy wall-clock limits preserved for existing missions."
+    "When a mission exhausts its execution allowance, Chusky now pauses the same mission and creates one owner-visible approval with the exact bounded resume arguments instead of asking for approval in prose.",
+    "Approving the saved action resumes the original durable task exactly once; repeated worker wakes are deduplicated and no new mission, sheet, row, or external write is created.",
+    "The dashboard and account approval feed surface mission approvals even when the original chat run is idle, and the mission remains paused until the owner decision is recorded."
   ],
   "createdAt": "2026-10-01T12:23:55.554Z"
 }

@@ -4,7 +4,7 @@ import { createTregEndpointJudge } from "./decisions/tregRouter.js";
 import { Client as WorkflowClient } from "@upstash/workflow";
 import { enqueueTaskWorkflow, enqueueTinyFishResearchWorkflow, workflowFailureUrl } from "./triggerWorkflow.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
-import { resumeMissionTaskAfterApproval } from "./missionApproval.js";
+import { MissionDurationApprovalRequiredError, requestMissionDurationApproval, resumeMissionTaskAfterApproval } from "./missionApproval.js";
 import { resolveWorkflowEndpoint } from "./workflowUrls.js";
 import { createHash, randomUUID } from "node:crypto";
 import { config } from "./config.js";
@@ -1699,8 +1699,17 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_RESUME": {
       const missionId = text(args.id);
-      if (args.maxDurationSeconds !== undefined && !runtime.approvedApprovalId) throw new Error("Extending a mission duration requires exact owner approval of the resume arguments.");
       const existing = await getMission(userId, missionId);
+      if (args.maxDurationSeconds !== undefined && !runtime.approvedApprovalId) {
+        // A model must never create a second prose-driven approval for an
+        // exhausted mission. Reuse the canonical owner approval so the UI
+        // and the durable worker share one exact resume action.
+        const requested = existing
+          ? await requestMissionDurationApproval(userId, missionId, { taskId: runtime.taskId, model: runtime.model })
+          : undefined;
+        if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
+        throw new Error("Extending a mission duration requires exact owner approval of the resume arguments.");
+      }
       if (args.maxDurationSeconds !== undefined && existing?.status === "waiting") throw new Error("Resolve this mission's exact timer, provider, or approval wait before requesting a duration extension.");
       if (existing?.status === "waiting" && existing.waiting?.kind === "approval" && existing.waiting.key) {
         const resumed = await resumeMissionTaskAfterApproval(userId, existing.waiting.key);
@@ -1708,6 +1717,13 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         if (resumed.status === "enqueue_failed") throw new Error("The approved mission action is saved, but its original task could not be queued. Retry after the workflow service recovers.");
         if (resumed.status === "task_running") throw new Error("The approved mission task is already running; wait for that worker to settle.");
         throw new Error("The mission approval no longer matches a resumable task. Inspect the mission checkpoint before retrying.");
+      }
+      if (existing && args.maxDurationSeconds === undefined) {
+        const preflight = missionBudgetPreflight(existing, { steps: 1, toolCalls: 1, cost: 0.0001, durationSeconds: 1 });
+        if (!preflight.allowed && preflight.reason === "Mission duration budget would be exceeded.") {
+          const requested = await requestMissionDurationApproval(userId, missionId, { taskId: runtime.taskId, model: runtime.model });
+          if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
+        }
       }
       const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds));
       if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");

@@ -217,9 +217,17 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces pause-aware mission timing and bounded extensions", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.35.0");
-  assert.equal(notice?.version, "4.35.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("missionTiming"));
+  assert.equal(notice?.id, "release-4.36.0");
+  assert.equal(notice?.version, "4.36.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("missionRecovery"));
+});
+
+test("mission recovery preset documents visible, exact resume approval", () => {
+  const bullets = getAgentUpgradePreset("missionRecovery");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /owner-visible approval/);
+  assert.match(bullets[1]!, /exactly once/);
+  assert.match(bullets[2]!, /account approval feed/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

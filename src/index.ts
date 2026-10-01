@@ -23,6 +23,7 @@ import { Readable } from "node:stream";
 import { deliverJob, deliverReminder, parseJobWorkflowPayload, parseReminderWorkflowPayload } from "./workflows.js";
 import { WorkflowNonRetryableError } from "@upstash/workflow";
 import { executeDurableTask } from "./taskRunner.js";
+import { requestMissionDurationApproval } from "./missionApproval.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
@@ -2405,6 +2406,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             try {
               mission = task.missionId ? await getMission(task.userId, task.missionId) : undefined;
               if (mission && ["paused", "blocked", "completed", "cancelled"].includes(mission.status)) {
+                if (mission.status === "blocked" && mission.error === "Mission duration budget would be exceeded.") {
+                  const requested = await requestMissionDurationApproval(task.userId, mission.id, { taskId: task.id, model: task.sdkModel });
+                  if (requested) return { status: "queued" as const, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
+                }
                 return { status: mission.status === "completed" ? "completed" as const : mission.status === "cancelled" ? "cancelled" as const : "blocked" as const, message: mission.result ?? mission.error ?? `Mission is ${mission.status}.`, result: mission.result, checkpoint: mission.checkpoint, nextAction: mission.nextAction };
               }
               if (mission?.status === "waiting") {
@@ -2473,6 +2478,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               if (mission) {
                 const preflight = missionBudgetPreflight(mission, { steps: 1, toolCalls: 1, cost: 0.0001, durationSeconds: 1 });
                 if (!preflight.allowed) {
+                  if (preflight.reason === "Mission duration budget would be exceeded.") {
+                    const requested = await requestMissionDurationApproval(task.userId, mission.id, { taskId: task.id, model: task.sdkModel });
+                    if (requested) return { status: "queued" as const, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
+                  }
                   const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: preflight.reason ?? "Mission budget preflight failed.", nextAction: "Increase the mission budget or revise the objective before resuming." });
                   return { status: "blocked" as const, message: blocked?.error ?? "Mission budget preflight failed", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
                 }

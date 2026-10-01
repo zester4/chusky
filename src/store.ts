@@ -1342,6 +1342,8 @@ export interface AttentionListOptions { query?: string; status?: string; limit?:
 export interface ApprovalRecord {
   id: string;
   userId: number;
+  /** Durable mission approvals remain discoverable even when no chat run is active. */
+  missionId?: string;
   accountId?: string;
   channelProvider?: ChannelProvider;
   channelConversationId?: string;
@@ -6234,17 +6236,27 @@ export async function extendMissionDurationIfEligible(userId: number, id: string
 }
 
 /** Resume a mission only when this exact owner-approved action released its wait. */
-export async function resumeMissionFromApproval(userId: number, id: string, approvalId: string): Promise<MissionRecord | undefined> {
+export async function resumeMissionFromApproval(userId: number, id: string, approvalId: string, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
   const approval = await getApproval(userId, approvalId);
   if (!approval || approval.status !== "approved" || approval.expiresAt <= Date.now()) return undefined;
+  if (maxDurationSeconds !== undefined && (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 2592000)) throw new Error("Mission duration must be an integer between 60 and 2592000 seconds.");
   return mutateMission(userId, id, (mission) => {
     if (mission.status !== "waiting" || mission.waiting?.kind !== "approval" || mission.waiting.key !== approvalId) return undefined;
+    if (maxDurationSeconds !== undefined && maxDurationSeconds < mission.budget.maxDurationSeconds) throw new Error("Resume can only extend the existing duration budget.");
+    const budget = maxDurationSeconds === undefined ? mission.budget : { ...mission.budget, maxDurationSeconds };
+    const budgetChanged = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds;
+    const preflight = missionBudgetPreflight({ ...mission, budget }, { steps: 1, toolCalls: 1, cost: 0.0001, durationSeconds: 1 });
+    if (!preflight.allowed) return undefined;
+    const events = budgetChanged
+      ? [...mission.events, missionEvent("checkpointed", `Owner-approved duration budget changed from ${mission.budget.maxDurationSeconds} to ${budget.maxDurationSeconds} seconds; original start and usage retained.`)]
+      : mission.events;
     return {
+      ...(budgetChanged ? { budget } : {}),
       status: "running",
       error: undefined,
       waiting: undefined,
       nextAction: "Continue from the saved mission checkpoint after the approved action.",
-      events: [...mission.events, missionEvent("approval_resumed", `Approval ${approvalId} granted; mission resumed from its checkpoint.`, Date.now(), mission.waiting.stepId, { approvalId })],
+      events: [...events, missionEvent("approval_resumed", `Approval ${approvalId} granted; mission resumed from its checkpoint.`, Date.now(), mission.waiting.stepId, { approvalId })],
     };
   });
 }
@@ -6262,12 +6274,16 @@ export async function waitMission(userId: number, id: string, waiting: MissionRe
     return sameWait ? initial : undefined;
   }
   return mutateMission(userId, id, (mission) => {
-    if (mission.status !== "running") return undefined;
+    // A duration-exhausted mission is a recoverable control-plane state. Move
+    // it to an approval wait instead of forcing the owner to manually repair
+    // it before the exact bounded extension can be reviewed.
+    const recoverableBlocked = mission.status === "blocked" && mission.error === "Mission duration budget would be exceeded.";
+    if (mission.status !== "running" && !recoverableBlocked) return undefined;
     const message = nextAction ?? "Mission is waiting for an external event.";
     const event = waiting?.kind === "approval" && typeof waiting.key === "string" && waiting.key.length > 0
       ? missionEvent("approval_waiting", message, Date.now(), waiting.stepId, { approvalId: waiting.key })
       : missionEvent("waiting", message, Date.now(), waiting?.stepId);
-    return { status: "waiting", waiting, checkpoint: checkpoint ?? mission.checkpoint, nextAction: message, events: [...mission.events, event] };
+    return { status: "waiting", waiting, error: undefined, checkpoint: checkpoint ?? mission.checkpoint, nextAction: message, events: [...mission.events, event] };
   });
 }
 
