@@ -9,6 +9,7 @@ import {
   finalizeMissionIfReady,
   getMission,
   initStore,
+  missionBudgetPreflight,
   pauseMission,
   recordMissionSlice,
   replanMission,
@@ -22,6 +23,37 @@ import {
 } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("expired mission resume stays blocked until its total duration is explicitly extended", async () => {
+  const userId = 951099;
+  const mission = await createMission(userId, input({ budget: { maxDurationSeconds: 60 } }));
+  await startMission(userId, mission.id);
+  const startedAt = Date.now() - 120_000;
+  await updateMission(userId, mission.id, { startedAt });
+  assert.equal(missionBudgetPreflight((await getMission(userId, mission.id))!).allowed, false);
+  const blocked = await resumeMission(userId, mission.id);
+  assert.equal(blocked?.status, "blocked");
+  assert.equal(await completeMissionStep(userId, mission.id, blocked!.currentStepId!, "Cannot advance"), undefined);
+  const resumed = await resumeMission(userId, mission.id, 300);
+  assert.equal(resumed?.status, "running");
+  assert.equal(resumed?.startedAt, startedAt);
+  assert.equal(resumed?.budget.maxDurationSeconds, 300);
+  assert.equal((await resumeMission(userId, mission.id, 300))?.budget.maxDurationSeconds, 300);
+  assert.equal((await completeMissionStep(userId, mission.id, resumed!.currentStepId!, "Verified existing work"))?.steps[0]?.status, "completed");
+  assert.equal(await resumeMission(userId + 1, mission.id, 300), undefined);
+});
+
+test("settling a slice records usage without reviving a blocked or paused mission", async () => {
+  const userId = 951098;
+  const mission = await createMission(userId, input());
+  await startMission(userId, mission.id);
+  await pauseMission(userId, mission.id);
+  const accounted = await recordMissionSlice(userId, mission.id, { toolCalls: 4, cost: 0.2 });
+  assert.equal(accounted?.status, "paused");
+  assert.equal(accounted?.consumedSteps, 1);
+  assert.equal(accounted?.toolCalls, 4);
+  assert.equal(accounted?.cost, 0.2);
+});
 
 function input(overrides: Partial<Pick<MissionRecord, "title" | "objective" | "definitionOfDone">> & { idempotencyKey?: string; budget?: Partial<MissionRecord["budget"]>; steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[] }> } = {}) {
   return {

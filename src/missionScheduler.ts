@@ -70,11 +70,12 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
 }
 
 /** Idempotently resume or repair scheduling for a mission that is already running. */
-export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer): Promise<MissionRecord | undefined> {
+export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
   const current = await getMission(userId, missionId);
   if (!current) return undefined;
-  const resumed = current.status === "running" ? current : await resumeMission(userId, missionId);
+  const resumed = await resumeMission(userId, missionId, maxDurationSeconds);
   if (!resumed) return undefined;
+  if (resumed.status !== "running") return resumed;
   return reconcileMissionExecution(userId, missionId, enqueue);
 }
 

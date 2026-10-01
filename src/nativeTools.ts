@@ -1694,7 +1694,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_RESUME": {
       const missionId = text(args.id);
+      if (args.maxDurationSeconds !== undefined && !runtime.approvedApprovalId) throw new Error("Extending a mission duration requires exact owner approval of the resume arguments.");
       const existing = await getMission(userId, missionId);
+      if (args.maxDurationSeconds !== undefined && existing?.status === "waiting") throw new Error("Resolve this mission's exact timer, provider, or approval wait before requesting a duration extension.");
       if (existing?.status === "waiting" && existing.waiting?.kind === "approval" && existing.waiting.key) {
         const resumed = await resumeMissionTaskAfterApproval(userId, existing.waiting.key);
         if (resumed.status === "resumed" || resumed.status === "already_queued") return resumed.mission;
@@ -1702,7 +1704,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         if (resumed.status === "task_running") throw new Error("The approved mission task is already running; wait for that worker to settle.");
         throw new Error("The mission approval no longer matches a resumable task. Inspect the mission checkpoint before retrying.");
       }
-      const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow);
+      const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds));
       if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");
       return mission;
     }
@@ -1732,7 +1734,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const before = await getMission(userId, missionId);
       const alreadyCompleted = before?.steps.some((step) => step.id === stepId && step.status === "completed") === true;
       const mission = await completeMissionStepAndAdvance(userId, missionId, stepId, text(args.result, 12000), runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId);
-      if (!mission) throw new Error("Only a pending or running step in an unfinished mission you own can be completed");
+      if (!mission) {
+        const current = await getMission(userId, missionId);
+        if (!current) throw new Error("Mission not found or not owned by you");
+        const step = current.steps.find((candidate) => candidate.id === stepId);
+        return { ...current, stepCompletion: "not_ready", closeout: { status: "not_ready", blockers: [`Mission is ${current.status}; step ${stepId} is ${step?.status ?? "missing"}.`, ...(current.error ? [current.error] : [])], nextAction: current.nextAction ?? "Inspect the mission dependencies and resume an eligible active step before completing it." } };
+      }
       const finalized = mission;
       const blockers = finalized.status === "completed" ? [] : finalized.verification?.unresolved?.length
         ? finalized.verification.unresolved

@@ -2606,11 +2606,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 return { status: "queued" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt };
               }
               if (mission) {
-                const currentMission = await getMission(task.userId, mission.id);
+                const beforeAccounting = await getMission(task.userId, mission.id);
+                const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: beforeAccounting?.checkpoint ?? result.text, nextAction: beforeAccounting?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
+                const currentMission = accounted ?? await getMission(task.userId, mission.id);
                 if (currentMission?.status === "completed") return { status: "completed" as const, message: "Autonomous mission completed", result: currentMission.result, checkpoint: currentMission.checkpoint };
                 if (currentMission?.status === "cancelled") return { status: "cancelled" as const, message: currentMission.error ?? "Autonomous mission cancelled" };
                 if (currentMission?.status === "paused" || currentMission?.status === "blocked" || currentMission?.status === "failed") return { status: "blocked" as const, message: currentMission.error ?? "Autonomous mission is waiting for intervention", checkpoint: currentMission.checkpoint, nextAction: currentMission.nextAction };
-                const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission?.checkpoint ?? result.text, nextAction: currentMission?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
                 if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
                 // Close out after the final model/tool turn. Without this
                 // server-side handoff, a mission with no ready steps would be

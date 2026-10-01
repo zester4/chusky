@@ -6,7 +6,7 @@ import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
 import { compensationView, executeCompensation, listCompensations, queueCompensation, updateCompensation } from "../src/reliability/persistence.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, recordTrustedMissionEvidence, recordMissionEvidence, type MissionRecord } from "../src/store.js";
+import { completeMission, completeMissionStep, createMission, getMission, initStore, startMission, verifyMission, updateMission, recordTrustedMissionEvidence, recordMissionEvidence, type MissionRecord } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
 import { createComposioOutcomeReadAdapter } from "../src/reliability/composioReadAdapter.js";
@@ -19,6 +19,21 @@ import { runProviderSmokeSuite } from "../src/reliability/providerSmoke.js";
 import type { ProviderProof, ProviderSmokeCapability } from "../src/reliability/contracts.js";
 import { buildReadinessReport } from "../src/reliability/readiness.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability/quotas.js";
+
+test("native expired resume reports the blocker without enqueueing and step completion reports persisted state", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 9824;
+  const mission = await createMission(ownerId, { title: "Expired recovery", objective: "Recover existing work", definitionOfDone: "Verified closeout", budget: { maxDurationSeconds: 60 }, steps: [{ id: "verify", title: "Verify", objective: "Verify the existing result" }] });
+  await startMission(ownerId, mission.id);
+  await updateMission(ownerId, mission.id, { startedAt: Date.now() - 120_000 });
+  let enqueues = 0;
+  const result = await nativeTool(ownerId, "CHUCK_MISSION_RESUME", { id: mission.id }, { enqueueMissionTask: async () => { enqueues += 1; return "unused"; } });
+  assert.equal((result as { status: string }).status, "blocked");
+  assert.equal(enqueues, 0);
+  const completion = await nativeTool(ownerId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "verify", result: "Existing result checked" });
+  assert.equal((completion as { stepCompletion: string }).stepCompletion, "not_ready");
+  await assert.rejects(nativeTool(ownerId, "CHUCK_MISSION_RESUME", { id: mission.id, maxDurationSeconds: 300 }), /exact owner approval/);
+});
 
 test("receipt checks resolve exact owned trusted evidence and reject forged or mismatched references", async () => {
   await initStore({ memoryOnly: true });

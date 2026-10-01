@@ -5857,7 +5857,7 @@ export function missionBudgetPreflight(mission: MissionRecord, estimate: { toolC
   if ((estimate.steps ?? 1) > remaining.steps) return { allowed: false, reason: "Mission step budget would be exceeded.", remaining };
   if ((estimate.toolCalls ?? 0) > remaining.toolCalls) return { allowed: false, reason: "Mission tool-call budget would be exceeded.", remaining };
   if ((estimate.cost ?? 0) > remaining.cost) return { allowed: false, reason: "Mission cost budget would be exceeded.", remaining };
-  if ((estimate.durationSeconds ?? 0) > remaining.durationSeconds) return { allowed: false, reason: "Mission duration budget would be exceeded.", remaining };
+  if (remaining.durationSeconds <= 0 || (estimate.durationSeconds ?? 0) > remaining.durationSeconds) return { allowed: false, reason: "Mission duration budget would be exceeded.", remaining };
   return { allowed: true, remaining };
 }
 
@@ -6144,8 +6144,20 @@ export async function pauseMission(userId: number, id: string, reason = "Mission
   return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "paused", error: reason, waiting: undefined, events: [...mission.events, missionEvent("paused", reason)] });
 }
 
-export async function resumeMission(userId: number, id: string): Promise<MissionRecord | undefined> {
-  return mutateMission(userId, id, (mission) => !["paused", "blocked", "failed"].includes(mission.status) ? undefined : { status: "running", error: undefined, waiting: undefined, events: [...mission.events, missionEvent("resumed", "Mission resumed")] });
+export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
+  if (maxDurationSeconds !== undefined && (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 2592000)) throw new Error("Mission duration must be an integer between 60 and 2592000 seconds.");
+  return mutateMission(userId, id, (mission) => {
+    if (!["paused", "blocked", "failed", "running"].includes(mission.status)) return undefined;
+    if (maxDurationSeconds !== undefined && maxDurationSeconds < mission.budget.maxDurationSeconds) throw new Error("Resume can only extend the existing duration budget.");
+    const budget = { ...mission.budget, maxDurationSeconds: maxDurationSeconds ?? mission.budget.maxDurationSeconds };
+    const events = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds
+      ? [...mission.events, missionEvent("checkpointed", `Owner-authorized duration budget changed from ${mission.budget.maxDurationSeconds} to ${budget.maxDurationSeconds} seconds; original start and usage retained.`)] : mission.events;
+    const preflight = missionBudgetPreflight({ ...mission, budget });
+    if (!preflight.allowed && mission.steps.some((step) => step.status !== "completed")) {
+      return { budget, status: "blocked", error: preflight.reason, nextAction: preflight.remaining.durationSeconds <= 0 ? "The owner must authorize a larger total duration from the original start before execution can resume." : "Resolve the recorded execution budget limit before resuming; a duration extension does not increase steps, tool calls, or spend.", events: [...events, missionEvent("budget_exhausted", preflight.reason!)] };
+    }
+    return { budget, status: "running", error: undefined, waiting: undefined, events: mission.status === "running" && events === mission.events ? events : [...events, missionEvent("resumed", "Mission resumed")] };
+  });
 }
 
 /** Resume a mission only when this exact owner-approved action released its wait. */
@@ -6205,11 +6217,12 @@ export async function checkpointMission(userId: number, id: string, checkpoint: 
 
 export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number }): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
-    if (!["running", "waiting"].includes(mission.status)) return undefined;
+    if (mission.status === "queued") return undefined;
     const now = Date.now();
     const consumedSteps = mission.consumedSteps + 1;
     const toolCalls = mission.toolCalls + (Number.isFinite(input.toolCalls) ? Math.max(0, Math.floor(input.toolCalls ?? 0)) : 0);
     const cost = mission.cost + (typeof input.cost === "number" && Number.isFinite(input.cost) ? Math.max(0, input.cost) : 0);
+    if (mission.status !== "running") return { consumedSteps, toolCalls, cost };
     const durationExceeded = Boolean(mission.startedAt && now - mission.startedAt > mission.budget.maxDurationSeconds * 1000);
     const budgetExceeded = durationExceeded || consumedSteps > mission.budget.maxSteps || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
     const reason = durationExceeded ? "Mission duration budget exhausted." : consumedSteps > mission.budget.maxSteps ? "Mission step budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;

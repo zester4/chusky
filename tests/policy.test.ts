@@ -4,6 +4,11 @@ import { humanProgressStatus, humanToolStatus, isReadOnlyToolSlug, isRiskyToolSl
 import { clearComposioToolMetadata, registerComposioToolMetadata } from "../src/composioRisk.js";
 import { isSharedChannelToolDenied } from "../src/sharedChannelPolicy.js";
 
+test("duration extensions require owner approval while ordinary mission resume stays autonomous", () => {
+  assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing" }), "private");
+  assert.equal(requiresToolApproval("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }, false, true), true);
+});
+
 test("recognizes materially risky tools", () => {
   for (const slug of [
     "GITHUB_DELETE_REPOSITORY", "STRIPE_CREATE_PAYMENT", "STRIPE_SUBSCRIBE_CUSTOMER", "SHOPIFY_CHECKOUT_ORDER",
