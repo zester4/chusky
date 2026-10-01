@@ -2575,6 +2575,13 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               }
               if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
               if (result.taskWait) {
+                if (mission) {
+                  const currentMission = await getMission(task.userId, mission.id);
+                  const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
+                    ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
+                    : currentMission;
+                  if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
+                }
                 if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt }, result.taskWait.checkpoint, result.taskWait.nextAction);
                 if (task.sdkRunId && task.sdkThreadId) {
                   const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
@@ -2583,6 +2590,11 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 return { status: "queued" as const, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
               }
               if (result.missionWait && mission) {
+                const currentMission = await getMission(task.userId, mission.id);
+                const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
+                  ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
+                  : currentMission;
+                if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
                 const timeoutSeconds = result.missionWait.timeoutSeconds === undefined ? undefined : Math.min(30 * 24 * 60 * 60, Math.max(60, result.missionWait.timeoutSeconds));
                 const expiresAt = timeoutSeconds === undefined ? undefined : Date.now() + timeoutSeconds * 1000;
                 await waitMission(task.userId, mission.id, { kind: "provider_event", provider: result.missionWait.provider, providerEventId: result.missionWait.providerEventId, stepId: result.missionWait.stepId, expiresAt }, result.missionWait.checkpoint, result.missionWait.nextAction);

@@ -61,8 +61,9 @@ export async function executeOutcomeVerification(input: {
         lastError = "";
         break;
       } catch (error) {
-        const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,60}$/.test(error.name) ? error.name : "Error";
-        lastError = `Provider read failed (${errorName}).`;
+        const message = error instanceof Error ? error.message : String(error);
+        const safeMessage = message.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
+        lastError = `Provider read failed${safeMessage ? `: ${safeMessage}` : " (unknown provider error)"}.`;
       }
     }
     if (lastError) results.push({ checkId: check.id, status: "uncertain", observedAt: now, reason: lastError });

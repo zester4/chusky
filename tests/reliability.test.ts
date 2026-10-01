@@ -199,6 +199,17 @@ test("Composio outcome reads execute only exact available read tools and bound t
   assert.equal(executed.length, 1);
 });
 
+test("Composio outcome reads preserve bounded provider failure details", async () => {
+  const adapter = createComposioOutcomeReadAdapter({
+    availableToolSlugs: ["GOOGLESHEETS_VALUES_GET"],
+    execute: async () => ({ successful: false, error: { message: "range is invalid" } }),
+  });
+  await assert.rejects(
+    () => adapter.read({ toolSlug: "GOOGLESHEETS_VALUES_GET", check: { id: "sheet", kind: "provider_read", description: "Sheet is correct", arguments: { range: "Sheet1!A1:D20" }, expected: { rows: 3 } } }),
+    /range is invalid/,
+  );
+});
+
 test("outcome engine ignores model-supplied provider pass results without a provider read", async () => {
   await initStore({ memoryOnly: true });
   const result = await executeOutcomeVerification({

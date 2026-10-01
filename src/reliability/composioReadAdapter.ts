@@ -6,6 +6,17 @@ import type { OutcomeReadAdapter } from "./outcomeEngine.js";
 const SECRET_FIELD = /token|secret|password|credential|cookie|authorization|private.?key/i;
 const MAX_ARGUMENT_BYTES = 16_384;
 
+function providerErrorMessage(value: unknown): string {
+  if (value instanceof Error) return value.message || value.name;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const nested = record.error ?? record.detail ?? record.message ?? record.data;
+    if (nested !== undefined && nested !== value) return providerErrorMessage(nested);
+  }
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
 function validateReadArguments(value: unknown, path = "arguments", depth = 0): asserts value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || depth > 6) throw new Error("Provider read arguments must be a bounded JSON object.");
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
@@ -29,8 +40,8 @@ function validateReadArguments(value: unknown, path = "arguments", depth = 0): a
 function normalizeObserved(result: unknown): Record<string, unknown> {
   if (result && typeof result === "object" && !Array.isArray(result)) {
     const record = result as Record<string, unknown>;
-    if (record.error !== undefined && record.error !== null && record.error !== false && record.error !== "") throw new Error("Provider reported an execution error.");
-    if (record.successful === false || record.success === false) throw new Error("Provider reported an unsuccessful execution.");
+    if (record.error !== undefined && record.error !== null && record.error !== false && record.error !== "") throw new Error(`Provider reported an execution error: ${providerErrorMessage(record.error).slice(0, 500)}`);
+    if (record.successful === false || record.success === false) throw new Error(`Provider reported an unsuccessful execution${record.message ? `: ${providerErrorMessage(record.message).slice(0, 500)}` : "."}`);
     const data = record.data;
     if (data && typeof data === "object" && !Array.isArray(data)) return data as Record<string, unknown>;
     if (Array.isArray(data)) return { items: data };
