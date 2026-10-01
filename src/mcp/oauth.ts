@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { decryptCredential, encryptCredential, type EncryptedCredential } from "../vault/crypto.js";
 import { connectMcpServer, listMcpCatalog } from "./client.js";
+import { createMcpOAuthFetch } from "./oauthFetch.js";
 import { getSession, mutateSession, type McpOAuthStateRecord } from "../store.js";
 
 const STATE_TTL_MS = 10 * 60_000;
@@ -85,6 +86,8 @@ function providerFor(userId: number, serverId: string, pending: McpOAuthStateRec
   return { provider, getAuthorizationUrl: () => authorizationUrl, getTokens: () => tokens, server, authorizationCode };
 }
 
+const mcpOAuthFetch = createMcpOAuthFetch();
+
 export async function beginMcpOAuth(userId: number, serverId: string): Promise<{ authorizationUrl: string; state: string; expiresAt: number }> {
   if (!config.mcpEnabled) throw new Error("Third-party MCP is disabled");
   const server = listMcpCatalog().servers.find((item) => item.id === serverId && item.enabled !== false);
@@ -97,7 +100,7 @@ export async function beginMcpOAuth(userId: number, serverId: string): Promise<{
     session.mcpOAuthStates = [...(session.mcpOAuthStates ?? []).filter((item) => item.expiresAt > now && item.state !== state), pending].slice(-10);
   });
   const flow = providerFor(userId, serverId, pending, {});
-  await auth(flow.provider, { serverUrl: server.url, scope: server.scopes?.join(" ") });
+  await auth(flow.provider, { serverUrl: server.url, scope: server.scopes?.join(" "), fetchFn: mcpOAuthFetch });
   if (!flow.getAuthorizationUrl()) throw new Error("MCP server did not return an OAuth authorization URL");
   return { authorizationUrl: flow.getAuthorizationUrl(), state, expiresAt: pending.expiresAt };
 }
@@ -108,7 +111,7 @@ export async function finishMcpOAuth(state: string, code: string): Promise<{ ser
   if (!pending || pending.expiresAt <= Date.now()) throw new Error("MCP OAuth authorization has expired; start again");
   const secret = decryptCredential<OAuthSecret>(pending.secret, key(), "MCP_CONNECTION_ENCRYPTION_KEY");
   const flow = providerFor(userId, pending.serverId, pending, secret, code);
-  await auth(flow.provider, { serverUrl: flow.server.url, authorizationCode: code, scope: flow.server.scopes?.join(" ") });
+  await auth(flow.provider, { serverUrl: flow.server.url, authorizationCode: code, scope: flow.server.scopes?.join(" "), fetchFn: mcpOAuthFetch });
   const tokens = flow.getTokens();
   if (!tokens?.access_token) throw new Error("MCP OAuth server did not return an access token");
   if (tokens.expires_in !== undefined && (!Number.isFinite(tokens.expires_in) || tokens.expires_in < 0)) throw new Error("MCP OAuth server returned an invalid token lifetime");

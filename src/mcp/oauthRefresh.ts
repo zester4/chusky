@@ -1,5 +1,6 @@
 import { auth, type OAuthClientProvider, type OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
+import { createMcpOAuthFetch } from "./oauthFetch.js";
 
 export interface McpOAuthRefreshState {
   redirectUri: string;
@@ -54,12 +55,7 @@ export async function refreshMcpOAuthToken(input: {
     saveDiscoveryState: (next) => { discoveryState = next; },
   };
 
-  const fetchImpl = input.fetchImpl ?? fetch;
-  const boundedFetch: typeof fetch = (request, init) => {
-    const timeoutSignal = AbortSignal.timeout(20_000);
-    const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
-    return fetchImpl(request, { ...init, signal });
-  };
+  const boundedFetch = createMcpOAuthFetch(input.fetchImpl);
   const result = await auth(provider, {
     serverUrl: input.serverUrl,
     ...(input.scopes?.length ? { scope: input.scopes.join(" ") } : {}),

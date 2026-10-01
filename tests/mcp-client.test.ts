@@ -10,6 +10,8 @@ import { addCustomMcpServer, discoverToolsForUser, disconnectMcpServer, isMcpSer
 import { getSession, initStore, saveSession } from "../src/store.js";
 import { decryptCredential, encryptCredential } from "../src/vault/crypto.js";
 import { refreshMcpOAuthToken } from "../src/mcp/oauthRefresh.js";
+import { createMcpOAuthFetch } from "../src/mcp/oauthFetch.js";
+import { parseErrorResponse } from "@modelcontextprotocol/sdk/client/auth.js";
 const originalNodeEnv = process.env.NODE_ENV;
 
 async function startMcpFixture(options: { requireToken?: string | string[]; requiredHeaders?: Record<string, string>; toolName?: string; failTools?: boolean } = {}): Promise<{ url: string; close: () => Promise<void>; requestCount: () => number; authorizationHeaders: () => string[] }> {
@@ -347,6 +349,23 @@ test("MCP OAuth refresher uses the installed SDK and persists the provider's rot
   assert.equal(result.tokens.access_token, "new-access");
   assert.equal(result.tokens.refresh_token, "new-refresh");
   assert.equal(result.state.clientInformation.client_id, "registered-client");
+});
+
+test("MCP OAuth fetch normalizes cross-runtime Response objects before the SDK parses errors", async () => {
+  const foreignBody = JSON.stringify({ error: "invalid_request", error_description: "The requested scope is not supported." });
+  const foreignResponse = {
+    status: 400,
+    statusText: "Bad Request",
+    ok: false,
+    headers: new Headers({ "content-type": "application/json" }),
+    arrayBuffer: async () => Buffer.from(foreignBody),
+    toString: () => "[object Response]",
+  } as unknown as Response;
+  const oauthFetch = createMcpOAuthFetch(async () => foreignResponse);
+  const response = await oauthFetch("https://auth.example.test/token");
+  assert.ok(response instanceof Response);
+  const error = await parseErrorResponse(response);
+  assert.equal(error.message, "The requested scope is not supported.");
 });
 
 test("MCP OAuth refresh failure blocks the upstream server request", async () => {
