@@ -184,6 +184,38 @@ with `MCP_CONNECTION_ENCRYPTION_KEY` and never enter the catalog, prompt,
 history, logs, or tool result. Production requires HTTPS and rejects
 credential-bearing, localhost, private-network, and metadata URLs.
 
+The built-in catalog includes Instacart and Upscrape as OAuth connections.
+Mercury is cataloged but disabled until Chusky refreshes stored MCP OAuth tokens:
+its official MCP supports OAuth 2.0 with PKCE and read-only access, but its
+access token expires and Chusky currently does not refresh stored third-party MCP
+tokens. The catalog requests Mercury's `read` and `offline_access` scopes for
+when refresh support is added. Zomato is listed but disabled pending provider approval: Zomato's published MCP
+manifest says third-party apps are not currently allowed and its OAuth callback
+must be allowlisted before a client can connect. Do not enable it until Zomato
+approves Chusky's integration and callback URL.
+
+Plaid Dashboard and Sabre Travel are cataloged but disabled until Chusky adds
+their provider-specific client-credentials token acquisition and refresh. Plaid
+requires a Plaid production client ID/secret and a short-lived `mcp:dashboard`
+token; Sabre's documented production MCP endpoint is `https://mcp.sabre.com/mcp`
+and requires a Sabre OAuth access token. Neither token flow is equivalent to
+Chusky's generic user-consent MCP OAuth connection. Sabre's `api.sabre.com/mcp`
+URL was not listed as the production MCP endpoint in Sabre's current docs.
+
+Twilio's public documentation MCP and Etsy's developer-documentation MCP are
+enabled as read-only reference servers. AWS and BigQuery are cataloged disabled
+pending verified OAuth setup and token-refresh support; AWS uses the documented
+regional endpoint, while BigQuery's official endpoint is
+`https://bigquery.googleapis.com/mcp`. Vonage Cloud Runtime is cataloged
+disabled because its server requires `X-Account-ID`, `X-Account-Secret`, and
+`X-Region` headers, which the current MCP connection contract does not support.
+The Azure and Playwright entries in common MCP examples use local `stdio`
+processes; Chusky's third-party MCP client supports remote HTTP servers only.
+The Postgres example likewise launches a local process and includes a sample
+database URL; Chusky does not launch local MCP commands or accept database
+connection strings through this catalog. The supplied eBay URL could not be
+verified in eBay's official developer documentation, so it is not registered.
+
 ```json
 {
   "version": 1,
@@ -207,7 +239,13 @@ The service exposes three account-scoped endpoints:
 - `POST /v1/mcp/connections` connects a server. For `none` use only
   `{"serverId":"..."}`; for `oauth` or `bearer`, send the provider-issued
   access token over HTTPS in `accessToken` (and optionally `refreshToken`,
-  `tokenType`, and `expiresAt`). The response never contains credentials.
+  `tokenType`, and `expiresAt`). OAuth authorization-code connections refresh
+  stored tokens near expiry under an owner/server lock and persist rotated
+  refresh tokens before making MCP requests. For catalog entries marked
+  `headers`, send exactly the declared header names and their values in a
+  `headers` object; values are encrypted and never returned. The response never
+  contains credentials. Refresh failure blocks the server call and requires a
+  new OAuth connection.
 - `DELETE /v1/mcp/connections/:serverId` disconnects the current user's server.
 
 For OAuth servers, the dashboard starts the official MCP SDK authorization-code

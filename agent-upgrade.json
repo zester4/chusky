@@ -1,11 +1,11 @@
 {
-  "id": "release-4.33.0",
-  "version": "4.33.0",
+  "id": "release-4.34.0",
+  "version": "4.34.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added owner-scoped TinyFish Research reports with durable run tracking, citations, cancellation without an approval pause, and Attention Pulse completion or failure observations.",
-    "Added autonomous page and topic monitoring with signed, deduplicated callbacks, bounded history, and private Pulse observations for meaningful changes or failed checks.",
-    "Expanded TinyFish Search and Fetch with source filters, research-paper metadata, structured extraction, conditional fetches, selectors, ranked highlights, and per-page errors; browser-agent APIs remain excluded."
+    "Stored third-party MCP OAuth connections now refresh expiring tokens automatically and persist provider-rotated refresh tokens before using the server.",
+    "Refresh runs are serialized per owner and server; failed refreshes stop before an MCP request and ask the owner to reconnect.",
+    "Curated MCP providers may use catalog-declared custom authentication headers; values are encrypted and excluded from catalog output, model tools, and logs."
   ],
-  "createdAt": "2026-09-30T18:47:23.336Z"
+  "createdAt": "2026-10-01T02:46:31.860Z"
 }

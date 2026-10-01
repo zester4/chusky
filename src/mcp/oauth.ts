@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { decryptCredential, encryptCredential, type EncryptedCredential } from "../vault/crypto.js";
 import { connectMcpServer, listMcpCatalog } from "./client.js";
-import { getSession, saveSession, type McpOAuthStateRecord } from "../store.js";
+import { getSession, mutateSession, type McpOAuthStateRecord } from "../store.js";
 
 const STATE_TTL_MS = 10 * 60_000;
 type OAuthSecret = { codeVerifier?: string; clientInformation?: OAuthClientInformationMixed; discoveryState?: OAuthDiscoveryState };
@@ -46,13 +46,13 @@ function publicClientMetadata(redirectUri: string): OAuthClientMetadata {
 }
 
 async function updatePending(userId: number, state: string, update: (secret: OAuthSecret) => OAuthSecret): Promise<McpOAuthStateRecord> {
-  const session = await getSession(userId);
-  const pending = session.mcpOAuthStates!.find((item) => item.state === state);
-  if (!pending || pending.expiresAt <= Date.now()) throw new Error("MCP OAuth authorization has expired; start again");
-  const secret = decryptCredential<OAuthSecret>(pending.secret, key(), "MCP_CONNECTION_ENCRYPTION_KEY");
-  pending.secret = encryptCredential(update(secret), key(), "MCP_CONNECTION_ENCRYPTION_KEY");
-  await saveSession(userId, session);
-  return pending;
+  return mutateSession(userId, (session) => {
+    const pending = session.mcpOAuthStates!.find((item) => item.state === state);
+    if (!pending || pending.expiresAt <= Date.now()) throw new Error("MCP OAuth authorization has expired; start again");
+    const secret = decryptCredential<OAuthSecret>(pending.secret, key(), "MCP_CONNECTION_ENCRYPTION_KEY");
+    pending.secret = encryptCredential(update(secret), key(), "MCP_CONNECTION_ENCRYPTION_KEY");
+    return pending;
+  });
 }
 
 function providerFor(userId: number, serverId: string, pending: McpOAuthStateRecord, initialSecret: OAuthSecret, authorizationCode?: string) {
@@ -92,10 +92,10 @@ export async function beginMcpOAuth(userId: number, serverId: string): Promise<{
   const redirectUri = callbackUrl();
   const state = encodeState(userId);
   const now = Date.now();
-  const session = await getSession(userId);
   const pending: McpOAuthStateRecord = { state, serverId, redirectUri, secret: encryptCredential({}, key(), "MCP_CONNECTION_ENCRYPTION_KEY"), createdAt: now, expiresAt: now + STATE_TTL_MS };
-  session.mcpOAuthStates = [...(session.mcpOAuthStates ?? []).filter((item) => item.expiresAt > now && item.state !== state), pending].slice(-10);
-  await saveSession(userId, session);
+  await mutateSession(userId, (session) => {
+    session.mcpOAuthStates = [...(session.mcpOAuthStates ?? []).filter((item) => item.expiresAt > now && item.state !== state), pending].slice(-10);
+  });
   const flow = providerFor(userId, serverId, pending, {});
   await auth(flow.provider, { serverUrl: server.url, scope: server.scopes?.join(" ") });
   if (!flow.getAuthorizationUrl()) throw new Error("MCP server did not return an OAuth authorization URL");
@@ -104,16 +104,27 @@ export async function beginMcpOAuth(userId: number, serverId: string): Promise<{
 
 export async function finishMcpOAuth(state: string, code: string): Promise<{ serverId: string; connection: Awaited<ReturnType<typeof connectMcpServer>> }> {
   const { userId } = decodeState(state);
-  const session = await getSession(userId);
-  const pending = session.mcpOAuthStates!.find((item) => item.state === state);
+  const pending = (await getSession(userId)).mcpOAuthStates!.find((item) => item.state === state);
   if (!pending || pending.expiresAt <= Date.now()) throw new Error("MCP OAuth authorization has expired; start again");
   const secret = decryptCredential<OAuthSecret>(pending.secret, key(), "MCP_CONNECTION_ENCRYPTION_KEY");
   const flow = providerFor(userId, pending.serverId, pending, secret, code);
   await auth(flow.provider, { serverUrl: flow.server.url, authorizationCode: code, scope: flow.server.scopes?.join(" ") });
   const tokens = flow.getTokens();
   if (!tokens?.access_token) throw new Error("MCP OAuth server did not return an access token");
-  session.mcpOAuthStates = (session.mcpOAuthStates ?? []).filter((item) => item.state !== state);
-  await saveSession(userId, session);
-  const connection = await connectMcpServer(userId, pending.serverId, { accessToken: tokens.access_token, ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}), ...(tokens.token_type ? { tokenType: tokens.token_type } : {}), ...(tokens.expires_in ? { expiresAt: Date.now() + tokens.expires_in * 1000 } : {}) });
+  if (tokens.expires_in !== undefined && (!Number.isFinite(tokens.expires_in) || tokens.expires_in < 0)) throw new Error("MCP OAuth server returned an invalid token lifetime");
+  const latestPending = (await getSession(userId)).mcpOAuthStates!.find((item) => item.state === state);
+  if (!latestPending || latestPending.expiresAt <= Date.now()) throw new Error("MCP OAuth authorization has expired; start again");
+  const latestSecret = decryptCredential<OAuthSecret>(latestPending.secret, key(), "MCP_CONNECTION_ENCRYPTION_KEY");
+  if (!latestSecret.clientInformation) throw new Error("MCP OAuth client registration was not saved; reconnect this server.");
+  const connection = await connectMcpServer(userId, pending.serverId, {
+    accessToken: tokens.access_token,
+    ...(tokens.refresh_token ? { refreshToken: tokens.refresh_token } : {}),
+    ...(tokens.token_type ? { tokenType: tokens.token_type } : {}),
+    ...(tokens.expires_in === undefined ? {} : { expiresAt: Date.now() + tokens.expires_in * 1000 }),
+    oauth: { redirectUri: pending.redirectUri, clientInformation: latestSecret.clientInformation, ...(latestSecret.discoveryState ? { discoveryState: latestSecret.discoveryState } : {}) },
+  });
+  await mutateSession(userId, (session) => {
+    session.mcpOAuthStates = (session.mcpOAuthStates ?? []).filter((item) => item.state !== state);
+  });
   return { serverId: pending.serverId, connection };
 }

@@ -2,6 +2,13 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.8.0 - 2026-10-01
+
+- Expose catalog-declared MCP authentication headers through `mcp.connect()`;
+  the header names are returned by the catalog and credential values are
+  write-only.
+- Document stored OAuth refresh behavior and fail-closed reconnection semantics.
+
 ## 1.7.1 - 2026-09-30
 
 - Default the SDK to the hosted Chusky API so `baseUrl` is optional for normal

@@ -446,6 +446,23 @@ decision at the approval boundary authorizes an external action.
 
 ## 11. Composio connection behavior
 
+### Chusky as a third-party MCP client
+
+This is separate from the Cloudflare Worker described above. The Telegram and
+SDK runtime connects to curated third-party servers through the MCP TypeScript
+SDK. OAuth client metadata, discovery state, access tokens, and rotating refresh
+tokens are encrypted in the owner's session. Refresh is attempted before the
+stored token expires; the rotated token is persisted before opening a new MCP
+transport. If refresh fails, do not contact the MCP server with the old token;
+report that the owner must reconnect.
+
+Some catalog entries use provider-defined HTTP auth headers instead of OAuth or
+Bearer. Expose only header names explicitly declared by that server's trusted
+catalog entry, require every declared value, encrypt the values at rest, and
+inject them only into the owner-scoped transport. Never place header values in
+tool schemas, model arguments, logs, or public catalog/connection responses.
+Custom MCP servers remain limited to the existing no-auth/Bearer contract.
+
 The Cloudflare MCP Worker does not manage Composio OAuth itself; Composio owns
 those connected accounts. The Chusky runtime can separately connect approved
 third-party MCP servers through its `/v1/mcp/oauth/start` PKCE flow. For the

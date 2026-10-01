@@ -398,8 +398,8 @@ function workspaceCard(input: { model: string; connectedApps: number; connectedA
   };
 }
 
-function mcpAuthLabel(auth: "none" | "bearer" | "oauth"): string {
-  return auth === "none" ? "public" : auth === "oauth" ? "OAuth" : "access token";
+function mcpAuthLabel(auth: "none" | "bearer" | "oauth" | "headers"): string {
+  return auth === "none" ? "public" : auth === "oauth" ? "OAuth" : auth === "headers" ? "API credentials" : "access token";
 }
 
 async function showMcpWorkspace(ctx: Context, messageId?: number): Promise<void> {
@@ -2357,7 +2357,9 @@ export function registerHandlers(bot: Bot): void {
         return;
       }
       if (server.auth !== "none") {
-        const authMethod = server.auth === "oauth" ? "OAuth" : "an access token";
+        const authMethod = server.auth === "oauth" ? "OAuth" : server.auth === "headers"
+          ? `API credentials (${(server.authHeaders ?? []).join(", ")})`
+          : "an access token";
         await ctx.editMessageText(
           `<b>${escapeTelegramHtml(server.name)}</b> needs ${authMethod}.\n\n` +
           "For your security, do not send credentials in Telegram. Complete the connection through the authenticated Chusky dashboard/API, then return here and tap Refresh status.",

@@ -113,6 +113,15 @@ test("custom MCP upgrade preset describes verification, private networking contr
   assert.match(bullets[2], /group and meeting contexts/);
 });
 
+test("MCP authentication upgrade preset describes refresh, fail-closed behavior, and secret isolation", () => {
+  const bullets = getAgentUpgradePreset("mcpAuth");
+  assert.equal(bullets.length, 3);
+  assert.deepEqual(bullets, [...AGENT_UPGRADE_PRESETS.mcpAuth]);
+  assert.match(bullets[0], /persist provider-rotated refresh tokens/);
+  assert.match(bullets[1], /stop before an MCP request/);
+  assert.match(bullets[2], /excluded from catalog output, model tools, and logs/);
+});
+
 test("trigger preset documents durable outcomes, recovery, and safe event policy", () => {
   const bullets = getAgentUpgradePreset("triggers");
   assert.equal(bullets.length, 3);
@@ -198,13 +207,13 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces durable TinyFish research and monitoring", async () => {
+test("current upgrade manifest announces MCP OAuth refresh and catalog-auth credentials", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.33.0");
-  assert.equal(notice?.version, "4.33.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /owner-scoped TinyFish Research reports/);
-  assert.match(formatAgentUpgradeNotice(notice!), /signed, deduplicated callbacks/);
-  assert.match(formatAgentUpgradeNotice(notice!), /browser-agent APIs remain excluded/);
+  assert.equal(notice?.id, "release-4.34.0");
+  assert.equal(notice?.version, "4.34.0");
+  assert.match(formatAgentUpgradeNotice(notice!), /Stored third-party MCP OAuth connections now refresh expiring tokens automatically/);
+  assert.match(formatAgentUpgradeNotice(notice!), /Refresh runs are serialized per owner and server/);
+  assert.match(formatAgentUpgradeNotice(notice!), /catalog-declared custom authentication headers/);
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

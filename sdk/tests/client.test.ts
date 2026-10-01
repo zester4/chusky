@@ -73,6 +73,17 @@ test("SDK adds custom MCP servers through the authenticated verification endpoin
   assert.equal(request?.userId, "mcp-owner");
 });
 
+test("SDK connects catalogued MCP servers with custom auth headers and expiry metadata", async () => {
+  let body: Record<string, unknown> | undefined;
+  const sdk = new Chusky({ apiKey: "chsk_mcp_headers", userId: "mcp-owner", baseUrl: "https://example.test", fetch: mockFetch((_url, init) => {
+    body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return new Response(JSON.stringify({ serverId: "vonage_tooling", name: "Vonage Cloud Runtime", auth: "headers", enabled: true, connectedAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", verifiedToolCount: 3 }), { status: 201 });
+  }) });
+  const connection = await sdk.mcp.connect("vonage_tooling", { headers: { "X-Account-ID": "api-key", "X-Account-Secret": "private-api-secret", "X-Region": "use1" } });
+  assert.equal(connection.auth, "headers");
+  assert.deepEqual(body, { serverId: "vonage_tooling", headers: { "X-Account-ID": "api-key", "X-Account-Secret": "private-api-secret", "X-Region": "use1" } });
+});
+
 test("SDK reliability capability runner narrows to one native tool and preserves durable approval flow", async () => {
   const calls: Array<{ url: string; method: string; body: Record<string, unknown>; key: string | null }> = [];
   const sdk = new Chusky({ apiKey: "chsk_test", userId: "tenant-1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

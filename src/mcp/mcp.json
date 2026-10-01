@@ -25,6 +25,89 @@
         "dom_snapshot"
       ],
       "requireApproval": true
+    },
+    {
+      "id": "zomato",
+      "name": "Zomato",
+      "url": "https://mcp-server.zomato.com/mcp",
+      "auth": "oauth",
+      "enabled": false,
+      "requireApproval": true
+    },
+    {
+      "id": "instacart_direct",
+      "name": "Instacart",
+      "url": "https://mcp.instacart.com/mcp",
+      "auth": "oauth",
+      "requireApproval": true
+    },
+    {
+      "id": "upscrape",
+      "name": "Upscrape",
+      "url": "https://data.upscrape.com/mcp",
+      "auth": "oauth",
+      "requireApproval": true
+    },
+    {
+      "id": "mercury",
+      "name": "Mercury",
+      "url": "https://mcp.mercury.com/mcp",
+      "auth": "oauth",
+      "scopes": ["read", "offline_access"],
+      "requireApproval": true
+    },
+    {
+      "id": "plaid_dashboard",
+      "name": "Plaid Dashboard",
+      "url": "https://api.dashboard.plaid.com/mcp/",
+      "auth": "bearer",
+      "enabled": false,
+      "requireApproval": true
+    },
+    {
+      "id": "sabre",
+      "name": "Sabre Travel",
+      "url": "https://mcp.sabre.com/mcp",
+      "auth": "bearer",
+      "enabled": false,
+      "requireApproval": true
+    },
+    {
+      "id": "aws",
+      "name": "AWS MCP",
+      "url": "https://aws-mcp.us-east-1.api.aws/mcp",
+      "auth": "oauth",
+      "enabled": false,
+      "requireApproval": true
+    },
+    {
+      "id": "gcp_bigquery",
+      "name": "Google Cloud BigQuery",
+      "url": "https://bigquery.googleapis.com/mcp",
+      "auth": "oauth",
+      "enabled": false,
+      "requireApproval": true
+    },
+    {
+      "id": "twilio",
+      "name": "Twilio API Docs",
+      "url": "https://mcp.twilio.com/docs",
+      "auth": "none",
+      "requireApproval": false
+    },
+    {
+      "id": "vonage_tooling",
+      "name": "Vonage Cloud Runtime",
+      "url": "https://vcr-mcp.use1.runtime.vonage.cloud/mcp",
+      "auth": { "type": "headers", "headerNames": ["X-Account-ID", "X-Account-Secret", "X-Region"] },
+      "requireApproval": true
+    },
+    {
+      "id": "etsy",
+      "name": "Etsy API Docs",
+      "url": "https://mcp.api.etsycloud.com/mcp",
+      "auth": "none",
+      "requireApproval": false
     }
   ]
 }

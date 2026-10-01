@@ -96,7 +96,7 @@ test("agent retains trusted release context after the one-time upgrade notice wa
   assert.equal(await claimAgentUpgrade(userId, notice), true);
 
   const requests: Array<Record<string, any>> = [];
-  let responseText = "This release manifest lists durable TinyFish research and monitoring as Chusky capabilities; whether they are active depends on your account setup.";
+  const responseText = "This release includes MCP OAuth token refresh and catalog-declared authentication headers; whether a provider is connected and usable still depends on your account setup.";
   await withAgentMocks([chatResponse({ role: "assistant", content: responseText })], async () => undefined, async () => {
     const result = await runAgent(userId, "Is the upgrade true? Is the feature active for me?", [
       { role: "assistant", content: formatAgentUpgradeNotice(notice) },
@@ -113,7 +113,7 @@ test("agent retains trusted release context after the one-time upgrade notice wa
   assert.match(systemText, /release label.*not.*npm package version/i);
   assert.match(systemText, /does not prove that an optional integration is configured/i);
   assert.match(systemText, /a feature is enabled for this account/i);
-  assert.match(systemText, /Added owner-scoped TinyFish Research reports with durable run tracking/);
+  assert.match(systemText, /Stored third-party MCP OAuth connections now refresh expiring tokens automatically/);
 });
 
 test("ordinary conversation sends an attached image through the normal Composio email action", async () => {

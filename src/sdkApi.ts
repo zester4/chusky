@@ -1685,8 +1685,9 @@ export function registerSdkApi(app: Hono): void {
     const accessToken = typeof body.accessToken === "string" ? body.accessToken : undefined;
     const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : undefined;
     const expiresAt = typeof body.expiresAt === "number" && Number.isFinite(body.expiresAt) ? body.expiresAt : undefined;
+    if (body.headers !== undefined && (!body.headers || typeof body.headers !== "object" || Array.isArray(body.headers) || Object.keys(body.headers).length > 12 || Object.entries(body.headers).some(([name, value]) => typeof value !== "string"))) return apiError(c, 400, "invalid_mcp_auth_headers", "headers must be an object containing at most 12 string values declared by the selected MCP server.");
     try {
-      const connection = await connectMcpServer(sdkUser(c)!.userId, serverId, accessToken ? { accessToken, ...(refreshToken ? { refreshToken } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}) } : undefined);
+      const connection = await connectMcpServer(sdkUser(c)!.userId, serverId, accessToken || body.headers ? { ...(accessToken ? { accessToken } : {}), ...(refreshToken ? { refreshToken } : {}), ...(expiresAt !== undefined ? { expiresAt } : {}), ...(body.headers ? { headers: body.headers as Record<string, string> } : {}) } : undefined);
       return c.json(connection, 201);
     } catch (error) { return apiError(c, 400, "mcp_connect_failed", error instanceof Error ? error.message : "MCP server could not be connected."); }
   });

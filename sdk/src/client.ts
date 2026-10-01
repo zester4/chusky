@@ -2,6 +2,7 @@ import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./
 import { readNdjson } from "./stream.js";
 import type { A2AMessageInput } from "./types.js";
 import type { ImageDownload } from "./types.js";
+import type { McpConnectionCredentials } from "./types.js";
 import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionCreateParams, MissionEvidence, MissionProof, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 // Hosted SDK users do not need to configure an API origin. Keep `baseUrl` as
@@ -462,7 +463,10 @@ export class McpResource {
   catalog(options?: RequestOptions): Promise<{ data: McpCatalogEntry[]; errors?: string[] }> { return this.client.request("/mcp/catalog", {}, options); }
   connections(options?: RequestOptions): Promise<{ data: McpConnection[] }> { return this.client.request("/mcp/connections", {}, options); }
   addServer(params: AddCustomMcpServerParams, options?: RequestOptions): Promise<McpConnection> { return this.client.request("/mcp/custom-servers", { method: "POST", body: JSON.stringify(params) }, options); }
-  connect(serverId: string, accessToken?: string, options?: RequestOptions): Promise<McpConnection> { return this.client.request("/mcp/connections", { method: "POST", body: JSON.stringify({ serverId, ...(accessToken ? { accessToken } : {}) }) }, options); }
+  connect(serverId: string, credentials?: string | McpConnectionCredentials, options?: RequestOptions): Promise<McpConnection> {
+    const auth = typeof credentials === "string" ? { accessToken: credentials } : credentials ?? {};
+    return this.client.request("/mcp/connections", { method: "POST", body: JSON.stringify({ serverId, ...auth }) }, options);
+  }
   disconnect(serverId: string, options?: RequestOptions): Promise<void> { return this.client.request(`/mcp/connections/${encodeURIComponent(serverId)}`, { method: "DELETE" }, options); }
 }
 

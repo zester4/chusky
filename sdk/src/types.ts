@@ -86,8 +86,9 @@ export interface TriggerConfigField { name: string; required: boolean; sensitive
 export interface TriggerCatalogueItem { token: string; slug: string; name: string; description: string; setupInstructions?: string; toolkit: { slug: string; name: string; logo?: string }; requiredFields: string[]; fields: TriggerConfigField[]; }
 export interface TriggerToolkit { slug: string; name: string; logo?: string; triggerCount: number; connected: boolean; accountCount: number; }
 export interface TriggerCreateParams { slug: string; connectedAccountId?: string; triggerConfig?: Record<string, unknown>; instructions?: string; }
-export interface McpCatalogEntry { id: string; name: string; url: string; auth: "none" | "bearer" | "oauth"; allowedTools?: string[]; requireApproval?: boolean; custom?: boolean; enabled?: boolean; }
-export interface McpConnection { serverId: string; name: string; auth: "none" | "bearer" | "oauth"; enabled: boolean; connectedAt: string; updatedAt: string; verifiedToolCount?: number; }
+export interface McpCatalogEntry { id: string; name: string; url: string; auth: "none" | "bearer" | "oauth" | "headers"; authHeaders?: string[]; allowedTools?: string[]; requireApproval?: boolean; custom?: boolean; enabled?: boolean; }
+export interface McpConnection { serverId: string; name: string; auth: "none" | "bearer" | "oauth" | "headers"; enabled: boolean; connectedAt: string; updatedAt: string; verifiedToolCount?: number; }
+export interface McpConnectionCredentials { accessToken?: string; refreshToken?: string; expiresAt?: number; headers?: Record<string, string>; }
 export interface AddCustomMcpServerParams { name: string; url: string; auth: "none" | "bearer"; accessToken?: string; allowedTools?: string[]; requireApproval?: boolean; }
 export interface CompanyBranding { organizationId: string; displayName?: string; logoUrl?: string; accentColor?: string; backgroundColor?: string; customDomain?: string; customDomainStatus?: string; updatedAt?: string; }
 

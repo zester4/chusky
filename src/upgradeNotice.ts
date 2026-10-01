@@ -72,6 +72,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Bearer credentials are encrypted at rest, outbound hosts are pinned to validated public DNS results, and private/link-local targets and redirects are rejected.",
     "The agent executes discovered tools with schema validation, default human approval, bounded results, visible failures, and account isolation from group and meeting contexts.",
   ],
+  mcpAuth: [
+    "Stored third-party MCP OAuth connections now refresh expiring tokens automatically and persist provider-rotated refresh tokens before using the server.",
+    "Refresh runs are serialized per owner and server; failed refreshes stop before an MCP request and ask the owner to reconnect.",
+    "Curated MCP providers may use catalog-declared custom authentication headers; values are encrypted and excluded from catalog output, model tools, and logs.",
+  ],
   triggers: [
     "Manage provider-backed triggers from the authenticated dashboard or typed SDK using the same live Composio catalogue as Chusky's chat interfaces.",
     "Every event now keeps its owner-scoped result and notification state in the dashboard, even when no private Telegram destination is linked; unresolved delivery creates durable Attention Pulse follow-up.",

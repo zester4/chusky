@@ -27,7 +27,29 @@ const tools = await chusky.mcp.catalog();
 Use `chusky.mcp.connections()` to check saved connections and
 `chusky.mcp.disconnect(serverId)` to remove one. Custom servers and their
 credentials are private to the stable end-user identity used by this SDK
-client. Bearer credentials are encrypted at rest and never returned by the API.
+client. Bearer tokens, OAuth refresh tokens, and catalog-declared header values
+are encrypted at rest and never returned by the API. OAuth connections refresh
+when the access token is within 90 seconds of expiry; rotated credentials are
+persisted before the MCP server is contacted. A failed refresh blocks the request
+and requires reconnection instead of retrying with an expired token.
+
+For catalog entries whose `auth` is `headers`, read the safe `authHeaders` names
+from `chusky.mcp.catalog()` and pass exactly those values through the server-side
+SDK. Header names are controlled by Chusky's catalog; undeclared names are
+rejected, and values never appear in catalog responses, tool schemas, or logs:
+
+```ts
+await chusky.mcp.connect("vonage_tooling", {
+  headers: {
+    "X-Account-ID": process.env.VONAGE_API_KEY!,
+    "X-Account-Secret": process.env.VONAGE_API_SECRET!,
+    "X-Region": "use1",
+  },
+});
+```
+
+Only pass credentials from a trusted server process. Never collect them in a
+prompt, browser client, chat message, or MCP tool argument.
 
 The API accepts HTTPS URLs and pins requests to validated DNS results to block
 private and link-local destinations. Development-only loopback HTTP is for local

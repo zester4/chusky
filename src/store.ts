@@ -6399,6 +6399,14 @@ export async function releaseUserLock(uid: number, token: string): Promise<void>
   return backend.releaseLock(uid, token);
 }
 
+export async function acquireMcpCredentialRefreshLock(userId: number, serverId: string, token: string, leaseSeconds = 30): Promise<boolean> {
+  return backend.acquireKeyLock(`mcp-credential-refresh:${userId}:${serverId}`, token, leaseSeconds);
+}
+
+export async function releaseMcpCredentialRefreshLock(userId: number, serverId: string, token: string): Promise<void> {
+  return backend.releaseKeyLock(`mcp-credential-refresh:${userId}:${serverId}`, token);
+}
+
 /** Distributed lease for work that must not serialize the owner's entire chat account. */
 export async function acquireAutonomyWatchLock(userId: number, watchId: string, token: string, leaseSeconds = 300): Promise<boolean> {
   return backend.acquireKeyLock(`autonomy-watch:${userId}:${watchId}`, token, leaseSeconds);
