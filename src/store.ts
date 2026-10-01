@@ -6213,7 +6213,34 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
           : "Resolve the recorded execution budget limit before resuming; a duration extension does not increase steps, tool calls, or spend.";
       return { budget, status: "blocked", error: preflight.reason, nextAction, events: [...events, missionEvent("budget_exhausted", preflight.reason!)] };
     }
-    return { budget, status: "running", error: undefined, waiting: undefined, events: mission.status === "running" && events === mission.events ? events : [...events, missionEvent("resumed", "Mission resumed")] };
+    const now = Date.now();
+    const failedStepIds = new Set(mission.steps.filter((step) => ["failed", "blocked"].includes(step.status)).map((step) => step.id));
+    const recoveredSteps = failedStepIds.size
+      ? mission.steps.map((step) => failedStepIds.has(step.id)
+        ? { ...step, status: "pending" as const, result: undefined, updatedAt: now }
+        : step)
+      : mission.steps;
+    const ready = recoveredSteps.filter((step) => step.status === "pending" && step.dependsOn.every((dependency) => recoveredSteps.find((candidate) => candidate.id === dependency)?.status === "completed"));
+    const activeStepIds = mission.activeStepIds?.length
+      ? [...new Set([...mission.activeStepIds, ...ready.map((step) => step.id)])]
+      : ready.map((step) => step.id);
+    const steps = recoveredSteps.map((step) => activeStepIds.includes(step.id) && step.status === "pending"
+      ? { ...step, status: "running" as const, attempts: step.attempts + 1, updatedAt: now }
+      : step);
+    const currentStepId = activeStepIds.find((stepId) => steps.some((step) => step.id === stepId && step.status === "running"));
+    const recoveryEvents = failedStepIds.size
+      ? [...events, missionEvent("repaired", `Reactivated ${failedStepIds.size} unfinished mission step${failedStepIds.size === 1 ? "" : "s"} for the next durable attempt.`), ...ready.map((step) => missionEvent("step_started", `Mission step ${step.id} reactivated after mission resume.`, now, step.id))]
+      : events;
+    return {
+      budget,
+      status: "running",
+      error: undefined,
+      waiting: undefined,
+      steps,
+      activeStepIds,
+      ...(currentStepId ? { currentStepId } : {}),
+      events: mission.status === "running" && recoveryEvents === mission.events ? recoveryEvents : [...recoveryEvents, missionEvent("resumed", "Mission resumed")],
+    };
   });
 }
 

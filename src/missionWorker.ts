@@ -62,6 +62,28 @@ export function missionNoProgressNextAction(step?: Pick<MissionStepRecord, "titl
 }
 
 /**
+ * Turn a model-provided wait description into an executable post-wake action.
+ * The model may describe the whole mission when it parks; the durable runtime
+ * must persist the active step as the authoritative continuation instead.
+ */
+export function missionPostWakeNextAction(
+  step: Pick<MissionStepRecord, "title" | "objective"> | undefined,
+  requestedNextAction: string,
+): string {
+  const requested = requestedNextAction.trim().slice(0, 900);
+  if (!step) return `After the durable wait wakes, execute the saved action now. Do not wait again. Saved action: ${requested}`.slice(0, 2000);
+  return `After the durable wait wakes, execute only mission step “${step.title}” now: ${step.objective} Do not call CHUCK_TASK_WAIT again. Persist the post-wake result and complete this step when its objective is verified. Saved continuation: ${requested}`.slice(0, 2000);
+}
+
+/** A timer wake with no tool call is safe to retry once inside the same slice. */
+export function missionWakeNeedsRecovery(
+  resumed: boolean,
+  result: { toolsUsed: string[]; taskWait?: unknown; missionWait?: unknown },
+): boolean {
+  return resumed && result.toolsUsed.length === 0 && !result.taskWait && !result.missionWait;
+}
+
+/**
  * A supervisor may resume a timer-waiting mission before its durable worker
  * claims the task. Keep the wake marker visible to that worker so it receives
  * post-wake instructions instead of treating the resumed mission as a fresh
@@ -73,7 +95,19 @@ export function missionHasTimerWakeContinuation(
 ): boolean {
   if (!mission || mission.status !== "running") return false;
   const stepId = missionStepId ?? mission.currentStepId ?? mission.activeStepIds?.[0];
-  return [...mission.events].reverse().some((event) => event.type === "resumed"
-    && /^Timer wait reached\b/i.test(event.message)
-    && (!event.stepId || !stepId || event.stepId === stepId));
+  const matchesStep = (event: { stepId?: string }) => !event.stepId || !stepId || event.stepId === stepId;
+  const terminalOrProgressEvents = new Set([
+    "checkpointed", "waiting", "paused", "blocked", "completed", "failed", "cancelled",
+    "budget_exhausted", "step_started", "step_completed", "step_failed", "approval_waiting",
+    "approval_resumed", "replanned", "repaired", "provider_event",
+  ]);
+  // Lease churn and task coordination events do not consume the wake marker.
+  // Any later mission progress does: otherwise a stale timer-resumed event can
+  // incorrectly make a future slice look like the first post-wake slice.
+  for (const event of [...mission.events].reverse()) {
+    if (!matchesStep(event)) continue;
+    if (event.type === "resumed" && /^Timer wait reached\b/i.test(event.message)) return true;
+    if (terminalOrProgressEvents.has(event.type)) return false;
+  }
+  return false;
 }

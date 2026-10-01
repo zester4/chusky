@@ -91,7 +91,7 @@ import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
 import { decideAutonomyStep, decideFollowUp, decideRecovery } from "./autonomy/decisionLoop.js";
 import { safeTriggerSummary } from "./triggerEventSummary.js";
 import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidance.js";
-import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionSliceHasPersistedProgress, missionStepInstruction } from "./missionWorker.js";
+import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery } from "./missionWorker.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -2579,12 +2579,15 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               let result;
               let meetingFollowUpDisposition: "completed" | "blocked" | undefined;
               try {
-                result = await withUserLock(task.userId, budgetAbort.signal, async () => {
-                  if (!task.meetingFollowUp) {
-                    const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
-                    const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId });
-                  }
+                const executeAgentTurn = async (turnPrompt: typeof prompt) => withUserLock(task.userId, budgetAbort.signal, async () => {
+                   if (!task.meetingFollowUp) {
+                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
+                     const wakeInstructions = missionTimerResumed
+                       ? "This is a post-wake continuation. The timer has already completed. Execute the saved active-step action now; do not narrate, repeat the pre-wait checkpoint, or call CHUCK_TASK_WAIT."
+                       : undefined;
+                     const instructions = [task.sdkInstructions, skillInstructions, wakeInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
+                     return runAgent(task.userId, turnPrompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId });
+                   }
 
                   const followUp = task.meetingFollowUp;
                   const execution = await executeScheduledMeetingFollowUp({ userId: task.userId, taskId: task.id, binding: followUp }, {
@@ -2621,6 +2624,17 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   meetingFollowUpDisposition = execution.status;
                   return { text: execution.message, toolsUsed: execution.toolsUsed, toolsSucceeded: execution.toolsSucceeded, cost: execution.cost };
                 });
+                result = await executeAgentTurn(prompt);
+                if (missionWakeNeedsRecovery(missionTimerResumed, result)) {
+                  const recoveryPrompt = `${prompt}\n\nMANDATORY WAKE RECOVERY: The previous wake turn made no tool call and did not persist progress. This is the only automatic recovery turn. Execute the active step now with a native or provider tool, or persist an explicit wait/block. Do not return prose alone.`;
+                  const recovery = await executeAgentTurn(recoveryPrompt);
+                  result = {
+                    ...recovery,
+                    toolsUsed: [...result.toolsUsed, ...recovery.toolsUsed],
+                    toolsSucceeded: [...result.toolsSucceeded, ...recovery.toolsSucceeded],
+                    cost: (result.cost ?? 0) + (recovery.cost ?? 0),
+                  };
+                }
               }
               catch (error) {
                 const cancelled = (await getTask(task.userId, task.id))?.status === "cancel_requested" || (await getTask(task.userId, task.id))?.status === "cancelled";
@@ -2641,19 +2655,22 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               }
               if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
               if (result.taskWait) {
+                const postWakeNextAction = mission
+                  ? missionPostWakeNextAction(currentMissionStep, result.taskWait.nextAction)
+                  : result.taskWait.nextAction;
                 if (mission) {
                   const currentMission = await getMission(task.userId, mission.id);
                   const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
-                    ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
+                    ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: postWakeNextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
                     : currentMission;
                   if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
                 }
-                if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt }, result.taskWait.checkpoint, result.taskWait.nextAction);
+                if (mission) await waitMission(task.userId, mission.id, { kind: "timer", runAt: result.taskWait.runAt, stepId: task.missionStepId }, result.taskWait.checkpoint, postWakeNextAction);
                 if (task.sdkRunId && task.sdkThreadId) {
                   const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
                   if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
                 }
-                return { status: "queued" as const, waiting: true, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
+                return { status: "queued" as const, waiting: true, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: postWakeNextAction, runAt: result.taskWait.runAt };
               }
               if (result.missionWait && mission) {
                 const currentMission = await getMission(task.userId, mission.id);

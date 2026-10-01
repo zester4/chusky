@@ -217,8 +217,8 @@ test("loads and writes the release manifest", async () => {
 
 test("current upgrade manifest announces automatic mission continuation", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.37.0");
-  assert.equal(notice?.version, "4.37.0");
+  assert.equal(notice?.id, "release-4.38.0");
+  assert.equal(notice?.version, "4.38.0");
   assert.deepEqual(notice?.bullets, getAgentUpgradePreset("missionContinuity"));
 });
 

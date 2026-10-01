@@ -1,11 +1,11 @@
 {
-  "id": "release-4.37.0",
-  "version": "4.37.0",
+  "id": "release-4.38.0",
+  "version": "4.38.0",
   "title": "Chusky has been upgraded",
   "bullets": [
     "After an owner approves a mission action or bounded extension, the same durable worker continues automatically from its saved checkpoint until the mission completes or reaches a real blocker.",
     "Durable task wakes now preserve the queued task state across early wake-ups and lease races, sleeping and retrying the same task instead of silently ending the workflow.",
     "Approval handoffs and mission status remain explicit: the approval turn can finish while the mission stays active and reports its final persisted verification result separately."
   ],
-  "createdAt": "2026-10-01T19:22:50.776Z"
+  "createdAt": "2026-10-01T21:13:41.798Z"
 }

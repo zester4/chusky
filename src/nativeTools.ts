@@ -1628,11 +1628,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_TASK_WAIT": {
       if (!runtime.taskId || !runtime.requestTaskWait) throw new Error("CHUCK_TASK_WAIT is only available inside an active durable task");
       const request: TaskWaitRequest = createTaskWaitRequest(args);
-      if (runtime.missionTimerResumed
-        && request.checkpoint === runtime.missionWakeCheckpoint
-        && request.nextAction === runtime.missionWakeNextAction) {
-        throw new Error("This mission timer already completed; execute the persisted post-wake action instead of repeating the same wait.");
-      }
+      if (runtime.missionTimerResumed) throw new Error("This mission timer already completed; execute the persisted post-wake action instead of waiting again.");
       runtime.requestTaskWait(request);
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
@@ -1697,9 +1693,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return missionProof(mission);
     }
     case "CHUCK_MISSION_CHECKPOINT": {
-      if (runtime.missionTimerResumed && args.checkpoint === runtime.missionWakeCheckpoint && args.nextAction === runtime.missionWakeNextAction) {
-        throw new Error("This mission timer already completed; persist the post-wake checkpoint or execute the next action instead of repeating the pre-wait checkpoint.");
-      }
+      if (runtime.missionTimerResumed && args.checkpoint === runtime.missionWakeCheckpoint) throw new Error("This mission timer already completed; persist the post-wake checkpoint or execute the next action instead of repeating the pre-wait checkpoint.");
       const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint, 8000), args.nextAction ? text(args.nextAction, 2000) : undefined);
       if (!mission) throw new Error("Only running missions you own can be checkpointed");
       return mission;

@@ -340,6 +340,28 @@ test("terminal task failure reconciles the linked mission step and mission statu
   assert.match(failed?.nextAction ?? "", /repair|replan/i);
 });
 
+test("resuming a failed mission reactivates its unfinished step and reuses its deterministic task", async () => {
+  const userId = 972009;
+  const mission = await createMission(userId, { title: "Recover failed step", objective: "Continue one step", definitionOfDone: "The step succeeds", steps: [{ id: "only", title: "Only step", objective: "Continue safely", retryLimit: 0 }] });
+  const started = await startMission(userId, mission.id);
+  const published: string[] = [];
+  await scheduleMissionSteps(userId, started!, async (_ownerId, taskId) => { published.push(taskId); return `workflow_${published.length}`; });
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id);
+  assert.ok(task);
+  const claimed = await claimTask(userId, task!.id, "failed-step-worker", 60_000);
+  assert.ok(claimed?.lease);
+  await settleTaskRun(userId, task!.id, claimed!.lease!.token, { status: "failed", message: "Worker made no durable progress" });
+  assert.equal((await getMission(userId, mission.id))?.status, "failed");
+  const resumed = await resumeMission(userId, mission.id);
+  assert.equal(resumed?.status, "running");
+  assert.equal(resumed?.steps.find((step) => step.id === "only")?.status, "running");
+  await scheduleMissionSteps(userId, resumed!, async (_ownerId, taskId) => { published.push(taskId); return `workflow_${published.length}`; });
+  const recoveredTask = (await listTasks(userId)).find((item) => item.missionId === mission.id);
+  assert.equal(recoveredTask?.id, task!.id);
+  assert.equal(recoveredTask?.status, "queued");
+  assert.equal(published.length, 2);
+});
+
 test("concurrent mission schedulers publish one workflow for one deterministic step", async () => {
   const userId = 972007;
   const mission = await createMission(userId, { title: "Concurrent schedule", objective: "Run once", definitionOfDone: "One step", steps: [{ id: "only", title: "Only", objective: "Run" }] });

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionSliceHasPersistedProgress, missionStepInstruction } from "../src/missionWorker.js";
+import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery } from "../src/missionWorker.js";
 
 test("a mission worker does not treat an unchanged slice as progress", () => {
   const task = { status: "running" as const, checkpoint: "before", nextAction: "Read the sheet", result: undefined, error: undefined, runAt: 1 };
@@ -72,4 +72,35 @@ test("a supervisor-resumed timer remains a post-wake continuation for the same s
   };
   assert.equal(missionHasTimerWakeContinuation(mission, "checkpoint_and_wait"), true);
   assert.equal(missionHasTimerWakeContinuation(mission, "second_readback"), false);
+});
+
+test("post-wake actions are step-specific even when the model supplied plan-level prose", () => {
+  const action = missionPostWakeNextAction(
+    { title: "Second readback", objective: "Read Sheet1!A1:C3 and compare it with the first readback." },
+    "Continue the remaining mission plan.",
+  );
+  assert.match(action, /Second readback/);
+  assert.match(action, /Read Sheet1!A1:C3/);
+  assert.match(action, /Do not call CHUCK_TASK_WAIT again/);
+  assert.match(action, /Continue the remaining mission plan/);
+});
+
+test("only a zero-tool timer wake receives an automatic recovery turn", () => {
+  assert.equal(missionWakeNeedsRecovery(true, { toolsUsed: [] }), true);
+  assert.equal(missionWakeNeedsRecovery(true, { toolsUsed: ["GOOGLESHEETS_VALUES_GET"] }), false);
+  assert.equal(missionWakeNeedsRecovery(false, { toolsUsed: [] }), false);
+  assert.equal(missionWakeNeedsRecovery(true, { toolsUsed: [], taskWait: {} }), false);
+});
+
+test("a later checkpoint consumes the timer wake marker", () => {
+  const mission = {
+    status: "running" as const,
+    currentStepId: "checkpoint_and_wait",
+    activeStepIds: ["checkpoint_and_wait"],
+    events: [
+      { id: "wake", type: "resumed" as const, message: "Timer wait reached for checkpoint_and_wait.", at: 2, stepId: "checkpoint_and_wait" },
+      { id: "checkpoint", type: "checkpointed" as const, message: "Post-wake action persisted.", at: 3 },
+    ],
+  };
+  assert.equal(missionHasTimerWakeContinuation(mission, "checkpoint_and_wait"), false);
 });
