@@ -51,6 +51,20 @@ test("mission start accepts its published objective and step text limits", async
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_START", { ...args, objective: "O".repeat(8001) }), /objective.*8000/);
 });
 
+test("mission step tool fences are published and reject supervisor-owned tools", async () => {
+  const args = {
+    title: "Scoped mission",
+    objective: "Run one bounded provider action.",
+    definitionOfDone: "The action is verified.",
+    steps: [{ title: "Send", objective: "Send the message", allowedTools: ["GMAIL_SEND_EMAIL"] }],
+  };
+  validateNativeToolArguments("CHUCK_MISSION_START", args);
+  await assert.rejects(() => nativeTool(951104, "CHUCK_MISSION_START", {
+    ...args,
+    steps: [{ ...args.steps[0], allowedTools: ["CHUCK_MISSION_STEP_COMPLETE"] }],
+  }), /invalid or supervisor-owned allowed tool/i);
+});
+
 test("mission block accepts verbose recovery diagnostics and persists a bounded reason", async () => {
   const userId = 951102;
   const mission = await createMission(userId, {

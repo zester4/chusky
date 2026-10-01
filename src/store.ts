@@ -912,6 +912,8 @@ export interface MissionStepRecord {
   outputSchema?: Record<string, unknown>;
   evidenceRequired?: string[];
   evidence?: MissionEvidenceRecord[];
+  /** Optional exact tools this executable step may use; lifecycle controls are added by the worker. */
+  allowedTools?: string[];
   compensationObjective?: string;
   retryBackoffSeconds?: number;
   parallelGroup?: string;
@@ -1059,6 +1061,8 @@ export interface TaskRecord {
   missionId?: string;
   /** The independently executable mission step represented by this task. */
   missionStepId?: string;
+  /** Exact provider/native tools allowed for this mission step; worker controls are runtime-added. */
+  missionAllowedTools?: string[];
   /** One approved tool execution may be replayed when a durable mission resumes. */
   approvedApprovalId?: string;
 }
@@ -5620,6 +5624,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
+    ...(Array.isArray(task.missionAllowedTools) ? { missionAllowedTools: [...new Set(task.missionAllowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 100) } : { missionAllowedTools: undefined }),
     ...(typeof task.quotaReservationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.quotaReservationId) ? { quotaReservationId: task.quotaReservationId } : { quotaReservationId: undefined }),
     ...(typeof task.sdkOrganizationId === "string" && /^org_[A-Za-z0-9_-]{1,120}$/.test(task.sdkOrganizationId) ? { sdkOrganizationId: task.sdkOrganizationId } : { sdkOrganizationId: undefined }),
     ...(task.enqueueClaim && typeof task.enqueueClaim === "object" && typeof task.enqueueClaim.token === "string" && Number.isFinite(task.enqueueClaim.expiresAt)
@@ -5667,6 +5672,7 @@ export async function createTask(userId: number, input: Pick<TaskRecord, "title"
     meetingFollowUp: input.meetingFollowUp,
     missionId: input.missionId,
     missionStepId: input.missionStepId,
+    missionAllowedTools: input.missionAllowedTools,
     events: [taskEvent(input.runAt ? "scheduled" : "created", input.runAt ? "Task scheduled" : "Task created", 0, now)],
     createdAt: now,
     updatedAt: now,
@@ -5715,6 +5721,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof step.compensationObjective === "string" ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}),
       retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(numeric(step.retryBackoffSeconds, 0)))),
       ...(typeof step.parallelGroup === "string" ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}),
+      ...(Array.isArray(step.allowedTools) ? { allowedTools: [...new Set(step.allowedTools.filter((tool): tool is string => typeof tool === "string" && /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool)))].slice(0, 100) } : {}),
     })),
     budget: {
       maxDurationSeconds: Math.max(60, Math.min(30 * 24 * 60 * 60, numeric(budget.maxDurationSeconds, DEFAULT_MISSION_BUDGET.maxDurationSeconds))),
@@ -5768,8 +5775,19 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   requiredEvidence?: string[];
   verificationMode?: "legacy" | "strict";
   a2aContextId?: string;
-  steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string }>;
+  steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string; allowedTools?: string[] }>;
 };
+
+const MISSION_STEP_TOOL_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
+const MISSION_STEP_RESERVED_TOOL_PATTERN = /^CHUCK_MISSION_|^CHUCK_TASK_|^COMPOSIO_(?:EXECUTE_TOOL|MULTI_EXECUTE_TOOL)$/;
+
+function normalizeMissionStepAllowedTools(value: unknown, label: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 100 || value.some((tool) => typeof tool !== "string" || !MISSION_STEP_TOOL_PATTERN.test(tool) || MISSION_STEP_RESERVED_TOOL_PATTERN.test(tool))) {
+    throw new Error(`${label} has an invalid or supervisor-owned allowed tool`);
+  }
+  return [...new Set(value)] as string[];
+}
 
 function validateMissionStepGraph(steps: Array<{ id: string; dependsOn: string[] }>, completedIds: ReadonlySet<string> = new Set()): void {
   const known = new Set(steps.map((step) => step.id));
@@ -5818,6 +5836,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
   for (const [index, step] of (input.steps ?? []).entries()) {
     if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Mission step ${index + 1} has an invalid ID`);
     if (step.retryLimit !== undefined && (!Number.isInteger(step.retryLimit) || step.retryLimit < 0 || step.retryLimit > 20)) throw new Error(`Mission step ${index + 1} has an invalid retry limit`);
+    normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${index + 1}`);
   }
   const idempotencyKey = input.idempotencyKey?.slice(0, 200);
   const missions = (await backend.getMissions(userId)).map(normalizeMission);
@@ -5839,7 +5858,8 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     const dependencies = step.dependsOn ?? [];
     if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepIds[index]} has invalid dependencies`);
     const dependsOn = [...new Set(dependencies.map((dependency) => dependency.trim()))];
-    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}) };
+    const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Mission step ${stepIds[index]}`);
+    return { id: stepIds[index], title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn, attempts: 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? 2))), updatedAt: now, ...(step.input ? { input: structuredClone(step.input) } : {}), ...(step.outputSchema ? { outputSchema: structuredClone(step.outputSchema) } : {}), ...(step.evidenceRequired ? { evidenceRequired: step.evidenceRequired.slice(0, 20) } : {}), ...(step.compensationObjective ? { compensationObjective: step.compensationObjective.slice(0, 4000) } : {}), ...(step.retryBackoffSeconds !== undefined ? { retryBackoffSeconds: Math.max(0, Math.min(86400, Math.floor(step.retryBackoffSeconds))) } : {}), ...(step.parallelGroup ? { parallelGroup: step.parallelGroup.slice(0, 120) } : {}), ...(allowedTools !== undefined ? { allowedTools } : {}) };
   });
   validateMissionStepGraph(steps);
   const ready = steps.find((step) => step.dependsOn.length === 0);
@@ -5952,7 +5972,7 @@ export class MissionReplanConflictError extends Error {
   }
 }
 
-export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>, reason: string): Promise<MissionRecord | undefined> {
+export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; allowedTools?: string[] }>, reason: string): Promise<MissionRecord | undefined> {
   if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > 100) throw new Error("Replanned missions require between 1 and 100 steps");
   if (!reason?.trim() || reason.length > 2000) throw new Error("A replan reason is required and must be 2000 characters or fewer");
   if (rawSteps.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every replanned mission step must be an object");
@@ -5960,6 +5980,7 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
     if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Replanned mission step ${index + 1} has an invalid ID`);
     if (step.retryLimit !== undefined && (!Number.isInteger(step.retryLimit) || step.retryLimit < 0 || step.retryLimit > 20)) throw new Error(`Replanned mission step ${index + 1} has an invalid retry limit`);
     if (step.dependsOn !== undefined && (!Array.isArray(step.dependsOn) || step.dependsOn.length > 20 || step.dependsOn.some((dependency) => typeof dependency !== "string" || !dependency.trim()))) throw new Error(`Replanned mission step ${index + 1} has invalid dependencies`);
+    normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${index + 1}`);
   }
   const stepIds = rawSteps.map((step) => step.id?.trim() || `mstep_${randomUUID()}`);
   if (new Set(stepIds).size !== stepIds.length) throw new Error("Replanned mission steps must have unique IDs");
@@ -5974,7 +5995,8 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       if (!step.objective?.trim() || step.objective.length > 4000) throw new Error(`Mission step ${stepId} objective is required and must be 4000 characters or fewer`);
       const dependencies = step.dependsOn ?? [];
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
-      return { id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result };
+      const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
+      return { id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
@@ -6008,6 +6030,8 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     // has already advanced or from bypassing the dependency graph.
     const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
     if (!step || step.status !== "running" || !active.has(stepId) || !step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed")) return undefined;
+    const missingEvidence = missingMissionEvidenceRequirements(step.evidenceRequired, step.evidence);
+    if (missingEvidence.length) return undefined;
     const now = Date.now();
     const steps = mission.steps.map((candidate) => candidate.id === stepId ? { ...candidate, status: "completed" as const, result: result.slice(0, 12000), updatedAt: now } : candidate);
     const ready = steps.filter((candidate) => candidate.status === "pending" && candidate.dependsOn.every((dependency) => steps.find((item) => item.id === dependency)?.status === "completed"));
@@ -6035,6 +6059,22 @@ export async function recordTrustedMissionEvidence(userId: number, id: string, e
   return appendMissionEvidence(userId, id, evidence, stepId, true);
 }
 
+function evidenceSatisfiesRequirement(item: MissionEvidenceRecord, requirement: string): boolean {
+  if (!item.verified) return false;
+  if (item.kind === "assertion" && item.verifiedBy !== "human") return false;
+  if (item.kind === "human_confirmation" && item.verifiedBy !== "human") return false;
+  if (["source", "tool_receipt", "artifact", "before_after"].includes(item.kind) && (!item.source && !item.ref && !item.hash || item.verifiedBy !== "system" || !item.verifiedAt || item.verifiedAt > Date.now())) return false;
+  const typed = requirement.match(/^kind:(source|tool_receipt|artifact|assertion|before_after|human_confirmation)$/i)?.[1].toLowerCase();
+  if (typed) return item.kind === typed;
+  const kindAlias = requirement.toLowerCase().trim();
+  if (["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"].includes(kindAlias)) return item.kind === kindAlias;
+  return item.summary.toLowerCase().includes(requirement.toLowerCase());
+}
+
+export function missingMissionEvidenceRequirements(requirements: string[] | undefined, evidence: MissionEvidenceRecord[] | undefined): string[] {
+  return (requirements ?? []).filter((requirement) => !evidence?.some((item) => evidenceSatisfiesRequirement(item, requirement)));
+}
+
 async function appendMissionEvidence(userId: number, id: string, evidence: MissionEvidenceRecord[], stepId: string | undefined, trusted: boolean): Promise<MissionRecord | undefined> {
   if (!Array.isArray(evidence) || !evidence.length) return undefined;
   const clean = evidence.slice(0, 20).map((item) => ({ ...item, id: item.id || `evidence_${randomUUID()}`, summary: String(item.summary ?? "").slice(0, 2000), verified: trusted && item.verified === true, ...(trusted && item.verified === true ? { verifiedBy: "system" as const, verifiedAt: Date.now() } : { verifiedBy: "agent" as const }), ...(item.source ? { source: item.source.slice(0, 500) } : {}), ...(item.ref ? { ref: item.ref.slice(0, 500) } : {}), ...(item.hash ? { hash: item.hash.slice(0, 200) } : {}) }));
@@ -6052,21 +6092,10 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
     const evidence = mission.evidence ?? [];
     const selected = input.evidenceIds?.length ? evidence.filter((item) => input.evidenceIds?.includes(item.id)) : evidence;
     const required = mission.verification?.requiredEvidence ?? [];
-    const acceptable = (item: MissionEvidenceRecord, requirement: string): boolean => {
-      if (!item.verified) return false;
-      if (item.kind === "assertion" && item.verifiedBy !== "human") return false;
-      if (item.kind === "human_confirmation" && item.verifiedBy !== "human") return false;
-      if (["source", "tool_receipt", "artifact", "before_after"].includes(item.kind) && (!item.source && !item.ref && !item.hash || item.verifiedBy !== "system" || !item.verifiedAt || item.verifiedAt > Date.now())) return false;
-      const typed = requirement.match(/^kind:(source|tool_receipt|artifact|assertion|before_after|human_confirmation)$/i)?.[1].toLowerCase();
-      if (typed) return item.kind === typed;
-      const kindAlias = requirement.toLowerCase().trim();
-      if (["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"].includes(kindAlias)) return item.kind === kindAlias;
-      return item.summary.toLowerCase().includes(requirement.toLowerCase());
-    };
     const unresolved = [
       ...(allStepsComplete ? [] : ["All mission steps must be completed."]),
       ...(mission.verification?.mode === "strict" && required.length === 0 ? ["Strict verification has no required evidence criteria."] : []),
-      ...required.filter((requirement) => !selected.some((item) => acceptable(item, requirement))),
+      ...missingMissionEvidenceRequirements(required, selected),
     ];
     const verified = unresolved.length === 0;
     // `system` is reserved for evidence independently recorded by trusted

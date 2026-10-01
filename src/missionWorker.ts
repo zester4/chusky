@@ -5,6 +5,30 @@ export interface MissionSliceState {
   mission?: Pick<MissionRecord, "status" | "checkpoint" | "nextAction" | "waiting" | "consumedSteps" | "toolCalls" | "cost" | "currentStepId" | "activeStepIds" | "steps" | "evidence" | "events">;
 }
 
+/** Lifecycle tools remain available to the durable mission supervisor even
+ * when a step is fenced to a small set of provider/native tools. */
+export const MISSION_WORKER_CONTROL_TOOLS = [
+  "CHUCK_TASK_WAIT",
+  "CHUCK_MISSION_GET",
+  "CHUCK_MISSION_PROOF",
+  "CHUCK_MISSION_CHECKPOINT",
+  "CHUCK_MISSION_WAIT_EVENT",
+  "CHUCK_MISSION_STEP_COMPLETE",
+  "CHUCK_MISSION_EVIDENCE",
+  "CHUCK_MISSION_VERIFY",
+  "CHUCK_MISSION_COMPLETE",
+  "CHUCK_MISSION_BLOCK",
+  "CHUCK_MISSION_REPLAN",
+  "CHUCK_MISSION_REPAIR",
+] as const;
+
+export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
+  if (stepTools === undefined) return inheritedTools;
+  const inherited = inheritedTools ? new Set(inheritedTools) : undefined;
+  const selected = stepTools.filter((tool) => !inherited || inherited.has(tool));
+  return [...new Set([...MISSION_WORKER_CONTROL_TOOLS, ...selected])];
+}
+
 /** Capture only durable fields that a worker slice is expected to change. */
 export function captureMissionSliceState(task?: TaskRecord, mission?: MissionRecord): MissionSliceState {
   return {

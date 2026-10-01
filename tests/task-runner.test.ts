@@ -1,6 +1,7 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, completeTask, createTask, getTask, initStore, settleTaskRun, updateTask } from "../src/store.js";
+import { claimTask, completeMissionStep, completeTask, createMission, createTask, finalizeMissionIfReady, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, settleTaskRun, startMission, updateTask } from "../src/store.js";
+import { scheduleMissionSteps } from "../src/missionScheduler.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
@@ -112,4 +113,38 @@ test("an in-turn task completion is not misreported as a lost lease failure", as
   });
   assert.equal(run.task?.status, "completed");
   assert.match(run.task?.result ?? "", /Verified completion/);
+});
+
+test("the durable worker can carry a receipt-gated mission slice to completion", async () => {
+  const userId = 840008;
+  const mission = await createMission(userId, {
+    title: "Golden mission",
+    objective: "Complete one provider-backed step durably.",
+    definitionOfDone: "The provider receipt is attached and the step is complete.",
+    requiredEvidence: ["kind:tool_receipt"],
+    steps: [{ id: "send", title: "Send", objective: "Perform the provider action", evidenceRequired: ["kind:tool_receipt"], allowedTools: ["GMAIL_SEND_EMAIL"] }],
+  });
+  const started = await startMission(userId, mission.id);
+  const published: string[] = [];
+  await scheduleMissionSteps(userId, started!, async (_ownerId, taskId) => { published.push(taskId); return `workflow_${taskId}`; });
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === mission.id);
+  assert.ok(task);
+  assert.deepEqual(task!.missionAllowedTools, ["GMAIL_SEND_EMAIL"]);
+
+  const run = await executeDurableTask({ userId, taskId: task!.id }, {
+    workerId: "golden-mission-worker",
+    execute: async (claimedTask) => {
+      assert.equal(claimedTask.missionId, mission.id);
+      assert.equal(claimedTask.missionStepId, "send");
+      await recordTrustedMissionEvidence(userId, mission.id, [{ id: "receipt-golden", kind: "tool_receipt", summary: "Provider confirmed the send", ref: "receipt://golden", verified: true, verifiedBy: "system" }], "send");
+      await completeMissionStep(userId, mission.id, "send", "Provider receipt recorded.");
+      const finalized = await finalizeMissionIfReady(userId, mission.id, { blockOnUnresolved: true });
+      assert.equal(finalized?.status, "completed");
+      return { status: "completed" as const, message: "Mission completed", result: finalized?.result };
+    },
+  });
+
+  assert.equal(published.length, 1);
+  assert.equal(run.task?.status, "completed");
+  assert.equal((await getMission(userId, mission.id))?.status, "completed");
 });

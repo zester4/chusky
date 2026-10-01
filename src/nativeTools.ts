@@ -19,7 +19,7 @@ import {
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
-  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, MissionReplanConflictError,
+  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
   type TaskStatus, type MissionStatus,
@@ -1655,6 +1655,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           compensationObjective: typeof step.compensationObjective === "string" ? step.compensationObjective : undefined,
           retryBackoffSeconds: step.retryBackoffSeconds === undefined ? undefined : Number(step.retryBackoffSeconds),
           parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined,
+          allowedTools: Array.isArray(step.allowedTools) ? step.allowedTools.filter((value: unknown): value is string => typeof value === "string") : undefined,
         })) : undefined,
         budget: {
           maxDurationSeconds: args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds),
@@ -1770,7 +1771,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         const current = await getMission(userId, missionId);
         if (!current) throw new Error("Mission not found or not owned by you");
         const step = current.steps.find((candidate) => candidate.id === stepId);
-        return { ...current, stepCompletion: "not_ready", closeout: { status: "not_ready", blockers: [`Mission is ${current.status}; step ${stepId} is ${step?.status ?? "missing"}.`, ...(current.error ? [current.error] : [])], nextAction: current.nextAction ?? "Inspect the mission dependencies and resume an eligible active step before completing it." } };
+        const missingEvidence = step?.status === "running" ? missingMissionEvidenceRequirements(step.evidenceRequired, step.evidence) : [];
+        const evidenceBlocker = missingEvidence.length
+          ? [`Step “${step?.title ?? stepId}” requires trusted evidence before completion: ${missingEvidence.join(", ")}.`]
+          : [];
+        return { ...current, stepCompletion: "not_ready", closeout: { status: "not_ready", blockers: [`Mission is ${current.status}; step ${stepId} is ${step?.status ?? "missing"}.`, ...evidenceBlocker, ...(current.error ? [current.error] : [])], nextAction: current.nextAction ?? "Inspect the mission dependencies and resume an eligible active step before completing it." } };
       }
       const finalized = mission;
       const blockers = finalized.status === "completed" ? [] : finalized.verification?.unresolved?.length
@@ -1912,6 +1917,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         objective: text(step.objective, 4000),
         dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((value: unknown): value is string => typeof value === "string") : undefined,
         retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit),
+        allowedTools: Array.isArray(step.allowedTools) ? step.allowedTools.filter((value: unknown): value is string => typeof value === "string") : undefined,
       })) : [];
       const missionId = text(args.id);
       const existing = await getMission(userId, missionId);

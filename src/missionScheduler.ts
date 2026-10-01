@@ -36,6 +36,7 @@ export function validateMissionStepsPayload(raw: unknown, options: { requireNonE
     if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) return `Mission step ${index + 1} has an invalid ID.`;
     if (step.dependsOn !== undefined && (!Array.isArray(step.dependsOn) || step.dependsOn.length > 20 || step.dependsOn.some((dependency) => typeof dependency !== "string" || !dependency.trim() || dependency.trim().length > 160))) return `Mission step ${index + 1} has invalid dependencies.`;
     if (step.retryLimit !== undefined && (typeof step.retryLimit !== "number" || !Number.isInteger(step.retryLimit) || step.retryLimit < 0 || step.retryLimit > 20)) return `Mission step ${index + 1} has an invalid retry limit.`;
+    if (step.allowedTools !== undefined && (!Array.isArray(step.allowedTools) || step.allowedTools.length > 100 || step.allowedTools.some((tool) => typeof tool !== "string" || !/^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/.test(tool) || /^CHUCK_MISSION_|^CHUCK_TASK_|^COMPOSIO_(?:EXECUTE_TOOL|MULTI_EXECUTE_TOOL)$/.test(tool)))) return `Mission step ${index + 1} has an invalid or supervisor-owned allowed tool.`;
   }
   return undefined;
 }
@@ -128,7 +129,7 @@ export async function recordMissionEvidenceAndCloseout(userId: number, missionId
 }
 
 /** Apply a validated replan and reconcile its ready tasks without stale task IDs. */
-export async function replanMissionAndSchedule(userId: number, missionId: string, steps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number }>, reason: string, enqueue: MissionTaskEnqueuer, preserveTaskId?: string): Promise<MissionRecord | undefined> {
+export async function replanMissionAndSchedule(userId: number, missionId: string, steps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; allowedTools?: string[] }>, reason: string, enqueue: MissionTaskEnqueuer, preserveTaskId?: string): Promise<MissionRecord | undefined> {
   const replanned = await replanMission(userId, missionId, steps, reason);
   if (!replanned) return undefined;
   return reconcileMissionExecution(userId, missionId, enqueue, preserveTaskId);
@@ -169,6 +170,7 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
         nextAction: step.objective,
         missionId: current.id,
         missionStepId: stepId,
+        missionAllowedTools: step.allowedTools,
         runAt: now,
         maxAttempts: Math.max(1, Math.min(10, (step.retryLimit ?? 2) + 1)),
       });

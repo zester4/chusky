@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission, waitMission } from "../src/store.js";
+import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, replanMission, updateTask, verifyMission, missionBudgetPreflight, resumeMission, waitMission } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
@@ -64,7 +64,7 @@ test("mission supports parallel ready steps, preflight budgets, and evidence ver
 test("mission scheduler materializes each parallel branch as an idempotent durable task", async () => {
   const userId = 972004;
   const mission = await createMission(userId, { title: "Parallel work", objective: "Run independent tracks", definitionOfDone: "Both tracks complete", steps: [
-    { id: "a", title: "Track A", objective: "A" },
+    { id: "a", title: "Track A", objective: "A", allowedTools: ["GMAIL_SEND_EMAIL"] },
     { id: "b", title: "Track B", objective: "B" },
   ] });
   const started = await startMission(userId, mission.id);
@@ -72,11 +72,46 @@ test("mission scheduler materializes each parallel branch as an idempotent durab
   const linked = await scheduleMissionSteps(userId, started!, async (_owner, taskId) => { enqueued.push(taskId); return `qstash_${taskId}`; });
   assert.equal(enqueued.length, 2);
   assert.equal((await listTasks(userId)).filter((task) => task.missionId === mission.id).length, 2);
+  assert.deepEqual((await listTasks(userId)).find((task) => task.missionStepId === "a")?.missionAllowedTools, ["GMAIL_SEND_EMAIL"]);
   assert.equal(linked?.steps.every((step) => Boolean(step.taskId)), true);
   const again = await scheduleMissionSteps(userId, linked!, async (_owner, taskId) => { enqueued.push(taskId); return `duplicate_${taskId}`; });
   assert.equal(enqueued.length, 2);
   assert.equal(again?.rootTaskId, linked?.rootTaskId);
   assert.equal(again?.events.length, linked?.events.length, "an idempotent schedule replay does not append duplicate progress events");
+});
+
+test("mission step completion rejects missing required trusted evidence", async () => {
+  const userId = 972006;
+  const mission = await createMission(userId, {
+    title: "Receipt-gated step",
+    objective: "Perform one provider action and retain its receipt.",
+    definitionOfDone: "The provider action is complete and its receipt is attached to the step.",
+    steps: [{ id: "send", title: "Send", objective: "Send the approved message", evidenceRequired: ["kind:tool_receipt"] }],
+  });
+  const started = await startMission(userId, mission.id);
+  const rejected = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: started!.currentStepId, result: "The message was sent." }) as { stepCompletion?: string; closeout?: { blockers?: string[] } };
+  assert.equal(rejected.stepCompletion, "not_ready");
+  assert.match(rejected.closeout?.blockers?.join(" ") ?? "", /trusted evidence/i);
+  assert.equal((await getMission(userId, mission.id))?.steps[0]?.status, "running");
+
+  await recordTrustedMissionEvidence(userId, mission.id, [{ id: "receipt-step", kind: "tool_receipt", summary: "Provider confirmed the message", ref: "receipt://send-1", verified: true, verifiedBy: "system" }], "send");
+  const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "send", result: "The provider receipt confirms delivery." }) as { status: string };
+  assert.equal(completed.status, "completed");
+});
+
+test("mission creation and replanning reject supervisor-owned step tools at the store boundary", async () => {
+  const userId = 972007;
+  await assert.rejects(() => createMission(userId, {
+    title: "Invalid fence",
+    objective: "Reject supervisor controls",
+    definitionOfDone: "The invalid plan is never stored",
+    steps: [{ title: "Bad step", objective: "Attempt to widen authority", allowedTools: ["CHUCK_MISSION_COMPLETE"] }],
+  }), /supervisor-owned allowed tool/i);
+
+  const mission = await createMission(userId, { title: "Replan fence", objective: "Reject invalid replans", definitionOfDone: "The original step remains", steps: [{ id: "only", title: "Only", objective: "Run" }] });
+  await startMission(userId, mission.id);
+  await assert.rejects(() => replanMission(userId, mission.id, [{ id: "only", title: "Only", objective: "Run", allowedTools: ["CHUCK_TASK_WAIT"] }], "Invalid supervisor fence"), /supervisor-owned allowed tool/i);
+  assert.equal((await getMission(userId, mission.id))?.steps[0]?.allowedTools, undefined);
 });
 
 test("resuming an already-running mission repairs missing task scheduling without duplicating it", async () => {

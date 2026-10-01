@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery } from "../src/missionWorker.js";
+import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
 test("a mission worker does not treat an unchanged slice as progress", () => {
   const task = { status: "running" as const, checkpoint: "before", nextAction: "Read the sheet", result: undefined, error: undefined, runAt: 1 };
@@ -61,6 +61,14 @@ test("worker instructions name one executable step and its recovery action", () 
   assert.match(missionStepInstruction(step), /Execute only this mission step now/);
   assert.match(missionStepInstruction(step), /Read Sheet1!A1:D20/);
   assert.match(missionNoProgressNextAction(step), /Read the sheet/);
+});
+
+test("mission worker fences provider tools while retaining lifecycle controls", () => {
+  const allowed = missionWorkerToolAllowlist(["GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_NOTE"]);
+  assert.deepEqual(allowed?.filter((tool) => tool === "GMAIL_SEND_EMAIL" || tool === "HUBSPOT_CREATE_NOTE"), ["GMAIL_SEND_EMAIL", "HUBSPOT_CREATE_NOTE"]);
+  assert.equal(allowed?.includes("GITHUB_DELETE_REPOSITORY"), false);
+  for (const control of MISSION_WORKER_CONTROL_TOOLS) assert.equal(allowed?.includes(control), true);
+  assert.deepEqual(missionWorkerToolAllowlist(undefined, ["TEST_SAFE_TOOL"]), ["TEST_SAFE_TOOL"]);
 });
 
 test("a supervisor-resumed timer remains a post-wake continuation for the same step", () => {
