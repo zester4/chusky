@@ -1040,6 +1040,35 @@ test("image downloads require the dedicated images:read project scope", async ()
   assert.match((await denied.json() as { error: { message: string } }).error.message, /images:read/);
 });
 
+test("dashboard autonomy works before and after optional Telegram linking", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user")
+    ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } }
+    : null);
+  const api = app();
+  const headers = { "X-Test-Web-User": "autonomy-web-owner" };
+
+  const unlinkedQueue = await api.fetch(new Request("http://local/v1/account/autonomy/queue?mode=personal", { headers }));
+  assert.equal(unlinkedQueue.status, 200);
+  const unlinkedSnapshot = await unlinkedQueue.json() as { userId: number; mode: string };
+  assert.equal(unlinkedSnapshot.mode, "personal");
+  assert.equal(typeof unlinkedSnapshot.userId, "number");
+
+  const unlinkedReconcile = await api.fetch(new Request("http://local/v1/account/autonomy/reconcile", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ mode: "personal", maxWatches: 8 }) }));
+  assert.equal(unlinkedReconcile.status, 200);
+
+  const link = await createWebTelegramLinkCode("autonomy-web-owner");
+  assert.equal(await redeemWebTelegramLinkCode(link.code, 820010), "linked");
+  const linkedQueue = await api.fetch(new Request("http://local/v1/account/autonomy/queue?mode=personal", { headers }));
+  assert.equal(linkedQueue.status, 200);
+  const linkedSnapshot = await linkedQueue.json() as { userId: number; mode: string };
+  assert.equal(linkedSnapshot.mode, "personal");
+  assert.equal(linkedSnapshot.userId, 820010);
+
+  const linkedReconcile = await api.fetch(new Request("http://local/v1/account/autonomy/reconcile", { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify({ mode: "personal", maxWatches: 8 }) }));
+  assert.equal(linkedReconcile.status, 200);
+});
+
 test("verified dashboard users can only manage their own bounded project keys", async () => {
   (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
   setWebAuthSessionResolverForTests(async (headers) => {

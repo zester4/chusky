@@ -1936,14 +1936,22 @@ export function registerSdkApi(app: Hono): void {
   // The projection never claims work; it lets a dashboard decide what to show
   // and lets an API consumer resume the exact next action from durable state.
   app.get("/v1/account/autonomy/queue", async (c) => {
-    const owner = await callOwner(c);
+    // Autonomy belongs to the authenticated Chusky account, not to a
+    // particular transport. sdkUser already resolves a linked dashboard
+    // session to its Telegram owner when one exists, and otherwise keeps the
+    // verified web-account identity. Do not reuse callOwner here: phone calls
+    // intentionally require a linked Telegram workspace, but read-only
+    // autonomy must work before or after that optional link.
+    const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before reading autonomy state.");
     const mode = c.req.query("mode") === "business" ? "business" : "personal";
     return c.json(await getAutonomySnapshot(owner.userId, mode));
   });
 
   app.post("/v1/account/autonomy/reconcile", async (c) => {
-    const owner = await callOwner(c);
+    // Keep reconciliation on the same account identity as the read endpoint;
+    // linking Telegram later must not move or hide the user's existing state.
+    const owner = sdkUser(c);
     if (!owner) return apiError(c, 403, "owner_link_required", "Link this account to an owner before running autonomy reconciliation.");
     const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
     const mode = body.mode === "business" ? "business" : "personal";
