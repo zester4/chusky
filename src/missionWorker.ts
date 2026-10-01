@@ -60,3 +60,20 @@ export function missionNoProgressNextAction(step?: Pick<MissionStepRecord, "titl
   if (!step) return "Retry the worker with one concrete action and persist its result before ending the slice.";
   return `Retry the worker for step “${step.title}” and execute this objective directly: ${step.objective}`;
 }
+
+/**
+ * A supervisor may resume a timer-waiting mission before its durable worker
+ * claims the task. Keep the wake marker visible to that worker so it receives
+ * post-wake instructions instead of treating the resumed mission as a fresh
+ * first slice.
+ */
+export function missionHasTimerWakeContinuation(
+  mission?: Pick<MissionRecord, "status" | "events" | "currentStepId" | "activeStepIds">,
+  missionStepId?: string,
+): boolean {
+  if (!mission || mission.status !== "running") return false;
+  const stepId = missionStepId ?? mission.currentStepId ?? mission.activeStepIds?.[0];
+  return [...mission.events].reverse().some((event) => event.type === "resumed"
+    && /^Timer wait reached\b/i.test(event.message)
+    && (!event.stepId || !stepId || event.stepId === stepId));
+}
