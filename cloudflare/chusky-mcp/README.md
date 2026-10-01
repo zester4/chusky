@@ -209,10 +209,11 @@ These are the main groups, shown by the job they help accomplish:
 | Understand autonomy and available building blocks | `chusky_autonomy_status`, `chusky_autonomy_reconcile`, `chusky_company_autonomy_status`, `chusky_company_autonomy_reconcile`, `chusky_triggers_list`, `chusky_skills_search`, `chusky_skill_read` |
 | Start and monitor work | `chusky_run_start`, `chusky_run_get`, `chusky_run_events`, `chusky_runs_list` |
 | Discover and run native capabilities | `chusky_tools_list`, `chusky_tool_schema_get`, `chusky_native_tool_run` |
+| Research and live intelligence | `chusky_tinyfish_search`, `chusky_tinyfish_fetch`, `chusky_tinyfish_research`, `chusky_tinyfish_monitor`, `chusky_treg_search`, `chusky_treg_get`, `chusky_treg_call`, `chusky_treg_resolve`, `chusky_treg_enrich_person`, `chusky_treg_enrich_company` |
 | Run a specific reliability capability or recover work | `chusky_tool_run`, `chusky_run_resume`, `chusky_run_cancel`, `chusky_approval_status`, `chusky_tasks_list`, `chusky_task_get`, `chusky_task_retry`, `chusky_task_cancel` |
 | Run a long-lived process | `chusky_missions_list`, `chusky_mission_start`, `chusky_mission_get`, `chusky_mission_events`, `chusky_mission_event`, `chusky_mission_step_complete`, `chusky_mission_replan` |
 | Prove or repair an outcome | `chusky_mission_evidence`, `chusky_mission_verify`, `chusky_mission_repair`, `chusky_mission_proof`, `chusky_outcomes_list`, `chusky_outcome_plan` |
-| Reuse knowledge and files | `chusky_context_search`, `chusky_context_save`, `chusky_artifacts_list`, `chusky_artifact_get`, `chusky_file_get` |
+| Reuse knowledge and files | `chusky_context_search`, `chusky_context_save`, `chusky_artifacts_list`, `chusky_artifact_get`, `chusky_artifact_read`, `chusky_file_get`, `chusky_file_read` |
 | Inspect conversations and approvals | `chusky_threads_list`, `chusky_thread_get`, `chusky_thread_update`, `chusky_approvals_list` |
 | Automate recurring work | `chusky_trigger_create`, `chusky_trigger_update`, `chusky_trigger_delete`, `chusky_webhooks_list`, `chusky_webhook_create`, `chusky_webhook_update`, `chusky_webhook_delete`, `chusky_webhook_deliveries_list`, `chusky_webhook_delivery_retry` |
 | Understand usage and company activity | `chusky_usage_get`, `chusky_company_runs_list`, `chusky_company_audit_list`, `chusky_company_usage_get` |
@@ -233,10 +234,29 @@ Identity isolation, agent policy, budgets, and human approval remain enforced
 by Chusky. A native tool that needs a file or image must receive an owner-scoped
 file ID in `attachments`, obtained through the authenticated `/v1/files` API.
 
-Two read-only resources are also available:
+TinyFish and Treg also have first-class MCP aliases for easier model discovery.
+They use the same live native schemas and durable one-tool run boundary as
+`chusky_native_tool_run`; the aliases do not bypass project scopes, spend caps,
+approval gates, connected-account ownership, or provider evidence requirements.
+Research and monitor operations return a run handle, so reconnecting clients
+should use `chusky_run_get` or `chusky_run_events` rather than starting a second
+request after a lost response.
+
+Artifact and uploaded-file results include an owner-scoped `chusky://` resource
+link. Use `chusky_artifact_read` when the host should receive the content in the
+tool result itself: text is returned as text and images or supported document
+formats are returned as MCP resource blobs. Hosts that support MCP resources can
+preview or offer those resources for download; hosts that do not support binary
+rendering still receive safe metadata and the existing short-lived file URL.
+The Worker caps inline transfer at 8 MB and never exposes a Daytona path, R2 key,
+credential, or unrestricted remote URL.
+
+Read-only resources are also available:
 
 - `chusky://outcomes/catalog` — outcome templates and planning context.
 - `chusky://missions/overview` — mission concepts and lifecycle guidance.
+- `chusky://artifacts/{artifactId}` — owner-scoped generated artifact content.
+- `chusky://files/{fileId}` — owner-scoped uploaded-file content.
 
 ## Start a useful run
 
