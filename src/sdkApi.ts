@@ -2926,7 +2926,40 @@ export function registerSdkApi(app: Hono): void {
         if (missionResume.status === "enqueue_failed") return apiError(c, 503, "mission_enqueue_failed", "Approval was recorded, but the mission could not be queued. The checkpoint is preserved for recovery.");
         const resumedMission = missionResume.mission;
         if (!resumedMission) return apiError(c, 409, "mission_not_resumable", "The mission approval no longer matches a resumable task.");
-        return c.json({ id: approval.id, status: "approved", mission: await getMission(owner.userId, resumedMission.id) ?? resumedMission }, 202);
+        // The durable task now owns continuation. The interactive run must be
+        // settled as a handoff as well; otherwise the dashboard keeps showing
+        // the old approval/working state even though the mission was resumed.
+        // This is not mission completion: the persisted mission remains the
+        // source of truth for the remaining steps and final verification.
+        const handoffSession = await getSession(owner.userId);
+        const handoffThread = handoffSession.sdkThreads?.find((item) => item.runs.some((run) => run.approvalId === approval.id));
+        const handoffRun = handoffThread?.runs.find((item) => item.approvalId === approval.id);
+        let handoffView: ReturnType<typeof runView> | undefined;
+        if (handoffThread && handoffRun) {
+          const approvedActivity = [...handoffRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+          if (approvedActivity) {
+            approvedActivity.status = "completed";
+            approvedActivity.message = "Approval accepted; the durable mission is continuing from its checkpoint.";
+          }
+          handoffRun.status = "completed";
+          handoffRun.approvalId = undefined;
+          handoffRun.output = `Approval accepted. Mission ${resumedMission.id} is running and has been handed off to its durable worker. This confirms resumption, not mission completion.`;
+          handoffRun.error = undefined;
+          handoffRun.updatedAt = Date.now();
+          handoffRun.events.push(event("run.completed", "Approval accepted; durable mission continuation is queued."));
+          handoffThread.updatedAt = handoffRun.updatedAt;
+          await persistSdkRunSnapshot(owner.userId, handoffThread.id, handoffRun, [
+            { role: "user", content: handoffRun.input, createdAt: handoffRun.createdAt },
+            { role: "assistant", content: handoffRun.output, createdAt: handoffRun.updatedAt },
+          ]);
+          const latestHandoffSession = await getSession(owner.userId);
+          const latestHandoffThread = latestHandoffSession.sdkThreads?.find((item) => item.id === handoffThread.id);
+          const latestHandoffRun = latestHandoffThread?.runs.find((item) => item.id === handoffRun.id);
+          if (latestHandoffThread && latestHandoffRun) handoffView = runView(latestHandoffThread.id, latestHandoffRun);
+          await notifyWebhooks(owner.userId, latestHandoffSession.sdkWebhooks!, "run.completed", { threadId: handoffThread.id, runId: handoffRun.id, status: "completed", missionId: resumedMission.id, handoff: true });
+        }
+        const mission = await getMission(owner.userId, resumedMission.id) ?? resumedMission;
+        return c.json({ id: approval.id, status: "approved", mission, ...(handoffView ? { run: handoffView } : {}) }, 202);
       }
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }

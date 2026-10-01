@@ -8,7 +8,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -756,6 +756,36 @@ test("approved mission resume executes stored arguments without inference and se
   assert.equal((await decide()).status, 404);
   const restored = await (await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_exact_resume`, { headers }))).json() as typeof run;
   assert.equal(restored.events.filter((item) => item.callId === "resume_call").at(-1)?.status, "completed");
+});
+
+test("approved mission wait settles the chat run while the durable worker continues", async () => {
+  const externalId = "waiting-mission-handoff-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  setSdkTaskWorkflowEnqueuerForTests(async (_owner, taskId) => `workflow-${taskId}`);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const thread = await (await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }))).json() as { id: string };
+  const mission = await createMission(userId, { title: "Waiting mission handoff", objective: "Continue durable work after approval.", definitionOfDone: "The mission completes its remaining verified steps.", budget: { maxDurationSeconds: 600 }, steps: [{ id: "step-1", title: "Continue work", objective: "Continue from the saved checkpoint." }] });
+  assert.ok(await startMission(userId, mission.id));
+  const task = await createTask(userId, { id: `task_waiting_handoff_${userId}`, title: "Waiting mission slice", objective: "Continue from the saved checkpoint.", missionId: mission.id, missionStepId: "step-1" });
+  const approval = await createApproval({ userId, missionId: mission.id, toolSlug: "CHUCK_MISSION_RESUME", args: { id: mission.id, maxDurationSeconds: 600 }, request: "Approve mission continuation", history: [], model: "unavailable/model" });
+  assert.ok(await waitMission(userId, mission.id, { kind: "approval", key: approval.id, stepId: "step-1" }, "The first five steps are verified.", "Resume this same mission after approval."));
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({ id: "run_waiting_handoff", status: "requires_approval", input: "Continue the existing mission", approvalId: approval.id, events: [{ id: "handoff_activity", type: "run.tool_activity", at: 1, callId: "resume_call", toolSlug: "CHUCK_MISSION_RESUME", status: "approval_required", message: "Waiting for approval" }], createdAt: 1, updatedAt: 1 });
+  await saveSession(userId, session);
+
+  const response = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(response.status, 202);
+  const result = await response.json() as { status: string; mission: { id: string; status: string }; run?: { status: string; approvalId?: string; output?: string; events: Array<{ type: string; status?: string }> } };
+  assert.equal(result.status, "approved");
+  assert.equal(result.mission.id, mission.id);
+  assert.equal(result.mission.status, "running");
+  assert.equal(result.run?.status, "completed", JSON.stringify(result));
+  assert.equal(result.run?.approvalId, undefined);
+  assert.match(result.run?.output ?? "", /handed off to its durable worker/i);
+  assert.equal(result.run?.events.find((item) => item.type === "run.tool_activity")?.status, "completed");
+  assert.equal((await getMission(userId, mission.id))?.status, "running");
+  assert.equal((await getTask(userId, task.id))?.workflowRunId, `workflow-${task.id}`);
 });
 
 test("accepted mission approval records an execution failure instead of leaving the activity waiting", async () => {
