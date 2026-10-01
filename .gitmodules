@@ -1,3 +1,7 @@
+[submodule "chusky-cli"]
+	path = chusky-cli
+	url = https://github.com/zester4/chusky-cli.git
+
 [submodule "chusky-web"]
 	path = chusky-web
 	url = https://github.com/zester4/chusky-web.git
