@@ -1812,6 +1812,12 @@ export interface AgentResult {
   missionWait?: MissionWaitRequest;
 }
 
+type MissionStartHandoff = {
+  id: string;
+  status: string;
+  rootTaskId?: string;
+};
+
 export interface AgentChannelContext {
   accountId: string;
   provider: string;
@@ -1914,6 +1920,8 @@ export interface AgentRunOptions {
   taskId?: string;
   /** Bind mission controls and accounting to the autonomous slice currently executing. */
   missionId?: string;
+  /** Testable/internal publisher override for the durable mission scheduler. */
+  enqueueMissionTask?: NonNullable<NativeToolRuntime["enqueueMissionTask"]>;
   /** Hard Treg call/spend ceiling supplied by an owner-configured signal monitor. */
   tregMaxCalls?: number;
   tregMaxSpendUsd?: number;
@@ -2483,6 +2491,7 @@ export async function runAgent(
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
   let taskWaitRequest: TaskWaitRequest | undefined;
   let missionWaitRequest: MissionWaitRequest | undefined;
+  let missionStartHandoff: MissionStartHandoff | undefined;
   const previewLinks: string[] = [];
   const toolResultsByCallId = new Map<string, string>();
   const addUpgradeNotice = async (text: string): Promise<string> => {
@@ -3055,7 +3064,7 @@ export async function runAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, connectedAccounts: connectedAccountSnapshot, ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
@@ -3195,6 +3204,20 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
         result = typeof modelResult === "string"
           ? modelResult
           : JSON.stringify(modelResult) ?? "undefined";
+        // Starting a mission is a supervisor handoff. Once the durable worker
+        // has been scheduled, the interactive model turn must end instead of
+        // trying to execute the mission (or its internal wait) itself.
+        if (slug === "CHUCK_MISSION_START" && !options?.taskId && !options?.missionId && !toolFailed
+          && execResult && typeof execResult === "object" && !Array.isArray(execResult)) {
+          const started = execResult as Record<string, unknown>;
+          if (typeof started.id === "string" && ["queued", "running"].includes(String(started.status))) {
+            missionStartHandoff = {
+              id: started.id,
+              status: String(started.status),
+              ...(typeof started.rootTaskId === "string" ? { rootTaskId: started.rootTaskId } : {}),
+            };
+          }
+        }
         if (slug === "COMPOSIO_SEARCH_TOOLS") {
           for (const [toolSlug, presentation] of collectComposioToolPresentations(execResult)) {
             composioToolPresentations.set(toolSlug, { ...composioToolPresentations.get(toolSlug), ...presentation });
@@ -3282,7 +3305,7 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
         content: result,
       });
       await persistRun("running", "run.tool_result", undefined, { tool: slug, callId: call.id, resultBytes: result.length, ok: !toolFailed, ...(toolFailureMeta ?? {}) });
-      if (taskWaitRequest || missionWaitRequest) break;
+      if (taskWaitRequest || missionWaitRequest || missionStartHandoff) break;
       if (execResult && typeof execResult === "object" && "__chuskyImageAsset" in execResult) {
         const asset = execResult as { id?: unknown; r2Key?: unknown; downloadUrl?: unknown; name?: unknown; contentType?: unknown };
         if (typeof asset.r2Key === "string" && asset.r2Key.length > 0) {
@@ -3308,6 +3331,11 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
       const message = "I’m waiting for the provider event recorded in this mission, then I’ll continue from the saved checkpoint.";
       await persistRun("paused", "run.waiting_for_provider_event", message, { provider: missionWaitRequest.provider, providerEventId: missionWaitRequest.providerEventId, checkpoint: missionWaitRequest.checkpoint, nextAction: missionWaitRequest.nextAction });
       return { text: message, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionWait: missionWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
+    }
+    if (missionStartHandoff) {
+      const message = `Mission ${missionStartHandoff.id} has started and is running in its durable worker. I will not execute its steps in this chat turn; the worker owns the mission and will continue from its persisted state.`;
+      await persistRun("completed", "run.mission_started", message, { missionId: missionStartHandoff.id, status: missionStartHandoff.status, ...(missionStartHandoff.rootTaskId ? { rootTaskId: missionStartHandoff.rootTaskId } : {}) });
+      return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
     }
   }
 

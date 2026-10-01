@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, claimAgentUpgrade, getApproval, getSession, initStore, listAgentRuns, listMissions, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, claimAgentUpgrade, getApproval, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
@@ -87,6 +87,37 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
     globalThis.fetch = originalFetch;
   }
 }
+
+test("interactive mission start hands execution to the durable worker before another model round", async () => {
+  const userId = 831235;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const requests: Array<Record<string, any>> = [];
+  const missionArgs = {
+    title: "Durable handoff regression",
+    objective: "Create and verify one bounded durable result.",
+    definitionOfDone: "The durable worker completes the mission and persists proof.",
+    steps: [{ id: "only", title: "Execute", objective: "Perform the bounded work." }],
+  };
+  await withAgentMocks(
+    [toolResponse("CHUCK_MISSION_START", JSON.stringify(missionArgs))],
+    async () => undefined,
+    async () => {
+      const result = await runAgent(userId, "Start this as a durable mission.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+        enqueueMissionTask: async (_ownerId, taskId) => `workflow_${taskId}`,
+      });
+      assert.match(result.text, /started and is running in its durable worker/i);
+      assert.equal(requests.length, 1, "the interactive supervisor must not take another model round");
+      const missions = await listMissions(userId);
+      assert.equal(missions.length, 1);
+      assert.equal(missions[0]?.status, "running");
+      assert.equal((await listTasks(userId)).filter((task) => task.missionId === missions[0]?.id).length, 1);
+    },
+    false,
+    undefined,
+    (body) => requests.push(body),
+  );
+});
 
 test("agent retains trusted release context after the one-time upgrade notice was shown", async () => {
   const userId = 831234;
