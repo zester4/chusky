@@ -13,7 +13,7 @@ import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord, ObservationRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -91,6 +91,7 @@ import { routeProactiveWork } from "./autonomy/proactiveRouter.js";
 import { decideAutonomyStep, decideFollowUp, decideRecovery } from "./autonomy/decisionLoop.js";
 import { safeTriggerSummary } from "./triggerEventSummary.js";
 import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidance.js";
+import { captureMissionSliceState, missionNoProgressNextAction, missionSliceHasPersistedProgress, missionStepInstruction } from "./missionWorker.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -2408,11 +2409,20 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               if (mission && ["paused", "blocked", "completed", "cancelled"].includes(mission.status)) {
                 if (mission.status === "blocked" && mission.error === "Mission duration budget would be exceeded.") {
                   const requested = await requestMissionDurationApproval(task.userId, mission.id, { taskId: task.id, model: task.sdkModel });
-                  if (requested) return { status: "queued" as const, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
+                  if (requested) return { status: "queued" as const, waiting: true, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
                 }
                 return { status: mission.status === "completed" ? "completed" as const : mission.status === "cancelled" ? "cancelled" as const : "blocked" as const, message: mission.result ?? mission.error ?? `Mission is ${mission.status}.`, result: mission.result, checkpoint: mission.checkpoint, nextAction: mission.nextAction };
               }
               if (mission?.status === "waiting") {
+                const waiting = mission.waiting;
+                if (waiting?.kind === "timer") {
+                  const runAt = waiting.runAt;
+                  if (!runAt) return { status: "blocked" as const, message: "Mission timer wait has no persisted wake-up time.", checkpoint: mission.checkpoint, nextAction: "Repair the mission timer checkpoint before resuming." };
+                  if (runAt > Date.now()) return { status: "queued" as const, waiting: true, message: mission.nextAction ?? "Mission is waiting for its timer.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt };
+                  const resumed = await resumeMissionFromTimer(task.userId, mission.id, runAt);
+                  if (!resumed) return { status: "blocked" as const, message: "The mission timer wake-up no longer matches its persisted wait.", checkpoint: mission.checkpoint, nextAction: "Inspect the mission wait state before retrying." };
+                  mission = resumed;
+                }
                 if (mission.waiting?.kind === "provider_event") {
                   const expiresAt = mission.waiting.expiresAt;
                   if (expiresAt && expiresAt <= Date.now()) {
@@ -2422,7 +2432,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   // A provider callback, not polling, resumes this task. If an
                   // expiry exists, one durable wake checks it; otherwise the
                   // task becomes blocked and the signed event route will retry it.
-                  if (expiresAt) return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
+                  if (expiresAt) return { status: "queued" as const, waiting: true, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
                   return { status: "blocked" as const, message: mission.nextAction ?? "Mission is waiting for a provider event.", checkpoint: mission.checkpoint, nextAction: "Wait for the exact provider event; the mission will resume automatically when it arrives." };
                 }
                 if (mission.waiting?.kind === "approval") {
@@ -2433,7 +2443,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   }
                   // Approval callbacks enqueue the original task immediately;
                   // no background polling is needed while the owner decides.
-                  if (expiresAt) return { status: "queued" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
+                  if (expiresAt) return { status: "queued" as const, waiting: true, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
                   return { status: "blocked" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: "Approve or deny the exact pending action; the mission will resume automatically after approval." };
                 }
                 await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
@@ -2464,7 +2474,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 maxItems: 1,
               });
               const autonomyGuidance = `\n\nTyped autonomy proposal (not authority): ${autonomyDecision.proposedAction}; effective policy action: ${autonomyDecision.effectiveAction}. Continue only within the current checkpoint, budget, account scope, approval state, and verification rules. If the proposal is wait, replan, retry, or ask_owner, follow the matching durable lifecycle control rather than improvising.`;
-              const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\nCurrent executable step: ${currentMissionStep ? `${currentMissionStep.title} — ${currentMissionStep.objective}` : "Verify the mission definition of done"}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nNext action: ${mission.nextAction ?? "determine the safest next bounded action"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.` : undefined;
+              const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\n${missionStepInstruction(currentMissionStep)}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.${task.attempt > 1 ? "\n\nThe previous slice made no persisted progress. Do not return a summary: execute the step's concrete objective now, or persist an explicit block/wait with its reason." : ""}` : undefined;
               const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt + autonomyGuidance) : (missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`) + autonomyGuidance;
               const session = await getSession(task.userId);
               const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
@@ -2480,7 +2490,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 if (!preflight.allowed) {
                   if (preflight.reason === "Mission duration budget would be exceeded.") {
                     const requested = await requestMissionDurationApproval(task.userId, mission.id, { taskId: task.id, model: task.sdkModel });
-                    if (requested) return { status: "queued" as const, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
+                    if (requested) return { status: "queued" as const, waiting: true, message: requested.mission.nextAction ?? "Mission is waiting for your approval.", checkpoint: requested.mission.checkpoint, nextAction: requested.mission.nextAction, runAt: requested.approval.expiresAt };
                   }
                   const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: preflight.reason ?? "Mission budget preflight failed.", nextAction: "Increase the mission budget or revise the objective before resuming." });
                   return { status: "blocked" as const, message: blocked?.error ?? "Mission budget preflight failed", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
@@ -2518,6 +2528,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 }, 20_000)
                 : undefined;
               if (missionLeaseRenewal && typeof missionLeaseRenewal === "object" && "unref" in missionLeaseRenewal) missionLeaseRenewal.unref();
+              const missionSliceBefore = captureMissionSliceState(task, mission);
               const durationSeconds = mission ? Math.max(1, Math.floor(missionBudgetPreflight(mission, { steps: 0 }).remaining.durationSeconds)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
               if (task.sdkRunId && task.sdkThreadId) {
@@ -2617,7 +2628,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
                   if (sdkRun) { sdkRun.status = "queued"; sdkRun.output = undefined; sdkRun.error = undefined; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.waiting_for_task", at: Date.now(), text: new Date(result.taskWait.runAt).toISOString() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
                 }
-                return { status: "queued" as const, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
+                return { status: "queued" as const, waiting: true, message: result.text, checkpoint: result.taskWait.checkpoint, nextAction: result.taskWait.nextAction, runAt: result.taskWait.runAt };
               }
               if (result.missionWait && mission) {
                 const currentMission = await getMission(task.userId, mission.id);
@@ -2633,9 +2644,19 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 // the exact mission branch; an expiry gets one durable wake
                 // that can convert a missed event into an honest blocker.
                 if (!expiresAt) return { status: "blocked" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction ?? "Wait for the exact provider event; the mission will resume automatically when it arrives." };
-                return { status: "queued" as const, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt };
+                return { status: "queued" as const, waiting: true, message: result.text, checkpoint: result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, runAt: expiresAt };
               }
               if (mission) {
+                const currentMissionBeforeAccounting = await getMission(task.userId, mission.id);
+                const currentTaskAfterTurn = await getTask(task.userId, task.id);
+                const missionSliceAfter = captureMissionSliceState(currentTaskAfterTurn, currentMissionBeforeAccounting);
+                if (!missionSliceHasPersistedProgress(missionSliceBefore, missionSliceAfter)) {
+                  const externalAttempt = result.toolsUsed.some((tool) => !tool.startsWith("CHUCK_"));
+                  const noProgressMessage = externalAttempt
+                    ? `Mission worker attempted an external tool but persisted no progress for ${currentMissionStep?.title ?? "the active step"}. The mission is paused for provider-state inspection so a retry cannot duplicate an uncertain action.`
+                    : `Mission worker ended the slice without persisting progress for ${currentMissionStep?.title ?? "the active step"}. No provider action, checkpoint, wait, evidence, or step completion was recorded.`;
+                  return { status: externalAttempt ? "blocked" as const : "failed" as const, message: noProgressMessage, checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: externalAttempt ? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known." : missionNoProgressNextAction(currentMissionStep) };
+                }
                 const beforeAccounting = await getMission(task.userId, mission.id);
                 const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: beforeAccounting?.checkpoint ?? result.text, nextAction: beforeAccounting?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: result.toolsUsed.length, cost: result.cost });
                 const currentMission = accounted ?? await getMission(task.userId, mission.id);
@@ -2686,7 +2707,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   const approval = await getApproval(task.userId, error.approvalId);
                   const expiresAt = approval?.expiresAt;
                   await waitMission(task.userId, mission.id, { kind: "approval", key: error.approvalId, stepId: mission.currentStepId, expiresAt }, mission.checkpoint, `Approve or deny ${error.toolSlug} (${error.approvalId}) before the mission can continue.`);
-                  return { status: "queued" as const, message: `Mission is waiting for approval of ${error.toolSlug}.`, checkpoint: mission.checkpoint, nextAction: `Approve or deny ${error.toolSlug} (${error.approvalId}) before continuing.`, runAt: expiresAt ?? Date.now() + 24 * 60 * 60 * 1000 };
+                  return { status: "queued" as const, waiting: true, message: `Mission is waiting for approval of ${error.toolSlug}.`, checkpoint: mission.checkpoint, nextAction: `Approve or deny ${error.toolSlug} (${error.approvalId}) before continuing.`, runAt: expiresAt ?? Date.now() + 24 * 60 * 60 * 1000 };
                 }
                 return { status: "blocked" as const, message: `Approval required for ${error.toolSlug}`, nextAction: "Approve or deny the pending action, then retry the task." };
               }

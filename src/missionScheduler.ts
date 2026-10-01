@@ -146,6 +146,10 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
         id: taskIdFor(current.id, stepId),
         title: `Mission: ${current.title} / ${step.title}`,
         objective: step.objective,
+        // The worker receives one executable step, not the supervisor's
+        // plan-level nextAction. This also gives operators a useful recovery
+        // instruction before the first slice has run.
+        nextAction: step.objective,
         missionId: current.id,
         missionStepId: stepId,
         runAt: now,

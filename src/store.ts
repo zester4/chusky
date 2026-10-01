@@ -993,7 +993,7 @@ export interface TaskLease {
 
 export interface TaskEvent {
   id: string;
-  type: "created" | "scheduled" | "claimed" | "checkpointed" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled" | "retried";
+  type: "created" | "scheduled" | "claimed" | "checkpointed" | "blocked" | "completed" | "failed" | "cancel_requested" | "cancelled" | "retried" | "waiting";
   message: string;
   at: number;
   attempt: number;
@@ -6206,6 +6206,20 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
   });
 }
 
+/** Resume the same durable task after its exact persisted timer has elapsed. */
+export async function resumeMissionFromTimer(userId: number, id: string, runAt: number): Promise<MissionRecord | undefined> {
+  return mutateMission(userId, id, (mission) => {
+    if (mission.status !== "waiting" || mission.waiting?.kind !== "timer" || mission.waiting.runAt !== runAt) return undefined;
+    return {
+      status: "running",
+      waiting: undefined,
+      error: undefined,
+      nextAction: "Continue from the saved timer checkpoint.",
+      events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, Date.now(), mission.waiting.stepId)],
+    };
+  });
+}
+
 /** Consume only the owner's pre-authorized time allowance, once per trusted progress frontier. */
 export async function extendMissionDurationIfEligible(userId: number, id: string): Promise<MissionRecord | undefined> {
   const current = await getMission(userId, id);
@@ -6454,25 +6468,29 @@ async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   });
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string }): Promise<TaskRecord | undefined> {
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
   if (["cancel_requested", "cancelled"].includes(task.status)) {
     return backend.settleTask(userId, id, leaseToken, { status: "cancelled", nextAction: undefined, error: outcome.message }, taskEvent("cancelled", "Cancellation completed before task settlement", task.attempt));
   }
-  const retryable = outcome.status === "failed" && task.attempt < task.maxAttempts;
-  const status = retryable ? "queued" : outcome.status;
+  const invalidQueue = outcome.status === "queued" && (!Number.isFinite(outcome.runAt) || (outcome.runAt as number) <= Date.now());
+  const normalized = invalidQueue
+    ? { ...outcome, status: "failed" as const, message: "Durable task returned queued without a future wake-up time." }
+    : outcome;
+  const retryable = normalized.status === "failed" && task.attempt < task.maxAttempts;
+  const status = retryable ? "queued" : normalized.status;
   const delayMs = retryable ? Math.min(15 * 60_000, 5_000 * 2 ** Math.max(0, task.attempt - 1)) : undefined;
-  const eventType: TaskEvent["type"] = retryable ? "failed" : outcome.status === "queued" ? "retried" : outcome.status;
+  const eventType: TaskEvent["type"] = retryable ? "failed" : normalized.status === "queued" ? (normalized.waiting ? "waiting" : "retried") : normalized.status;
   const settled = await backend.settleTask(userId, id, leaseToken, {
     status,
-    checkpoint: outcome.checkpoint ?? task.checkpoint,
-    nextAction: outcome.nextAction,
-    result: outcome.result,
-    error: outcome.status === "failed" ? outcome.message : undefined,
+    checkpoint: normalized.checkpoint ?? task.checkpoint,
+    nextAction: normalized.nextAction,
+    result: normalized.result,
+    error: normalized.status === "failed" ? normalized.message : undefined,
     ...(status === "queued" ? { workflowRunId: undefined, enqueueClaim: undefined } : {}),
-    runAt: retryable ? Date.now() + (delayMs ?? 0) : outcome.status === "queued" ? outcome.runAt : undefined,
-  }, taskEvent(eventType, outcome.message, task.attempt));
+    runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
+  }, taskEvent(eventType, normalized.message, task.attempt));
   if (settled) await reconcileTerminalMissionTask(settled);
   return settled;
 }

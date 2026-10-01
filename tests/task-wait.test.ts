@@ -38,6 +38,7 @@ test("queued task outcomes retain their wake-up time and checkpoint", async () =
     workerId: "task-wait-test",
     execute: async () => ({
       status: "queued" as const,
+      waiting: true,
       message: "Waiting for the provider export",
       runAt,
       checkpoint: "Export request accepted",
@@ -49,5 +50,5 @@ test("queued task outcomes retain their wake-up time and checkpoint", async () =
   assert.equal(run.task?.runAt, runAt);
   assert.equal(run.task?.checkpoint, "Export request accepted");
   assert.equal(run.task?.nextAction, "Check export status");
-  assert.equal((await getTask(userId, task.id))?.events.at(-1)?.type, "retried");
+  assert.equal((await getTask(userId, task.id))?.events.at(-1)?.type, "waiting");
 });

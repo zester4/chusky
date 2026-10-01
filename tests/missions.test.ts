@@ -15,6 +15,7 @@ import {
   recordMissionSlice,
   replanMission,
   resumeMissionFromProviderEvent,
+  resumeMissionFromTimer,
   resumeMission,
   startMission,
   updateMission,
@@ -168,6 +169,20 @@ test("mission revisions prevent lost concurrent updates and provider events resu
   const final = await getMission(userId, mission.id);
   assert.equal(final?.version, (current?.version ?? 0) + 2);
   assert.ok(final?.checkpoint === "left" || final?.checkpoint === "right");
+});
+
+test("the same durable task resumes a timer-waiting mission only after its persisted wake time", async () => {
+  const userId = 951034;
+  const mission = await createMission(userId, input({ idempotencyKey: "timer-wait-resume" }));
+  await startMission(userId, mission.id);
+  const runAt = Date.now() - 1;
+  await waitMission(userId, mission.id, { kind: "timer", runAt }, "The provider is processing.", "Read the provider result after waking.");
+  assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+  const resumed = await resumeMissionFromTimer(userId, mission.id, runAt);
+  assert.equal(resumed?.status, "running");
+  assert.equal(resumed?.waiting, undefined);
+  assert.match(resumed?.events.at(-1)?.message ?? "", /Timer wait reached/);
+  assert.equal(await resumeMissionFromTimer(userId, mission.id, runAt), undefined);
 });
 
 test("mission steps enforce dependency order and reject cycles", async () => {

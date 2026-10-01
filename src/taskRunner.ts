@@ -11,6 +11,8 @@ export interface TaskRunResult {
   nextAction?: string;
   runAt?: number;
   result?: string;
+  /** Distinguishes an intentional durable wait from a retry after failure. */
+  waiting?: boolean;
 }
 
 export interface TaskRunnerDependencies {
