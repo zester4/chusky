@@ -782,7 +782,7 @@ test("approved mission wait settles the chat run while the durable worker contin
   assert.equal(result.mission.status, "running");
   assert.equal(result.run?.status, "completed", JSON.stringify(result));
   assert.equal(result.run?.approvalId, undefined);
-  assert.match(result.run?.output ?? "", /handed off to its durable worker/i);
+  assert.match(result.run?.output ?? "", /continuing automatically from its saved checkpoint/i);
   assert.equal(result.run?.events.find((item) => item.type === "run.tool_activity")?.status, "completed");
   assert.equal((await getMission(userId, mission.id))?.status, "running");
   assert.equal((await getTask(userId, task.id))?.workflowRunId, `workflow-${task.id}`);

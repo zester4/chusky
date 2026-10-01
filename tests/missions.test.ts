@@ -200,6 +200,7 @@ test("the same durable task resumes a timer-waiting mission only after its persi
   const resumed = await resumeMissionFromTimer(userId, mission.id, runAt);
   assert.equal(resumed?.status, "running");
   assert.equal(resumed?.waiting, undefined);
+  assert.equal(resumed?.nextAction, "Read the provider result after waking.");
   assert.match(resumed?.events.at(-1)?.message ?? "", /Timer wait reached/);
   assert.equal(await resumeMissionFromTimer(userId, mission.id, runAt), undefined);
 });

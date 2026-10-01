@@ -138,6 +138,11 @@ export interface NativeToolRuntime {
   taskId?: string;
   /** The autonomous mission currently executing this bounded slice. */
   missionId?: string;
+  /** True when this slice is the first worker turn after a persisted timer wake. */
+  missionTimerResumed?: boolean;
+  /** Checkpoint/action pair that created the timer wait, used to reject an exact duplicate wait. */
+  missionWakeCheckpoint?: string;
+  missionWakeNextAction?: string;
   /** Hard per-run Treg limits for explicitly configured autonomous monitors. */
   tregMaxCalls?: number;
   tregMaxSpendUsd?: number;
@@ -1623,6 +1628,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_TASK_WAIT": {
       if (!runtime.taskId || !runtime.requestTaskWait) throw new Error("CHUCK_TASK_WAIT is only available inside an active durable task");
       const request: TaskWaitRequest = createTaskWaitRequest(args);
+      if (runtime.missionTimerResumed
+        && request.checkpoint === runtime.missionWakeCheckpoint
+        && request.nextAction === runtime.missionWakeNextAction) {
+        throw new Error("This mission timer already completed; execute the persisted post-wake action instead of repeating the same wait.");
+      }
       runtime.requestTaskWait(request);
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
@@ -1687,6 +1697,9 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return missionProof(mission);
     }
     case "CHUCK_MISSION_CHECKPOINT": {
+      if (runtime.missionTimerResumed && args.checkpoint === runtime.missionWakeCheckpoint && args.nextAction === runtime.missionWakeNextAction) {
+        throw new Error("This mission timer already completed; persist the post-wake checkpoint or execute the next action instead of repeating the pre-wait checkpoint.");
+      }
       const mission = await checkpointMission(userId, text(args.id), text(args.checkpoint, 8000), args.nextAction ? text(args.nextAction, 2000) : undefined);
       if (!mission) throw new Error("Only running missions you own can be checkpointed");
       return mission;
@@ -1710,7 +1723,11 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
         throw new Error("Extending a mission duration requires exact owner approval of the resume arguments.");
       }
-      if (args.maxDurationSeconds !== undefined && existing?.status === "waiting") throw new Error("Resolve this mission's exact timer, provider, or approval wait before requesting a duration extension.");
+      const overdueTimer = existing?.status === "waiting"
+        && existing.waiting?.kind === "timer"
+        && typeof existing.waiting.runAt === "number"
+        && existing.waiting.runAt <= Date.now();
+      if (args.maxDurationSeconds !== undefined && existing?.status === "waiting" && !overdueTimer) throw new Error("Resolve this mission's exact provider or approval wait before requesting a duration extension.");
       if (existing?.status === "waiting" && existing.waiting?.kind === "approval" && existing.waiting.key) {
         const resumed = await resumeMissionTaskAfterApproval(userId, existing.waiting.key);
         if (resumed.status === "resumed" || resumed.status === "already_queued") return resumed.mission;

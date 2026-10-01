@@ -2406,6 +2406,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
             let mission: Awaited<ReturnType<typeof getMission>>;
             try {
               mission = task.missionId ? await getMission(task.userId, task.missionId) : undefined;
+              let missionTimerResumed = false;
+              let missionWakeCheckpoint: string | undefined;
+              let missionWakeNextAction: string | undefined;
               if (mission && ["paused", "blocked", "completed", "cancelled"].includes(mission.status)) {
                 if (mission.status === "blocked" && mission.error === "Mission duration budget would be exceeded.") {
                   const requested = await requestMissionDurationApproval(task.userId, mission.id, { taskId: task.id, model: task.sdkModel });
@@ -2419,9 +2422,23 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   const runAt = waiting.runAt;
                   if (!runAt) return { status: "blocked" as const, message: "Mission timer wait has no persisted wake-up time.", checkpoint: mission.checkpoint, nextAction: "Repair the mission timer checkpoint before resuming." };
                   if (runAt > Date.now()) return { status: "queued" as const, waiting: true, message: mission.nextAction ?? "Mission is waiting for its timer.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt };
+                  missionWakeCheckpoint = mission.checkpoint;
+                  missionWakeNextAction = mission.nextAction ?? "Continue from the saved timer checkpoint.";
                   const resumed = await resumeMissionFromTimer(task.userId, mission.id, runAt);
-                  if (!resumed) return { status: "blocked" as const, message: "The mission timer wake-up no longer matches its persisted wait.", checkpoint: mission.checkpoint, nextAction: "Inspect the mission wait state before retrying." };
-                  mission = resumed;
+                  if (!resumed) {
+                    const current = await getMission(task.userId, mission.id);
+                    if (!current || current.status !== "running") return { status: "blocked" as const, message: "The mission timer wake-up no longer matches its persisted wait.", checkpoint: current?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the mission wait state before retrying." };
+                    mission = current;
+                  } else {
+                    mission = resumed;
+                    missionTimerResumed = true;
+                    // Keep the task's durable prompt aligned with the mission
+                    // frontier. The previous implementation left the task's
+                    // nextAction at the pre-wait text, so a wake could replay
+                    // the same checkpoint and park again.
+                    const resumedTask = await updateTask(task.userId, task.id, { checkpoint: mission.checkpoint, nextAction: mission.nextAction, error: undefined });
+                    if (resumedTask) task = resumedTask;
+                  }
                 }
                 if (mission.waiting?.kind === "provider_event") {
                   const expiresAt = mission.waiting.expiresAt;
@@ -2474,7 +2491,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 maxItems: 1,
               });
               const autonomyGuidance = `\n\nTyped autonomy proposal (not authority): ${autonomyDecision.proposedAction}; effective policy action: ${autonomyDecision.effectiveAction}. Continue only within the current checkpoint, budget, account scope, approval state, and verification rules. If the proposal is wait, replan, retry, or ask_owner, follow the matching durable lifecycle control rather than improvising.`;
-              const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\n${missionStepInstruction(currentMissionStep)}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.${task.attempt > 1 ? "\n\nThe previous slice made no persisted progress. Do not return a summary: execute the step's concrete objective now, or persist an explicit block/wait with its reason." : ""}` : undefined;
+              const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\n${missionStepInstruction(currentMissionStep)}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nPersisted next action: ${mission.nextAction ?? task.nextAction ?? "Execute the current step's concrete objective."}\n${missionTimerResumed ? `WAKE CONTINUATION: The persisted timer wait has completed. Do not repeat the pre-wait checkpoint or the same CHUCK_TASK_WAIT call. Execute the persisted next action now, then checkpoint the post-wake result and advance the active step when its objective is satisfied.` : ""}\nBudget consumed: ${mission.consumedSteps} slices, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.${task.attempt > 1 ? "\n\nThe previous slice made no persisted progress. Do not return a summary: execute the step's concrete objective now, or persist an explicit block/wait with its reason." : ""}` : undefined;
               const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt + autonomyGuidance) : (missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`) + autonomyGuidance;
               const session = await getSession(task.userId);
               const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
@@ -2558,7 +2575,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                   if (!task.meetingFollowUp) {
                     const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
                     const instructions = [task.sdkInstructions, skillInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId });
+                    return runAgent(task.userId, prompt, session.history, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: task.sdkTools?.allow, toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId });
                   }
 
                   const followUp = task.meetingFollowUp;
@@ -2734,6 +2751,21 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
       for (let attempt = 0; attempt < 10; attempt++) {
         const run = await execute(attempt) as { claimed: boolean; status?: string; runAt?: number; taskId?: string; missionId?: string };
         if (run.taskId) await onComposerTaskSettled(payload.userId, run.taskId).catch((error) => logger.warn({ err: error, taskId: run.taskId }, "Composer stage reconciliation failed"));
+        // A durable workflow can wake a little before the persisted task
+        // runAt, or while another worker still owns the lease. Keep the same
+        // workflow alive for that transient race. Previously executeDurableTask
+        // returned only `claimed: false`, so this loop broke and left the
+        // mission queued indefinitely after an approval or task wait.
+        if (!run.claimed && run.status === "queued") {
+          const now = Date.now();
+          const wakeAt = Math.max(run.runAt ?? now, now + 1_000);
+          if (attempt >= 9) {
+            if (run.taskId) await enqueueTaskWithClaim(payload.userId, run.taskId, wakeAt);
+            break;
+          }
+          await workflow.sleep(`retry-claim-${attempt}`, Math.max(1, Math.ceil((wakeAt - now) / 1000)));
+          continue;
+        }
         if (run.status !== "queued" || !run.runAt || run.runAt <= Date.now()) break;
         // Keep the continuation inside the durable workflow while the delay is
         // short. Re-publishing a mission task immediately was a hot-loop bug:

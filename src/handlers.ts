@@ -2711,7 +2711,7 @@ export function registerHandlers(bot: Bot): void {
           await editApprovalOutcome(ctx, "✅ Approved. The mission task is already being queued; check the mission status for its update.");
           return;
         }
-        await editApprovalOutcome(ctx, "✅ Approved. The original mission is resuming from its saved checkpoint.");
+        await editApprovalOutcome(ctx, "✅ Approved. The mission is continuing automatically from its saved checkpoint. I’ll report when it finishes or needs a new decision.");
       } catch (error) {
         logger.warn({ err: error, userId: ctx.from.id, approvalId: approval.id, missionId: missionTarget.mission.id, taskId: missionTarget.task.id }, "Mission approval resume failed");
         await editApprovalOutcome(ctx, "⚠️ Approval was recorded, but the mission could not be queued. Check its status and retry the mission from the saved checkpoint.");

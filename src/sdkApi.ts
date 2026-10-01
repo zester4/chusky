@@ -2943,10 +2943,10 @@ export function registerSdkApi(app: Hono): void {
           }
           handoffRun.status = "completed";
           handoffRun.approvalId = undefined;
-          handoffRun.output = `Approval accepted. Mission ${resumedMission.id} is running and has been handed off to its durable worker. This confirms resumption, not mission completion.`;
+          handoffRun.output = `Approval accepted. Mission ${resumedMission.id} is continuing automatically from its saved checkpoint. This approval turn is complete; the mission remains active until its persisted steps, verification, and completion finish.`;
           handoffRun.error = undefined;
           handoffRun.updatedAt = Date.now();
-          handoffRun.events.push(event("run.completed", "Approval accepted; durable mission continuation is queued."));
+          handoffRun.events.push(event("run.completed", "Approval accepted; durable mission continuation is running."));
           handoffThread.updatedAt = handoffRun.updatedAt;
           await persistSdkRunSnapshot(owner.userId, handoffThread.id, handoffRun, [
             { role: "user", content: handoffRun.input, createdAt: handoffRun.createdAt },
@@ -2990,7 +2990,7 @@ export function registerSdkApi(app: Hono): void {
           await setApprovalStatus(owner.userId, approval.id, "consumed");
           if (approvedActivity) { approvedActivity.status = "completed"; approvedActivity.message = "Approved mission resume completed."; }
           run.status = "completed";
-          run.output = `Approval accepted. Mission ${mission.id} is ${mission.status}. This confirms the resume action, not completion of its remaining work.`;
+          run.output = `Approval accepted. Mission ${mission.id} is continuing automatically from its saved checkpoint. The mission remains active until its persisted work and verification finish.`;
           run.error = undefined;
           run.events.push(event("run.completed"));
         } else {

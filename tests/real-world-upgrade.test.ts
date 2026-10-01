@@ -1,10 +1,10 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission } from "../src/store.js";
+import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, updateTask, verifyMission, missionBudgetPreflight, resumeMission, waitMission } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
-import { scheduleMissionSteps } from "../src/missionScheduler.js";
+import { resumeMissionAndSchedule, scheduleMissionSteps } from "../src/missionScheduler.js";
 import { nativeTool } from "../src/nativeTools.js";
 
 beforeEach(async () => { await initStore({ memoryOnly: true }); });
@@ -100,6 +100,48 @@ test("resuming an already-running mission repairs missing task scheduling withou
   assert.equal((replay as { status: string }).status, "running");
   assert.equal(enqueued.length, 1, "repeating resume does not publish a second workflow");
   assert.equal((await listTasks(userId)).filter((task) => task.missionId === mission.id).length, 1);
+});
+
+test("resuming an overdue timer wake requeues the same mission task exactly once", async () => {
+  const userId = 972015;
+  const mission = await createMission(userId, { title: "Timer wake recovery", objective: "Continue after a durable wait", definitionOfDone: "The waiting step continues", steps: [
+    { id: "only", title: "Only step", objective: "Continue from the post-wake action" },
+  ] });
+  const started = await startMission(userId, mission.id);
+  const published: string[] = [];
+  const enqueue = async (_ownerId: number, taskId: string) => {
+    published.push(taskId);
+    return `workflow_${published.length}`;
+  };
+  await scheduleMissionSteps(userId, started!, enqueue);
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id);
+  assert.ok(task);
+  const claimed = await claimTask(userId, task!.id, "timer-worker", 60_000);
+  assert.ok(claimed?.lease);
+  const runAt = Date.now() - 1;
+  await waitMission(userId, mission.id, { kind: "timer", runAt }, "Pre-wait checkpoint", "Execute the post-wake readback.");
+  const parked = await settleTaskRun(userId, task!.id, claimed!.lease!.token, {
+    status: "queued",
+    waiting: true,
+    message: "Waiting for the durable timer",
+    runAt,
+    checkpoint: "Pre-wait checkpoint",
+    nextAction: "Execute the post-wake readback.",
+  });
+  assert.equal(parked?.status, "queued");
+  assert.equal((await getMission(userId, mission.id))?.status, "waiting");
+
+  const resumed = await resumeMissionAndSchedule(userId, mission.id, enqueue);
+  assert.equal(resumed?.status, "running");
+  assert.equal(resumed?.waiting, undefined);
+  assert.equal(resumed?.nextAction, "Execute the post-wake readback.");
+  assert.equal(published.length, 2, "the original task is republished once for its overdue wake");
+  assert.equal(published[1], task!.id);
+  assert.equal((await listTasks(userId)).filter((item) => item.missionId === mission.id).length, 1);
+
+  const replay = await resumeMissionAndSchedule(userId, mission.id, enqueue);
+  assert.equal(replay?.status, "running");
+  assert.equal(published.length, 2, "replaying resume does not publish a duplicate wake");
 });
 
 test("replayed mission start calls in one agent run create and schedule only one mission", async () => {

@@ -9,6 +9,7 @@ import {
   recordMissionEvidence,
   replanMission,
   resumeMission,
+  resumeMissionFromTimer,
   extendMissionDurationIfEligible,
   retryTask,
   updateMission,
@@ -74,6 +75,22 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
 export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
   const current = await getMission(userId, missionId);
   if (!current) return undefined;
+  // A timer-waiting mission is already the owner of the correct durable task.
+  // When its wake is overdue, resume that same mission/step instead of
+  // rejecting it as non-resumable or creating a replacement task. A future
+  // timer remains waiting and is returned unchanged.
+  if (current.status === "waiting" && current.waiting?.kind === "timer") {
+    const runAt = current.waiting.runAt;
+    if (!runAt || runAt > Date.now()) return current;
+    const resumedFromTimer = await resumeMissionFromTimer(userId, missionId, runAt);
+    if (!resumedFromTimer) return await getMission(userId, missionId);
+    if (resumedFromTimer.status !== "running") return resumedFromTimer;
+    const resumed = maxDurationSeconds === undefined
+      ? resumedFromTimer
+      : await resumeMission(userId, missionId, maxDurationSeconds);
+    if (!resumed || resumed.status !== "running") return resumed ?? await getMission(userId, missionId);
+    return reconcileMissionExecution(userId, missionId, enqueue);
+  }
   if (maxDurationSeconds === undefined) await extendMissionDurationIfEligible(userId, missionId);
   const resumed = await resumeMission(userId, missionId, maxDurationSeconds);
   if (!resumed) return undefined;

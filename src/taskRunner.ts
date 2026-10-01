@@ -30,7 +30,13 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
   const task = await claimTask(payload.userId, payload.taskId, deps.workerId, leaseMs);
   if (!task?.lease) {
     logger.info({ userId: payload.userId, taskId: payload.taskId, workerId: deps.workerId }, "Task worker skipped unclaimable task");
-    return { claimed: false };
+    // Preserve the authoritative task state for the workflow coordinator. A
+    // wake-up can race the scheduled run time or another worker's lease. If
+    // we return only `claimed: false`, the workflow cannot distinguish a
+    // transient scheduling race from a terminal state and may exit while a
+    // queued mission is stranded. The coordinator will sleep/retry using the
+    // returned runAt instead of guessing or re-running provider work.
+    return { claimed: false, task: await getTask(payload.userId, payload.taskId) };
   }
   logger.info({ userId: payload.userId, taskId: task.id, attempt: task.attempt, workerId: deps.workerId }, "Task worker claimed task");
   const leaseAbort = new AbortController();

@@ -2682,8 +2682,14 @@ class RedisBackend implements Backend {
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
       const now = Date.now();
       if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
+      // A timer/provider wait is a continuation of the same bounded slice,
+      // not a retry. Do not consume another retry attempt when the durable
+      // task wakes, otherwise a normal wait can exceed maxAttempts and enter
+      // a second no-progress loop instead of executing its post-wake action.
+      const continuationWake = task.events.at(-1)?.type === "waiting";
+      const nextAttempt = continuationWake ? task.attempt : task.attempt + 1;
       const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
-      const next = normalizeTask({ ...task, status: "running", lease, attempt: task.attempt + 1, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, task.attempt + 1, now)].slice(-100) });
+      const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
       if (result) return next;
@@ -3654,7 +3660,12 @@ class MemoryBackend implements Backend {
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
     if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
-    const next = normalizeTask({ ...task, status: "running", lease: { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs }, attempt: task.attempt + 1, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, task.attempt + 1, now)].slice(-100) });
+    // A timer/provider wait is a continuation of the same bounded slice, not
+    // a retry. Preserve the attempt number across that wake so ordinary waits
+    // cannot consume the task's retry budget.
+    const continuationWake = task.events.at(-1)?.type === "waiting";
+    const nextAttempt = continuationWake ? task.attempt : task.attempt + 1;
+    const next = normalizeTask({ ...task, status: "running", lease: { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs }, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
     tasks[index] = next;
     this.tasks.set(userId, tasks);
     return next;
@@ -6214,7 +6225,11 @@ export async function resumeMissionFromTimer(userId: number, id: string, runAt: 
       status: "running",
       waiting: undefined,
       error: undefined,
-      nextAction: "Continue from the saved timer checkpoint.",
+      // Preserve the action that was explicitly recorded before parking. The
+      // first post-wake slice must execute that action; replacing it with a
+      // generic sentence made the worker fall back to the original step
+      // objective and repeat CHUCK_TASK_WAIT.
+      nextAction: mission.nextAction ?? "Continue from the saved timer checkpoint.",
       events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, Date.now(), mission.waiting.stepId)],
     };
   });
