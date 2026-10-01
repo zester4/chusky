@@ -12,6 +12,7 @@ import { addRecallMeeting, authenticateCliToken, completeMissionStep, createAppr
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
+import { acquireUserLock, releaseUserLock } from "../src/store.js";
 
 beforeEach(async () => {
   (config as { apiKey: string }).apiKey = "sdk-test-key";
@@ -498,6 +499,7 @@ test("denying a run approval preserves its recorded tool steps after reload", as
     id: "run_denied_timeline", status: "requires_approval", input: "Search the relevant guidance.", approvalId: approval.id,
     events: [
       { id: "event_before_approval", type: "run.tool_activity", at: 1, toolSlug: "CHUCK_SEARCH_SKILLS", status: "completed", message: "Guidance searched", summary: "Found relevant material" },
+      { id: "event_waiting_approval", type: "run.tool_activity", at: 2, toolSlug: "CHUCK_SEARCH_SKILLS", status: "approval_required", message: "Waiting for approval" },
     ], createdAt: 1, updatedAt: 1,
   });
   await saveSession(userId, session);
@@ -508,6 +510,7 @@ test("denying a run approval preserves its recorded tool steps after reload", as
   const run = await persisted.json() as { status: string; events: Array<{ id: string; type: string; text?: string }> };
   assert.equal(run.status, "cancelled");
   assert.equal(run.events.some((event) => event.id === "event_before_approval"), true);
+  assert.equal((run.events.find((event) => event.id === "event_waiting_approval") as { status?: string })?.status, "cancelled");
   assert.match(run.events.at(-1)?.text ?? "", /Approval denied/);
 });
 
@@ -678,6 +681,80 @@ test("SDK tool activity survives a disconnected stream while the same run keeps 
     finishSecondCall();
     globalThis.fetch = originalFetch;
   }
+});
+
+test("SDK mission creation validates and persists owner-configured timing and extension caps", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-timing-test");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "timing-owner", "Content-Type": "application/json" };
+  const body = { title: "Timing contract", objective: "Complete bounded work", definitionOfDone: "Verified", maxDurationSeconds: 300, maxLifetimeSeconds: 86400, automaticExtensionSeconds: 300, maxAutomaticExtensions: 2 };
+  for (const invalid of [{ durationMode: "wrong" }, { maxAutomaticExtensions: 11 }, { automaticExtensionSeconds: 0 }, { maxLifetimeSeconds: "86400" }]) {
+    const response = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ ...body, ...invalid }) }));
+    assert.equal(response.status, 400);
+  }
+  const response = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify(body) }));
+  assert.equal(response.status, 201);
+  const mission = await response.json() as { id: string; budget: { durationMode: string; maxLifetimeSeconds: number; maxAutomaticExtensions: number }; timing: { activeMs: number; extensionsUsed: number } };
+  assert.equal(mission.budget.durationMode, "active");
+  assert.equal(mission.budget.maxLifetimeSeconds, 86400);
+  assert.equal(mission.budget.maxAutomaticExtensions, 2);
+  assert.equal(mission.timing.activeMs, 0);
+  assert.equal(mission.timing.extensionsUsed, 0);
+  const retrieved = await api.fetch(new Request(`http://local/v1/missions/${mission.id}`, { headers }));
+  assert.deepEqual((await retrieved.json() as typeof mission).budget, mission.budget);
+});
+
+test("approved mission resume executes stored arguments without inference and settles the original activity once", async () => {
+  const externalId = "exact-mission-resume-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-approved-resume");
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const thread = await (await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }))).json() as { id: string };
+  const mission = await createMission(userId, { title: "Existing mission", objective: "Verify existing work", definitionOfDone: "Verified", budget: { maxDurationSeconds: 300 } });
+  await startMission(userId, mission.id);
+  const approval = await createApproval({ userId, toolSlug: "CHUCK_MISSION_RESUME", args: { id: mission.id, maxDurationSeconds: 600 }, request: "Extend and resume", history: [], model: "unavailable/model" });
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({ id: "run_exact_resume", status: "requires_approval", input: "Extend and resume", approvalId: approval.id, events: [{ id: "resume_activity", type: "run.tool_activity", at: 1, callId: "resume_call", toolSlug: "CHUCK_MISSION_RESUME", status: "approval_required", message: "Waiting for approval" }], createdAt: 1, updatedAt: 1 });
+  await saveSession(userId, session);
+  const decide = () => api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  const foreign = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers: { ...headers, "X-Chusky-User-Id": "foreign-resume-owner" }, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(foreign.status, 404);
+  assert.equal(await acquireUserLock(userId, "approval-test-lock"), true);
+  try {
+    assert.equal((await decide()).status, 409);
+    const saved = await (await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { headers }))).json() as { status: string };
+    assert.equal(saved.status, "pending");
+  } finally { await releaseUserLock(userId, "approval-test-lock"); }
+  const response = await decide();
+  assert.equal(response.status, 200);
+  const run = await response.json() as { status: string; events: Array<{ callId?: string; status?: string }> };
+  assert.equal(run.status, "completed", JSON.stringify(run));
+  assert.equal(run.events.filter((item) => item.callId === "resume_call").at(-1)?.status, "completed");
+  assert.equal((await getMission(userId, mission.id))?.budget.maxDurationSeconds, 600);
+  assert.equal((await decide()).status, 404);
+  const restored = await (await api.fetch(new Request(`http://local/v1/threads/${thread.id}/runs/run_exact_resume`, { headers }))).json() as typeof run;
+  assert.equal(restored.events.filter((item) => item.callId === "resume_call").at(-1)?.status, "completed");
+});
+
+test("accepted mission approval records an execution failure instead of leaving the activity waiting", async () => {
+  const externalId = "failed-mission-resume-owner";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const api = app();
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" };
+  const thread = await (await api.fetch(new Request("http://local/v1/threads", { method: "POST", headers, body: "{}" }))).json() as { id: string };
+  const approval = await createApproval({ userId, toolSlug: "CHUCK_MISSION_RESUME", args: { id: "mis_missing", maxDurationSeconds: 600 }, request: "Resume existing work", history: [], model: "unavailable/model" });
+  const session = await getSession(userId);
+  session.sdkThreads!.find((item) => item.id === thread.id)!.runs.push({ id: "run_failed_resume", status: "requires_approval", input: "Resume existing work", approvalId: approval.id, events: [{ id: "failed_activity", type: "run.tool_activity", at: 1, callId: "failed_call", toolSlug: "CHUCK_MISSION_RESUME", status: "approval_required", message: "Waiting for approval" }], createdAt: 1, updatedAt: 1 });
+  await saveSession(userId, session);
+  const response = await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { method: "POST", headers, body: JSON.stringify({ decision: "approve" }) }));
+  assert.equal(response.status, 200);
+  const run = await response.json() as { status: string; error: { message: string }; events: Array<{ status?: string }> };
+  assert.equal(run.status, "failed");
+  assert.match(run.error.message, /no longer resumable/);
+  assert.equal(run.events.some((item) => item.status === "approval_required"), false);
+  const saved = await (await api.fetch(new Request(`http://local/v1/approvals/${approval.id}`, { headers }))).json() as { status: string };
+  assert.equal(saved.status, "consumed");
 });
 
 test("SDK autonomous missions are idempotent, owner-scoped, and controllable", async () => {

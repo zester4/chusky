@@ -26,7 +26,7 @@ before(async () => { await initStore({ memoryOnly: true }); });
 
 test("expired mission resume stays blocked until its total duration is explicitly extended", async () => {
   const userId = 951099;
-  const mission = await createMission(userId, input({ budget: { maxDurationSeconds: 60 } }));
+  const mission = await createMission(userId, input({ budget: { maxDurationSeconds: 60, durationMode: "wall_clock" } }));
   await startMission(userId, mission.id);
   const startedAt = Date.now() - 120_000;
   await updateMission(userId, mission.id, { startedAt });

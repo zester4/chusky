@@ -23,7 +23,7 @@ import { reserveExecutionQuota, releaseExecutionQuota } from "../src/reliability
 test("native expired resume reports the blocker without enqueueing and step completion reports persisted state", async () => {
   await initStore({ memoryOnly: true });
   const ownerId = 9824;
-  const mission = await createMission(ownerId, { title: "Expired recovery", objective: "Recover existing work", definitionOfDone: "Verified closeout", budget: { maxDurationSeconds: 60 }, steps: [{ id: "verify", title: "Verify", objective: "Verify the existing result" }] });
+  const mission = await createMission(ownerId, { title: "Expired recovery", objective: "Recover existing work", definitionOfDone: "Verified closeout", budget: { maxDurationSeconds: 60, durationMode: "wall_clock" }, steps: [{ id: "verify", title: "Verify", objective: "Verify the existing result" }] });
   await startMission(ownerId, mission.id);
   await updateMission(ownerId, mission.id, { startedAt: Date.now() - 120_000 });
   let enqueues = 0;

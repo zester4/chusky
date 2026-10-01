@@ -2,6 +2,16 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.9.0 - 2026-10-01
+
+- New missions default to pause-aware active execution time with a separate
+  overall lifetime. Existing records retain their wall-clock contract.
+- Expose optional bounded automatic time extensions authorized at creation,
+  requiring new trusted completed-step progress without changing other budgets.
+- Mission responses expose persisted timing and extension usage.
+- Document exact approved mission-resume execution and recovery from lost
+  approval responses without assuming completion or replaying accepted actions.
+
 ## 1.8.1 - 2026-10-01
 
 - Outcome verification accepts per-check `evidenceId` references to owned,

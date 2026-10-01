@@ -5,6 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { AGENT_UPGRADE_PRESETS, formatAgentUpgradeNotice, getAgentUpgradePreset, loadAgentUpgrade, validateAgentUpgrade, writeAgentUpgrade } from "../src/upgradeNotice.js";
 
+test("mission timing release distinguishes active time, deadline, and bounded owner authority", () => {
+  const bullets = getAgentUpgradePreset("missionTiming");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0], /active worker time/);
+  assert.match(bullets[1], /new trusted completed-step progress/);
+  assert.match(bullets[2], /legacy wall-clock/);
+});
+
 test("validates and formats a bounded upgrade notice", () => {
   const notice = validateAgentUpgrade({ version: "3.1.0", id: "release-3.1.0", bullets: ["One", "Two"] });
   assert.equal(formatAgentUpgradeNotice(notice), "Chusky has been upgraded (v3.1.0)\n- One\n- Two");
@@ -207,13 +215,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces MCP OAuth refresh and catalog-auth credentials", async () => {
+test("current upgrade manifest announces pause-aware mission timing and bounded extensions", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.34.0");
-  assert.equal(notice?.version, "4.34.0");
-  assert.match(formatAgentUpgradeNotice(notice!), /Stored third-party MCP OAuth connections now refresh expiring tokens automatically/);
-  assert.match(formatAgentUpgradeNotice(notice!), /Refresh runs are serialized per owner and server/);
-  assert.match(formatAgentUpgradeNotice(notice!), /catalog-declared custom authentication headers/);
+  assert.equal(notice?.id, "release-4.35.0");
+  assert.equal(notice?.version, "4.35.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("missionTiming"));
 });
 
 test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {

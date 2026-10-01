@@ -322,7 +322,29 @@ paths:
     get: { summary: List owner-scoped recurring-job occurrences, parameters: [{ $ref: '#/components/parameters/UserId' }, { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100 } }], responses: { '200': { description: Occurrence history } } }
   /missions:
     get: { summary: List owner-scoped autonomous missions, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Mission records } } }
-    post: { summary: Create and start a durable dependency-aware mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Mission started } } }
+    post:
+      summary: Create and start a durable dependency-aware mission
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, objective, definitionOfDone]
+              properties:
+                title: { type: string, maxLength: 240 }
+                objective: { type: string, maxLength: 8000 }
+                definitionOfDone: { type: string, maxLength: 4000 }
+                maxDurationSeconds: { type: integer, minimum: 60, maximum: 2592000 }
+                durationMode: { type: string, enum: [active, wall_clock], default: active }
+                maxLifetimeSeconds: { type: integer, minimum: 60, maximum: 2592000, description: Absolute elapsed-time limit from start including waits; active default is 14 days. }
+                automaticExtensionSeconds: { type: integer, minimum: 0, maximum: 3600, default: 0 }
+                maxAutomaticExtensions: { type: integer, minimum: 0, maximum: 10, default: 0 }
+                maxSteps: { type: integer, minimum: 1, maximum: 1000 }
+                maxToolCalls: { type: integer, minimum: 1, maximum: 10000 }
+                maxCost: { type: number, minimum: 0, maximum: 10000 }
+      responses: { '201': { description: Mission started with persisted timing and bounded extension usage } }
   /missions/{missionId}:
     get: { summary: Get an autonomous mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission record } } }
   /missions/{missionId}/events:

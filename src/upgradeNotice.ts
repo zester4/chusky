@@ -12,6 +12,11 @@ const MAX_BULLET_LENGTH = 240;
  * omitted.
  */
 export const AGENT_UPGRADE_PRESETS = {
+  missionTiming: [
+    "New missions count active worker time separately from their overall deadline; durable waits, pauses, blockers, and scheduling gaps preserve remaining execution time.",
+    "Owners can pre-authorize bounded automatic time extensions; each extension requires new trusted completed-step progress and never raises spend, tool-call, or step limits.",
+    "Timing and extensions are persisted under mission concurrency controls, with audited reasons and legacy wall-clock limits preserved for existing missions.",
+  ],
   autonomy: [
     "Added bounded personal and business autonomy queues with read-only reconciliation, checkpoints, watches, quiet hours, budgets, and explicit authority modes.",
     "Added a persisted dependency-graph workflow composer that fans out ready stages, joins dependencies, carries bounded results forward, enforces retries and budgets, and pauses at approval checkpoints.",

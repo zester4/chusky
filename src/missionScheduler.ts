@@ -9,6 +9,7 @@ import {
   recordMissionEvidence,
   replanMission,
   resumeMission,
+  extendMissionDurationIfEligible,
   retryTask,
   updateMission,
   verifyMission,
@@ -73,6 +74,7 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
 export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
   const current = await getMission(userId, missionId);
   if (!current) return undefined;
+  if (maxDurationSeconds === undefined) await extendMissionDurationIfEligible(userId, missionId);
   const resumed = await resumeMission(userId, missionId, maxDurationSeconds);
   if (!resumed) return undefined;
   if (resumed.status !== "running") return resumed;

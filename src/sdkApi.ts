@@ -2625,6 +2625,10 @@ export function registerSdkApi(app: Hono): void {
       const requiredEvidence = Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined;
       const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", budget: {
         maxDurationSeconds: body.maxDurationSeconds === undefined ? undefined : Number(body.maxDurationSeconds),
+        durationMode: body.durationMode as "active" | "wall_clock" | undefined,
+        maxLifetimeSeconds: body.maxLifetimeSeconds as number | undefined,
+        automaticExtensionSeconds: body.automaticExtensionSeconds as number | undefined,
+        maxAutomaticExtensions: body.maxAutomaticExtensions as number | undefined,
         maxSteps: body.maxSteps === undefined ? undefined : Number(body.maxSteps),
         maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
         maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
@@ -2866,6 +2870,8 @@ export function registerSdkApi(app: Hono): void {
       const deniedThread = deniedSession.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === pending.id));
       const deniedRun = deniedThread?.runs.find((run) => run.approvalId === pending.id);
       if (deniedThread && deniedRun) {
+        const deniedActivity = [...deniedRun.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === pending.toolSlug && item.status === "approval_required");
+        if (deniedActivity) { deniedActivity.status = "cancelled"; deniedActivity.message = "Approval denied; no action was executed."; }
         deniedRun.status = "cancelled";
         deniedRun.approvalId = undefined;
         deniedRun.events.push(event("run.cancelled", "Approval denied; the action was not executed."));
@@ -2922,6 +2928,8 @@ export function registerSdkApi(app: Hono): void {
       const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;
+      const approvedActivity = [...run.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");
+      if (approvedActivity) { approvedActivity.status = "started"; approvedActivity.message = "Approval accepted; executing the approved action."; }
       run.status = "running";
       run.approvalId = undefined;
       run.events.push(event("run.started", "Approval granted; continuing this run."));
@@ -2932,6 +2940,24 @@ export function registerSdkApi(app: Hono): void {
       activeRuns.set(run.id, abort);
       let costIncrement = 0;
       try {
+        if (approval.toolSlug === "CHUCK_MISSION_RESUME") {
+          // Resume is a control-plane operation, not a fresh model decision.
+          // Execute only the exact stored arguments after the atomic claim.
+          if (run.tools?.deny?.includes(approval.toolSlug) || (run.tools?.allow && !run.tools.allow.includes(approval.toolSlug))) throw new Error("The approved action is outside this run's tool policy.");
+          validateNativeToolArguments(approval.toolSlug, approval.args);
+          const missionId = String(approval.args.id);
+          const existingMission = await getMission(owner.userId, missionId);
+          if (existingMission?.status === "waiting") throw new Error("Resolve the mission's exact pending wait before resuming with this approval.");
+          const mission = await resumeMissionAndSchedule(owner.userId, missionId, sdkTaskWorkflowEnqueuer, approval.args.maxDurationSeconds === undefined ? undefined : Number(approval.args.maxDurationSeconds));
+          if (!mission) throw new Error("The approved mission is no longer resumable.");
+          if (mission.status !== "running" && mission.status !== "completed") throw new Error("Approval was accepted, but the mission remains blocked. Inspect its saved checkpoint and budget.");
+          await setApprovalStatus(owner.userId, approval.id, "consumed");
+          if (approvedActivity) { approvedActivity.status = "completed"; approvedActivity.message = "Approved mission resume completed."; }
+          run.status = "completed";
+          run.output = `Approval accepted. Mission ${mission.id} is ${mission.status}. This confirms the resume action, not completion of its remaining work.`;
+          run.error = undefined;
+          run.events.push(event("run.completed"));
+        } else {
         const result = await runAgent(owner.userId, approval.request, approval.history, approval.model, undefined, abort.signal, undefined, approval.id, undefined, {
           ...await sdkAgentOptions({ budget: run.budget, tools: run.tools, skills: run.skills }, run.id, thread.id, run.agentInstructions, run.ownerPrivateRun === true),
           onToolActivity: async (activity: AgentToolActivity) => {
@@ -2951,7 +2977,26 @@ export function registerSdkApi(app: Hono): void {
         });
         if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
         else { run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; costIncrement = result.cost ?? 0; run.error = undefined; run.events.push(event("run.completed")); }
+        const settledApproval = await getApproval(owner.userId, approval.id);
+        if (approvedActivity && settledApproval?.status === "consumed") {
+          const outcome = [...run.events].reverse().find((item) => item !== approvedActivity && item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && (item.status === "completed" || item.status === "failed" || item.status === "cancelled"));
+          approvedActivity.status = outcome?.status ?? "failed";
+          approvedActivity.message = outcome?.status === "completed" ? "Approved action completed." : "Approval accepted, but successful execution was not confirmed.";
+        }
+        else if (approvedActivity && run.status === "completed") {
+          approvedActivity.status = "failed";
+          approvedActivity.message = "Approval accepted, but the approved action was not executed.";
+          run.status = "failed";
+          run.output = undefined;
+          run.error = { code: "approved_action_not_executed", message: "The approved action was not executed. Review the saved steps before retrying." };
+          await setApprovalStatus(owner.userId, approval.id, "consumed");
+          run.events = run.events.filter((item) => item.type !== "run.completed");
+          run.events.push(event("run.failed", run.error.message));
+        }
+        }
       } catch (error) {
+        if (approvedActivity) { approvedActivity.status = "failed"; approvedActivity.message = "Approval accepted, but the action could not be completed."; }
+        await setApprovalStatus(owner.userId, approval.id, "consumed");
         if (error instanceof ApprovalRequiredError) { run.status = "requires_approval"; run.approvalId = error.approvalId; run.events.push(event("run.approval_required", "Another action needs your approval.")); }
         else if (abort.signal.aborted) { run.status = "cancelled"; run.events.push(event("run.cancelled", "Run cancelled. Completed steps are preserved.")); }
         else { run.status = "failed"; run.error = { code: "resume_failed", message: error instanceof Error ? error.message : "Approval resume failed" }; run.events.push(event("run.failed", run.error.message)); }

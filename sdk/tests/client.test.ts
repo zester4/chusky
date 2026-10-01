@@ -6,6 +6,16 @@ function mockFetch(responder: (url: string, init?: RequestInit) => Response | Pr
   return (async (input: string | URL | Request, init?: RequestInit) => responder(String(input), init)) as typeof fetch;
 }
 
+test("SDK forwards the owner-configured mission timing contract without changing its caps", async () => {
+  const input = { title: "Timing", objective: "Bounded work", definitionOfDone: "Verified", maxDurationSeconds: 300, durationMode: "active" as const, maxLifetimeSeconds: 86400, automaticExtensionSeconds: 300, maxAutomaticExtensions: 2 };
+  const sdk = new Chusky({ apiKey: "chsk_test", userId: "owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {
+    assert.equal(url, "https://example.test/v1/missions");
+    assert.deepEqual(JSON.parse(String(init?.body)), input);
+    return new Response(JSON.stringify({ id: "mis_timing", timing: { activeMs: 0, extensionsUsed: 0 } }), { status: 201 });
+  }) });
+  assert.equal((await sdk.missions.create(input)).timing?.extensionsUsed, 0);
+});
+
 test("SDK forwards exact mission evidence references for outcome verification", async () => {
   const input = { missionId: "mis_existing", checks: [{ id: "execution", kind: "receipt", description: "Receipt exists", evidenceId: "receipt_existing" }] };
   const sdk = new Chusky({ apiKey: "chsk_test", userId: "owner", baseUrl: "https://example.test", fetch: mockFetch((url, init) => {

@@ -1,4 +1,5 @@
 import { Bot, InputFile, InlineKeyboard } from "grammy";
+import { extendMissionDurationIfEligible } from "./store.js";
 import { Receiver } from "@upstash/qstash";
 import { serve as serveWorkflow } from "@upstash/workflow/hono";
 import { serve, type ServerType } from "@hono/node-server";
@@ -1339,7 +1340,23 @@ async function main(): Promise<void> {
       const invalidSteps = validateMissionStepsPayload(body.steps);
       if (invalidSteps) return c.json({ ok: false, error: invalidSteps }, 400);
       try {
-        const mission = await createMission(device.userId, { title, objective, definitionOfDone, idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined, requiredEvidence: Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined, verificationMode: body.verificationMode === "strict" ? "strict" : body.verificationMode === "legacy" ? "legacy" : undefined, steps: Array.isArray(body.steps) ? body.steps.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((step) => ({ id: typeof step.id === "string" ? step.id : undefined, title: String(step.title ?? ""), objective: String(step.objective ?? ""), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined, budget: { maxDurationSeconds: typeof body.maxDurationSeconds === "number" ? body.maxDurationSeconds : undefined, maxSteps: typeof body.maxSteps === "number" ? body.maxSteps : undefined, maxToolCalls: typeof body.maxToolCalls === "number" ? body.maxToolCalls : undefined, maxCost: typeof body.maxCost === "number" ? body.maxCost : undefined } });
+        const mission = await createMission(device.userId, {
+          title, objective, definitionOfDone,
+          idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined,
+          requiredEvidence: Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined,
+          verificationMode: body.verificationMode === "strict" ? "strict" : body.verificationMode === "legacy" ? "legacy" : undefined,
+          steps: Array.isArray(body.steps) ? body.steps.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object")).map((step) => ({ id: typeof step.id === "string" ? step.id : undefined, title: String(step.title ?? ""), objective: String(step.objective ?? ""), dependsOn: Array.isArray(step.dependsOn) ? step.dependsOn.filter((item): item is string => typeof item === "string") : undefined, retryLimit: step.retryLimit === undefined ? undefined : Number(step.retryLimit), evidenceRequired: Array.isArray(step.evidenceRequired) ? step.evidenceRequired.filter((item): item is string => typeof item === "string") : undefined, parallelGroup: typeof step.parallelGroup === "string" ? step.parallelGroup : undefined })) : undefined,
+          budget: {
+            maxDurationSeconds: typeof body.maxDurationSeconds === "number" ? body.maxDurationSeconds : undefined,
+            durationMode: body.durationMode as "active" | "wall_clock" | undefined,
+            maxLifetimeSeconds: body.maxLifetimeSeconds as number | undefined,
+            automaticExtensionSeconds: body.automaticExtensionSeconds as number | undefined,
+            maxAutomaticExtensions: body.maxAutomaticExtensions as number | undefined,
+            maxSteps: typeof body.maxSteps === "number" ? body.maxSteps : undefined,
+            maxToolCalls: typeof body.maxToolCalls === "number" ? body.maxToolCalls : undefined,
+            maxCost: typeof body.maxCost === "number" ? body.maxCost : undefined,
+          },
+        });
         const started = mission.status === "queued" ? await startMission(device.userId, mission.id) : mission.status === "running" ? mission : undefined;
         if (!started) return c.json({ ok: true, mission }, mission.status === "queued" ? 409 : 200);
         const linked = await reconcileMissionExecution(device.userId, started.id, enqueueTaskWorkflow);
@@ -2448,7 +2465,8 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
               const missionRemainingTools = mission ? mission.budget.maxToolCalls - mission.toolCalls : undefined;
               const missionRemainingCost = mission ? mission.budget.maxCost - mission.cost : undefined;
-              if (mission && ((missionRemainingSteps ?? 1) <= 0 || (missionRemainingTools ?? 1) <= 0 || (missionRemainingCost ?? 1) <= 0 || (mission.startedAt && Date.now() - mission.startedAt >= mission.budget.maxDurationSeconds * 1000))) {
+              if (mission) mission = await extendMissionDurationIfEligible(task.userId, mission.id) ?? mission;
+              if (mission && ((missionRemainingSteps ?? 1) <= 0 || (missionRemainingTools ?? 1) <= 0 || (missionRemainingCost ?? 1) <= 0)) {
                 const blocked = await updateMission(task.userId, mission.id, { status: "blocked", error: "Mission budget is exhausted before the next slice.", nextAction: "Increase the mission budget or revise the objective before resuming." });
                 return { status: "blocked" as const, message: blocked?.error ?? "Mission budget exhausted", checkpoint: blocked?.checkpoint, nextAction: blocked?.nextAction };
               }
@@ -2491,7 +2509,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
                 }, 20_000)
                 : undefined;
               if (missionLeaseRenewal && typeof missionLeaseRenewal === "object" && "unref" in missionLeaseRenewal) missionLeaseRenewal.unref();
-              const durationSeconds = mission ? Math.max(1, Math.floor((mission.budget.maxDurationSeconds * 1000 - (Date.now() - (mission.startedAt ?? Date.now()))) / 1000)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
+              const durationSeconds = mission ? Math.max(1, Math.floor(missionBudgetPreflight(mission, { steps: 0 }).remaining.durationSeconds)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
               if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
               if (task.sdkRunId && task.sdkThreadId) {
                 const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
@@ -2502,7 +2520,10 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
               const onMissionLeaseLost = () => budgetAbort.abort(new Error("Mission lease lost; stopping before another worker can continue."));
               leaseSignal?.addEventListener("abort", onLeaseLost, { once: true });
               missionLeaseLost?.signal.addEventListener("abort", onMissionLeaseLost, { once: true });
-              const remainingMs = durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined; const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(), remainingMs) : undefined;
+              const remainingMs = mission ? durationSeconds! * 1000 : durationSeconds && task.sdkStartedAt ? Math.max(1, durationSeconds * 1000 - (Date.now() - task.sdkStartedAt)) : undefined;
+              // Node overflows delays above its signed 32-bit maximum to 1ms.
+              // Conservatively bound one worker slice rather than aborting immediately.
+              const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(new Error("Execution duration budget exhausted")), Math.min(remainingMs, 2_147_483_647)) : undefined;
               const cancellationPoll = setInterval(() => {
                 void getTask(task.userId, task.id).then((latest) => {
                   if (latest?.status === "cancel_requested" || latest?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));

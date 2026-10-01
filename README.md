@@ -105,6 +105,19 @@ the backend's Redis and QStash configuration.
 
 ### Autonomous missions
 
+New missions use pause-aware active worker time by default. A five-minute
+execution budget with two minutes consumed retains three minutes after an hour
+waiting for a provider or owner. A separate `maxLifetimeSeconds` deadline
+includes all waits (14 days by default). Persisted legacy missions retain their
+original wall-clock contract; this change does not reset existing budgets.
+
+Owners may authorize `automaticExtensionSeconds` and `maxAutomaticExtensions`
+at creation. Every extension requires new completed-step progress backed by
+trusted evidence, is audited, and preserves spend, steps, tool calls, and the
+overall deadline. Chat approves the initial allowance once, not every extension.
+Without an allowance, exhausted missions stay blocked. Inspect `timing` and
+mission proof for execution usage and extensions consumed.
+
 Use a mission when work must continue after the initiating request: research,
 lead qualification, long-running browser work, provider polling, or a
 multi-stage business operation. A mission is not an unbounded background loop.

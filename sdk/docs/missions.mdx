@@ -7,6 +7,20 @@ Missions are the SDK surface for work that must continue beyond one model reques
 
 ## Create a mission
 
+New missions default to `durationMode: "active"`: `maxDurationSeconds` counts
+leased worker execution, not time waiting for providers, approvals, timers,
+owner pauses, blockers, or queued scheduling. `maxLifetimeSeconds` separately
+limits elapsed time from mission start, including waits (default 14 days).
+Existing stored missions without a duration mode retain wall-clock behavior.
+
+An authenticated owner may authorize `automaticExtensionSeconds` (0–3600) and
+`maxAutomaticExtensions` (0–10) together at creation. Both default to zero.
+Each automatic extension requires newly completed work backed by trusted step
+evidence; repeated checkpoints or reads cannot reuse the same progress.
+Extensions never raise lifetime, cost, tool calls, steps, or permissions.
+Chat-created allowances require one exact approval of the initial contract.
+Inspect `mission.timing` for active milliseconds and extension usage.
+
 Keep the definition of done concrete. If you provide steps, the first dependency-free steps may run in parallel; later steps cannot start until their dependencies are completed.
 
 ```ts

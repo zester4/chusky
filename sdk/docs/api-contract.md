@@ -16,7 +16,7 @@ execute live and cannot be replaced with stored receipts or submitted results.
 3. API keys are revocable and scope-enforced (`resource:read`, `resource:write`, `resource:*`, or `*`). Never use CLI device tokens for the SDK.
 4. Durable mutations accept `Idempotency-Key`; persist method, normalized path, body digest, response status/body, and a 24-hour replay window. A reused key with a different body returns `409 idempotency_mismatch`. Live streaming is not replayable; reconnect through persisted run state and events.
 5. Every response has `X-Request-Id`. Errors use `{ "error": { "code", "message", "requestId" } }`.
-6. Runs may require approval. The server persists the exact pending action and binds a decision to its end user; neither the SDK nor a webhook payload is authorization.
+6. Runs may require approval. The server persists the exact pending action and binds a decision to its end user; neither the SDK nor a webhook payload is authorization. Approved mission resume executes the stored arguments directly and updates the original run activity. Approval acceptance is not proof that the mission completed. If an approval response is lost, read the approval and run before retrying; only a confirmed pending approval is retryable. A busy user lock restores the pending approval without executing it.
 
 ## Dashboard API-key management
 
@@ -108,3 +108,13 @@ Events are append-only for a single run. The terminal `completed` or `failed` ev
 - Per-project/end-user rate and spend limits, `429`/`Retry-After`, audit records, and request IDs.
 - R2 intent expiry, content-type/size verification, pending-file download denial, and tenant isolation.
 - Webhook signature verification, retry/backoff, endpoint disablement, and dead-letter replay.
+# Mission execution timing (SDK 1.9.0)
+
+`POST /v1/missions` accepts `durationMode` (`active` by default for new records,
+or `wall_clock`), `maxLifetimeSeconds` (60–2592000; active default 1209600),
+`automaticExtensionSeconds` (0–3600), and `maxAutomaticExtensions` (0–10).
+Extension size and count must be supplied together; zero means disabled.
+Only new completed steps with trusted evidence unlock extensions. Other
+budgets and the absolute lifetime are unchanged. Older persisted records keep
+their original wall-clock interpretation. Responses include `timing.activeMs`,
+`timing.activeSince` when a worker is active, and `timing.extensionsUsed`.

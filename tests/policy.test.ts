@@ -7,6 +7,8 @@ import { isSharedChannelToolDenied } from "../src/sharedChannelPolicy.js";
 test("duration extensions require owner approval while ordinary mission resume stays autonomous", () => {
   assert.equal(toolApprovalPolicy("CHUCK_MISSION_RESUME", { id: "mis_existing" }), "private");
   assert.equal(requiresToolApproval("CHUCK_MISSION_RESUME", { id: "mis_existing", maxDurationSeconds: 3600 }, false, true), true);
+  assert.equal(requiresToolApproval("CHUCK_MISSION_START", { maxAutomaticExtensions: 2, automaticExtensionSeconds: 300 }, false, true), true);
+  assert.equal(toolApprovalPolicy("CHUCK_MISSION_START", { maxAutomaticExtensions: 0 }), "private");
 });
 
 test("recognizes materially risky tools", () => {

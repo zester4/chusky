@@ -1627,6 +1627,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return { waiting: true, taskId: runtime.taskId, runAt: new Date(request.runAt).toISOString(), checkpoint: request.checkpoint, nextAction: request.nextAction, ...(request.reason ? { reason: request.reason } : {}) };
     }
     case "CHUCK_MISSION_START": {
+      if (Number(args.maxAutomaticExtensions ?? 0) > 0 && !runtime.approvedApprovalId) throw new Error("Automatic mission extensions require owner approval of the initial allowance.");
       const invalidSteps = validateMissionStepsPayload(args.steps);
       if (invalidSteps) throw new Error(invalidSteps);
       const mission = await createMission(userId, {
@@ -1651,6 +1652,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         })) : undefined,
         budget: {
           maxDurationSeconds: args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds),
+          durationMode: args.durationMode as "active" | "wall_clock" | undefined,
+          maxLifetimeSeconds: args.maxLifetimeSeconds as number | undefined,
+          automaticExtensionSeconds: args.automaticExtensionSeconds as number | undefined,
+          maxAutomaticExtensions: args.maxAutomaticExtensions as number | undefined,
           maxSteps: args.maxSteps === undefined ? undefined : Number(args.maxSteps),
           maxToolCalls: args.maxToolCalls === undefined ? undefined : Number(args.maxToolCalls),
           maxCost: args.maxCost === undefined ? undefined : Number(args.maxCost),

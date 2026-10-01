@@ -44,7 +44,7 @@ test("mission start accepts its published objective and step text limits", async
     steps: [{ title: "S".repeat(240), objective: "X".repeat(3000) }],
   };
   validateNativeToolArguments("CHUCK_MISSION_START", args);
-  const returned = await nativeTool(userId, "CHUCK_MISSION_START", args) as { id: string; objective: string };
+  const returned = await nativeTool(userId, "CHUCK_MISSION_START", args, { enqueueMissionTask: async () => "workflow-limit-test" }) as { id: string; objective: string };
 
   assert.equal(returned.id, existing.id);
   assert.equal(returned.objective, existing.objective);

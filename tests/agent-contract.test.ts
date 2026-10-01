@@ -97,7 +97,7 @@ test("agent retains trusted release context after the one-time upgrade notice wa
   assert.equal(await claimAgentUpgrade(userId, notice), true);
 
   const requests: Array<Record<string, any>> = [];
-  const responseText = "This release includes MCP OAuth token refresh and catalog-declared authentication headers; whether a provider is connected and usable still depends on your account setup.";
+  const responseText = "The trusted release metadata describes shipped features; whether they are enabled for this account still requires checking the account and mission state.";
   await withAgentMocks([chatResponse({ role: "assistant", content: responseText })], async () => undefined, async () => {
     const result = await runAgent(userId, "Is the upgrade true? Is the feature active for me?", [
       { role: "assistant", content: formatAgentUpgradeNotice(notice) },
@@ -114,7 +114,7 @@ test("agent retains trusted release context after the one-time upgrade notice wa
   assert.match(systemText, /release label.*not.*npm package version/i);
   assert.match(systemText, /does not prove that an optional integration is configured/i);
   assert.match(systemText, /a feature is enabled for this account/i);
-  assert.match(systemText, /Stored third-party MCP OAuth connections now refresh expiring tokens automatically/);
+  for (const bullet of notice.bullets) assert.ok(systemText.includes(bullet));
 });
 
 test("ordinary conversation sends an attached image through the normal Composio email action", async () => {

@@ -175,6 +175,7 @@ function composioActionPolicy(slug: string): ToolApprovalPolicy {
 export function toolApprovalPolicy(slug: string, args: Record<string, unknown> = {}): ToolApprovalPolicy {
   slug = canonicalPolicySlug(slug);
   if (slug === "CHUCK_MISSION_RESUME" && args.maxDurationSeconds !== undefined) return "approval_required";
+  if (slug === "CHUCK_MISSION_START" && Number(args.maxAutomaticExtensions ?? 0) > 0) return "approval_required";
   if (TINYFISH_AUTONOMOUS_TOOLS.has(slug)) return "private";
   if (slug === "CHUCK_BROWSER") {
     // Unknown browser claims are validated by the E2B/vault guard against the
