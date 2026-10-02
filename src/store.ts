@@ -6632,6 +6632,10 @@ export async function checkpointMission(userId: number, id: string, checkpoint: 
 
 export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string }): Promise<MissionRecord | undefined> {
   const saved = await mutateMission(userId, id, (mission) => {
+    // A worker response can arrive after cancellation or terminal closeout.
+    // Preserve those terminal records exactly; late accounting must not alter
+    // their counters, checkpoint, version, or audit frontier.
+    if (["completed", "cancelled"].includes(mission.status)) return undefined;
     if (mission.status === "queued") return undefined;
     const now = Date.now();
     const consumedSteps = mission.consumedSteps;
@@ -6651,7 +6655,10 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
     return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, consumedSlices, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
-  return saved;
+  // `mutateMission` returns undefined when a concurrent terminal transition
+  // won the CAS. Return that persisted winner so late workers cannot mistake
+  // a cancellation race for a missing mission.
+  return saved ?? await getMission(userId, id);
 }
 
 export async function completeMission(userId: number, id: string, result: string): Promise<MissionRecord | undefined> {

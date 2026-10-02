@@ -14,7 +14,7 @@ not been established. Broken means a concrete code path contradicts the target.
 The unrelated `chusky-voice` working-tree edits are excluded from this work.
 
 Current regression evidence: `VOICE_MAX_TOKENS=192 npm test` completed with
-**1,232 tests, 1,228 passed, 0 failed, 4 skipped**. The skips are the two
+**1,235 tests, 1,231 passed, 0 failed, 4 skipped**. The skips are the two
 platform-dependent PTY checks and two opt-in Recall staging checks. The run
 included the production coordinator, 200-step mixed soak, 30-day work-window
 simulation, process-crash probes, recovery sweeper, mission control, and
@@ -60,7 +60,7 @@ worker-dispatch suites.
 | Compensation | `autonomy/actions`; reliability persistence / native compensation | `autonomy-actions`, `reliability` tests | Untested: leased execution, provider read-back, approval and restart of compensation attached to a failed branch. |
 | Pause | `pauseMission`, `cancelMissionTasks`; native/API surfaces | `missions`, route tests | Untested: cancellation of in-flight provider/model work and late completion after pause across processes. |
 | Resume | `resumeMission`, `resumeMissionAndSchedule` | `missions`, `mission-approval`, `task-slice-proof`, `mission-timing`, `mission-recovery` tests | Partial repair: explicit waits, approved retries, no-progress repair, and provider-uncertain quarantine use distinct persisted paths; provider reconciliation is still required before replaying ambiguous work. |
-| Cancel | `cancelMission`, `cancelTask`; abort polling | `tasks`, `task-runner`, route tests | Untested: late external response, duplicate continuation and lease loss at every await. Cancellation cannot undo an already-dispatched provider effect. |
+| Cancel | `cancelMission`, `cancelMissionTasks`, `cancelTask`; abort polling; A2A REST/JSON-RPC cancellation | `missions`, `tasks`, `task-runner`, `sdk-api` route tests | Partial repair: A2A and owner/API cancellation now fan out across every active mission branch, and late slice settlement cannot mutate a cancelled terminal record. Cancellation cannot undo an already-dispatched provider effect; exhaustive cross-process late-response and lease-loss-at-every-await proof remains open. |
 | Budget preflight | `missionBudgetPreflight`; HTTP worker admission | `mission-timing`, `missions`, `mission-kernel-proof` | Partial repair: completed plan steps and worker slices are separate counters, `maxSlices` is independently enforced, and detailed agent outcomes charge repeated provider calls individually; live multi-worker budget contention remains open. |
 | Budget extend | `extendMissionDurationIfEligible`, duration approval | `mission-timing`, `mission-approval`, `mission-kernel-proof` tests | Partial repair: owner-approved duration extension is bounded by saved ceilings and only consumes on completed progress; general slice/tool/cost ceiling negotiation remains narrower than duration management. |
 | Budget reduce | `updateMissionControl`; native, SDK, and CLI mission control routes | `mission-control`, `mission-native-limits`, `sdk-api`, `cli-client` tests | Partial repair: the worker and owner-facing API/CLI can shrink saved budgets only within owner ceilings, preserve usage, and block with an exact resume action when the active frontier is exceeded; more adversarial concurrent reductions remain open. |

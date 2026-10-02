@@ -69,6 +69,28 @@ test("settling a slice records usage without reviving a blocked or paused missio
   assert.equal(accounted?.cost, 0.2);
 });
 
+test("late slice settlement cannot mutate a cancelled mission", async () => {
+  const userId = 951096;
+  const mission = await createMission(userId, input({ idempotencyKey: "late-cancelled-slice" }));
+  await startMission(userId, mission.id);
+  const cancelled = await cancelMission(userId, mission.id, "Owner cancelled the mission.");
+  assert.equal(cancelled?.status, "cancelled");
+
+  const late = await recordMissionSlice(userId, mission.id, {
+    checkpoint: "A late worker response arrived.",
+    nextAction: "Ignore the cancelled continuation.",
+    toolCalls: 4,
+    cost: 0.2,
+  });
+
+  assert.equal(late?.status, "cancelled");
+  assert.equal(late?.version, cancelled?.version);
+  assert.equal(late?.checkpoint, cancelled?.checkpoint);
+  assert.equal(late?.consumedSlices, cancelled?.consumedSlices);
+  assert.equal(late?.toolCalls, cancelled?.toolCalls);
+  assert.equal(late?.cost, cancelled?.cost);
+});
+
 test("uncertain external progress charges the slice before atomically blocking the mission", async () => {
   const userId = 951097;
   const mission = await createMission(userId, input({ idempotencyKey: "uncertain-external-slice" }));
