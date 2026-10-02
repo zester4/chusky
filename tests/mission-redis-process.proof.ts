@@ -6,6 +6,13 @@ import { expireMissionProofKeys, missionProofRedisKeys, runMissionProcess } from
 
 after(expireMissionProofKeys);
 
+test("concurrent real Redis claims on one client return exactly one durable owner", { timeout: 120000 }, async () => {
+  for (let run = 0; run < 3; run++) {
+    const proof = await runMissionProcess({ mode: "race", now: Date.UTC(2026, 0, 1), userId: randomInt(900000000, 999000000) });
+    assert.equal(proof.result?.taskStatus, "running");
+  }
+});
+
 test("real Redis coordinator completes with physically isolated keys", { timeout: 120000 }, async () => {
   assert.ok(process.env.MISSION_PROCESS_REDIS_URL, "Explicitly supply the user-authorized Redis connection.");
   const proof = await runMissionProcess({ mode: "run", now: Date.UTC(2026, 0, 1), userId: randomInt(900000000, 999000000) });

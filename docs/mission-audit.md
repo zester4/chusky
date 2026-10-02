@@ -240,3 +240,15 @@ and task identity. This is not exhaustive crash acceptance: shared-connection
 WATCH/MULTI atomicity, provider replay safety and recovery without a delivery
 still require separate repairs and proofs. Context7 ioredis documentation was
 consulted; installed client remains 5.11.1, and no client API was changed.
+
+### Shared-client claim race
+
+A real-account Redis regression launches eight simultaneous public task claims
+on the production store's shared client. The original WATCH/MULTI path failed
+the exactly-one-owner check. The claim path now compares the complete raw owner
+task record and writes its replacement in one Lua operation, returning success
+only when the comparison matches. Its first real-Redis rerun and a subsequent
+three-fixture repetition passed; the memory task suite (10 tests), typecheck
+and build also passed. Stored keys and formats
+are unchanged. Other WATCH/MULTI mutators are still under audit; this repair
+does not certify all task/mission transitions or cross-process races.

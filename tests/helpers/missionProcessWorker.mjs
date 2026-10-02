@@ -65,6 +65,14 @@ async function main() {
     fixture = { userId: input.userId, missionId: mission.id, taskId: (await store.getMission(input.userId, mission.id)).rootTaskId, scenario: input.scenario ?? "complete" };
   }
   if (input.mode === "prepare") return { fixture };
+  if (input.mode === "race") {
+    const claims = await Promise.all(Array.from({ length: 8 }, (_, index) => store.claimTask(fixture.userId, fixture.taskId, `racing-worker-${index}`, 10000)));
+    const winners = claims.filter(Boolean);
+    if (winners.length !== 1) throw new Error(`Concurrent claim returned ${winners.length} owners instead of one.`);
+    const current = await store.getTask(fixture.userId, fixture.taskId);
+    if (current?.lease?.token !== winners[0].lease.token) throw new Error("The successful claimant does not own the persisted lease.");
+    return { fixture, taskStatus: current.status };
+  }
   if (input.mode === "recover") {
     const current = await store.getMission(fixture.userId, fixture.missionId);
     if (current?.waiting?.kind === "provider_event") await store.resumeMissionFromProviderEvent(fixture.userId, fixture.missionId, "fixture", "exact-fixture-event");

@@ -10,7 +10,7 @@ import Redis from "ioredis";
 
 export type ProcessScenario = "complete" | "strict" | "timer" | "provider" | "approval" | "checkpoint" | "failure" | "prose" | "cancel" | "replan";
 export interface ProcessFixture { userId: number; missionId: string; taskId: string; scenario: ProcessScenario }
-export interface ProcessProofInput { mode: "prepare" | "run" | "recover"; now: number; userId?: number; fixture?: ProcessFixture; memoryOnly?: boolean; scenario?: ProcessScenario }
+export interface ProcessProofInput { mode: "prepare" | "run" | "recover" | "race"; now: number; userId?: number; fixture?: ProcessFixture; memoryOnly?: boolean; scenario?: ProcessScenario }
 export interface ProcessProofResult { fixture: ProcessFixture; missionStatus?: string; taskStatus?: string }
 
 let compiledDirectory: string | undefined;

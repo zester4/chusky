@@ -2679,14 +2679,13 @@ class RedisBackend implements Backend {
   async claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined> {
     const key = this.taskk(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
       const raw = await this.r.get(key);
       const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
       const index = tasks.findIndex((task) => task.id === id);
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
       const now = Date.now();
       const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
-      if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
+      if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
       // A timer/provider wait is a continuation of the same bounded slice,
       // not a retry. Do not consume another retry attempt when the durable
       // task wakes, otherwise a normal wait can exceed maxAttempts and enter
@@ -2696,8 +2695,19 @@ class RedisBackend implements Backend {
       const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
       const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
       tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
+      // WATCH belongs to the connection, not this invocation. Concurrent
+      // claims on a shared client can clear each other's watch on EXEC.
+      // Compare the entire owner record atomically so only one lease wins
+      // and changes to sibling tasks cannot be overwritten.
+      const result = await this.r.eval(`
+        local current = redis.call('GET', KEYS[1])
+        if ARGV[2] == 'missing' then
+          if current then return 0 end
+        elseif current ~= ARGV[1] then return 0 end
+        redis.call('SET', KEYS[1], ARGV[3])
+        return 1
+      `, 1, key, raw ?? "", raw === null ? "missing" : "present", JSON.stringify(tasks));
+      if (result === 1) return next;
     }
     return undefined;
   }
