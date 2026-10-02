@@ -12,6 +12,8 @@ import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeClock, MissionFakeQStash, MissionCrashInjector, MissionCrash } from "./helpers/missionKernelHarness.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { missionWorkerToolAllowlist } from "../src/missionWorker.js";
+import { beginExternalAction, failExternalAction } from "../src/autonomy/actions.js";
+import { executeCompensation, listCompensations } from "../src/reliability/persistence.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -147,6 +149,56 @@ test("proof an uncertain sibling action blocks even when another call and checkp
   const outcome = await settleMissionSlice({ task, mission: current, before, enqueue: queue.enqueue, result });
   assert.equal(outcome.status, "blocked", "Persisted progress must never conceal a dispatched uncertain sibling.");
   assert.match(outcome.nextAction ?? "", /inspect|verify|reconcile/i);
+});
+
+test("proof an uncertain mission write queues one durable compensation and never duplicates it", async () => {
+  const userId = 980015;
+  const mission = await createMission(userId, {
+    title: "Compensation path",
+    objective: "Recover safely from an uncertain provider write",
+    definitionOfDone: "The uncertain write is reconciled or compensated",
+    steps: [{ id: "send", title: "Send", objective: "Send one message", compensationObjective: "Undo the message if the provider confirms it was sent" }],
+  });
+  const claim = await beginExternalAction({
+    userId,
+    provider: "composio",
+    tool: "GMAIL_SEND_EMAIL",
+    args: { to: "owner@example.com", subject: "Mission test" },
+    runId: "run_compensation-proof",
+    source: { kind: "mission", id: mission.id, missionStepId: "send", occurrenceId: "occurrence-1" },
+  });
+  assert.equal(claim.state, "new");
+  await failExternalAction(userId, claim.logicalActionId, "provider timeout");
+  await failExternalAction(userId, claim.logicalActionId, "duplicate webhook retry");
+
+  const pending = await listCompensations(userId, ["pending"]);
+  assert.equal(pending.length, 1, "Repeated uncertainty must create one compensation record.");
+  assert.equal(pending[0]?.missionId, mission.id);
+  assert.equal(pending[0]?.missionStepId, "send");
+
+  let dispatches = 0;
+  const settled = await executeCompensation({
+    ownerId: userId,
+    id: pending[0]!.id,
+    approvalId: "approval_compensation-proof",
+    toolSlug: "GMAIL_DELETE_MESSAGE",
+    argumentsHash: "stable-compensation-args",
+    execute: async () => {
+      dispatches += 1;
+      return { summary: "provider state reconciled", externalReceiptId: "comp-receipt-1", verificationId: "comp-verify-1" };
+    },
+  });
+  assert.equal(settled?.status, "succeeded");
+  assert.equal(dispatches, 1);
+  assert.equal((await executeCompensation({
+    ownerId: userId,
+    id: pending[0]!.id,
+    approvalId: "different-approval",
+    toolSlug: "GMAIL_DELETE_MESSAGE",
+    argumentsHash: "stable-compensation-args",
+    execute: async () => { dispatches += 1; return { summary: "must not run", externalReceiptId: "duplicate", verificationId: "duplicate" }; },
+  }))?.status, "succeeded");
+  assert.equal(dispatches, 1, "A completed compensation must be idempotent across approval retries.");
 });
 
 test("proof per-call outcomes charge repeated provider calls individually", async () => {
