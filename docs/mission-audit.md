@@ -169,3 +169,35 @@ one passed, twelve failed, zero skipped** on each run. These are stable red
 regressions, not an acceptance pass. `git diff --check` passed afterwards.
 Exhaustive await/crash, independent recovery and budget-ceiling
 proofs remain outstanding, as do the runtime repairs.
+
+### Process-kill harness (in progress)
+
+`tests/helpers/missionProcessHarness.ts` compiles an isolated copy of the real
+production runtime with test-only probes before/after every project `await`.
+Probes run in child processes and the parent can issue `SIGKILL`; this does not
+throw a recoverable exception or execute worker `finally` cleanup. Production
+source and deployed builds contain no crash hooks. The production-coordinator
+instrumentation smoke test passed; real-store process recovery is a separate
+gate: `npm run test:mission:crash` with an isolated `MISSION_PROCESS_REDIS_URL`.
+That gate enumerates observed boundaries, kills/restarts each original task,
+and requires matching persisted mission and task terminal states. Fixtures now
+cover internal and strict completion, timer/provider/approval waits, checkpoint,
+failure, prose-only output, cancellation and replan. Memory-only coordinator
+smokes exercise these branches; they do not certify restart recovery or real
+provider writes. Cancellation before its request is durably persisted and
+approval before its exact action is recorded still need explicit recovery
+expectations, not a completion-shaped recovery script that bypasses authority.
+
+Additional red budget proofs require worker access to the existing resume
+control, extension and reduction inside explicit owner-approved ceilings, and
+separate plan-step versus slice accounting. The latest kernel run has 16 tests:
+1 passed and 15 failed, with no skips. No runtime budget repair is claimed.
+
+Local Node is **25.2.1**, installed TypeScript **5.9.3**; CI targets Node 22.
+An isolated, synthetic-only scratch Redis database was provisioned using the
+official agent scratch-storage service (ID
+`b3b38ec8-9c83-486e-8fce-0c627b53d8a1`, expires 2026-10-05). Its TCP endpoint
+times out (`ETIMEDOUT`) from this host. No token was written to repository files
+or logs; no production database was used. Docker startup did not expose an
+engine socket. The durable process-kill gate is therefore **not verified**;
+memory-only instrumentation does not substitute for cross-process persistence.

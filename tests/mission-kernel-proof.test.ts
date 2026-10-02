@@ -4,11 +4,14 @@ import {
   claimTask, checkpointMission, createMission, createTask, getMission, getTask, initStore,
   completeMissionStep, replanMission, renewTaskLease, resumeMissionFromProviderEvent,
   resumeMissionFromTimer, settleTaskRun, startMission, waitMission,
+  recordMissionSlice,
 } from "../src/store.js";
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
 import { captureMissionSliceState, missionSliceHasPersistedProgress } from "../src/missionWorker.js";
 import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeClock, MissionFakeQStash, MissionCrashInjector, MissionCrash } from "./helpers/missionKernelHarness.js";
+import { nativeTool } from "../src/nativeTools.js";
+import { missionWorkerToolAllowlist } from "../src/missionWorker.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -205,3 +208,45 @@ test("proof an accepted but lost publication is recoverable with the same task i
   assert.equal(queue.deliveries.length, 1, "A persisted provider workflow ID cannot strand queued work forever.");
   assert.equal(queue.deliveries[0].taskId, taskId, "Recovery must preserve the original work identity.");
 }));
+
+test("proof a worker extends and shrinks its budget only within the owner's saved ceilings", async () => {
+  const userId = 980014;
+  const queue = new MissionFakeQStash();
+  const contract = {
+    title: "Self-managed budget", objective: "Choose the needed allowance inside owner authority",
+    definitionOfDone: "Work fits the adjusted allowance without changing authority",
+    budget: { maxDurationSeconds: 600, maxSteps: 2, maxToolCalls: 4, maxCost: 1 },
+    budgetCeiling: { maxDurationSeconds: 3600, maxSteps: 20, maxToolCalls: 100, maxCost: 5 },
+    steps: [{ id: "unit", title: "Unit", objective: "Complete a verified unit" }],
+  };
+  const mission = await createMission(userId, contract);
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const runtime = { taskId: (await getMission(userId, mission.id))!.rootTaskId, missionId: mission.id, enqueueMissionTask: queue.enqueue };
+  await nativeTool(userId, "CHUCK_MISSION_RESUME", { id: mission.id, budget: { maxDurationSeconds: 1200, maxSteps: 10, maxToolCalls: 40, maxCost: 3 } }, runtime);
+  assert.equal((await getMission(userId, mission.id))?.budget.maxDurationSeconds, 1200, "A permitted extension cannot require another owner turn.");
+  await nativeTool(userId, "CHUCK_MISSION_RESUME", { id: mission.id, budget: { maxDurationSeconds: 900, maxSteps: 8, maxToolCalls: 30, maxCost: 2 } }, runtime);
+  assert.equal((await getMission(userId, mission.id))?.budget.maxDurationSeconds, 900, "The worker must be able to shrink unused allowance.");
+  assert.equal((await getMission(userId, mission.id))?.budget.maxCost, 2);
+  await assert.rejects(nativeTool(userId, "CHUCK_MISSION_RESUME", { id: mission.id, budget: { maxCost: 6 } }, runtime), /approval|ceiling/i);
+  assert.equal((await getMission(userId, mission.id))?.budget.maxCost, 2, "Exceeding a ceiling cannot silently authorize more spend.");
+});
+
+test("proof the worker can reach its existing budget-control tool inside a fenced step", () => {
+  assert.ok(missionWorkerToolAllowlist([])?.includes("CHUCK_MISSION_RESUME"), "Budget adjustment must not depend on an unavailable supervisor control.");
+});
+
+test("proof plan-step accounting is independent of healthy slice accounting", async () => {
+  const userId = 980015;
+  const contract = {
+    title: "Many slices, two plan steps", objective: "Advance a long unit without consuming another plan step",
+    definitionOfDone: "Both plan steps verified", budget: { maxSteps: 2, maxSlices: 200 },
+    steps: [{ id: "a", title: "A", objective: "Persist several intermediate results" }, { id: "b", title: "B", objective: "Verify the result", dependsOn: ["a"] }],
+  };
+  const mission = await createMission(userId, contract);
+  await startMission(userId, mission.id);
+  for (let slice = 0; slice < 10; slice++) {
+    const accounted = await recordMissionSlice(userId, mission.id, { checkpoint: `Verified unit frontier ${slice}`, nextAction: "Advance the next frontier", toolCalls: 1 });
+    assert.equal(accounted?.status, "running", "Intermediate slices cannot exhaust a two-step plan's allowance.");
+  }
+});
