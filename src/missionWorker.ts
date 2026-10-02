@@ -20,6 +20,7 @@ export const MISSION_WORKER_CONTROL_TOOLS = [
   "CHUCK_MISSION_BLOCK",
   "CHUCK_MISSION_REPLAN",
   "CHUCK_MISSION_REPAIR",
+  "CHUCK_MISSION_RESUME",
 ] as const;
 
 export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
@@ -52,10 +53,10 @@ export function captureMissionSliceState(task?: TaskRecord, mission?: MissionRec
       activeStepIds: mission.activeStepIds,
       steps: mission.steps,
       evidence: mission.evidence,
+      events: [],
       // Lease acquisition/release is worker coordination, not mission work.
       // Exclude it so a model turn with no action cannot masquerade as
       // progress merely because the execution lease changed.
-      events: mission.events.filter((event) => event.type !== "lease_acquired" && event.type !== "lease_released"),
     } : undefined,
   };
 }

@@ -864,6 +864,8 @@ export interface MissionBudget {
   automaticExtensionSeconds?: number;
   maxAutomaticExtensions?: number;
   maxSteps: number;
+  /** Maximum durable execution slices; separate from completed plan steps. */
+  maxSlices?: number;
   maxToolCalls: number;
   maxCost: number;
 }
@@ -964,9 +966,13 @@ export interface MissionRecord {
   nextAction?: string;
   waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number };
   budget: MissionBudget;
+  /** Owner-saved upper bounds for bounded worker budget adjustments. */
+  budgetCeiling?: Partial<MissionBudget>;
   workSchedule?: MissionWorkSchedule;
   timing?: { activeMs: number; activeSince?: number; extensionsUsed: number; lastExtensionProgress?: string };
   consumedSteps: number;
+  /** Durable worker slices consumed; retained separately from plan-step count. */
+  consumedSlices?: number;
   toolCalls: number;
   cost: number;
   idempotencyKey?: string;
@@ -2487,7 +2493,10 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
       const existing = tasks.find((item) => item.id === task.id);
       if (existing) { await this.r.unwatch(); return existing; }
-      const result = await this.r.multi().set(key, JSON.stringify([...tasks, task].slice(-100))).exec();
+      const retained = [...tasks, task];
+      const unfinished = retained.filter((item) => !["completed", "cancelled"].includes(item.status));
+      const finished = retained.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100);
+      const result = await this.r.multi().set(key, JSON.stringify([...unfinished, ...finished])).exec();
       if (result) return task;
     }
     throw new Error("Task creation changed concurrently; please retry");
@@ -2519,7 +2528,8 @@ class RedisBackend implements Backend {
       const current = index < 0 ? undefined : tasks[index];
       const now = Date.now();
       const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:")) || claimActive) { await this.r.unwatch(); return undefined; }
+      const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:");
+      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -2706,7 +2716,7 @@ class RedisBackend implements Backend {
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
       const now = Date.now();
       const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
-      if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
+      if (!task || (task.status !== "queued" && !expiredRunning) || (expiredRunning && task.lease?.workerId === workerId) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
       // A timer/provider wait is a continuation of the same bounded slice,
       // not a retry. Do not consume another retry attempt when the durable
       // task wakes, otherwise a normal wait can exceed maxAttempts and enter
@@ -3634,7 +3644,8 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const existing = tasks.find((item) => item.id === task.id);
     if (existing) return normalizeTask(existing);
-    this.tasks.set(userId, [...tasks, task].slice(-100));
+    const retained = [...tasks, task];
+    this.tasks.set(userId, [...retained.filter((item) => !["completed", "cancelled"].includes(item.status)), ...retained.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100)]);
     return task;
   }
   async compareAndUpdateTask(userId: number, id: string, expectedVersion: number, next: TaskRecord) {
@@ -3642,7 +3653,9 @@ class MemoryBackend implements Backend {
     const index = tasks.findIndex((task) => task.id === id);
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
     if (!current || current.version !== expectedVersion) return undefined;
-    const nextList = [...tasks]; nextList[index] = next; this.tasks.set(userId, nextList.slice(-100)); return next;
+    const nextList = [...tasks]; nextList[index] = next;
+    this.tasks.set(userId, [...nextList.filter((item) => !["completed", "cancelled"].includes(item.status)), ...nextList.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100)]);
+    return next;
   }
   async claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number) {
     const tasks = this.tasks.get(userId) ?? [];
@@ -3650,7 +3663,8 @@ class MemoryBackend implements Backend {
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
     const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-    if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:")) || claimActive) return undefined;
+    const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:");
+    if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
     const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
@@ -3700,7 +3714,7 @@ class MemoryBackend implements Backend {
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
     const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
-    if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
+    if (!task || (task.status !== "queued" && !expiredRunning) || (expiredRunning && task.lease?.workerId === workerId) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
     // A timer/provider wait is a continuation of the same bounded slice, not
     // a retry. Preserve the attempt number across that wake so ordinary waits
     // cannot consume the task's retry budget.
@@ -5773,9 +5787,11 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       automaticExtensionSeconds: Math.max(0, Math.min(3600, Math.floor(numeric(budget.automaticExtensionSeconds, 0)))),
       maxAutomaticExtensions: Math.max(0, Math.min(10, Math.floor(numeric(budget.maxAutomaticExtensions, 0)))),
       maxSteps: Math.max(1, Math.min(1000, Math.floor(numeric(budget.maxSteps, DEFAULT_MISSION_BUDGET.maxSteps)))),
+      maxSlices: Math.max(1, Math.min(100000, Math.floor(numeric(budget.maxSlices, 1000)))),
       maxToolCalls: Math.max(1, Math.min(10000, Math.floor(numeric(budget.maxToolCalls, DEFAULT_MISSION_BUDGET.maxToolCalls)))),
       maxCost: Math.max(0, Math.min(10000, numeric(budget.maxCost, DEFAULT_MISSION_BUDGET.maxCost))),
     },
+    ...(mission.budgetCeiling && typeof mission.budgetCeiling === "object" ? { budgetCeiling: { ...mission.budgetCeiling } } : {}),
     ...(mission.workSchedule && typeof mission.workSchedule === "object" ? {
       workSchedule: {
         timezone: String(mission.workSchedule.timezone ?? "UTC").trim().slice(0, 100),
@@ -5792,6 +5808,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.timing?.lastExtensionProgress === "string" ? { lastExtensionProgress: mission.timing.lastExtensionProgress.slice(0, 17000) } : {}),
     } : mission.timing,
     consumedSteps: Math.max(0, Number(mission.consumedSteps) || 0),
+    consumedSlices: Math.max(0, Number(mission.consumedSlices) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
     activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, MAX_MISSION_PLAN_STEPS) : undefined,
@@ -5824,6 +5841,7 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   id?: string;
   idempotencyKey?: string;
   budget?: Partial<MissionBudget>;
+  budgetCeiling?: Partial<MissionBudget>;
   requiredEvidence?: string[];
   verificationMode?: "legacy" | "strict";
   workSchedule?: MissionWorkSchedule;
@@ -5945,6 +5963,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     currentStepId: ready.id,
     activeStepIds: undefined,
     budget: { ...DEFAULT_MISSION_BUDGET, ...(input.budget ?? {}), durationMode: input.budget?.durationMode ?? "active" },
+    ...(input.budgetCeiling ? { budgetCeiling: { ...input.budgetCeiling } } : {}),
     ...(input.workSchedule ? { workSchedule: { ...input.workSchedule } } : {}),
     timing: { activeMs: 0, extensionsUsed: 0 },
     consumedSteps: 0,
@@ -6064,7 +6083,7 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       const dependencies = step.dependsOn ?? [];
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
       const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
-      return { id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
@@ -6110,7 +6129,7 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     }
     const next = nextActive.map((candidate) => steps.find((item) => item.id === candidate)).find(Boolean);
     const newlyStarted = ready.filter((candidate) => nextActive.includes(candidate.id));
-    return { steps, activeStepIds: nextActive, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
+    return { steps, activeStepIds: nextActive, currentStepId: next?.id, consumedSteps: mission.consumedSteps + 1, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
   });
 }
 
@@ -6293,13 +6312,21 @@ export async function pauseMission(userId: number, id: string, reason = "Mission
   return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "paused", error: reason, waiting: undefined, events: [...mission.events, missionEvent("paused", reason)] });
 }
 
-export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
+export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number, budgetPatch?: Partial<MissionBudget>): Promise<MissionRecord | undefined> {
   if (maxDurationSeconds !== undefined && (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 2592000)) throw new Error("Mission duration must be an integer between 60 and 2592000 seconds.");
   return mutateMission(userId, id, (mission) => {
     const ownerInputWait = mission.status === "waiting" && mission.waiting?.kind === "human_input";
     if (!["paused", "blocked", "failed", "running"].includes(mission.status) && !ownerInputWait) return undefined;
     if (maxDurationSeconds !== undefined && maxDurationSeconds < mission.budget.maxDurationSeconds) throw new Error("Resume can only extend the existing duration budget.");
-    const budget = { ...mission.budget, maxDurationSeconds: maxDurationSeconds ?? mission.budget.maxDurationSeconds };
+    const requestedBudget = { ...(budgetPatch ?? {}), ...(maxDurationSeconds === undefined ? {} : { maxDurationSeconds }) };
+    const ceiling = mission.budgetCeiling ?? {};
+    for (const field of ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const) {
+      const value = requestedBudget[field];
+      const limit = ceiling[field];
+      if (value !== undefined && limit !== undefined && value > limit) throw new Error(`Requested mission ${field} exceeds the owner's saved ceiling.`);
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new Error(`Requested mission ${field} is invalid.`);
+    }
+    const budget = { ...mission.budget, ...requestedBudget };
     const events = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds
       ? [...mission.events, missionEvent("checkpointed", `Owner-authorized duration budget changed from ${mission.budget.maxDurationSeconds} to ${budget.maxDurationSeconds} seconds; original start and usage retained.`)] : mission.events;
     const preflight = missionBudgetPreflight({ ...mission, budget });
@@ -6351,6 +6378,7 @@ export async function listMissionOwnerIds(): Promise<number[]> {
 export async function resumeMissionFromTimer(userId: number, id: string, runAt: number): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
     if (mission.status !== "waiting" || mission.waiting?.kind !== "timer" || mission.waiting.runAt !== runAt) return undefined;
+    if (Date.now() < runAt) return undefined;
     return {
       status: "running",
       waiting: undefined,
@@ -6450,12 +6478,12 @@ export async function waitMission(userId: number, id: string, waiting: MissionRe
 export async function resumeMissionFromProviderEvent(userId: number, id: string, provider: string, providerEventId: string): Promise<MissionRecord | undefined> {
   const initial = await getMission(userId, id);
   if (!initial) return undefined;
-  if (initial.status === "running" && initial.events.some((event) => event.type === "resumed" && event.message.includes(providerEventId))) return initial;
+  if (initial.status === "running" && initial.events.some((event) => event.type === "resumed" && event.provider === provider && event.providerEventId === providerEventId)) return initial;
   return mutateMission(userId, id, (mission) => {
     const waiting = mission.waiting;
     if (mission.status !== "waiting" || waiting?.kind !== "provider_event" || waiting.provider !== provider || waiting.providerEventId !== providerEventId) return undefined;
     const now = Date.now();
-    return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now)] };
+    return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, { ...missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now), provider, providerEventId }] };
   });
 }
 
@@ -6467,20 +6495,21 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
   const saved = await mutateMission(userId, id, (mission) => {
     if (mission.status === "queued") return undefined;
     const now = Date.now();
-    const consumedSteps = mission.consumedSteps + 1;
+    const consumedSteps = mission.consumedSteps;
+    const consumedSlices = (mission.consumedSlices ?? 0) + 1;
     const toolCalls = mission.toolCalls + (Number.isFinite(input.toolCalls) ? Math.max(0, Math.floor(input.toolCalls ?? 0)) : 0);
     const cost = mission.cost + (typeof input.cost === "number" && Number.isFinite(input.cost) ? Math.max(0, input.cost) : 0);
     if (mission.status !== "running") return { consumedSteps, toolCalls, cost };
     const durationPreflight = missionBudgetPreflight(mission, { steps: 0 });
     const durationExceeded = durationPreflight.remaining.durationSeconds <= 0;
-    const budgetExceeded = durationExceeded || consumedSteps > mission.budget.maxSteps || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
-    const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSteps > mission.budget.maxSteps ? "Mission step budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
+    const budgetExceeded = durationExceeded || consumedSlices > (mission.budget.maxSlices ?? 1000) || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
+    const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSlices > (mission.budget.maxSlices ?? 1000) ? "Mission slice budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
     const blocked = Boolean(input.blockedReason?.trim()) || budgetExceeded;
     const blockedReason = input.blockedReason?.trim().slice(0, 2000) || reason;
     const nextAction = blocked
       ? budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction
       : input.nextAction?.slice(0, 2000) ?? mission.nextAction;
-    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
+    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, consumedSlices, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
   return saved;

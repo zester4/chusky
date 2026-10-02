@@ -1719,6 +1719,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_MISSION_RESUME": {
       const missionId = text(args.id);
       const existing = await getMission(userId, missionId);
+      const workerBudget = args.budget && typeof args.budget === "object" && !Array.isArray(args.budget) ? args.budget as Record<string, unknown> : undefined;
+      const budgetPatch = workerBudget ? Object.fromEntries(["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"].filter((key) => workerBudget[key] !== undefined).map((key) => [key, Number(workerBudget[key])])) : undefined;
       if (args.maxDurationSeconds !== undefined && !runtime.approvedApprovalId) {
         // A model must never create a second prose-driven approval for an
         // exhausted mission. Reuse the canonical owner approval so the UI
@@ -1748,7 +1750,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           if (requested) throw new MissionDurationApprovalRequiredError(requested.approval.id, requested.approval.args);
         }
       }
-      const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds));
+      const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds), budgetPatch as any);
       if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");
       return mission;
     }

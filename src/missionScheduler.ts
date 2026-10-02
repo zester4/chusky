@@ -110,7 +110,7 @@ export async function reconcileMissionExecution(userId: number, missionId: strin
 }
 
 /** Idempotently resume or repair scheduling for a mission that is already running. */
-export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
+export async function resumeMissionAndSchedule(userId: number, missionId: string, enqueue: MissionTaskEnqueuer, maxDurationSeconds?: number, budgetPatch?: import("./store.js").MissionBudget): Promise<MissionRecord | undefined> {
   const current = await getMission(userId, missionId);
   if (!current) return undefined;
   // A timer-waiting mission is already the owner of the correct durable task.
@@ -123,14 +123,14 @@ export async function resumeMissionAndSchedule(userId: number, missionId: string
     const resumedFromTimer = await resumeMissionFromTimer(userId, missionId, runAt);
     if (!resumedFromTimer) return await getMission(userId, missionId);
     if (resumedFromTimer.status !== "running") return resumedFromTimer;
-    const resumed = maxDurationSeconds === undefined
+    const resumed = maxDurationSeconds === undefined && !budgetPatch
       ? resumedFromTimer
-      : await resumeMission(userId, missionId, maxDurationSeconds);
+      : await resumeMission(userId, missionId, maxDurationSeconds, budgetPatch);
     if (!resumed || resumed.status !== "running") return resumed ?? await getMission(userId, missionId);
     return reconcileMissionExecution(userId, missionId, enqueue);
   }
   if (maxDurationSeconds === undefined) await extendMissionDurationIfEligible(userId, missionId);
-  const resumed = await resumeMission(userId, missionId, maxDurationSeconds);
+  const resumed = await resumeMission(userId, missionId, maxDurationSeconds, budgetPatch);
   if (!resumed) return undefined;
   if (resumed.status !== "running") return resumed;
   return reconcileMissionExecution(userId, missionId, enqueue);
@@ -226,7 +226,8 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
     // treat an expired marker as recoverable rather than waiting forever.
     const pendingClaimExpired = task.workflowRunId?.startsWith("pending:") === true
       && (!task.enqueueClaim || task.enqueueClaim.expiresAt <= Date.now());
-    if (shouldEnqueue || (task.status === "queued" && (!task.workflowRunId || pendingClaimExpired))) {
+    const overduePublished = task.status === "queued" && typeof task.runAt === "number" && task.runAt <= now && Boolean(task.workflowRunId) && !task.workflowRunId?.startsWith("pending:");
+    if (shouldEnqueue || (task.status === "queued" && (!task.workflowRunId || pendingClaimExpired || overduePublished))) {
       const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? now, enqueue);
       if (workflowRunId) enqueuedStepIds.add(stepId);
     }

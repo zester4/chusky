@@ -3,7 +3,8 @@ import { captureMissionSliceState, missionSliceHasPersistedProgress, missionNoPr
 import { reconcileMissionExecution, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import type { TaskRunResult } from "./taskRunner.js";
 
-export interface MissionSliceResult { text: string; toolsUsed: string[]; toolsSucceeded?: string[]; cost?: number }
+export interface MissionToolOutcome { callId: string; toolSlug: string; status: "succeeded" | "failed" | "uncertain"; dispatched?: boolean; receiptId?: string }
+export interface MissionSliceResult { text: string; toolsUsed: string[]; toolsSucceeded?: string[]; toolOutcomes?: MissionToolOutcome[]; cost?: number }
 
 export interface MissionSliceInput {
   task: TaskRecord;
@@ -16,9 +17,15 @@ export interface MissionSliceInput {
 
 /** Production post-turn accounting and dependency handoff, independent of HTTP. */
 export async function settleMissionSlice({ task, mission, currentMissionStep, result, before, enqueue }: MissionSliceInput): Promise<TaskRunResult> {
+  const uncertainExternal = (result.toolOutcomes ?? []).some((outcome) => outcome.status === "uncertain" && outcome.dispatched !== false && !outcome.toolSlug.startsWith("CHUCK_"));
   const currentMissionBeforeAccounting = await getMission(task.userId, mission.id);
   const currentTaskAfterTurn = await getTask(task.userId, task.id);
   const missionSliceAfter = captureMissionSliceState(currentTaskAfterTurn, currentMissionBeforeAccounting);
+  if (uncertainExternal) {
+    const message = `Mission worker has an uncertain dispatched provider action for ${currentMissionStep?.title ?? "the active step"}. The outcome must be reconciled before any retry.`;
+    const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", toolCalls: result.toolsUsed.length, cost: result.cost, blockedReason: message });
+    return { status: "blocked", message: accounted?.error ?? message, checkpoint: accounted?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known." };
+  }
   if (!missionSliceHasPersistedProgress(before, missionSliceAfter)) {
     const externalAttempt = result.toolsUsed.some((tool) => !tool.startsWith("CHUCK_"));
     const noProgressMessage = externalAttempt
