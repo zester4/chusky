@@ -266,3 +266,20 @@ mission and task then complete through real native dispatch and settlement.
 Three repeated runs of normal completion, early timer and human wait/resume
 each passed all three tests without skips. Typecheck and build passed. This
 does not prove notification delivery or live human-input transport behavior.
+
+### 200-step coordinator proof
+
+Creation and replanning previously rejected plans above 100 steps, and store
+normalization silently truncated persisted dependency graphs at 100. The
+internal bound is now 1,000; normalization preserves the full graph. Execution
+budgets and approval authority are unchanged. The full coordinator's 200-step
+mixed soak passed in three repeated runs: 200 distinct confirmed fixture
+effects, 200 completed steps, strict verification, dependency joins, timer and
+provider waits, approvals, a replan, forced failures, and duplicate/reordered
+deliveries. Restoring the old read-time truncation made the proof fail with
+100 versus 200 outcomes; removing that mutation restored the repair.
+The existing mission/worker suite passed 32 tests with no skips; typecheck and
+build passed. This is an internal deterministic runtime proof, not public
+contract parity: tool schemas, SDK/API bounds and release artifacts still need
+alignment. It also does not certify live provider effects, exhaustive crashes,
+arbitrary plan growth beyond the current bound, or the 30-day work schedule.

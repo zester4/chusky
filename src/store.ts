@@ -5703,6 +5703,7 @@ export async function getTask(userId: number, id: string): Promise<TaskRecord | 
 }
 
 const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
+const MAX_MISSION_PLAN_STEPS = 1000;
 
 function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string, metadata?: MissionEventRecord["metadata"]): MissionEventRecord {
   return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, ...(stepId ? { stepId } : {}), ...(metadata ? { metadata } : {}) };
@@ -5717,7 +5718,9 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     objective: String(mission.objective ?? "").slice(0, 8000),
     definitionOfDone: String(mission.definitionOfDone ?? "").slice(0, 4000),
     status: ["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"].includes(mission.status) ? mission.status : "failed",
-    steps: (mission.steps ?? []).slice(0, 100).map((step) => ({
+    // A read must never truncate a persisted dependency graph. Bound new
+    // plans at creation/replan, not while restoring durable state.
+    steps: (mission.steps ?? []).map((step) => ({
       ...step,
       id: String(step.id).slice(0, 160),
       title: String(step.title ?? "Mission step").slice(0, 240),
@@ -5843,7 +5846,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     throw new Error("Strict mission verification requires at least one non-empty required evidence criterion.");
   }
   if (input.steps !== undefined && !Array.isArray(input.steps)) throw new Error("Mission steps must be an array");
-  if (input.steps && input.steps.length > 100) throw new Error("Mission plans can contain at most 100 steps");
+  if (input.steps && input.steps.length > MAX_MISSION_PLAN_STEPS) throw new Error(`Mission plans can contain at most ${MAX_MISSION_PLAN_STEPS} steps`);
   if (input.steps?.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every mission step must be an object");
   for (const [index, step] of (input.steps ?? []).entries()) {
     if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Mission step ${index + 1} has an invalid ID`);
@@ -5985,7 +5988,7 @@ export class MissionReplanConflictError extends Error {
 }
 
 export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; allowedTools?: string[] }>, reason: string): Promise<MissionRecord | undefined> {
-  if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > 100) throw new Error("Replanned missions require between 1 and 100 steps");
+  if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > MAX_MISSION_PLAN_STEPS) throw new Error(`Replanned missions require between 1 and ${MAX_MISSION_PLAN_STEPS} steps`);
   if (!reason?.trim() || reason.length > 2000) throw new Error("A replan reason is required and must be 2000 characters or fewer");
   if (rawSteps.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every replanned mission step must be an object");
   for (const [index, step] of rawSteps.entries()) {
