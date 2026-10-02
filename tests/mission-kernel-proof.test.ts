@@ -88,6 +88,13 @@ test("proof provider replay uses exact provider and event identity", async () =>
   await startMission(mission.userId, mission.id);
   await waitMission(mission.userId, mission.id, { kind: "provider_event", provider: "gmail", providerEventId: "event-123", stepId: "event" });
   assert.ok(await resumeMissionFromProviderEvent(mission.userId, mission.id, "gmail", "event-123"));
+  // A webhook retry after resume must remain schedulable even if the first
+  // process died between the mission CAS and its task publication.
+  const queue = new MissionFakeQStash();
+  const resumedAgain = await resumeMissionFromProviderEvent(mission.userId, mission.id, "gmail", "event-123");
+  assert.equal(resumedAgain?.status, "running");
+  const scheduled = await reconcileMissionExecution(mission.userId, mission.id, queue.enqueue);
+  assert.ok(scheduled?.activeStepIds?.includes("event"));
   assert.equal(await resumeMissionFromProviderEvent(mission.userId, mission.id, "different-provider", "123"), undefined);
 });
 

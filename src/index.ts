@@ -172,10 +172,16 @@ async function persistCalendarMeetingPreparation(userId: number, eventId: string
  */
 async function resumeMissionsFromComposioEvent(userId: number, providerEventId: string): Promise<number> {
   let resumedCount = 0;
-  const waitingMissions = await listMissions(userId, ["waiting"]);
-  for (const mission of waitingMissions) {
-    if (mission.waiting?.kind !== "provider_event" || mission.waiting.provider !== "composio" || mission.waiting.providerEventId !== providerEventId) continue;
-    const resumed = await resumeMissionFromProviderEvent(userId, mission.id, "composio", providerEventId);
+  // A signed webhook can be retried after the process resumes the mission but
+  // before it publishes the continuation. Include running missions whose
+  // durable history already records this exact resume so that the retry can
+  // repair scheduling instead of treating the event as fully handled.
+  const candidateMissions = await listMissions(userId, ["waiting", "running"]);
+  for (const mission of candidateMissions) {
+    const waitingForEvent = mission.waiting?.kind === "provider_event" && mission.waiting.provider === "composio" && mission.waiting.providerEventId === providerEventId;
+    const alreadyResumed = mission.status === "running" && mission.events.some((event) => event.type === "resumed" && event.provider === "composio" && event.providerEventId === providerEventId);
+    if (!waitingForEvent && !alreadyResumed) continue;
+    const resumed = waitingForEvent ? await resumeMissionFromProviderEvent(userId, mission.id, "composio", providerEventId) : mission;
     if (!resumed) continue;
     // A mission may have several independent branches. Re-scheduling the
     // dependency-ready set wakes the exact waiting branch instead of assuming
