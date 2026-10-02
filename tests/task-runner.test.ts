@@ -142,6 +142,19 @@ test("blocked executions retain their checkpoint and emit an audit event", async
   assert.equal(run.task?.events.at(-1)?.type, "blocked");
 });
 
+test("lease-loss failures block instead of retrying a possibly dispatched native task", async () => {
+  const userId = 840011;
+  const task = await createTask(userId, { title: "Lease loss", objective: "Preserve the durable checkpoint", missionAllowedTools: ["CHUCK_MISSION_CHECKPOINT"] });
+  const run = await executeDurableTask({ userId, taskId: task.id }, {
+    workerId: "lease-loss-worker",
+    execute: async () => { throw new Error("Task lease was lost while the worker was executing."); },
+  });
+  assert.equal(run.task?.status, "blocked");
+  assert.match(run.task?.nextAction ?? "", /native-only|checkpoint/i);
+  assert.doesNotMatch(run.task?.nextAction ?? "", /provider receipt|read-back/i);
+  assert.equal(run.task?.events.at(-1)?.type, "blocked");
+});
+
 test("an in-turn task completion is not misreported as a lost lease failure", async () => {
   const userId = 840005;
   const task = await createTask(userId, { title: "Complete in turn", objective: "Exercise lifecycle handoff" });

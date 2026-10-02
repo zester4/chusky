@@ -30,6 +30,21 @@ function missionTasks(tasks: Awaited<ReturnType<typeof listTasks>>, missionId: s
   return tasks.filter((task) => task.missionId === missionId);
 }
 
+function expiredLeaseRecoveryText(task: Awaited<ReturnType<typeof listTasks>>[number]): { reason: string; nextAction: string } {
+  const allowed = task.missionAllowedTools ?? [];
+  const externalTools = allowed.filter((tool) => !tool.startsWith("CHUCK_"));
+  if (allowed.length > 0 && externalTools.length === 0) {
+    return {
+      reason: `Mission worker lease expired while native-only step ${task.missionStepId ?? "unknown"} was in flight. No external provider tool was authorized for this step, so no provider receipt is expected; the saved checkpoint and task events remain the authoritative progress record.`,
+      nextAction: "Review the saved checkpoint and task events, then repair or resume this same mission from the exact next action. Do not retry an external action that was not authorized.",
+    };
+  }
+  return {
+    reason: `Mission worker lease expired while step ${task.missionStepId ?? "unknown"} was in flight. Provider outcome is uncertain; no automatic replay was attempted.`,
+    nextAction: "Inspect the provider receipt or read-back for this step, then repair or resume the mission explicitly.",
+  };
+}
+
 /**
  * Reconcile durable mission control state independently of provider delivery.
  * This is deliberately conservative: an expired in-flight lease is
@@ -70,8 +85,7 @@ export async function recoverMissionsForOwner(
 
       const expired = tasks.find((task) => task.status === "running" && task.lease && task.lease.expiresAt <= now);
       if (expired) {
-        const reason = `Mission worker lease expired while step ${expired.missionStepId ?? "unknown"} was in flight. Provider outcome is uncertain; no automatic replay was attempted.`;
-        const nextAction = "Inspect the provider receipt or read-back for this step, then repair or resume the mission explicitly.";
+        const { reason, nextAction } = expiredLeaseRecoveryText(expired);
         const quarantined = await quarantineExpiredTask(userId, expired.id, reason, nextAction);
         if (quarantined) {
           await blockMission(userId, mission.id, reason, nextAction);
