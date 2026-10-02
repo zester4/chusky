@@ -342,11 +342,16 @@ paths:
                 automaticExtensionSeconds: { type: integer, minimum: 0, maximum: 3600, default: 0 }
                 maxAutomaticExtensions: { type: integer, minimum: 0, maximum: 10, default: 0 }
                 maxSteps: { type: integer, minimum: 1, maximum: 1000 }
+                maxSlices: { type: integer, minimum: 1, maximum: 100000 }
                 maxToolCalls: { type: integer, minimum: 1, maximum: 10000 }
                 maxCost: { type: number, minimum: 0, maximum: 10000 }
+                workSchedule: { $ref: '#/components/schemas/MissionWorkSchedule' }
+                budgetCeiling: { $ref: '#/components/schemas/MissionBudgetCeiling' }
       responses: { '201': { description: Mission started with persisted timing and bounded extension usage } }
   /missions/{missionId}:
     get: { summary: Get an autonomous mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission record } } }
+  /missions/{missionId}/doctor:
+    get: { summary: Explain the current durable mission state and exact safe next action, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Bounded read-only mission diagnosis } } }
   /missions/{missionId}/events:
     get: { summary: List mission lifecycle events, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission events } } }
     post: { summary: Resume a mission for its exact expected provider event, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Continuation queued } } }
@@ -364,6 +369,20 @@ paths:
     post: { summary: Pause a mission and cancel active slices, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Paused mission } } }
   /missions/{missionId}/resume:
     post: { summary: Resume a paused, blocked, or failed mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Resumed mission } } }
+  /missions/{missionId}/control:
+    post:
+      summary: Adjust an unfinished mission budget or work schedule within its owner-saved ceiling
+      parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                budget: { $ref: '#/components/schemas/MissionBudgetCeiling' }
+                workSchedule: { $ref: '#/components/schemas/MissionWorkSchedule' }
+      responses: { '200': { description: Updated mission policy } }
   /missions/{missionId}/replan:
     post: { summary: Replace the unfinished portion of a mission plan while preserving completed work, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Replanned mission } } }
   /missions/{missionId}/steps/{stepId}/complete:
@@ -540,6 +559,25 @@ components:
   securitySchemes:
     bearerAuth: { type: http, scheme: bearer }
   schemas:
+    MissionBudgetCeiling:
+      type: object
+      additionalProperties: false
+      properties:
+        maxDurationSeconds: { type: integer, minimum: 60, maximum: 2592000 }
+        maxSteps: { type: integer, minimum: 1, maximum: 1000 }
+        maxSlices: { type: integer, minimum: 1, maximum: 100000 }
+        maxToolCalls: { type: integer, minimum: 1, maximum: 10000 }
+        maxCost: { type: number, minimum: 0, maximum: 10000 }
+    MissionWorkSchedule:
+      type: object
+      additionalProperties: false
+      required: [timezone, windowStart, windowEnd, dailyBudgetSeconds, cadenceSeconds]
+      properties:
+        timezone: { type: string, maxLength: 100 }
+        windowStart: { type: string, pattern: '^(?:[01]\d|2[0-3]):[0-5]\d$' }
+        windowEnd: { type: string, pattern: '^(?:[01]\d|2[0-3]):[0-5]\d$' }
+        dailyBudgetSeconds: { type: integer, minimum: 60, maximum: 86400 }
+        cadenceSeconds: { type: integer, minimum: 60, maximum: 86400 }
     Compensation:
       type: object
       required: [id, ownerId, originalActionId, provider, objective, status, attempts, maxAttempts, idempotencyKey, createdAt, updatedAt]

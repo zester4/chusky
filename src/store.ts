@@ -864,8 +864,18 @@ export interface MissionBudget {
   automaticExtensionSeconds?: number;
   maxAutomaticExtensions?: number;
   maxSteps: number;
+  /** Maximum durable execution slices; separate from completed plan steps. */
+  maxSlices?: number;
   maxToolCalls: number;
   maxCost: number;
+}
+
+export interface MissionWorkSchedule {
+  timezone: string;
+  windowStart: string;
+  windowEnd: string;
+  dailyBudgetSeconds: number;
+  cadenceSeconds: number;
 }
 
 export interface MissionEvidenceRecord {
@@ -956,8 +966,13 @@ export interface MissionRecord {
   nextAction?: string;
   waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number };
   budget: MissionBudget;
+  /** Owner-saved upper bounds for bounded worker budget adjustments. */
+  budgetCeiling?: Partial<MissionBudget>;
+  workSchedule?: MissionWorkSchedule;
   timing?: { activeMs: number; activeSince?: number; extensionsUsed: number; lastExtensionProgress?: string };
   consumedSteps: number;
+  /** Durable worker slices consumed; retained separately from plan-step count. */
+  consumedSlices?: number;
   toolCalls: number;
   cost: number;
   idempotencyKey?: string;
@@ -971,6 +986,8 @@ export interface MissionRecord {
   evidence?: MissionEvidenceRecord[];
   verification?: MissionVerification;
   lease?: MissionLease;
+  /** Independent worker leases for concurrently running dependency branches. */
+  executionLeases?: Record<string, MissionLease>;
   /** A2A context supplied by the delegating agent; optional for legacy missions. */
   a2aContextId?: string;
   a2aPushNotifications?: MissionA2APushNotificationConfig[];
@@ -1001,6 +1018,8 @@ export interface TaskEvent {
   attempt: number;
 }
 
+export type TaskFailureClass = "no_progress" | "provider_uncertain" | "provider_failed" | "worker";
+
 /**
  * A task lives outside the expiring chat session so a paused Daytona workspace
  * and its recovery instructions remain available after session/history TTL.
@@ -1019,8 +1038,14 @@ export interface TaskRecord {
   error?: string;
   attempt: number;
   maxAttempts: number;
+  /** Machine-readable terminal failure classification used by recovery. */
+  lastFailureClass?: TaskFailureClass;
+  /** Number of bounded server-side repair cycles already claimed. */
+  automaticRepairCount?: number;
   runAt?: number;
   workflowRunId?: string;
+  /** When the provider accepted the current workflow publication. */
+  workflowPublishedAt?: number;
   /** Short-lived claim used while publishing a task to QStash. */
   enqueueClaim?: { token: string; expiresAt: number };
   lease?: TaskLease;
@@ -1632,7 +1657,11 @@ interface Backend {
   getMissions(userId: number): Promise<MissionRecord[]>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
+  registerMissionOwner(userId: number): Promise<void>;
+  listMissionOwnerIds(): Promise<number[]>;
   compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
+  appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void>;
+  listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
   addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void>;
@@ -1884,6 +1913,8 @@ class RedisBackend implements Backend {
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
   private missionk = (id: number) => `chuck:missions:${id}`;
+  private missionEventsKey = (userId: number, missionId: string) => `chuck:mission-events:${userId}:${createHash("sha256").update(missionId).digest("hex")}`;
+  private missionOwnersKey = "chuck:missions:owners";
   private reminderk = (id: number) => `chuck:reminders:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
@@ -2475,7 +2506,10 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
       const existing = tasks.find((item) => item.id === task.id);
       if (existing) { await this.r.unwatch(); return existing; }
-      const result = await this.r.multi().set(key, JSON.stringify([...tasks, task].slice(-100))).exec();
+      const retained = [...tasks, task];
+      const unfinished = retained.filter((item) => !["completed", "cancelled"].includes(item.status));
+      const finished = retained.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100);
+      const result = await this.r.multi().set(key, JSON.stringify([...unfinished, ...finished])).exec();
       if (result) return task;
     }
     throw new Error("Task creation changed concurrently; please retry");
@@ -2507,7 +2541,9 @@ class RedisBackend implements Backend {
       const current = index < 0 ? undefined : tasks[index];
       const now = Date.now();
       const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:")) || claimActive) { await this.r.unwatch(); return undefined; }
+      const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
+        && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
+      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -2524,7 +2560,7 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
       const index = tasks.findIndex((task) => task.id === id);
       const current = index < 0 ? undefined : tasks[index];
-      if (!current || current.lease?.token !== leaseToken || !["running", "cancel_requested"].includes(current.status)) { await this.r.unwatch(); return undefined; }
+      if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...current, lease: { ...current.lease, expiresAt: Date.now() + leaseMs }, updatedAt: Date.now(), version: current.version + 1 });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -2535,7 +2571,11 @@ class RedisBackend implements Backend {
   async getMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
     if (!raw) return [];
-    try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { return []; }
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) void this.r.sadd(this.missionOwnersKey, String(userId));
+      return Array.isArray(parsed) ? parsed as MissionRecord[] : [];
+    } catch { return []; }
   }
   async saveMissions(userId: number, missions: MissionRecord[]): Promise<void> {
     // Mission state is durable control-plane state and must outlive chat history.
@@ -2550,10 +2590,20 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; missions = Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { missions = []; }
       const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
       if (existing) { await this.r.unwatch(); return normalizeMission(existing); }
-      const result = await this.r.multi().set(key, JSON.stringify([...missions, mission].slice(-100))).exec();
-      if (result) return mission;
+      const historyKey = this.missionEventsKey(userId, mission.id);
+      const result = await this.r.multi()
+        .set(key, JSON.stringify([...missions, mission].slice(-100)))
+        .rpush(historyKey, ...mission.events.map((event) => JSON.stringify(event)))
+        .ltrim(historyKey, -5000, -1)
+        .exec();
+      if (result) { await this.r.sadd(this.missionOwnersKey, String(userId)); return mission; }
     }
     throw new Error("Mission creation changed concurrently; please retry");
+  }
+  async registerMissionOwner(userId: number): Promise<void> { await this.r.sadd(this.missionOwnersKey, String(userId)); }
+  async listMissionOwnerIds(): Promise<number[]> {
+    const values = await this.r.smembers(this.missionOwnersKey);
+    return values.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value >= 0).sort((a, b) => a - b);
   }
   async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined> {
     const key = this.missionk(userId);
@@ -2566,10 +2616,29 @@ class RedisBackend implements Backend {
       const current = index < 0 ? undefined : normalizeMission(missions[index]);
       if (!current || current.version !== expectedVersion) { await this.r.unwatch(); return undefined; }
       missions[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(missions.slice(-100))).exec();
+      const newEvents = next.events.filter((event) => !current.events.some((existing) => existing.id === event.id));
+      const historyKey = this.missionEventsKey(userId, id);
+      const transaction = this.r.multi().set(key, JSON.stringify(missions.slice(-100)));
+      if (newEvents.length) transaction.rpush(historyKey, ...newEvents.map((event) => JSON.stringify(event))).ltrim(historyKey, -5000, -1);
+      const result = await transaction.exec();
       if (result) return next;
     }
     return undefined;
+  }
+  async appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void> {
+    if (!events.length) return;
+    const key = this.missionEventsKey(userId, missionId);
+    await this.r.rpush(key, ...events.map((event) => JSON.stringify(event)));
+    await this.r.ltrim(key, -5000, -1);
+  }
+  async listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]> {
+    const raw = await this.r.lrange(this.missionEventsKey(userId, missionId), -Math.max(1, Math.min(5000, Math.floor(limit))), -1);
+    return (raw ?? []).flatMap((value) => {
+      try {
+        const event = typeof value === "string" ? JSON.parse(value) as MissionEventRecord : value as MissionEventRecord;
+        return event && typeof event.id === "string" ? [event] : [];
+      } catch { return []; }
+    });
   }
   async getReminders(userId: number): Promise<ReminderRecord[]> {
     const raw = await this.r.get(this.reminderk(userId));
@@ -2679,13 +2748,13 @@ class RedisBackend implements Backend {
   async claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined> {
     const key = this.taskk(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
       const raw = await this.r.get(key);
       const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
       const index = tasks.findIndex((task) => task.id === id);
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
       const now = Date.now();
-      if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
+      const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
+      if (!task || (task.status !== "queued" && !expiredRunning) || (expiredRunning && task.lease?.workerId === workerId) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
       // A timer/provider wait is a continuation of the same bounded slice,
       // not a retry. Do not consume another retry attempt when the durable
       // task wakes, otherwise a normal wait can exceed maxAttempts and enter
@@ -2695,8 +2764,19 @@ class RedisBackend implements Backend {
       const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
       const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
       tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
+      // WATCH belongs to the connection, not this invocation. Concurrent
+      // claims on a shared client can clear each other's watch on EXEC.
+      // Compare the entire owner record atomically so only one lease wins
+      // and changes to sibling tasks cannot be overwritten.
+      const result = await this.r.eval(`
+        local current = redis.call('GET', KEYS[1])
+        if ARGV[2] == 'missing' then
+          if current then return 0 end
+        elseif current ~= ARGV[1] then return 0 end
+        redis.call('SET', KEYS[1], ARGV[3])
+        return 1
+      `, 1, key, raw ?? "", raw === null ? "missing" : "present", JSON.stringify(tasks));
+      if (result === 1) return next;
     }
     return undefined;
   }
@@ -2708,7 +2788,7 @@ class RedisBackend implements Backend {
       const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
       const index = tasks.findIndex((task) => task.id === id);
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
-      if (!task || task.lease?.token !== leaseToken) { await this.r.unwatch(); return undefined; }
+      if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), version: task.version + 1, events: [...task.events, event].slice(-100) });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -3592,6 +3672,8 @@ class MemoryBackend implements Backend {
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
   private missions = new Map<number, MissionRecord[]>();
+  private missionEvents = new Map<string, MissionEventRecord[]>();
+  private missionOwners = new Set<number>();
   async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
@@ -3601,7 +3683,8 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const existing = tasks.find((item) => item.id === task.id);
     if (existing) return normalizeTask(existing);
-    this.tasks.set(userId, [...tasks, task].slice(-100));
+    const retained = [...tasks, task];
+    this.tasks.set(userId, [...retained.filter((item) => !["completed", "cancelled"].includes(item.status)), ...retained.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100)]);
     return task;
   }
   async compareAndUpdateTask(userId: number, id: string, expectedVersion: number, next: TaskRecord) {
@@ -3609,7 +3692,9 @@ class MemoryBackend implements Backend {
     const index = tasks.findIndex((task) => task.id === id);
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
     if (!current || current.version !== expectedVersion) return undefined;
-    const nextList = [...tasks]; nextList[index] = next; this.tasks.set(userId, nextList.slice(-100)); return next;
+    const nextList = [...tasks]; nextList[index] = next;
+    this.tasks.set(userId, [...nextList.filter((item) => !["completed", "cancelled"].includes(item.status)), ...nextList.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100)]);
+    return next;
   }
   async claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number) {
     const tasks = this.tasks.get(userId) ?? [];
@@ -3617,7 +3702,9 @@ class MemoryBackend implements Backend {
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
     const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-    if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:")) || claimActive) return undefined;
+    const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
+      && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
+    if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
     const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
@@ -3625,19 +3712,23 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const index = tasks.findIndex((task) => task.id === id);
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
-    if (!current || current.lease?.token !== leaseToken || !["running", "cancel_requested"].includes(current.status)) return undefined;
+    if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) return undefined;
     const next = normalizeTask({ ...current, lease: { ...current.lease, expiresAt: Date.now() + leaseMs }, updatedAt: Date.now(), version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
   async createMissionIfAbsent(userId: number, mission: MissionRecord) {
+    this.missionOwners.add(userId);
     const missions = this.missions.get(userId) ?? [];
     const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
     if (existing) return normalizeMission(existing);
     this.missions.set(userId, [...missions, mission].slice(-100));
+    this.missionEvents.set(`${userId}:${mission.id}`, mission.events.slice(-5000));
     return mission;
   }
+  async registerMissionOwner(userId: number) { this.missionOwners.add(userId); }
+  async listMissionOwnerIds() { return [...this.missionOwners].sort((a, b) => a - b); }
   async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord) {
     const missions = this.missions.get(userId) ?? [];
     const index = missions.findIndex((mission) => mission.id === id);
@@ -3646,7 +3737,21 @@ class MemoryBackend implements Backend {
     const nextList = [...missions];
     nextList[index] = next;
     this.missions.set(userId, nextList.slice(-100));
+    const historyKey = `${userId}:${id}`;
+    const history = this.missionEvents.get(historyKey) ?? [];
+    const newEvents = next.events.filter((event) => !current.events.some((existing) => existing.id === event.id));
+    this.missionEvents.set(historyKey, [...history, ...newEvents].slice(-5000));
     return next;
+  }
+  async appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void> {
+    if (!events.length) return;
+    const key = `${userId}:${missionId}`;
+    const history = this.missionEvents.get(key) ?? [];
+    const known = new Set(history.map((event) => event.id));
+    this.missionEvents.set(key, [...history, ...events.filter((event) => !known.has(event.id))].slice(-5000));
+  }
+  async listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]> {
+    return (this.missionEvents.get(`${userId}:${missionId}`) ?? []).slice(-Math.max(1, Math.min(5000, Math.floor(limit))));
   }
   private attentionKey(userId: number, collection: AttentionCollection): string { return `${userId}:${collection}`; }
   async getAttentionRecords(userId: number, collection: AttentionCollection) {
@@ -3663,7 +3768,8 @@ class MemoryBackend implements Backend {
     const index = tasks.findIndex((task) => task.id === id);
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
-    if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
+    const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
+    if (!task || (task.status !== "queued" && !expiredRunning) || (expiredRunning && task.lease?.workerId === workerId) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
     // A timer/provider wait is a continuation of the same bounded slice, not
     // a retry. Preserve the attempt number across that wake so ordinary waits
     // cannot consume the task's retry budget.
@@ -3678,7 +3784,7 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const index = tasks.findIndex((task) => task.id === id);
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
-    if (!task || task.lease?.token !== leaseToken) return undefined;
+    if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) return undefined;
     const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), version: task.version + 1, events: [...task.events, event].slice(-100) });
     tasks[index] = next;
     this.tasks.set(userId, tasks);
@@ -5621,6 +5727,11 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     attempt: task.attempt ?? 0,
     version: Number.isSafeInteger(task.version) && task.version >= 0 ? task.version : 0,
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
+    ...(typeof task.lastFailureClass === "string" && ["no_progress", "provider_uncertain", "provider_failed", "worker"].includes(task.lastFailureClass)
+      ? { lastFailureClass: task.lastFailureClass as TaskFailureClass }
+      : { lastFailureClass: undefined }),
+    automaticRepairCount: Math.max(0, Math.min(3, Math.floor(Number(task.automaticRepairCount) || 0))),
+    ...(typeof task.workflowRunId === "string" && task.workflowRunId && Number.isFinite(task.workflowPublishedAt) && (task.workflowPublishedAt ?? 0) > 0 ? { workflowPublishedAt: Number(task.workflowPublishedAt) } : { workflowPublishedAt: undefined }),
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
@@ -5690,7 +5801,11 @@ export async function getTask(userId: number, id: string): Promise<TaskRecord | 
   return (await backend.getTasks(userId)).map(normalizeTask).find((task) => task.id === id);
 }
 
-const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
+// The default must accommodate a real long-horizon plan. A mission still has
+// independent duration/tool/cost guards; callers may opt into a smaller step
+// ceiling explicitly when the objective is intentionally narrow.
+const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 1000, maxToolCalls: 1000, maxCost: 25 };
+const MAX_MISSION_PLAN_STEPS = 1000;
 
 function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string, metadata?: MissionEventRecord["metadata"]): MissionEventRecord {
   return { id: `misevt_${randomUUID()}`, type, message: message.slice(0, 1000), at, ...(stepId ? { stepId } : {}), ...(metadata ? { metadata } : {}) };
@@ -5705,7 +5820,9 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     objective: String(mission.objective ?? "").slice(0, 8000),
     definitionOfDone: String(mission.definitionOfDone ?? "").slice(0, 4000),
     status: ["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"].includes(mission.status) ? mission.status : "failed",
-    steps: (mission.steps ?? []).slice(0, 100).map((step) => ({
+    // A read must never truncate a persisted dependency graph. Bound new
+    // plans at creation/replan, not while restoring durable state.
+    steps: (mission.steps ?? []).map((step) => ({
       ...step,
       id: String(step.id).slice(0, 160),
       title: String(step.title ?? "Mission step").slice(0, 240),
@@ -5730,9 +5847,20 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       automaticExtensionSeconds: Math.max(0, Math.min(3600, Math.floor(numeric(budget.automaticExtensionSeconds, 0)))),
       maxAutomaticExtensions: Math.max(0, Math.min(10, Math.floor(numeric(budget.maxAutomaticExtensions, 0)))),
       maxSteps: Math.max(1, Math.min(1000, Math.floor(numeric(budget.maxSteps, DEFAULT_MISSION_BUDGET.maxSteps)))),
+      maxSlices: Math.max(1, Math.min(100000, Math.floor(numeric(budget.maxSlices, 1000)))),
       maxToolCalls: Math.max(1, Math.min(10000, Math.floor(numeric(budget.maxToolCalls, DEFAULT_MISSION_BUDGET.maxToolCalls)))),
       maxCost: Math.max(0, Math.min(10000, numeric(budget.maxCost, DEFAULT_MISSION_BUDGET.maxCost))),
     },
+    ...(mission.budgetCeiling && typeof mission.budgetCeiling === "object" ? { budgetCeiling: { ...mission.budgetCeiling } } : {}),
+    ...(mission.workSchedule && typeof mission.workSchedule === "object" ? {
+      workSchedule: {
+        timezone: String(mission.workSchedule.timezone ?? "UTC").trim().slice(0, 100),
+        windowStart: String(mission.workSchedule.windowStart ?? "09:00").slice(0, 5),
+        windowEnd: String(mission.workSchedule.windowEnd ?? "17:00").slice(0, 5),
+        dailyBudgetSeconds: Math.max(60, Math.min(86400, Math.floor(numeric(mission.workSchedule.dailyBudgetSeconds, 8 * 3600)))),
+        cadenceSeconds: Math.max(60, Math.min(86400, Math.floor(numeric(mission.workSchedule.cadenceSeconds, 300)))),
+      },
+    } : {}),
     timing: mission.budget?.durationMode === "active" ? {
       activeMs: Math.max(0, numeric(mission.timing?.activeMs, 0)),
       extensionsUsed: Math.max(0, Math.floor(numeric(mission.timing?.extensionsUsed, 0))),
@@ -5740,9 +5868,10 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.timing?.lastExtensionProgress === "string" ? { lastExtensionProgress: mission.timing.lastExtensionProgress.slice(0, 17000) } : {}),
     } : mission.timing,
     consumedSteps: Math.max(0, Number(mission.consumedSteps) || 0),
+    consumedSlices: Math.max(0, Number(mission.consumedSlices) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
-    activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, 100) : undefined,
+    activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, MAX_MISSION_PLAN_STEPS) : undefined,
     events: (mission.events ?? []).slice(-500).map((event) => ({ ...event, message: String(event.message ?? "").slice(0, 1000) })),
     evidence: Array.isArray(mission.evidence) ? mission.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-100) : [],
     verification: mission.verification && typeof mission.verification === "object" ? {
@@ -5755,6 +5884,14 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.verification.confidence === "number" ? { confidence: Math.max(0, Math.min(1, mission.verification.confidence)) } : {}),
     } : undefined,
     ...(mission.lease && typeof mission.lease === "object" ? { lease: mission.lease } : {}),
+    ...(mission.executionLeases && typeof mission.executionLeases === "object" ? {
+      executionLeases: Object.fromEntries(Object.entries(mission.executionLeases).slice(0, MAX_MISSION_PLAN_STEPS).flatMap(([stepId, lease]) => {
+        if (!/^[A-Za-z0-9_-]{1,160}$/.test(stepId) || !lease || typeof lease !== "object") return [];
+        const candidate = lease as MissionLease;
+        if (typeof candidate.token !== "string" || typeof candidate.workerId !== "string" || !Number.isFinite(candidate.acquiredAt) || !Number.isFinite(candidate.expiresAt)) return [];
+        return [[stepId, { token: candidate.token.slice(0, 160), workerId: candidate.workerId.slice(0, 160), acquiredAt: Number(candidate.acquiredAt), expiresAt: Number(candidate.expiresAt) } satisfies MissionLease]];
+      })),
+    } : {}),
     ...(typeof mission.a2aContextId === "string" && mission.a2aContextId.trim() ? { a2aContextId: mission.a2aContextId.trim().slice(0, 200) } : {}),
     a2aPushNotifications: Array.isArray(mission.a2aPushNotifications) ? mission.a2aPushNotifications.slice(-10).filter((item): item is MissionA2APushNotificationConfig => Boolean(item) && typeof item === "object" && typeof item.id === "string" && typeof item.url === "string" && typeof item.signingSecretCiphertext === "string").map((item) => ({
       id: item.id.slice(0, 160),
@@ -5772,14 +5909,29 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   id?: string;
   idempotencyKey?: string;
   budget?: Partial<MissionBudget>;
+  budgetCeiling?: Partial<MissionBudget>;
   requiredEvidence?: string[];
   verificationMode?: "legacy" | "strict";
+  workSchedule?: MissionWorkSchedule;
   a2aContextId?: string;
   steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string; allowedTools?: string[] }>;
 };
 
 const MISSION_STEP_TOOL_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
 const MISSION_STEP_RESERVED_TOOL_PATTERN = /^CHUCK_MISSION_|^CHUCK_TASK_|^COMPOSIO_(?:EXECUTE_TOOL|MULTI_EXECUTE_TOOL)$/;
+
+function validateMissionWorkSchedule(schedule: MissionWorkSchedule): void {
+  if (!schedule || typeof schedule !== "object") throw new Error("Mission workSchedule must be an object.");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: schedule.timezone }).format(); }
+  catch { throw new Error("Mission workSchedule timezone must be a valid IANA timezone."); }
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  if (!timePattern.test(schedule.windowStart) || !timePattern.test(schedule.windowEnd)) throw new Error("Mission workSchedule windows must use HH:MM.");
+  const toMinutes = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const duration = toMinutes(schedule.windowEnd) - toMinutes(schedule.windowStart);
+  if (duration <= 0) throw new Error("Mission workSchedule windowEnd must be after windowStart on the same day.");
+  if (!Number.isInteger(schedule.dailyBudgetSeconds) || schedule.dailyBudgetSeconds < 60 || schedule.dailyBudgetSeconds > duration * 60) throw new Error("Mission workSchedule dailyBudgetSeconds must fit inside the work window.");
+  if (!Number.isInteger(schedule.cadenceSeconds) || schedule.cadenceSeconds < 60 || schedule.cadenceSeconds > 86400) throw new Error("Mission workSchedule cadenceSeconds is outside its supported range.");
+}
 
 function normalizeMissionStepAllowedTools(value: unknown, label: string): string[] | undefined {
   if (value === undefined) return undefined;
@@ -5819,6 +5971,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
   }
   if (Boolean(input.budget?.automaticExtensionSeconds) !== Boolean(input.budget?.maxAutomaticExtensions)) throw new Error("Automatic extension size and count must be supplied together.");
   if (input.budget?.durationMode === "wall_clock" && input.budget.maxAutomaticExtensions) throw new Error("Automatic extensions require active execution timing.");
+  if (input.workSchedule) validateMissionWorkSchedule(input.workSchedule);
   if (!input.title?.trim() || input.title.length > 240) throw new Error("Mission title is required and must be 240 characters or fewer");
   if (!input.objective?.trim() || input.objective.length > 8000) throw new Error("Mission objective is required and must be 8000 characters or fewer");
   if (!input.definitionOfDone?.trim() || input.definitionOfDone.length > 4000) throw new Error("Mission definitionOfDone is required and must be 4000 characters or fewer");
@@ -5831,7 +5984,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     throw new Error("Strict mission verification requires at least one non-empty required evidence criterion.");
   }
   if (input.steps !== undefined && !Array.isArray(input.steps)) throw new Error("Mission steps must be an array");
-  if (input.steps && input.steps.length > 100) throw new Error("Mission plans can contain at most 100 steps");
+  if (input.steps && input.steps.length > MAX_MISSION_PLAN_STEPS) throw new Error(`Mission plans can contain at most ${MAX_MISSION_PLAN_STEPS} steps`);
   if (input.steps?.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every mission step must be an object");
   for (const [index, step] of (input.steps ?? []).entries()) {
     if (step.id !== undefined && (typeof step.id !== "string" || !step.id.trim() || step.id.trim().length > 160)) throw new Error(`Mission step ${index + 1} has an invalid ID`);
@@ -5878,6 +6031,8 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     currentStepId: ready.id,
     activeStepIds: undefined,
     budget: { ...DEFAULT_MISSION_BUDGET, ...(input.budget ?? {}), durationMode: input.budget?.durationMode ?? "active" },
+    ...(input.budgetCeiling ? { budgetCeiling: { ...input.budgetCeiling } } : {}),
+    ...(input.workSchedule ? { workSchedule: { ...input.workSchedule } } : {}),
     timing: { activeMs: 0, extensionsUsed: 0 },
     consumedSteps: 0,
     toolCalls: 0,
@@ -5905,7 +6060,8 @@ export function readyMissionSteps(mission: MissionRecord): MissionStepRecord[] {
 
 export function missionActiveMs(mission: MissionRecord, now = Date.now()): number {
   const since = mission.timing?.activeSince;
-  const end = Math.min(now, mission.lease?.expiresAt ?? now);
+  const branchLeaseExpiry = Object.values(mission.executionLeases ?? {}).reduce((latest, lease) => Math.max(latest, lease.expiresAt), 0);
+  const end = Math.min(now, Math.max(mission.lease?.expiresAt ?? 0, branchLeaseExpiry) || now);
   return Math.max(0, mission.timing?.activeMs ?? 0) + (since === undefined ? 0 : Math.max(0, end - since));
 }
 
@@ -5972,8 +6128,63 @@ export class MissionReplanConflictError extends Error {
   }
 }
 
+/** Acquire an independent lease for one dependency-ready mission branch. */
+export async function acquireMissionStepLease(userId: number, id: string, stepId: string, workerId: string, leaseMs = 60_000): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+    const step = mission.steps.find((candidate) => candidate.id === stepId);
+    if (!step || step.status !== "running" || !(mission.activeStepIds?.includes(stepId) || mission.currentStepId === stepId)) return undefined;
+    const now = Date.now();
+    const existing = mission.executionLeases?.[stepId];
+    if (existing && existing.expiresAt > now && existing.workerId !== workerId) return undefined;
+    const executionLeases = { ...(mission.executionLeases ?? {}), [stepId]: { token: randomUUID(), workerId: workerId.slice(0, 160), acquiredAt: now, expiresAt: now + Math.max(1000, Math.min(900_000, leaseMs)) } };
+    const timing = mission.budget.durationMode === "active" && !Object.keys(mission.executionLeases ?? {}).some((key) => (mission.executionLeases ?? {})[key]!.expiresAt > now)
+      ? { ...mission.timing, activeMs: missionActiveMs(mission, now), extensionsUsed: mission.timing?.extensionsUsed ?? 0, activeSince: now }
+      : mission.timing;
+    const next = normalizeMission({ ...mission, timing, executionLeases, updatedAt: now, version: mission.version + 1, events: [...mission.events, missionEvent("lease_acquired", `Mission step lease acquired for ${stepId} by ${workerId}.`, now, stepId)] });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
+}
+
+/** Renew one branch lease without affecting sibling branch authority. */
+export async function renewMissionStepLease(userId: number, id: string, stepId: string, leaseToken: string, leaseMs = 60_000): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    const lease = mission?.executionLeases?.[stepId];
+    if (!mission || !lease || lease.token !== leaseToken || lease.expiresAt <= Date.now() || ["completed", "cancelled"].includes(mission.status)) return undefined;
+    const executionLeases = { ...(mission.executionLeases ?? {}), [stepId]: { ...lease, expiresAt: Date.now() + Math.max(1_000, Math.min(900_000, leaseMs)) } };
+    const next = normalizeMission({ ...mission, executionLeases, updatedAt: Date.now(), version: mission.version + 1 });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
+}
+
+/** Release one branch lease and stop active-duration timing only after all branches rest. */
+export async function releaseMissionStepLease(userId: number, id: string, stepId: string, token: string): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    const lease = mission?.executionLeases?.[stepId];
+    if (!mission || !lease || lease.token !== token) return undefined;
+    const now = Date.now();
+    const executionLeases = { ...(mission.executionLeases ?? {}) };
+    delete executionLeases[stepId];
+    const hasSibling = Object.keys(executionLeases).length > 0;
+    const timing = mission.budget.durationMode === "active" && !hasSibling
+      ? { ...mission.timing, activeMs: missionActiveMs(mission, now), extensionsUsed: mission.timing?.extensionsUsed ?? 0, activeSince: undefined }
+      : mission.timing;
+    const next = normalizeMission({ ...mission, executionLeases: Object.keys(executionLeases).length ? executionLeases : undefined, timing, updatedAt: now, version: mission.version + 1, events: [...mission.events, missionEvent("lease_released", `Mission step lease released for ${stepId}.`, now, stepId)] });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
+}
+
 export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; allowedTools?: string[] }>, reason: string): Promise<MissionRecord | undefined> {
-  if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > 100) throw new Error("Replanned missions require between 1 and 100 steps");
+  if (!Array.isArray(rawSteps) || rawSteps.length < 1 || rawSteps.length > MAX_MISSION_PLAN_STEPS) throw new Error(`Replanned missions require between 1 and ${MAX_MISSION_PLAN_STEPS} steps`);
   if (!reason?.trim() || reason.length > 2000) throw new Error("A replan reason is required and must be 2000 characters or fewer");
   if (rawSteps.some((step) => !step || typeof step !== "object" || Array.isArray(step))) throw new Error("Every replanned mission step must be an object");
   for (const [index, step] of rawSteps.entries()) {
@@ -5996,7 +6207,7 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       const dependencies = step.dependsOn ?? [];
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
       const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
-      return { id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}) };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
@@ -6042,7 +6253,7 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     }
     const next = nextActive.map((candidate) => steps.find((item) => item.id === candidate)).find(Boolean);
     const newlyStarted = ready.filter((candidate) => nextActive.includes(candidate.id));
-    return { steps, activeStepIds: nextActive, currentStepId: next?.id, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
+    return { steps, activeStepIds: nextActive, currentStepId: next?.id, consumedSteps: mission.consumedSteps + 1, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
   });
 }
 
@@ -6152,6 +6363,28 @@ export async function getMission(userId: number, id: string): Promise<MissionRec
   return (await backend.getMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
 }
 
+/**
+ * Return the durable mission event stream, including the current record's
+ * bounded tail as a repair source if a legacy record predates the event log.
+ * Events are owner-scoped and capped so an operator cannot turn this endpoint
+ * into an unbounded Redis or response read.
+ */
+export async function listMissionEvents(userId: number, id: string, limit = 1000): Promise<MissionEventRecord[]> {
+  const requestedLimit = Number(limit);
+  const boundedLimit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(5000, Math.floor(requestedLimit)))
+    : 1000;
+  const mission = await getMission(userId, id);
+  if (!mission) return [];
+  const persisted = await backend.listMissionEvents(userId, id, boundedLimit);
+  const merged = new Map<string, MissionEventRecord>();
+  for (const event of [...persisted, ...mission.events]) merged.set(event.id, event);
+  // Redis list order is the append order and is authoritative. Do not sort by
+  // timestamp: several lifecycle transitions can legitimately share a clock
+  // tick, and event IDs are random, so a tie-break sort can reorder history.
+  return [...merged.values()].slice(-boundedLimit);
+}
+
 /** Cancel every durable slice belonging to a mission, including parallel branches. */
 export async function cancelMissionTasks(userId: number, missionId: string): Promise<void> {
   const tasks = await listTasks(userId);
@@ -6225,12 +6458,21 @@ export async function pauseMission(userId: number, id: string, reason = "Mission
   return mutateMission(userId, id, (mission) => !["running", "waiting"].includes(mission.status) ? undefined : { status: "paused", error: reason, waiting: undefined, events: [...mission.events, missionEvent("paused", reason)] });
 }
 
-export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
+export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number, budgetPatch?: Partial<MissionBudget>): Promise<MissionRecord | undefined> {
   if (maxDurationSeconds !== undefined && (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 2592000)) throw new Error("Mission duration must be an integer between 60 and 2592000 seconds.");
   return mutateMission(userId, id, (mission) => {
-    if (!["paused", "blocked", "failed", "running"].includes(mission.status)) return undefined;
+    const ownerInputWait = mission.status === "waiting" && mission.waiting?.kind === "human_input";
+    if (!["paused", "blocked", "failed", "running"].includes(mission.status) && !ownerInputWait) return undefined;
     if (maxDurationSeconds !== undefined && maxDurationSeconds < mission.budget.maxDurationSeconds) throw new Error("Resume can only extend the existing duration budget.");
-    const budget = { ...mission.budget, maxDurationSeconds: maxDurationSeconds ?? mission.budget.maxDurationSeconds };
+    const requestedBudget = { ...(budgetPatch ?? {}), ...(maxDurationSeconds === undefined ? {} : { maxDurationSeconds }) };
+    const ceiling = mission.budgetCeiling ?? {};
+    for (const field of ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const) {
+      const value = requestedBudget[field];
+      const limit = ceiling[field];
+      if (value !== undefined && limit !== undefined && value > limit) throw new Error(`Requested mission ${field} exceeds the owner's saved ceiling.`);
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new Error(`Requested mission ${field} is invalid.`);
+    }
+    const budget = { ...mission.budget, ...requestedBudget };
     const events = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds
       ? [...mission.events, missionEvent("checkpointed", `Owner-authorized duration budget changed from ${mission.budget.maxDurationSeconds} to ${budget.maxDurationSeconds} seconds; original start and usage retained.`)] : mission.events;
     const preflight = missionBudgetPreflight({ ...mission, budget });
@@ -6273,10 +6515,74 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
   });
 }
 
+/**
+ * Apply an owner-scoped execution-policy change without pretending that it is
+ * a new mission or resetting any consumed usage. Budget increases are allowed
+ * only inside the ceiling saved when the mission was created; reductions are
+ * always retained and may honestly move an already-over-budget mission into a
+ * blocked state. Queued slices are moved to the new work window, while a
+ * running slice keeps its lease and is never interrupted by policy editing.
+ */
+export async function updateMissionControl(userId: number, id: string, input: { budget?: Partial<MissionBudget>; workSchedule?: MissionWorkSchedule }): Promise<MissionRecord | undefined> {
+  if (!input.budget && !input.workSchedule) throw new Error("Mission control requires a budget or workSchedule change.");
+  const budgetFields = ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const;
+  const updated = await mutateMission(userId, id, (mission) => {
+    if (["completed", "cancelled"].includes(mission.status)) return undefined;
+    const requested = input.budget ?? {};
+    const ceiling = mission.budgetCeiling ?? {};
+    for (const field of budgetFields) {
+      const value = requested[field];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`Requested mission ${field} is invalid.`);
+      if (field !== "maxCost" && !Number.isInteger(value)) throw new Error(`Requested mission ${field} must be an integer.`);
+      const limit = ceiling[field];
+      if (limit !== undefined && value > limit) throw new Error(`Requested mission ${field} exceeds the owner's saved ceiling.`);
+    }
+    if (requested.maxDurationSeconds !== undefined && requested.maxDurationSeconds < 60) throw new Error("Requested mission maxDurationSeconds must be at least 60 seconds.");
+    if (requested.maxSteps !== undefined && requested.maxSteps < 1) throw new Error("Requested mission maxSteps must be at least 1.");
+    if (requested.maxSlices !== undefined && requested.maxSlices < 1) throw new Error("Requested mission maxSlices must be at least 1.");
+    if (requested.maxToolCalls !== undefined && requested.maxToolCalls < 1) throw new Error("Requested mission maxToolCalls must be at least 1.");
+    if (requested.maxCost !== undefined && requested.maxCost < 0) throw new Error("Requested mission maxCost cannot be negative.");
+    if (input.workSchedule) validateMissionWorkSchedule(input.workSchedule);
+    const budget = { ...mission.budget, ...requested };
+    const scheduleChanged = JSON.stringify(mission.workSchedule ?? null) !== JSON.stringify(input.workSchedule ?? mission.workSchedule ?? null);
+    const budgetChanged = JSON.stringify(mission.budget) !== JSON.stringify(budget);
+    if (!scheduleChanged && !budgetChanged) return undefined;
+    const preflight = missionBudgetPreflight({ ...mission, budget }, { steps: 0 });
+    const sliceExceeded = (mission.consumedSlices ?? 0) > (budget.maxSlices ?? Number.POSITIVE_INFINITY);
+    const toolsExceeded = mission.toolCalls > budget.maxToolCalls;
+    const costExceeded = mission.cost > budget.maxCost;
+    const overBudget = mission.status === "running" && (!preflight.allowed || sliceExceeded || toolsExceeded || costExceeded);
+    const reason = overBudget
+      ? sliceExceeded ? "Mission slice budget exhausted."
+        : toolsExceeded ? "Mission tool-call budget exhausted."
+          : costExceeded ? "Mission cost budget exhausted."
+            : preflight.reason ?? "Mission execution budget is exhausted."
+      : undefined;
+    const message = [
+      budgetChanged ? "Mission execution budget updated; consumed usage was preserved." : "",
+      scheduleChanged ? "Mission work schedule updated; queued slices will use the new window." : "",
+    ].filter(Boolean).join(" ");
+    return {
+      budget,
+      ...(input.workSchedule ? { workSchedule: { ...input.workSchedule } } : {}),
+      ...(overBudget ? { status: "blocked" as const, error: reason, nextAction: "Reduce the remaining work or authorize a larger budget, then resume this mission." } : {}),
+      events: [...mission.events, missionEvent(overBudget ? "budget_exhausted" : "checkpointed", `${message}${reason ? ` ${reason}` : ""}`)],
+    };
+  });
+  return updated;
+}
+
+/** Owners with durable mission state; used by the recovery sweeper. */
+export async function listMissionOwnerIds(): Promise<number[]> {
+  return backend.listMissionOwnerIds();
+}
+
 /** Resume the same durable task after its exact persisted timer has elapsed. */
 export async function resumeMissionFromTimer(userId: number, id: string, runAt: number): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
     if (mission.status !== "waiting" || mission.waiting?.kind !== "timer" || mission.waiting.runAt !== runAt) return undefined;
+    if (Date.now() < runAt) return undefined;
     return {
       status: "running",
       waiting: undefined,
@@ -6376,12 +6682,12 @@ export async function waitMission(userId: number, id: string, waiting: MissionRe
 export async function resumeMissionFromProviderEvent(userId: number, id: string, provider: string, providerEventId: string): Promise<MissionRecord | undefined> {
   const initial = await getMission(userId, id);
   if (!initial) return undefined;
-  if (initial.status === "running" && initial.events.some((event) => event.type === "resumed" && event.message.includes(providerEventId))) return initial;
+  if (initial.status === "running" && initial.events.some((event) => event.type === "resumed" && event.provider === provider && event.providerEventId === providerEventId)) return initial;
   return mutateMission(userId, id, (mission) => {
     const waiting = mission.waiting;
     if (mission.status !== "waiting" || waiting?.kind !== "provider_event" || waiting.provider !== provider || waiting.providerEventId !== providerEventId) return undefined;
     const now = Date.now();
-    return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now)] };
+    return { status: "running", waiting: undefined, error: undefined, nextAction: "Continue from the provider event checkpoint.", events: [...mission.events, { ...missionEvent("resumed", `Provider event ${providerEventId} received from ${provider}.`, now), provider, providerEventId }] };
   });
 }
 
@@ -6391,25 +6697,33 @@ export async function checkpointMission(userId: number, id: string, checkpoint: 
 
 export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string }): Promise<MissionRecord | undefined> {
   const saved = await mutateMission(userId, id, (mission) => {
+    // A worker response can arrive after cancellation or terminal closeout.
+    // Preserve those terminal records exactly; late accounting must not alter
+    // their counters, checkpoint, version, or audit frontier.
+    if (["completed", "cancelled"].includes(mission.status)) return undefined;
     if (mission.status === "queued") return undefined;
     const now = Date.now();
-    const consumedSteps = mission.consumedSteps + 1;
+    const consumedSteps = mission.consumedSteps;
+    const consumedSlices = (mission.consumedSlices ?? 0) + 1;
     const toolCalls = mission.toolCalls + (Number.isFinite(input.toolCalls) ? Math.max(0, Math.floor(input.toolCalls ?? 0)) : 0);
     const cost = mission.cost + (typeof input.cost === "number" && Number.isFinite(input.cost) ? Math.max(0, input.cost) : 0);
-    if (mission.status !== "running") return { consumedSteps, toolCalls, cost };
+    if (mission.status !== "running") return { consumedSteps, consumedSlices, toolCalls, cost };
     const durationPreflight = missionBudgetPreflight(mission, { steps: 0 });
     const durationExceeded = durationPreflight.remaining.durationSeconds <= 0;
-    const budgetExceeded = durationExceeded || consumedSteps > mission.budget.maxSteps || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
-    const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSteps > mission.budget.maxSteps ? "Mission step budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
+    const budgetExceeded = durationExceeded || consumedSlices > (mission.budget.maxSlices ?? 1000) || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
+    const reason = durationExceeded ? durationPreflight.reason ?? "Mission duration budget exhausted." : consumedSlices > (mission.budget.maxSlices ?? 1000) ? "Mission slice budget exhausted." : toolCalls > mission.budget.maxToolCalls ? "Mission tool-call budget exhausted." : cost > mission.budget.maxCost ? "Mission cost budget exhausted." : undefined;
     const blocked = Boolean(input.blockedReason?.trim()) || budgetExceeded;
     const blockedReason = input.blockedReason?.trim().slice(0, 2000) || reason;
     const nextAction = blocked
       ? budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction
       : input.nextAction?.slice(0, 2000) ?? mission.nextAction;
-    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
+    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, consumedSlices, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
-  return saved;
+  // `mutateMission` returns undefined when a concurrent terminal transition
+  // won the CAS. Return that persisted winner so late workers cannot mistake
+  // a cancellation race for a missing mission.
+  return saved ?? await getMission(userId, id);
 }
 
 export async function completeMission(userId: number, id: string, result: string): Promise<MissionRecord | undefined> {
@@ -6447,6 +6761,25 @@ export async function updateTask(userId: number, id: string, patch: Partial<Omit
   return mutateTask(userId, id, () => patch);
 }
 
+/**
+ * Quarantine an expired in-flight task. A provider may have accepted work
+ * before the worker died, so recovery must not turn lease expiry into a blind
+ * replay. The mission remains explicitly blocked until a fresh read-back or
+ * owner-directed repair decides what is safe.
+ */
+export async function quarantineExpiredTask(userId: number, id: string, reason: string, nextAction: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => {
+    if (task.status !== "running" || !task.lease || task.lease.expiresAt > Date.now()) return undefined;
+    return {
+      status: "blocked",
+      lease: undefined,
+      error: reason.slice(0, 2000),
+      nextAction: nextAction.slice(0, 2000),
+      events: [...task.events, taskEvent("blocked", reason, task.attempt)],
+    };
+  });
+}
+
 export async function scheduleTask(userId: number, id: string, runAt: number): Promise<TaskRecord | undefined> {
   return mutateTask(userId, id, (task) => {
     if (["completed", "running"].includes(task.status)) return undefined;
@@ -6457,7 +6790,7 @@ export async function scheduleTask(userId: number, id: string, runAt: number): P
 export async function setTaskWorkflowRunId(userId: number, id: string, workflowRunId: string, expectedWorkflowRunId?: string): Promise<TaskRecord | undefined> {
   return mutateTask(userId, id, (task) => expectedWorkflowRunId !== undefined && task.workflowRunId !== expectedWorkflowRunId
     ? undefined
-    : { workflowRunId: workflowRunId ? workflowRunId.slice(0, 200) : undefined, enqueueClaim: undefined });
+    : { workflowRunId: workflowRunId ? workflowRunId.slice(0, 200) : undefined, workflowPublishedAt: workflowRunId ? Date.now() : undefined, enqueueClaim: undefined });
 }
 
 export async function checkpointTask(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<TaskRecord | undefined> {
@@ -6504,6 +6837,8 @@ export async function retryTask(userId: number, id: string): Promise<TaskRecord 
       status: "queued",
       error: undefined,
       result: undefined,
+      attempt: 0,
+      lastFailureClass: undefined,
       // A retry is a new provider publication. Never carry the previous
       // workflow id or an expired/pending enqueue claim into that attempt.
       workflowRunId: undefined,
@@ -6527,6 +6862,11 @@ export async function renewTaskLease(userId: number, id: string, leaseToken: str
   return backend.renewTaskLease(userId, id, leaseToken, Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
 }
 
+/** Release a continuation lease after the delegated worker has durably settled its task. */
+export async function releaseTaskLease(userId: number, id: string, leaseToken: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => task.lease?.token === leaseToken ? { lease: undefined } : undefined);
+}
+
 async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   if (task.status !== "failed" || !task.missionId || !task.missionStepId) return;
   const mission = await getMission(task.userId, task.missionId);
@@ -6544,7 +6884,25 @@ async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   });
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean }): Promise<TaskRecord | undefined> {
+/**
+ * Claim one safe, bounded automatic repair after a mission task exhausted its
+ * consecutive no-progress attempts. The CAS prevents two recovery sweepers
+ * from reactivating the same failed task, and the failure class prevents this
+ * path from ever replaying an uncertain provider action.
+ */
+export async function claimMissionAutomaticRepair(userId: number, id: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => {
+    if (task.status !== "failed" || task.lastFailureClass !== "no_progress" || (task.automaticRepairCount ?? 0) >= 1) return undefined;
+    return {
+      automaticRepairCount: (task.automaticRepairCount ?? 0) + 1,
+      attempt: 0,
+      error: undefined,
+      nextAction: "A bounded automatic repair will reactivate this step once; if it still makes no progress, review the blocker and replan explicitly.",
+    };
+  });
+}
+
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean; progress?: boolean; failureClass?: TaskFailureClass }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
   if (["cancel_requested", "cancelled"].includes(task.status)) {
@@ -6564,7 +6922,9 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     nextAction: normalized.nextAction,
     result: normalized.result,
     error: normalized.status === "failed" ? normalized.message : undefined,
+    ...(normalized.failureClass ? { lastFailureClass: normalized.failureClass } : normalized.status === "queued" || normalized.status === "completed" ? { lastFailureClass: undefined } : {}),
     ...(status === "queued" ? { workflowRunId: undefined, enqueueClaim: undefined } : {}),
+    ...(status === "queued" && normalized.status === "queued" && normalized.progress ? { attempt: 0 } : {}),
     runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
   }, taskEvent(eventType, normalized.message, task.attempt));
   if (settled) await reconcileTerminalMissionTask(settled);

@@ -1799,6 +1799,8 @@ export interface AgentResult {
   toolsUsed: string[];
   /** Exact tool slugs whose execution returned successfully; unlike toolsUsed, excludes failed attempts. */
   toolsSucceeded: string[];
+  /** Per-call outcome evidence used by durable mission settlement. */
+  toolOutcomes: Array<{ callId: string; toolSlug: string; status: "succeeded" | "failed" | "uncertain"; dispatched: boolean; receiptId?: string }>;
   cost?: number;
   generatedImages?: { data: Buffer; mediaType: string; cost?: number; assetId?: string }[];
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
@@ -2484,6 +2486,7 @@ export async function runAgent(
 
   const toolsUsed: string[] = [];
   const toolsSucceeded: string[] = [];
+  const toolOutcomes: AgentResult["toolOutcomes"] = [];
   let toolCallsExecuted = 0;
   let totalCost = 0;
   const generatedImages: AgentResult["generatedImages"] = [];
@@ -2670,7 +2673,7 @@ export async function runAgent(
       posthog?.capture({ distinctId: String(userId), event: "agent_run_completed", properties: { model: requestModel, tools_used: toolsUsed, tool_count: toolsUsed.length, cost: totalCost, rounds: round + 1, has_images: (generatedImages?.length ?? 0) > 0, has_files: (generatedFiles?.length ?? 0) > 0 } });
       const finalText = await addUpgradeNotice(appendPreviewLinks(rawText, previewLinks));
       await persistRun("completed", "run.completed", finalText, { finishReason: finish_reason ?? "unknown" });
-      return { text: finalText, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
     }
 
     // ── Tool calls: execute via Composio session ───────────────────────
@@ -2701,6 +2704,8 @@ export async function runAgent(
       let effectiveAuditArgs: Record<string, unknown> | undefined = auditArgs;
       let externalClaim: ExternalActionClaim | undefined;
       let executionDispatched = false;
+      let providerRejected = false;
+      let toolReceiptId: string | undefined;
       let toolFailureMeta: { failureClass: string; retrySafety: "safe_retry" | "verify_first" } | undefined;
       try {
         // A tool must be in the exact tool list shown to the model. In
@@ -2836,6 +2841,7 @@ export async function runAgent(
         // - app tools (GITHUB_CREATE_ISSUE, GMAIL_SEND_EMAIL, etc.) → Composio → provider API
         executionDispatched = externalClaim?.state !== "succeeded";
         if (externalClaim?.state === "succeeded") {
+          toolReceiptId = externalClaim.receipt?.providerId ?? externalClaim.receipt?.id;
           execResult = { idempotentReplay: true, priorResult: externalClaim.receipt?.resultSummary ?? "The same external action was already confirmed successful." };
         } else if (slug === "CHUCK_EMAIL_ARTIFACT") {
           execResult = await sendArtifactEmail(userId, sessionObj, fullComposioTools, executionArgs, generatedFiles, signal);
@@ -3231,9 +3237,18 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
         }
         if (slug === "COMPOSIO_MULTI_EXECUTE_TOOL" && batchActivityActions.length) {
           batchActivityActions = settleComposioBatchActions(batchActivityActions, execResult);
+          if (batchActivityActions.some((action) => action.status === "failed" || action.status === "unknown")) {
+            // A successful wrapper response is not a successful batch when an
+            // individual action failed or was not matchable. Preserve the
+            // whole call as non-clean so mission settlement cannot replay a
+            // mixed external write blindly.
+            providerRejected = true;
+            toolFailed = true;
+          }
         }
         if (slug.startsWith("COMPOSIO_") && execResult && typeof execResult === "object" && !Array.isArray(execResult)
           && (execResult as Record<string, unknown>).successful === false) {
+          providerRejected = true;
           toolFailed = true;
         }
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
@@ -3249,7 +3264,8 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
                   return target && typeof target === "object" ? providerActionReceipt(execResult, target.toolSlug, target.arguments) : [];
                 })()
                 : [];
-            await finishExternalAction(userId, externalClaim.logicalActionId, result, providerReceiptId(execResult), trustedProviderActions);
+            toolReceiptId = providerReceiptId(execResult) ?? externalClaim.receipt?.providerId ?? externalClaim.receipt?.id;
+            await finishExternalAction(userId, externalClaim.logicalActionId, result, toolReceiptId, trustedProviderActions);
           }
         }
         if (approvedForTool) await setApprovalStatus(userId, approvedApprovalId!, "consumed");
@@ -3286,6 +3302,13 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
           result += "\nNo artifact was registered by this failed call. Fix the reported cause before retrying. If rendering setup failed, reuse the exact file path in the error; do not invent a replacement path or claim delivery.";
         }
       }
+
+      const outcomeStatus = !toolFailed
+        ? "succeeded"
+        : executionDispatched && !providerRejected
+          ? "uncertain"
+          : "failed";
+      toolOutcomes.push({ callId: call.id, toolSlug: slug, status: outcomeStatus, dispatched: executionDispatched, ...(toolReceiptId ? { receiptId: toolReceiptId } : {}) });
 
       await reportToolActivity({
         toolSlug: slug,
@@ -3330,17 +3353,17 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
     if (taskWaitRequest) {
       const message = "I’m waiting for the external task to finish, then I’ll check its status and continue.";
       await persistRun("paused", "run.waiting_for_task", message, { runAt: taskWaitRequest.runAt, checkpoint: taskWaitRequest.checkpoint, nextAction: taskWaitRequest.nextAction });
-      return { text: message, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, taskWait: taskWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, taskWait: taskWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (missionWaitRequest) {
       const message = "I’m waiting for the provider event recorded in this mission, then I’ll continue from the saved checkpoint.";
       await persistRun("paused", "run.waiting_for_provider_event", message, { provider: missionWaitRequest.provider, providerEventId: missionWaitRequest.providerEventId, checkpoint: missionWaitRequest.checkpoint, nextAction: missionWaitRequest.nextAction });
-      return { text: message, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionWait: missionWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: message, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, missionWait: missionWaitRequest, ...(privateLinks.length ? { privateLinks } : {}) };
     }
     if (missionStartHandoff) {
       const message = `Mission ${missionStartHandoff.id} has started and is running in its durable worker. I will not execute its steps in this chat turn; the worker owns the mission and will continue from its persisted state.`;
       await persistRun("completed", "run.mission_started", message, { missionId: missionStartHandoff.id, status: missionStartHandoff.status, ...(missionStartHandoff.rootTaskId ? { rootTaskId: missionStartHandoff.rootTaskId } : {}) });
-      return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+      return { text: await addUpgradeNotice(message), toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
     }
   }
 
@@ -3360,7 +3383,7 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
   const closeout = typeof text === "string" ? appendPreviewLinks(text, previewLinks) : appendPreviewLinks("", previewLinks);
   const finalText = `${await addUpgradeNotice(closeout)}\n\nI reached the ${config.maxToolRounds}-round tool limit, so this run may be incomplete. Verify the results above before treating it as done.`.trim();
   await persistRun("completed", "run.completed_after_round_limit", finalText);
-  return { text: finalText, toolsUsed, toolsSucceeded, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+  return { text: finalText, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
 }
 
 // ── Get connection URL for a toolkit (for the /connect command) ───────────────

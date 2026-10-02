@@ -10,6 +10,7 @@ import {
   finalizeMissionIfReady,
   getMission,
   initStore,
+  listMissionEvents,
   missionBudgetPreflight,
   pauseMission,
   recordMissionSlice,
@@ -25,6 +26,20 @@ import {
 } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("mission event history survives the bounded mission-record tail", async () => {
+  const userId = 981020;
+  const mission = await createMission(userId, { title: "Event history", objective: "Retain lifecycle history", definitionOfDone: "History remains readable", steps: [{ id: "history", title: "History", objective: "Checkpoint repeatedly" }] });
+  await startMission(userId, mission.id);
+  for (let index = 0; index < 140; index++) await checkpointMission(userId, mission.id, `checkpoint-${index}`, `continue-${index}`);
+
+  const current = await getMission(userId, mission.id);
+  const events = await listMissionEvents(userId, mission.id, 5000);
+  assert.ok((current?.events.length ?? 0) <= 500, "the mission record remains bounded");
+  assert.ok(events.length > 100, "the durable history must outlive the bounded mission record");
+  assert.equal(events[0]?.type, "created");
+  assert.equal(events.at(-1)?.message, "continue-139");
+});
 
 test("expired mission resume stays blocked until its total duration is explicitly extended", async () => {
   const userId = 951099;
@@ -64,9 +79,31 @@ test("settling a slice records usage without reviving a blocked or paused missio
   await pauseMission(userId, mission.id);
   const accounted = await recordMissionSlice(userId, mission.id, { toolCalls: 4, cost: 0.2 });
   assert.equal(accounted?.status, "paused");
-  assert.equal(accounted?.consumedSteps, 1);
+  assert.equal(accounted?.consumedSlices, 1);
   assert.equal(accounted?.toolCalls, 4);
   assert.equal(accounted?.cost, 0.2);
+});
+
+test("late slice settlement cannot mutate a cancelled mission", async () => {
+  const userId = 951096;
+  const mission = await createMission(userId, input({ idempotencyKey: "late-cancelled-slice" }));
+  await startMission(userId, mission.id);
+  const cancelled = await cancelMission(userId, mission.id, "Owner cancelled the mission.");
+  assert.equal(cancelled?.status, "cancelled");
+
+  const late = await recordMissionSlice(userId, mission.id, {
+    checkpoint: "A late worker response arrived.",
+    nextAction: "Ignore the cancelled continuation.",
+    toolCalls: 4,
+    cost: 0.2,
+  });
+
+  assert.equal(late?.status, "cancelled");
+  assert.equal(late?.version, cancelled?.version);
+  assert.equal(late?.checkpoint, cancelled?.checkpoint);
+  assert.equal(late?.consumedSlices, cancelled?.consumedSlices);
+  assert.equal(late?.toolCalls, cancelled?.toolCalls);
+  assert.equal(late?.cost, cancelled?.cost);
 });
 
 test("uncertain external progress charges the slice before atomically blocking the mission", async () => {
@@ -81,7 +118,7 @@ test("uncertain external progress charges the slice before atomically blocking t
     blockedReason: "An external provider action was attempted without a durable receipt.",
   });
   assert.equal(blocked?.status, "blocked");
-  assert.equal(blocked?.consumedSteps, 1);
+  assert.equal(blocked?.consumedSlices, 1);
   assert.equal(blocked?.toolCalls, 2);
   assert.equal(blocked?.cost, 0.35);
   assert.match(blocked?.error ?? "", /without a durable receipt/);

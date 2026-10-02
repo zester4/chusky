@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { isSimpleTelegramGreeting, registerHandlers, telegramAgentChannelContext } from "../src/handlers.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { config } from "../src/config.js";
-import { addJob, addReminder, appendChannelConversationMessages, consumeCliPairing, createApproval, createMission, createTask, getApproval, getChannelConversation, getSession, initStore, setComposioSessionId, appendMessages } from "../src/store.js";
+import { addJob, addReminder, appendChannelConversationMessages, claimTask, consumeCliPairing, createApproval, createMission, createTask, getApproval, getChannelConversation, getSession, initStore, listTasks, setComposioSessionId, appendMessages, startMission } from "../src/store.js";
+import { reconcileMissionExecution } from "../src/missionScheduler.js";
 
 class FakeBot {
   commands = new Map<string, (ctx: any) => Promise<void>>();
@@ -206,6 +207,35 @@ test("home workspace exposes durable reminders, schedules, tasks, missions, and 
   voiceCtx.match = ["home:voice:on", "on"];
   await voice.handler(voiceCtx);
   assert.equal((await getSession(userId)).voiceReplies, true);
+});
+
+test("Telegram mission pause cancels every active branch, not only the root task", async () => {
+  const bot = new FakeBot();
+  registerHandlers(bot as any);
+  const userId = 840027;
+  const mission = await createMission(userId, {
+    title: "Parallel Telegram pause",
+    objective: "Pause both branches",
+    definitionOfDone: "Both branches stop",
+    idempotencyKey: "telegram-parallel-pause",
+    steps: [
+      { id: "branch-a", title: "Branch A", objective: "Work A" },
+      { id: "branch-b", title: "Branch B", objective: "Work B" },
+    ],
+  });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, async () => "workflow");
+  const tasks = await listTasks(userId);
+  assert.equal(tasks.filter((task) => task.missionId === mission.id).length, 2);
+  const running = tasks.find((task) => task.missionStepId === "branch-a");
+  assert.ok(running);
+  await claimTask(userId, running.id, "telegram-pause-worker");
+
+  const pause = context(userId, `pause ${mission.id}`);
+  await bot.commands.get("missions")!(pause);
+
+  const settled = (await listTasks(userId)).filter((task) => task.missionId === mission.id);
+  assert.ok(settled.every((task) => ["cancelled", "cancel_requested"].includes(task.status)), `unsettled branches: ${settled.map((task) => `${task.missionStepId}:${task.status}`).join(", ")}`);
 });
 
 test("home exposes a private third-party MCP status and management view", async () => {

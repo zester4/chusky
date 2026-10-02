@@ -1,4 +1,4 @@
-import { claimTask, getTask, renewTaskLease, settleTaskRun, type TaskRecord } from "./store.js";
+import { claimTask, getTask, renewTaskLease, settleTaskRun, type TaskFailureClass, type TaskRecord } from "./store.js";
 import { logger } from "./logger.js";
 import { decideRecovery } from "./autonomy/decisionLoop.js";
 
@@ -13,6 +13,10 @@ export interface TaskRunResult {
   result?: string;
   /** Distinguishes an intentional durable wait from a retry after failure. */
   waiting?: boolean;
+  /** The slice persisted real durable progress and may reset consecutive retries. */
+  progress?: boolean;
+  /** Machine-readable failure classification for bounded recovery decisions. */
+  failureClass?: TaskFailureClass;
 }
 
 export interface TaskRunnerDependencies {
@@ -107,8 +111,9 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
       status: "failed",
       message: message.slice(0, 1000),
       checkpoint: task.checkpoint,
-      nextAction: recoveryNextAction,
-    });
+        nextAction: recoveryNextAction,
+        failureClass: "worker",
+      });
     const failureContext = { userId: payload.userId, taskId: task.id, attempt: task.attempt, status: settled?.status, errorClass: error instanceof Error ? error.name : "unknown" };
     // A queued settlement is an intentional bounded retry, not a terminal
     // worker failure. Keep the diagnostic classification without presenting a

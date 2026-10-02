@@ -1,8 +1,36 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
-import { initStore, createMission, startMission, acquireMissionLease, releaseMissionLease, pauseMission, resumeMission, missionBudgetPreflight, getMission, completeMissionStep, extendMissionDurationIfEligible, recordTrustedMissionEvidence, waitMission, resumeMissionFromProviderEvent, renewMissionLease, recordMissionSlice } from "../src/store.js";
+import { initStore, createMission, startMission, acquireMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, pauseMission, resumeMission, missionBudgetPreflight, getMission, completeMissionStep, extendMissionDurationIfEligible, recordTrustedMissionEvidence, waitMission, resumeMissionFromProviderEvent, renewMissionLease, recordMissionSlice } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("independent running branches hold separate leases and preserve active timing", async (t) => {
+  let now = 1_790_100_000_000;
+  t.mock.method(Date, "now", () => now);
+  const mission = await createMission(961000, { title: "Parallel branches", objective: "Run both branches", definitionOfDone: "Both branches verified", steps: [
+    { id: "root", title: "Root", objective: "Prepare" },
+    { id: "left", title: "Left", objective: "Run left", dependsOn: ["root"] },
+    { id: "right", title: "Right", objective: "Run right", dependsOn: ["root"] },
+  ] });
+  await startMission(961000, mission.id);
+  await recordTrustedMissionEvidence(961000, mission.id, [{ id: "root-proof", kind: "tool_receipt", summary: "Root verified", verified: true, verifiedBy: "system", verifiedAt: now }], "root");
+  await completeMissionStep(961000, mission.id, "root", "Root verified");
+  const left = await acquireMissionStepLease(961000, mission.id, "left", "left-worker", 60_000);
+  const right = await acquireMissionStepLease(961000, mission.id, "right", "right-worker", 60_000);
+  assert.ok(left?.executionLeases?.left);
+  assert.ok(right?.executionLeases?.right);
+  assert.ok(Object.keys(right?.executionLeases ?? {}).includes("left"));
+  now += 20_000;
+  assert.ok(await renewMissionStepLease(961000, mission.id, "left", left!.executionLeases!.left!.token, 60_000));
+  assert.equal(await acquireMissionStepLease(961000, mission.id, "left", "replacement-worker", 60_000), undefined);
+  await releaseMissionStepLease(961000, mission.id, "left", left!.executionLeases!.left!.token);
+  const afterLeft = await getMission(961000, mission.id);
+  assert.ok(afterLeft?.executionLeases?.right, "Releasing one branch must not release its sibling.");
+  now += 10_000;
+  await releaseMissionStepLease(961000, mission.id, "right", right!.executionLeases!.right!.token);
+  assert.equal((await getMission(961000, mission.id))?.executionLeases, undefined);
+  assert.equal(missionBudgetPreflight((await getMission(961000, mission.id))!).remaining.durationSeconds, 24 * 60 * 60 - 30);
+});
 
 test("active execution budget excludes queued and owner-paused time across resume", async (t) => {
   let now = 1_790_000_000_000;

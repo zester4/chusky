@@ -168,7 +168,8 @@ test("Treg lead-signal watches bound tools, persist first-seen signals, and supp
   const firstSignals = (await listAttentionRecords(userId, "observation") as any[]).filter((item) => item.eventType === "lead_signal.detected");
   assert.equal(firstSignals.length, 2);
   assert.equal(firstSignals[0].metadata.email, undefined);
-  assert.equal(firstSignals[1].metadata.url, undefined, "non-HTTPS source URLs are dropped");
+  assert.equal(firstSignals.some((item) => item.metadata.url === "http://unsafe.example/post"), false, "non-HTTPS source URLs are dropped");
+  assert.equal(firstSignals.filter((item) => typeof item.metadata.url === "string").length, 1, "only the HTTPS source URL is retained");
   const persistedWatch = (await listAttentionRecords(userId, "autonomy_watch") as any[]).find((item) => item.id === watch.id);
   assert.equal(persistedWatch.seenSignalKeys.length, 2);
 

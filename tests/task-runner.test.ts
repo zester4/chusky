@@ -1,10 +1,51 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, completeMissionStep, completeTask, createMission, createTask, finalizeMissionIfReady, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, settleTaskRun, startMission, updateTask } from "../src/store.js";
+import { claimTask, completeMissionStep, completeTask, createMission, createTask, finalizeMissionIfReady, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, renewTaskLease, settleTaskRun, startMission, updateTask } from "../src/store.js";
 import { scheduleMissionSteps } from "../src/missionScheduler.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("an expired running task is reclaimed with a new token and rejects the crashed worker", async () => {
+  const userId = 840009;
+  const originalNow = Date.now;
+  let now = 1_800_000_000_000;
+  Date.now = () => now;
+  try {
+    const task = await createTask(userId, { title: "Recover a crash", objective: "Continue the same durable task" });
+    const crashed = await claimTask(userId, task.id, "crashed-worker", 1000);
+    assert.ok(crashed?.lease);
+    now += 1001;
+    const recovered = await claimTask(userId, task.id, "replacement-worker", 1000);
+    assert.ok(recovered?.lease, "An expired running lease must not strand the task.");
+    assert.equal(recovered.id, task.id);
+    assert.notEqual(recovered.lease.token, crashed.lease.token);
+    assert.equal(await renewTaskLease(userId, task.id, crashed.lease.token, 1000), undefined);
+    assert.equal(await settleTaskRun(userId, task.id, crashed.lease.token, { status: "completed", message: "Late stale result" }), undefined);
+    const settled = await settleTaskRun(userId, task.id, recovered.lease.token, { status: "completed", message: "Recovered", result: "Verified" });
+    assert.equal(settled?.status, "completed");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("lease expiry revokes settlement and renewal even before a replacement claims", async () => {
+  const userId = 840010;
+  const originalNow = Date.now;
+  let now = 1_800_000_000_000;
+  Date.now = () => now;
+  try {
+    const task = await createTask(userId, { title: "Expired authority", objective: "Reject expired worker writes" });
+    const claimed = await claimTask(userId, task.id, "expired-worker", 1000);
+    assert.ok(claimed?.lease);
+    now += 1000;
+    assert.equal(await renewTaskLease(userId, task.id, claimed.lease.token, 1000), undefined);
+    assert.equal(await settleTaskRun(userId, task.id, claimed.lease.token, { status: "completed", message: "Expired result" }), undefined);
+    assert.equal((await getTask(userId, task.id))?.status, "running");
+  } finally {
+    Date.now = originalNow;
+  }
+});
 
 test("only one worker can claim a queued task and the stale worker cannot settle it", async () => {
   const userId = 840001;

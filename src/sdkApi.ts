@@ -12,7 +12,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -61,7 +61,7 @@ import {
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
-import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { appendReliabilitySample, compensationView, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
@@ -76,6 +76,7 @@ import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./rel
 import { buildReadinessReport } from "./reliability/readiness.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
+import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
 
@@ -1075,7 +1076,7 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 400, "task_create_failed", error instanceof Error ? error.message : "A2A task could not be created."); }
   });
   app.get("/a2a/tasks/:taskId", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await getMission(owner.userId, c.req.param("taskId")); return mission ? c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission, artifacts: [] }) : apiError(c, 404, "task_not_found", "A2A task not found."); });
-  app.post("/a2a/tasks/:taskId/cancel", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await cancelMission(owner.userId, c.req.param("taskId"), "Cancelled by the delegating agent."); if (!mission) return apiError(c, 409, "task_not_cancellable", "A2A task is already finished or not owned by this key."); if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission }); });
+  app.post("/a2a/tasks/:taskId/cancel", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await cancelMission(owner.userId, c.req.param("taskId"), "Cancelled by the delegating agent."); if (!mission) return apiError(c, 409, "task_not_cancellable", "A2A task is already finished or not owned by this key."); await cancelMissionTasks(owner.userId, mission.id); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission }); });
   app.post("/a2a/tasks/:taskId/send", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const body = await c.req.json().catch(() => ({})) as { message?: unknown }; const mission = await getMission(owner.userId, c.req.param("taskId")); if (!mission) return apiError(c, 404, "task_not_found", "A2A task not found."); if (typeof body.message !== "string" || !body.message.trim()) return apiError(c, 400, "invalid_message", "message is required."); const updated = await updateMission(owner.userId, mission.id, { checkpoint: body.message.slice(0, 8000), nextAction: "Incorporate the delegating agent's update in the next bounded slice." }); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(updated ?? mission), mission: updated ?? mission }); });
   app.get("/a2a/tasks/:taskId/stream", async (c) => {
     const owner = (c as any).get("a2aOwner") as SdkOwner;
@@ -1186,7 +1187,7 @@ export function registerSdkApi(app: Hono): void {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
         const mission = await cancelMission(owner.userId, taskId, "Cancelled by the delegating agent.");
         if (!mission) return a2aJsonRpcError(c, id, -32002, "Task is not cancellable or was not found.", 409);
-        if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId);
+        await cancelMissionTasks(owner.userId, mission.id);
         const task = a2aTaskView(owner, mission);
         return a2aJsonRpcResult(c, id, method === "CancelTask" ? task : { task });
       }
@@ -2613,7 +2614,7 @@ export function registerSdkApi(app: Hono): void {
     const title = typeof body.title === "string" ? body.title.trim() : "";
     const objective = typeof body.objective === "string" ? body.objective.trim() : "";
     const definitionOfDone = typeof body.definitionOfDone === "string" ? body.definitionOfDone.trim() : "";
-    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+    const steps = Array.isArray(body.steps) ? body.steps.flatMap((value) => {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
@@ -2624,13 +2625,14 @@ export function registerSdkApi(app: Hono): void {
     const idempotencyKey = (c.req.header("Idempotency-Key") ?? (typeof body.idempotencyKey === "string" ? body.idempotencyKey : "")).trim().slice(0, 200) || undefined;
     try {
       const requiredEvidence = Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined;
-      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", budget: {
+      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", workSchedule: body.workSchedule && typeof body.workSchedule === "object" && !Array.isArray(body.workSchedule) ? body.workSchedule as MissionWorkSchedule : undefined, budgetCeiling: body.budgetCeiling && typeof body.budgetCeiling === "object" && !Array.isArray(body.budgetCeiling) ? body.budgetCeiling as Record<string, number> : undefined, budget: {
         maxDurationSeconds: body.maxDurationSeconds === undefined ? undefined : Number(body.maxDurationSeconds),
         durationMode: body.durationMode as "active" | "wall_clock" | undefined,
         maxLifetimeSeconds: body.maxLifetimeSeconds as number | undefined,
         automaticExtensionSeconds: body.automaticExtensionSeconds as number | undefined,
         maxAutomaticExtensions: body.maxAutomaticExtensions as number | undefined,
         maxSteps: body.maxSteps === undefined ? undefined : Number(body.maxSteps),
+        maxSlices: body.maxSlices === undefined ? undefined : Number(body.maxSlices),
         maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
         maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
       } });
@@ -2646,7 +2648,8 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 400, "mission_create_failed", error instanceof Error ? error.message : "Mission could not be created."); }
   });
   app.get("/v1/missions/:missionId", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(mission) : apiError(c, 404, "not_found", "Mission not found."); });
-  app.get("/v1/missions/:missionId/events", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json({ data: mission.events }) : apiError(c, 404, "not_found", "Mission not found."); });
+  app.get("/v1/missions/:missionId/doctor", async (c) => { const owner = sdkUser(c)!; const mission = await getMission(owner.userId, c.req.param("missionId")); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); return c.json(diagnoseMission({ mission, tasks: await listTasks(owner.userId), compensations: await listCompensations(owner.userId) })); });
+  app.get("/v1/missions/:missionId/events", async (c) => { const events = await listMissionEvents(sdkUser(c)!.userId, c.req.param("missionId"), Number(c.req.query("limit") ?? 1000)); return (await getMission(sdkUser(c)!.userId, c.req.param("missionId"))) ? c.json({ data: events }) : apiError(c, 404, "not_found", "Mission not found."); });
   app.get("/v1/missions/:missionId/proof", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(missionProof(mission)) : apiError(c, 404, "not_found", "Mission not found."); });
   app.post("/v1/missions/:missionId/evidence", async (c) => {
     const body = await c.req.json().catch(() => ({})) as { stepId?: unknown; evidence?: unknown };
@@ -2663,6 +2666,37 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/missions/:missionId/verify", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const verified = await verifyMission(owner.userId, c.req.param("missionId"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: "agent" }); if (!verified) return apiError(c, 404, "not_found", "Mission not found."); return c.json(await finalizeMissionCloseout(owner.userId, verified.id) ?? verified); });
   app.post("/v1/missions/:missionId/repair", async (c) => { const body = await c.req.json().catch(() => ({})) as { reason?: unknown; nextAction?: unknown }; if (typeof body.reason !== "string" || !body.reason.trim()) return apiError(c, 400, "invalid_repair", "reason is required."); const mission = await repairMission(sdkUser(c)!.userId, c.req.param("missionId"), { reason: body.reason, nextAction: typeof body.nextAction === "string" ? body.nextAction : undefined }); return mission ? c.json(mission) : apiError(c, 409, "mission_repair_failed", "Mission is not repairable or not owned by you."); });
   app.post("/v1/missions/:missionId/pause", async (c) => { const owner = sdkUser(c)!; const mission = await pauseMission(owner.userId, c.req.param("missionId"), "Mission paused through the API."); if (mission) await cancelMissionTasks(owner.userId, mission.id); return mission ? c.json(mission) : apiError(c, 409, "mission_not_paused", "Only a running or waiting mission can be paused."); });
+  app.post("/v1/missions/:missionId/control", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const rawBudget = body.budget;
+    const budget: Record<string, number> = {};
+    if (rawBudget !== undefined) {
+      if (!rawBudget || typeof rawBudget !== "object" || Array.isArray(rawBudget)) return apiError(c, 400, "invalid_mission_control", "budget must be an object.");
+      for (const field of ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const) {
+        const value = (rawBudget as Record<string, unknown>)[field];
+        if (value !== undefined) {
+          if (typeof value !== "number" || !Number.isFinite(value)) return apiError(c, 400, "invalid_mission_control", `${field} must be a finite number.`);
+          budget[field] = value;
+        }
+      }
+    }
+    const rawSchedule = body.workSchedule;
+    const workSchedule = rawSchedule === undefined ? undefined : rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule) ? rawSchedule as MissionWorkSchedule : undefined;
+    if (rawSchedule !== undefined && !workSchedule) return apiError(c, 400, "invalid_mission_control", "workSchedule must be an object.");
+    if (!Object.keys(budget).length && !workSchedule) return apiError(c, 400, "invalid_mission_control", "Provide budget or workSchedule.");
+    try {
+      const mission = await updateMissionControl(owner.userId, c.req.param("missionId"), { ...(Object.keys(budget).length ? { budget: budget as Partial<MissionBudget> } : {}), ...(workSchedule ? { workSchedule } : {}) });
+      if (!mission) return apiError(c, 409, "mission_control_rejected", "This mission is finished, unchanged, or not owned by you.");
+      if (workSchedule) await rescheduleQueuedMissionTasks(owner.userId, mission);
+      const reconciled = mission.status === "running" ? await reconcileMissionExecution(owner.userId, mission.id, sdkTaskWorkflowEnqueuer) : mission;
+      return c.json(reconciled ?? mission);
+    } catch (error) {
+      return error instanceof MissionEnqueueError
+        ? apiError(c, 503, "mission_enqueue_failed", error.message)
+        : apiError(c, 400, "invalid_mission_control", error instanceof Error ? error.message : "Mission control update was rejected.");
+    }
+  });
   app.post("/v1/missions/:missionId/resume", async (c) => {
     const owner = sdkUser(c)!;
     try {
@@ -2715,7 +2749,7 @@ export function registerSdkApi(app: Hono): void {
     const reason = typeof body.reason === "string" ? body.reason.trim() : "Verified information changed the remaining plan.";
     const invalidSteps = validateMissionStepsPayload(body.steps, { requireNonEmpty: true });
     if (invalidSteps) return apiError(c, 400, "invalid_replan", invalidSteps);
-    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+    const steps = Array.isArray(body.steps) ? body.steps.flatMap((value) => {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];

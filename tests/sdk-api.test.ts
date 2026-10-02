@@ -8,7 +8,7 @@ import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkR
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
-import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
+import { addRecallMeeting, authenticateCliToken, completeMissionStep, createApproval, createCliDevice, createMission, createTask, createTriggerEvent, createWebTelegramLinkCode, enqueueOutbox, getMission, getOutbox, getSession, getTask, initStore, listTasks, recordTrustedMissionEvidence, redeemWebTelegramLinkCode, saveCalendarMeetingPreparation, saveExternalAction, saveSession, startMission, updateMission, updateOutbox, upsertMeetingContact, upsertMemory, waitMission } from "../src/store.js";
 import { redeemLinkCode } from "../src/channels/identity.js";
 import { appendTraceEvent, queueCompensation, saveOutcomeVerification } from "../src/reliability/persistence.js";
 import { resetTriggerCatalogueForTests } from "../src/triggerCatalog.js";
@@ -820,8 +820,8 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   assert.match(await invalidMode.text(), /verificationMode must be either legacy or strict/i);
   const malformedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Malformed plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: [{ title: "Keep this", objective: "Do this." }, null] }) }));
   assert.equal(malformedPlan.status, 400, "the API must reject rather than silently drop malformed plan steps");
-  const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 101 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
-  assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over 100 steps");
+  const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 1001 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
+  assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over the published maximum");
   const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
   const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(first.status, 201);
@@ -831,6 +831,18 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   const replay = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(replay.status, 200);
   assert.equal((await replay.json() as { id: string }).id, created.id);
+  const doctor = await api.fetch(new Request(`http://local/v1/missions/${created.id}/doctor`, { headers }));
+  assert.equal(doctor.status, 200);
+  const diagnosis = await doctor.json() as { missionId: string; health: string; nextActions: string[] };
+  assert.equal(diagnosis.missionId, created.id);
+  assert.ok(["healthy", "stalled", "waiting", "blocked"].includes(diagnosis.health));
+  assert.ok(Array.isArray(diagnosis.nextActions));
+  const controlled = await api.fetch(new Request(`http://local/v1/missions/${created.id}/control`, { method: "POST", headers, body: JSON.stringify({ budget: { maxSlices: 900 }, workSchedule: { timezone: "UTC", windowStart: "09:00", windowEnd: "17:00", dailyBudgetSeconds: 3600, cadenceSeconds: 300 } }) }));
+  assert.equal(controlled.status, 200);
+  const controlledMission = await controlled.json() as { budget: { maxSlices: number }; workSchedule?: { timezone: string; windowStart: string; windowEnd: string } };
+  assert.equal(controlledMission.budget.maxSlices, 900);
+  assert.equal(controlledMission.workSchedule?.timezone, "UTC");
+  assert.equal(controlledMission.workSchedule?.windowStart, "09:00");
   const hidden = await api.fetch(new Request(`http://local/v1/missions/${created.id}`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "another-owner" } }));
   assert.equal(hidden.status, 404);
   const paused = await api.fetch(new Request(`http://local/v1/missions/${created.id}/pause`, { method: "POST", headers }));
@@ -941,6 +953,65 @@ test("A2A JSON-RPC exposes standard task operations over the owner-scoped missio
   const unsupportedVersion = await api.fetch(new Request("http://local/a2a/rpc", { method: "POST", headers: { ...headers, "A2A-Version": "9.9" }, body: JSON.stringify({ jsonrpc: "2.0", id: 6, method: "tasks/get", params: { id: created.result.task.id } }) }));
   assert.equal(unsupportedVersion.status, 400);
   assert.equal(((await unsupportedVersion.json()) as { error: { code: string } }).error.code, "a2a_version_not_supported");
+});
+
+test("A2A REST cancellation cancels every mission branch, not only the root task", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-cancel-branches");
+  const externalId = "a2a-rest-cancel-branches";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const mission = await createMission(userId, {
+    title: "Parallel delegated work",
+    objective: "Finish both independent branches.",
+    definitionOfDone: "Both branches are complete.",
+    steps: [
+      { id: "branch_a", title: "Branch A", objective: "Complete branch A." },
+      { id: "branch_b", title: "Branch B", objective: "Complete branch B." },
+    ],
+    idempotencyKey: "a2a-rest-cancel-branches",
+  });
+  assert.equal((await startMission(userId, mission.id))?.status, "running");
+  const rootTask = await createTask(userId, { title: "Root branch", objective: "Run branch A.", missionId: mission.id, missionStepId: "branch_a", runAt: Date.now() });
+  const branchTask = await createTask(userId, { title: "Parallel branch", objective: "Run branch B.", missionId: mission.id, missionStepId: "branch_b", runAt: Date.now() });
+  await updateMission(userId, mission.id, { rootTaskId: rootTask.id });
+
+  const api = app();
+  const response = await api.fetch(new Request(`http://local/a2a/tasks/${mission.id}/cancel`, {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/json" },
+  }));
+  assert.equal(response.status, 200);
+  const tasks = (await listTasks(userId)).filter((task) => task.id === rootTask.id || task.id === branchTask.id);
+  assert.deepEqual(tasks.map((task) => task.status).sort(), ["cancelled", "cancelled"]);
+});
+
+test("A2A JSON-RPC cancellation cancels every mission branch, not only the root task", async () => {
+  setSdkTaskWorkflowEnqueuerForTests(async () => "workflow-a2a-rpc-cancel-branches");
+  const externalId = "a2a-rpc-cancel-branches";
+  const userId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalId}`).digest("hex").slice(0, 12), 16);
+  const mission = await createMission(userId, {
+    title: "Parallel delegated RPC work",
+    objective: "Finish both independent branches.",
+    definitionOfDone: "Both branches are complete.",
+    steps: [
+      { id: "branch_a", title: "Branch A", objective: "Complete branch A." },
+      { id: "branch_b", title: "Branch B", objective: "Complete branch B." },
+    ],
+    idempotencyKey: "a2a-rpc-cancel-branches",
+  });
+  assert.equal((await startMission(userId, mission.id))?.status, "running");
+  const rootTask = await createTask(userId, { title: "Root branch", objective: "Run branch A.", missionId: mission.id, missionStepId: "branch_a", runAt: Date.now() });
+  const branchTask = await createTask(userId, { title: "Parallel branch", objective: "Run branch B.", missionId: mission.id, missionStepId: "branch_b", runAt: Date.now() });
+  await updateMission(userId, mission.id, { rootTaskId: rootTask.id });
+
+  const api = app();
+  const response = await api.fetch(new Request("http://local/a2a/rpc", {
+    method: "POST",
+    headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": externalId, "Content-Type": "application/a2a+json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: "cancel-branches", method: "CancelTask", params: { id: mission.id } }),
+  }));
+  assert.equal(response.status, 200);
+  const tasks = (await listTasks(userId)).filter((task) => task.id === rootTask.id || task.id === branchTask.id);
+  assert.deepEqual(tasks.map((task) => task.status).sort(), ["cancelled", "cancelled"]);
 });
 
 test("A2A tasks accept only verified owner image file IDs and persist them for durable worker input", async () => {

@@ -52,35 +52,87 @@ async function main() {
       checks.push({ name, ok: condition, ...(detail ? { detail } : {}) });
       if (!condition) throw new Error(`Smoke check failed: ${name}${detail ? ` (${detail})` : ""}`);
     };
+    const selectorFor = (item: Record<string, any>) => ({
+      role: item.role,
+      name: item.name,
+      index: item.index,
+      ...(item.id ? { id: item.id } : {}),
+      ...(item.nameAttr ? { nameAttr: item.nameAttr } : {}),
+      ...(item.placeholder ? { placeholder: item.placeholder } : {}),
+      ...(item.autocomplete ? { autocomplete: item.autocomplete } : {}),
+      ...(item.inputType ? { inputType: item.inputType } : {}),
+      ...(item.tagName ? { tagName: item.tagName } : {}),
+      ...(item.frameIndex !== undefined ? { frameIndex: item.frameIndex } : {}),
+      ...(item.frameUrl ? { frameUrl: item.frameUrl } : {}),
+      ...(item.observationId ? { observationId: item.observationId } : {}),
+      ...(item.pageGeneration !== undefined ? { pageGeneration: item.pageGeneration } : {}),
+    });
 
     const publicUrl = process.argv[2] || "https://www.iana.org/help/example-domains";
     const opened = await requestBrowser({ action: "open", url: publicUrl });
     const publicSnapshot = await requestBrowser({ action: "snapshot", includePageContent: true });
-    assertCheck("public internet navigation and readable page content", typeof opened.url === "string" && publicSnapshot.pageContent?.length > 80, String(opened.url));
+    assertCheck("public internet navigation and readable page content", typeof opened.url === "string" && publicSnapshot.pageContent?.length > 80, JSON.stringify({ openedUrl: opened.url, snapshotUrl: publicSnapshot.url, title: publicSnapshot.title, pageContentChars: String(publicSnapshot.pageContent || "").length, challenge: publicSnapshot.challenge }));
 
     const fixture = await requestBrowser({ action: "smoke_fixture" });
     assertCheck("private smoke fixture content", String(fixture.pageContent).includes("Visible content proves page reading works."));
     const textbox = (fixture.matches as Array<any>).find((item) => item.role === "textbox" && item.name === "Search fixture");
     const button = (fixture.matches as Array<any>).find((item) => item.role === "button" && item.name === "Continue");
     if (!textbox || !button) throw new Error("Smoke fixture did not expose its accessible text field and button");
-    await requestBrowser({ action: "fill", selector: { role: textbox.role, name: textbox.name, index: textbox.index }, value: "E2B form test" });
-    await requestBrowser({ action: "click", selector: { role: button.role, name: button.name, index: button.index } });
+    await requestBrowser({ action: "fill", selector: selectorFor(textbox), value: "E2B form test" });
+    await requestBrowser({ action: "click", selector: selectorFor(button) });
     const submitted = await requestBrowser({ action: "snapshot", includePageContent: true });
     assertCheck("accessible form fill and button action", String(submitted.pageContent).includes("Submitted: E2B form test"));
+
+    const fixtureMatches = submitted.matches as Array<any>;
+    const firstName = fixtureMatches.find((item) => item.role === "textbox" && item.name === "Legal first name");
+    const lastName = fixtureMatches.find((item) => item.role === "textbox" && item.name === "Legal last name");
+    const businessEmail = fixtureMatches.find((item) => item.role === "textbox" && item.name === "Business email");
+    const headquarters = fixtureMatches.find((item) => item.role === "combobox" && item.name === "Business headquarters");
+    const password = fixtureMatches.find((item) => item.role === "textbox" && item.name === "Create a password");
+    const terms = fixtureMatches.find((item) => item.role === "checkbox" && item.name.includes("I agree"));
+    const createAccount = fixtureMatches.find((item) => item.role === "button" && item.name === "Create sandbox account") || { role: "button", name: "Create sandbox account", id: "create-account", index: 0 };
+    if (!firstName || !lastName || !businessEmail || !headquarters || !password || !terms || !createAccount) throw new Error(`Smoke fixture did not expose every form control: ${JSON.stringify(fixtureMatches.map((item) => ({ role: item.role, name: item.name, id: item.id, autocomplete: item.autocomplete })))}`);
+    await requestBrowser({ action: "fill", selector: selectorFor(firstName), value: "Chusky" });
+    await requestBrowser({ action: "fill", selector: selectorFor(lastName), value: "Tester" });
+    await requestBrowser({ action: "fill", selector: selectorFor(businessEmail), value: "chusky.tester@example.invalid" });
+    const generatedPassword = `Chusky-${randomUUID().replaceAll("-", "").slice(0, 16)}!a1`;
+    await requestBrowser({ action: "fill", selector: selectorFor(password), value: generatedPassword });
+    await requestBrowser({ action: "select_option", selector: selectorFor(headquarters), value: "Ghana" });
+    const checked = await requestBrowser({ action: "check", selector: selectorFor(terms), includePageContent: true });
+    assertCheck("form controls remain verifiably filled before submit", String(checked.pageContent).includes("Ghana") && checked.formState?.checked === true);
+    await requestBrowser({ action: "click", selector: selectorFor(createAccount) });
+    const accountSubmitted = await requestBrowser({ action: "snapshot", includePageContent: true });
+    assertCheck("country selection, checkbox, generated password, and submit", String(accountSubmitted.pageContent).includes("Account submitted: Chusky Tester chusky.tester@example.invalid ghana terms=true"));
+
+    const surveyMatches = fixtureMatches;
+    const surveyName = surveyMatches.find((item) => item.role === "textbox" && item.name === "Your name (optional)");
+    const technology = surveyMatches.find((item) => item.role === "checkbox" && item.name === "Technology");
+    const sports = surveyMatches.find((item) => item.role === "checkbox" && item.name === "Sports");
+    const ratingFive = surveyMatches.find((item) => item.role === "radio" && item.name === "5");
+    const surveySubmit = surveyMatches.find((item) => item.role === "button" && item.name === "Submit survey") || { role: "button", name: "Submit survey", id: "survey-submit", index: 0 };
+    if (!surveyName || !technology || !sports || !ratingFive || !surveySubmit) throw new Error("Smoke fixture did not expose the generic survey text field, checkboxes, radio, and submit button");
+    await requestBrowser({ action: "fill", selector: selectorFor(surveyName), value: "Anonymous" });
+    await requestBrowser({ action: "check", selector: selectorFor(technology) });
+    const surveyChecked = await requestBrowser({ action: "check", selector: selectorFor(sports), includePageContent: true });
+    await requestBrowser({ action: "click", selector: selectorFor(ratingFive) });
+    assertCheck("generic multi-checkbox and radio controls remain verifiably selected", surveyChecked.formState?.checked === true);
+    await requestBrowser({ action: "click", selector: selectorFor(surveySubmit) });
+    const surveySubmitted = await requestBrowser({ action: "snapshot", includePageContent: true });
+    assertCheck("generic survey form submission", String(surveySubmitted.pageContent).includes("Survey submitted: Anonymous topics=technology,sports rating=5"));
     await requestBrowser({ action: "scroll", direction: "down", amount: 3 });
 
-    const uploadInput = (submitted.matches as Array<any>).find((item) => item.role === "file" && item.name === "Attach fixture file");
+    const uploadInput = fixtureMatches.find((item) => item.role === "file" && item.name === "Attach fixture file");
     if (!uploadInput) throw new Error("Smoke fixture did not expose its accessible file input");
     const uploadPath = `/tmp/chusky-browser-upload/${randomUUID()}-fixture.txt`;
     const uploadBytes = Buffer.from("Chusky E2B upload fixture", "utf8");
     await sandbox.files.write(uploadPath, Uint8Array.from(uploadBytes).buffer);
-    await requestBrowser({ action: "upload_files", selector: { role: uploadInput.role, name: uploadInput.name, index: uploadInput.index }, uploadPath });
+    await requestBrowser({ action: "upload_files", selector: selectorFor(uploadInput), uploadPath });
     const uploaded = await requestBrowser({ action: "snapshot", includePageContent: true });
     assertCheck("owner file upload into an inspected file input", String(uploaded.pageContent).includes("Uploaded: ") && String(uploaded.pageContent).includes("fixture.txt"));
 
     const downloadLink = (uploaded.matches as Array<any>).find((item) => item.role === "link" && item.name === "Download fixture");
     if (!downloadLink) throw new Error("Smoke fixture did not expose its download link");
-    await requestBrowser({ action: "click", selector: { role: downloadLink.role, name: downloadLink.name, index: downloadLink.index } });
+    await requestBrowser({ action: "click", selector: selectorFor(downloadLink) });
     const waited = await requestBrowser({ action: "wait_download", timeoutMs: 15_000 });
     if (waited.download?.state !== "ready" || typeof waited.download.id !== "string") throw new Error("Browser did not capture the fixture download");
     const claimed = await requestBrowser({ action: "download_claim", id: waited.download.id });

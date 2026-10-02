@@ -29,6 +29,40 @@ const signingKeyB64 = process.env.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64 || "";
 let webBotAuthActive = Boolean(signatureDirectory && signingKeyB64);
 let webBotAuthSigner;
 
+function ensurePageTracking(page) {
+  if (page.__chuskyTracking) return page.__chuskyTracking;
+  const tracking = { generation: 1, crashed: false, observationId: undefined };
+  page.__chuskyTracking = tracking;
+  page.on("crash", () => { tracking.crashed = true; tracking.generation += 1; });
+  page.on("framenavigated", () => { tracking.generation += 1; });
+  void page.evaluate(() => {
+    if (window.__chuskyDomGeneration !== undefined) return;
+    window.__chuskyDomGeneration = 1;
+    new MutationObserver(() => { window.__chuskyDomGeneration += 1; }).observe(document, { childList: true, subtree: true, attributes: true, characterData: true });
+  }).catch(() => {});
+  return tracking;
+}
+
+async function pageGeneration(page) {
+  const tracking = ensurePageTracking(page);
+  const domGeneration = await page.evaluate(() => Number(window.__chuskyDomGeneration || 1)).catch(() => 1);
+  return tracking.generation + domGeneration;
+}
+
+function frameFor(page, value = {}) {
+  const frames = page.frames();
+  const requestedIndex = Number(value.frameIndex);
+  if (Number.isSafeInteger(requestedIndex) && requestedIndex >= 0 && requestedIndex < frames.length) {
+    const candidate = frames[requestedIndex];
+    if (!value.frameUrl || candidate.url() === String(value.frameUrl)) return candidate;
+  }
+  if (value.frameUrl) {
+    const candidate = frames.find((frame) => frame.url() === String(value.frameUrl));
+    if (candidate) return candidate;
+  }
+  return page.mainFrame();
+}
+
 async function getWebBotAuthSigner() {
   if (webBotAuthSigner) return webBotAuthSigner;
   if (!signatureDirectory || !signingKeyB64) throw new Error("Web Bot Auth key is not configured in this browser sandbox");
@@ -106,11 +140,11 @@ function notifyDownload(item) {
 }
 
 async function pageText(page) {
-  const raw = await page.locator("body").evaluate((element, max) => {
-    const text = element.innerText || "";
-    return { text: text.slice(0, max + 1), truncated: text.length > max };
-  }, MAX_PAGE_TEXT).catch(() => ({ text: "", truncated: false }));
-  return { pageContent: clean(raw.text, MAX_PAGE_TEXT), pageContentTruncated: raw.truncated || raw.text.length > MAX_PAGE_TEXT };
+  let text = await page.locator("body").innerText({ timeout: 5_000 }).catch(() => "");
+  if (!String(text || "").trim()) text = await page.locator("body").textContent({ timeout: 5_000 }).catch(() => "");
+  if (!String(text || "").trim()) text = await page.evaluate(() => document.body?.textContent || document.documentElement?.textContent || "").catch(() => "");
+  const bounded = String(text || "").slice(0, MAX_PAGE_TEXT + 1);
+  return { pageContent: clean(bounded, MAX_PAGE_TEXT), pageContentTruncated: String(text || "").length > MAX_PAGE_TEXT };
 }
 
 function privateAddress(value) {
@@ -149,37 +183,143 @@ function nameMatcher(value) {
   return String(value?.name || "");
 }
 
-function locatorFor(page, value) {
+function locatorFor(root, value) {
   const role = typeof value?.role === "string" && ROLES.includes(value.role) ? value.role : "button";
   const name = nameMatcher(value);
-  if (role === "file") return page.locator('input[type="file"]').nth(Math.max(0, Number(value?.index ?? 0)));
+  if (value?.id) return root.locator(`[id=${JSON.stringify(String(value.id))}]`);
+  if (value?.nameAttr) return root.locator(`[name=${JSON.stringify(String(value.nameAttr))}]`);
+  if (value?.placeholder) return root.locator(`[placeholder=${JSON.stringify(String(value.placeholder))}]`);
+  if (value?.autocomplete) return root.locator(`[autocomplete=${JSON.stringify(String(value.autocomplete))}]`);
+  if (role === "file") return root.locator('input[type="file"]').nth(Math.max(0, Number(value?.index ?? 0)));
   const options = name ? { name, exact: value?.nameMatch !== "substring" && value?.nameMatch !== "regex" } : {};
-  return page.getByRole(role, options).nth(Math.max(0, Number(value?.index ?? 0)));
+  return root.getByRole(role, options).nth(Math.max(0, Number(value?.index ?? 0)));
+}
+
+async function resolveLocator(page, value) {
+  // observation_stale remains the error vocabulary for unrecoverable stale
+  // observations, but IDs and DOM generations are advisory for form actions.
+  // Form
+  // workflows commonly reuse controls from one snapshot across several
+  // sequential fills, and successful actions emit newer observations. Always
+  // re-resolve the current stable/accessibility selector below; missing or
+  // ambiguous controls still fail safely instead of acting on a stale node.
+  const root = frameFor(page, value);
+  const role = typeof value?.role === "string" && ROLES.includes(value.role) ? value.role : "button";
+  const name = nameMatcher(value);
+  const options = name ? { name, exact: value?.nameMatch !== "substring" && value?.nameMatch !== "regex" } : {};
+  const roleLocator = role === "file" ? root.locator('input[type="file"]') : root.getByRole(role, options);
+  const count = await roleLocator.count();
+  const visible = [];
+  for (let index = 0; index < count; index += 1) {
+    const candidate = roleLocator.nth(index);
+    if (role === "file" || await candidate.isVisible().catch(() => false)) visible.push(candidate);
+  }
+  if (value?.id || value?.nameAttr || value?.placeholder || value?.autocomplete) {
+    const preferred = locatorFor(root, value);
+    if (await preferred.count() === 1 && (role === "file" || await preferred.isVisible().catch(() => false))) return preferred;
+  }
+  if (visible.length === 1) return visible[0];
+  const index = Number(value?.index);
+  if (Number.isSafeInteger(index) && index >= 0 && index < visible.length) return visible[index];
+  if (!visible.length) throw new Error(`Accessible ${role} control ${name ? `"${name}" ` : ""}was not found on the current page`);
+  throw new Error(`Accessible ${role} control ${name ? `"${name}" ` : ""}is ambiguous (${visible.length} visible matches); inspect again and choose a specific control`);
+}
+
+async function controlState(locator) {
+  return await locator.evaluate((element) => {
+    const input = element;
+    const state = { controlRole: input.getAttribute("role") || input.tagName.toLowerCase() };
+    if (typeof input.value === "string") state.value = input.value;
+    if (typeof input.checked === "boolean") state.checked = input.checked;
+    const ariaChecked = input.getAttribute("aria-checked");
+    if (ariaChecked === "true" || ariaChecked === "false") state.checked = ariaChecked === "true";
+    const dataState = input.getAttribute("data-state");
+    if (dataState === "checked" || dataState === "unchecked") state.checked = dataState === "checked";
+    const dataChecked = input.getAttribute("data-checked");
+    if (dataChecked === "true" || dataChecked === "false") state.checked = dataChecked === "true";
+    if (input.tagName.toLowerCase() === "select") state.selectedText = Array.from(input.selectedOptions || []).map((option) => option.textContent || "").join(", ").trim();
+    if (input.getAttribute("role") === "combobox") state.selectedText = (input.innerText || input.textContent || "").trim().slice(0, 300);
+    return state;
+  }).catch(() => ({}));
+}
+
+async function setCheckbox(locator, desired) {
+  const native = await locator.evaluate((element) => element instanceof HTMLInputElement && element.type === "checkbox").catch(() => false);
+  if (native) {
+    if (desired) await locator.check({ timeout: 15_000 });
+    else await locator.uncheck({ timeout: 15_000 });
+  } else {
+    const current = await controlState(locator);
+    if (current.checked !== desired) await locator.click({ timeout: 15_000 });
+  }
+  const after = await controlState(locator);
+  if (after.checked !== desired) throw new Error(`Checkbox state did not become ${desired ? "checked" : "unchecked"}`);
+  return after;
+}
+
+async function selectControl(page, locator, value, root) {
+  const tagName = await locator.evaluate((element) => element.tagName.toLowerCase()).catch(() => "");
+  if (tagName === "select") {
+    try { await locator.selectOption({ label: String(value) }); }
+    catch { await locator.selectOption(String(value)); }
+  } else {
+    await locator.click({ timeout: 15_000 });
+    const option = root.getByRole("option", { name: String(value), exact: true }).first();
+    if (await option.count()) await option.click({ timeout: 15_000 });
+    else {
+      const visibleText = root.getByText(String(value), { exact: true }).first();
+      if (!(await visibleText.count())) throw new Error(`Dropdown option "${String(value).slice(0, 120)}" was not found`);
+      await visibleText.click({ timeout: 15_000 });
+    }
+  }
+  const state = await controlState(locator);
+  const selected = state.selectedText || state.value || "";
+  if (!selected.toLowerCase().includes(String(value).toLowerCase())) throw new Error(`Dropdown did not select "${String(value).slice(0, 120)}"`);
+  return state;
 }
 
 async function roleMatches(page, request = {}) {
+  ensurePageTracking(page);
   const requestedRole = typeof request.role === "string" && ROLES.includes(request.role) ? request.role : undefined;
   const roles = requestedRole ? [requestedRole] : ROLES;
   const out = [];
   const name = request.name ? nameMatcher(request) : undefined;
   const options = name ? { name, exact: request.nameMatch !== "substring" && request.nameMatch !== "regex" } : {};
   const limit = Math.max(1, Math.min(MAX_MATCHES, Number(request.limit ?? MAX_MATCHES)));
-  for (const role of roles) {
-    const locator = role === "file" ? page.locator('input[type="file"]') : page.getByRole(role, options);
+  for (const frame of page.frames()) {
+    const root = frame;
+    for (const role of roles) {
+    const locator = role === "file" ? root.locator('input[type="file"]') : root.getByRole(role, options);
     const count = Math.min(await locator.count(), limit - out.length);
     for (let index = 0; index < count; index += 1) {
       const item = locator.nth(index);
       if (role !== "file" && !(await item.isVisible().catch(() => false))) continue;
       const label = await item.getAttribute("aria-label").catch(() => "");
       const alt = await item.getAttribute("alt").catch(() => "");
-      const associated = role === "file" ? await item.evaluate((element) => {
+      const id = await item.getAttribute("id").catch(() => "");
+      const nameAttr = await item.getAttribute("name").catch(() => "");
+      const placeholder = await item.getAttribute("placeholder").catch(() => "");
+      const autocomplete = await item.getAttribute("autocomplete").catch(() => "");
+      const inputType = await item.getAttribute("type").catch(() => "");
+      const tagName = await item.evaluate((element) => element.tagName.toLowerCase()).catch(() => "");
+      const associated = await item.evaluate((element) => {
         const input = element;
         const labels = Array.from(input.labels || []).map((label) => label.innerText || label.textContent || "");
-        return labels.join(" ") || input.getAttribute("title") || input.getAttribute("name") || input.getAttribute("accept") || "File upload";
-      }).catch(() => "File upload") : "";
-      const nameValue = clean(label || await item.innerText().catch(() => "") || alt || associated);
+        if (labels.length) return labels.join(" ");
+        const labelledBy = input.getAttribute("aria-labelledby");
+        if (labelledBy) return labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" ");
+        return input.getAttribute("title") || input.getAttribute("name") || input.getAttribute("accept") || (input.type === "file" ? "File upload" : "");
+      }).catch(() => role === "file" ? "File upload" : "");
+      const visibleText = await item.innerText().catch(() => "");
+      // Selects expose their option text as innerText, but their accessible
+      // control name comes from the associated label. Prefer that label for
+      // form controls so discovery returns "Business headquarters" rather
+      // than "Select... Ghana United Kingdom".
+      const nameValue = clean(label || ((tagName === "select" || inputType) ? associated : visibleText) || alt || associated);
       if (name && !String(nameValue).toLowerCase().includes(String(name).toLowerCase())) continue;
-      if (nameValue) out.push({ role, name: nameValue, index, ...(role === "link" ? { href: clean(await item.getAttribute("href").catch(() => ""), 1_000) } : {}) });
+      if (nameValue) out.push({ role, name: nameValue, index, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000), ...(id ? { id: clean(id, 160) } : {}), ...(nameAttr ? { nameAttr: clean(nameAttr, 160) } : {}), ...(placeholder ? { placeholder: clean(placeholder, 200) } : {}), ...(autocomplete ? { autocomplete: clean(autocomplete, 80) } : {}), ...(inputType ? { inputType: clean(inputType, 40) } : {}), ...(tagName ? { tagName } : {}), ...(role === "link" ? { href: clean(await item.getAttribute("href").catch(() => ""), 1_000) } : {}) });
+    }
+    if (out.length >= limit) break;
     }
     if (out.length >= limit) break;
   }
@@ -201,6 +341,21 @@ async function tabsFor(context, active) {
   return Promise.all(context.pages().slice(0, 10).map(async (page, index) => ({ index, url: page.url(), title: clean(await page.title().catch(() => ""), 160), active: page === active })));
 }
 
+async function healthSnapshot(context) {
+  const pages = context.pages();
+  const crashed = pages.some((page) => ensurePageTracking(page).crashed);
+  return {
+    ok: !crashed && pages.some((page) => !page.isClosed()),
+    provider: "e2b",
+    browser: crashed ? "unhealthy" : "ready",
+    daemon: "ready",
+    chromium: crashed ? "crashed" : (pages.length ? "ready" : "starting"),
+    display: DISPLAY,
+    pageCount: pages.length,
+    activeUrl: pages[0]?.url() || "about:blank",
+  };
+}
+
 async function linkPayTokenFrame(page) {
   for (const frame of page.frames()) {
     try {
@@ -220,8 +375,20 @@ async function linkPayTokenFrame(page) {
 }
 
 async function result(page, context, extra = {}, includePageContent = false) {
+  // Allow initial hydration and observer delivery to settle before sealing an
+  // observation. This remains bounded and avoids treating the same render
+  // transaction as a stale page between snapshot and the next action.
+  await page.waitForTimeout(50).catch(() => {});
+  const tracking = ensurePageTracking(page);
+  const generation = await pageGeneration(page);
+  const observationId = randomUUID();
+  tracking.observationId = observationId;
+  const suppliedMatches = Array.isArray(extra.matches) ? extra.matches : undefined;
+  const matches = suppliedMatches?.map((item) => ({ ...item, observationId, pageGeneration: generation }))
+    ?? await roleMatches(page);
+  const accessibilityHash = createHash("sha256").update(JSON.stringify(matches.map(({ role, name, index, frameIndex, frameUrl }) => ({ role, name, index, frameIndex, frameUrl })))).digest("hex").slice(0, 24);
   const challenge = await challengeFor(page);
-  return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
+  return { ok: true, url: page.url(), title: clean(await page.title().catch(() => ""), 160), loadState: "settled", observationId, pageGeneration: generation, accessibilityHash, ...(challenge.detected ? { needsUserInteraction: true, challenge } : { challenge }), ...(includePageContent ? await pageText(page) : {}), ...extra, ...(matches ? { matches } : {}), tabs: await tabsFor(context, page), activeIndex: context.pages().indexOf(page) };
 }
 
 async function runSmokeFixture(context) {
@@ -230,11 +397,39 @@ async function runSmokeFixture(context) {
     <main><h1>Browser integration fixture</h1><p>Visible content proves page reading works.</p>
     <label for="query">Search fixture</label><input id="query" aria-label="Search fixture" />
     <button id="continue">Continue</button><output id="output"></output>
+    <form id="account-form">
+      <label for="first-name">Legal first name</label><input id="first-name" autocomplete="given-name" />
+      <label for="last-name">Legal last name</label><input id="last-name" autocomplete="family-name" />
+      <label for="business-email">Business email</label><input id="business-email" type="email" autocomplete="email" />
+      <label for="country">Business headquarters</label><select id="country"><option value="">Select...</option><option value="ghana">Ghana</option><option value="united-kingdom">United Kingdom</option></select>
+      <label for="password">Create a password</label><input id="password" type="password" autocomplete="new-password" />
+      <label><input id="terms" type="checkbox" /> I agree to the Terms &amp; Conditions</label>
+      <button id="create-account" type="submit">Create sandbox account</button>
+    </form>
+    <form id="survey-form">
+      <label for="survey-name">Your name (optional)</label><input id="survey-name" placeholder="Anonymous" />
+      <fieldset><legend>Which topics interest you? (select all that apply)</legend>
+        <label><input type="checkbox" name="topic" value="technology" /> Technology</label>
+        <label><input type="checkbox" name="topic" value="sports" /> Sports</label>
+        <label><input type="checkbox" name="topic" value="music" /> Music</label>
+        <label><input type="checkbox" name="topic" value="travel" /> Travel</label>
+      </fieldset>
+      <fieldset><legend>How would you rate your experience?</legend>
+        <label><input type="radio" name="rating" value="1" /> 1</label>
+        <label><input type="radio" name="rating" value="2" /> 2</label>
+        <label><input type="radio" name="rating" value="3" /> 3</label>
+        <label><input type="radio" name="rating" value="4" /> 4</label>
+        <label><input type="radio" name="rating" value="5" /> 5</label>
+      </fieldset>
+      <button id="survey-submit" type="submit">Submit survey</button>
+    </form>
     <label for="upload">Attach fixture file</label><input id="upload" type="file" aria-label="Attach fixture file" />
     <a id="download" download="fixture.txt" href="data:text/plain;base64,Q2h1c2t5IEUyQiBkb3dubG9hZCBmaXh0dXJl">Download fixture</a>
     <div style="height:2400px">End of long page</div></main>
     <script>
       document.querySelector('#continue').addEventListener('click',()=>{document.querySelector('#output').textContent='Submitted: '+document.querySelector('#query').value});
+      document.querySelector('#account-form').addEventListener('submit',(event)=>{event.preventDefault();const form=event.currentTarget;document.querySelector('#output').textContent='Account submitted: '+form.elements['first-name'].value+' '+form.elements['last-name'].value+' '+form.elements['business-email'].value+' '+form.elements.country.value+' terms='+form.elements.terms.checked});
+      document.querySelector('#survey-form').addEventListener('submit',(event)=>{event.preventDefault();const form=event.currentTarget;document.querySelector('#output').textContent='Survey submitted: '+(form.elements['survey-name'].value||'Anonymous')+' topics='+[...form.querySelectorAll('input[name="topic"]:checked')].map((input)=>input.value).join(',')+' rating='+form.elements.rating.value});
       document.querySelector('#upload').addEventListener('change',(event)=>{document.querySelector('#output').textContent+='; Uploaded: '+(event.target.files?.[0]?.name||'none')});
     </script>
   </body></html>`);
@@ -377,7 +572,7 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
-  const target = request.selector ? locatorFor(page, request.selector) : null;
+  const target = request.selector ? await resolveLocator(page, request.selector) : null;
   if (action === "open") {
     await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 5_000 }).catch(() => {});
@@ -397,6 +592,7 @@ async function execute(context, pageState, request) {
     }, request.value);
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
+  else if (action === "health") return result(page, context, { health: { status: "ready", daemon: "ready", chromium: page.isClosed() ? "closed" : "ready", pages: context.pages().length, display: DISPLAY, profile: PROFILE } });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click") await page.mouse.click(Number(request.x), Number(request.y));
     else await page.mouse.move(Number(request.x), Number(request.y));
@@ -406,10 +602,15 @@ async function execute(context, pageState, request) {
     if (["invoke", "click"].includes(action)) await target.click({ timeout: 15_000 });
     if (["move", "hover"].includes(action)) await target.hover({ timeout: 15_000 });
     if (action === "focus") await target.focus();
-    if (action === "fill") await target.fill(String(request.value ?? request.text ?? ""));
-    if (action === "select_option") await target.selectOption(String(request.value ?? ""));
-    if (action === "check") await target.check();
-    if (action === "uncheck") await target.uncheck();
+    if (action === "fill") {
+      const value = String(request.value ?? request.text ?? "");
+      await target.fill(value);
+      const state = await controlState(target);
+      if (state.value !== value) throw new Error("Field value did not persist after fill");
+    }
+    if (action === "select_option") await selectControl(page, target, request.value ?? "", frameFor(page, request.selector));
+    if (action === "check") await setCheckbox(target, true);
+    if (action === "uncheck") await setCheckbox(target, false);
   } else if (["upload", "upload_files"].includes(action)) {
     if (!target || !request.uploadPath || !/^\/tmp\/chusky-browser-upload\/[A-Za-z0-9_-]+-[^/]{1,120}$/.test(String(request.uploadPath))) throw new Error("Upload requires a fresh file-input node and an owner file reference");
     if (!(await target.count())) throw new Error("The selected file input is no longer available");
@@ -427,12 +628,18 @@ async function execute(context, pageState, request) {
     }
   } else if (action === "type") { if (target) await target.focus(); await page.keyboard.type(String(request.text ?? ""), { delay: Math.max(0, Math.min(250, Number(request.delayMs ?? 0))) }); }
   else if (action === "press") { if (target) await target.focus(); await page.keyboard.press(String(request.key || request.keys || "Enter")); }
-  else if (action === "drag") { if (!request.source || !request.target) throw new Error("drag requires source and target accessible selectors"); await locatorFor(page, request.source).dragTo(locatorFor(page, request.target), { timeout: 15_000 }); }
+  else if (action === "drag") { if (!request.source || !request.target) throw new Error("drag requires source and target accessible selectors"); await (await resolveLocator(page, request.source)).dragTo(await resolveLocator(page, request.target), { timeout: 15_000 }); }
   else if (action === "scroll") await page.mouse.wheel(0, (request.direction === "up" ? -1 : 1) * Math.max(1, Math.min(10, Number(request.amount || 3))) * 600);
   else if (action === "back") await page.goBack({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
   else if (action === "forward") await page.goForward({ waitUntil: "domcontentloaded", timeout: 30_000 }).catch(() => {});
   else if (action === "refresh") await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
-  else if (action === "wait") await page.waitForTimeout(Math.max(50, Math.min(30_000, Number(request.timeoutMs ?? 1_000))));
+  else if (action === "wait") {
+    const timeoutMs = Math.max(50, Math.min(30_000, Number(request.timeoutMs ?? 1_000)));
+    if (request.role || request.name) {
+      const semanticTarget = await resolveLocator(page, request);
+      await semanticTarget.waitFor({ state: "visible", timeout: timeoutMs });
+    } else await page.waitForTimeout(timeoutMs);
+  }
   else if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full"].includes(action)) {
     const clipped = ["screenshot_region", "screenshot_region_full"].includes(action);
     const clip = clipped && [request.x, request.y, request.width, request.height].every((value) => Number.isFinite(Number(value))) ? { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } : undefined;
@@ -457,7 +664,8 @@ async function execute(context, pageState, request) {
     return result(page, context, { recording: { id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt, ...(item.error ? { error: item.error } : {}) } });
   } else if (["tabs", "windows"].includes(action)) return result(page, context);
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
-  return result(page, context, { matches: await roleMatches(page) }, request.includePageContent === true);
+  const formState = target && ["fill", "select_option", "check", "uncheck"].includes(action) ? await controlState(target) : undefined;
+  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {
@@ -614,7 +822,7 @@ async function start() {
   if (!context.pages().length) await context.newPage();
   const pageState = { activeIndex: 0 };
   const server = http.createServer(async (incoming, response) => {
-    if (incoming.method === "GET" && incoming.url === "/health") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ ok: true, provider: "e2b", browser: "ready" })); return; }
+    if (incoming.method === "GET" && incoming.url === "/health") { const health = await healthSnapshot(context); response.writeHead(health.ok ? 200 : 503, { "content-type": "application/json" }); response.end(JSON.stringify(health)); return; }
     if (incoming.method !== "POST" || incoming.url !== "/command") { response.writeHead(404); response.end(); return; }
     let body = ""; incoming.on("data", (chunk) => { body += chunk; if (body.length > 256_000) incoming.destroy(); });
     incoming.on("end", async () => {
