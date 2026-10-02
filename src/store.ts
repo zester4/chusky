@@ -986,6 +986,8 @@ export interface MissionRecord {
   evidence?: MissionEvidenceRecord[];
   verification?: MissionVerification;
   lease?: MissionLease;
+  /** Independent worker leases for concurrently running dependency branches. */
+  executionLeases?: Record<string, MissionLease>;
   /** A2A context supplied by the delegating agent; optional for legacy missions. */
   a2aContextId?: string;
   a2aPushNotifications?: MissionA2APushNotificationConfig[];
@@ -5829,6 +5831,14 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       ...(typeof mission.verification.confidence === "number" ? { confidence: Math.max(0, Math.min(1, mission.verification.confidence)) } : {}),
     } : undefined,
     ...(mission.lease && typeof mission.lease === "object" ? { lease: mission.lease } : {}),
+    ...(mission.executionLeases && typeof mission.executionLeases === "object" ? {
+      executionLeases: Object.fromEntries(Object.entries(mission.executionLeases).slice(0, MAX_MISSION_PLAN_STEPS).flatMap(([stepId, lease]) => {
+        if (!/^[A-Za-z0-9_-]{1,160}$/.test(stepId) || !lease || typeof lease !== "object") return [];
+        const candidate = lease as MissionLease;
+        if (typeof candidate.token !== "string" || typeof candidate.workerId !== "string" || !Number.isFinite(candidate.acquiredAt) || !Number.isFinite(candidate.expiresAt)) return [];
+        return [[stepId, { token: candidate.token.slice(0, 160), workerId: candidate.workerId.slice(0, 160), acquiredAt: Number(candidate.acquiredAt), expiresAt: Number(candidate.expiresAt) } satisfies MissionLease]];
+      })),
+    } : {}),
     ...(typeof mission.a2aContextId === "string" && mission.a2aContextId.trim() ? { a2aContextId: mission.a2aContextId.trim().slice(0, 200) } : {}),
     a2aPushNotifications: Array.isArray(mission.a2aPushNotifications) ? mission.a2aPushNotifications.slice(-10).filter((item): item is MissionA2APushNotificationConfig => Boolean(item) && typeof item === "object" && typeof item.id === "string" && typeof item.url === "string" && typeof item.signingSecretCiphertext === "string").map((item) => ({
       id: item.id.slice(0, 160),
@@ -5997,7 +6007,8 @@ export function readyMissionSteps(mission: MissionRecord): MissionStepRecord[] {
 
 export function missionActiveMs(mission: MissionRecord, now = Date.now()): number {
   const since = mission.timing?.activeSince;
-  const end = Math.min(now, mission.lease?.expiresAt ?? now);
+  const branchLeaseExpiry = Object.values(mission.executionLeases ?? {}).reduce((latest, lease) => Math.max(latest, lease.expiresAt), 0);
+  const end = Math.min(now, Math.max(mission.lease?.expiresAt ?? 0, branchLeaseExpiry) || now);
   return Math.max(0, mission.timing?.activeMs ?? 0) + (since === undefined ? 0 : Math.max(0, end - since));
 }
 
@@ -6062,6 +6073,61 @@ export class MissionReplanConflictError extends Error {
     super("A replan cannot remove a completed mission step");
     this.name = "MissionReplanConflictError";
   }
+}
+
+/** Acquire an independent lease for one dependency-ready mission branch. */
+export async function acquireMissionStepLease(userId: number, id: string, stepId: string, workerId: string, leaseMs = 60_000): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    if (!mission || ["completed", "cancelled"].includes(mission.status)) return undefined;
+    const step = mission.steps.find((candidate) => candidate.id === stepId);
+    if (!step || step.status !== "running" || !(mission.activeStepIds?.includes(stepId) || mission.currentStepId === stepId)) return undefined;
+    const now = Date.now();
+    const existing = mission.executionLeases?.[stepId];
+    if (existing && existing.expiresAt > now && existing.workerId !== workerId) return undefined;
+    const executionLeases = { ...(mission.executionLeases ?? {}), [stepId]: { token: randomUUID(), workerId: workerId.slice(0, 160), acquiredAt: now, expiresAt: now + Math.max(1000, Math.min(900_000, leaseMs)) } };
+    const timing = mission.budget.durationMode === "active" && !Object.keys(mission.executionLeases ?? {}).some((key) => (mission.executionLeases ?? {})[key]!.expiresAt > now)
+      ? { ...mission.timing, activeMs: missionActiveMs(mission, now), extensionsUsed: mission.timing?.extensionsUsed ?? 0, activeSince: now }
+      : mission.timing;
+    const next = normalizeMission({ ...mission, timing, executionLeases, updatedAt: now, version: mission.version + 1, events: [...mission.events, missionEvent("lease_acquired", `Mission step lease acquired for ${stepId} by ${workerId}.`, now, stepId)] });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
+}
+
+/** Renew one branch lease without affecting sibling branch authority. */
+export async function renewMissionStepLease(userId: number, id: string, stepId: string, leaseToken: string, leaseMs = 60_000): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    const lease = mission?.executionLeases?.[stepId];
+    if (!mission || !lease || lease.token !== leaseToken || lease.expiresAt <= Date.now() || ["completed", "cancelled"].includes(mission.status)) return undefined;
+    const executionLeases = { ...(mission.executionLeases ?? {}), [stepId]: { ...lease, expiresAt: Date.now() + Math.max(1_000, Math.min(900_000, leaseMs)) } };
+    const next = normalizeMission({ ...mission, executionLeases, updatedAt: Date.now(), version: mission.version + 1 });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
+}
+
+/** Release one branch lease and stop active-duration timing only after all branches rest. */
+export async function releaseMissionStepLease(userId: number, id: string, stepId: string, token: string): Promise<MissionRecord | undefined> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const mission = await getMission(userId, id);
+    const lease = mission?.executionLeases?.[stepId];
+    if (!mission || !lease || lease.token !== token) return undefined;
+    const now = Date.now();
+    const executionLeases = { ...(mission.executionLeases ?? {}) };
+    delete executionLeases[stepId];
+    const hasSibling = Object.keys(executionLeases).length > 0;
+    const timing = mission.budget.durationMode === "active" && !hasSibling
+      ? { ...mission.timing, activeMs: missionActiveMs(mission, now), extensionsUsed: mission.timing?.extensionsUsed ?? 0, activeSince: undefined }
+      : mission.timing;
+    const next = normalizeMission({ ...mission, executionLeases: Object.keys(executionLeases).length ? executionLeases : undefined, timing, updatedAt: now, version: mission.version + 1, events: [...mission.events, missionEvent("lease_released", `Mission step lease released for ${stepId}.`, now, stepId)] });
+    const saved = await backend.compareAndUpdateMission(userId, id, mission.version, next);
+    if (saved) return saved;
+  }
+  return undefined;
 }
 
 export async function replanMission(userId: number, id: string, rawSteps: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; allowedTools?: string[] }>, reason: string): Promise<MissionRecord | undefined> {

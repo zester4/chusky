@@ -2,7 +2,7 @@ import { extendMissionDurationIfEligible } from "./store.js";
 import { config } from "./config.js";
 import { appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { getTelegramChatId, getSession, saveSession, addUsage, canSpend, getApproval, getTask, getMission, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, getRecallMeeting, getMeetingContact } from "./store.js";
+import { getTelegramChatId, getSession, saveSession, addUsage, canSpend, getApproval, getTask, getMission, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, getRecallMeeting, getMeetingContact } from "./store.js";
 import { runAgent as defaultRunAgent, ApprovalRequiredError } from "./agent.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -144,6 +144,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt + autonomyGuidance) : (missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`) + autonomyGuidance;
     const session = await getSession(task.userId);
     const agentHistory = mission ? boundedMissionHistory(session.history) : session.history;
+    const parallelMission = Boolean(mission?.activeStepIds && mission.activeStepIds.length > 1);
     const missionRemainingSteps = mission ? mission.budget.maxSteps - mission.consumedSteps : undefined;
     const missionRemainingTools = mission ? mission.budget.maxToolCalls - mission.toolCalls : undefined;
     const missionRemainingCost = mission ? mission.budget.maxCost - mission.cost : undefined;
@@ -170,17 +171,24 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       quotaReservationId = admission.reservationId;
     }
     let missionLeaseToken: string | undefined;
+    const missionLeaseStepId = task.missionStepId;
     if (mission) {
-      const leased = await acquireMissionLease(task.userId, mission.id, `workflow:${context.workflowRunId ?? "task"}:${context.attempt}`);
-      if (!leased?.lease) { if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch(() => undefined); return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 }; }
+      const workerId = `workflow:${context.workflowRunId ?? "task"}:${context.attempt}`;
+      const leased = missionLeaseStepId
+        ? await acquireMissionStepLease(task.userId, mission.id, missionLeaseStepId, workerId)
+        : await acquireMissionLease(task.userId, mission.id, workerId);
+      const acquiredLease = missionLeaseStepId ? leased?.executionLeases?.[missionLeaseStepId] : leased?.lease;
+      if (!acquiredLease) { if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch(() => undefined); return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 }; }
       mission = leased;
-      missionLeaseToken = leased.lease.token;
+      missionLeaseToken = acquiredLease.token;
     }
     const missionLeaseLost = mission ? new AbortController() : undefined;
     let missionLeaseRenewalFailures = 0;
     const missionLeaseRenewal = mission?.id && missionLeaseToken
       ? setInterval(() => {
-        void renewMissionLease(task.userId, mission!.id, missionLeaseToken!, 60_000).then((renewed) => {
+        void (missionLeaseStepId
+          ? renewMissionStepLease(task.userId, mission!.id, missionLeaseStepId, missionLeaseToken!, 60_000)
+          : renewMissionLease(task.userId, mission!.id, missionLeaseToken!, 60_000)).then((renewed) => {
           if (renewed) {
             missionLeaseRenewalFailures = 0;
             return;
@@ -221,7 +229,8 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     let result;
     let meetingFollowUpDisposition: "completed" | "blocked" | undefined;
     try {
-      const executeAgentTurn = async (turnPrompt: typeof prompt) => withUserLock(task.userId, budgetAbort.signal, async () => {
+      const runWithExecutionLock = <T>(work: () => Promise<T>): Promise<T> => parallelMission ? work() : withUserLock(task.userId, budgetAbort.signal, work);
+      const executeAgentTurn = async (turnPrompt: typeof prompt) => runWithExecutionLock(async () => {
          if (!task.meetingFollowUp) {
            const skillInstructions = await sdkTaskSkillInstructions(task.sdkSkills);
            const wakeInstructions = missionTimerResumed
@@ -293,7 +302,10 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       missionLeaseLost?.signal.removeEventListener("abort", onMissionLeaseLost);
       clearInterval(cancellationPoll);
       if (missionLeaseRenewal) clearInterval(missionLeaseRenewal);
-      if (mission?.id && missionLeaseToken) await releaseMissionLease(task.userId, mission.id, missionLeaseToken);
+      if (mission?.id && missionLeaseToken) {
+        if (missionLeaseStepId) await releaseMissionStepLease(task.userId, mission.id, missionLeaseStepId, missionLeaseToken);
+        else await releaseMissionLease(task.userId, mission.id, missionLeaseToken);
+      }
       if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch((error) => logger.warn({ err: error, taskId: task.id }, "Execution quota reservation release failed"));
     }
     if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
