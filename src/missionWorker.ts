@@ -1,4 +1,26 @@
-import type { MissionRecord, MissionStepRecord, TaskRecord } from "./store.js";
+import type { Message, MissionRecord, MissionStepRecord, TaskRecord } from "./store.js";
+
+const MISSION_HISTORY_MAX_MESSAGES = 8;
+const MISSION_HISTORY_MAX_CHARS = 8000;
+
+/** Keep resumed mission turns independent from an unbounded owner chat history. */
+export function boundedMissionHistory(history: readonly Message[]): Message[] {
+  const candidates = history.filter((message) =>
+    (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim().length > 0,
+  );
+  const selected: Message[] = [];
+  let chars = 0;
+  for (let index = candidates.length - 1; index >= 0 && selected.length < MISSION_HISTORY_MAX_MESSAGES; index--) {
+    const message = candidates[index]!;
+    const remaining = MISSION_HISTORY_MAX_CHARS - chars;
+    if (remaining <= 0) break;
+    const content = String(message.content).slice(-Math.min(2000, remaining));
+    if (!content) continue;
+    selected.unshift({ role: message.role, content });
+    chars += content.length;
+  }
+  return selected;
+}
 
 export interface MissionSliceState {
   task?: Pick<TaskRecord, "status" | "checkpoint" | "nextAction" | "result" | "error" | "runAt">;

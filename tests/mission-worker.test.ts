@@ -1,6 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+
+test("bounded mission history keeps only a recent bounded text frontier", () => {
+  const history = Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" as const : "user" as const, content: `message-${index}-${"x".repeat(900)}` }));
+  const bounded = boundedMissionHistory(history);
+  assert.equal(bounded.length, 8);
+  assert.equal(bounded[0]?.content.toString().startsWith("message-4-"), true);
+  assert.equal(bounded.at(-1)?.content.toString().startsWith("message-11-"), true);
+  assert.equal(bounded.some((message) => message.content.includes("message-0-")), false);
+  assert.ok(bounded.reduce((total, message) => total + String(message.content).length, 0) <= 8000);
+});
 
 test("a mission worker does not treat an unchanged slice as progress", () => {
   const task = { status: "running" as const, checkpoint: "before", nextAction: "Read the sheet", result: undefined, error: undefined, runAt: 1 };
