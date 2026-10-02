@@ -5,7 +5,7 @@ import { memoryRouter } from "../memory/router.js";
 import { nativeTool } from "../nativeTools.js";
 import { chuckTools, validateNativeToolArguments } from "../agentTools.js";
 import { requiresToolApproval, isRiskyToolSlug, isReadOnlyToolSlug, humanToolStatus } from "../policy.js";
-import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, type AgentRunRecord } from "../store.js";
+import { createApproval, getSession, getTask, getHandoffRecord, saveHandoffRecord, claimHandoffBudget, createTask, checkpointTask, completeTask, blockTask, updateTask, setApprovalStatus, getAgentRun, saveAgentRun, requestTaskCancellation, finalizeTaskCancellation, claimTask, retryTask, renewTaskLease, releaseTaskLease, type AgentRunRecord } from "../store.js";
 import { config } from "../config.js";
 import { getScopedComposioTools, orChat, parseToolArguments, cleanModelText, UnavailableComposioToolsError } from "../agent.js";
 import type { ApiMessage } from "../types.js";
@@ -56,6 +56,36 @@ export function delegationStartedStatus(displayName: string, objective: string):
     ? `${compactObjective.slice(0, DELEGATION_STATUS_PREVIEW_LENGTH - 1).trimEnd()}…`
     : compactObjective;
   return `🤝 Delegated to ${displayName}\nTask: ${preview || "Specialist task"}`;
+}
+
+/** Run a persisted worker continuation behind the normal durable task lease. */
+export async function executeClaimedDelegation(
+  userId: number,
+  contractInput: Partial<DelegationContract> & { worker: CapabilityWorkerName; objective: string },
+  options: Parameters<typeof executeDelegation>[2],
+  taskId: string,
+  requeueBlocked = false,
+): Promise<DelegationResult | undefined> {
+  if (requeueBlocked && !(await retryTask(userId, taskId))) return undefined;
+  const claimed = await claimTask(userId, taskId, `subagent:${options?.resume?.handoffId ?? taskId}`, 10 * 60_000);
+  if (!claimed?.lease) return undefined;
+  const leaseToken = claimed.lease.token;
+  const leaseAbort = new AbortController();
+  const activeSignal = options?.signal ? AbortSignal.any([options.signal, leaseAbort.signal]) : leaseAbort.signal;
+  let renewalFailures = 0;
+  const renewal = setInterval(() => {
+    void renewTaskLease(userId, taskId, leaseToken, 10 * 60_000).then((renewed) => {
+      if (renewed) { renewalFailures = 0; return; }
+      if (++renewalFailures >= 2) leaseAbort.abort(new Error("Delegated worker task lease was lost."));
+    }).catch(() => { if (++renewalFailures >= 2) leaseAbort.abort(new Error("Delegated worker task lease renewal failed.")); });
+  }, 60_000);
+  if (typeof renewal === "object" && "unref" in renewal) renewal.unref();
+  try {
+    return await executeDelegation(userId, contractInput, { ...options, signal: activeSignal });
+  } finally {
+    clearInterval(renewal);
+    await releaseTaskLease(userId, taskId, leaseToken);
+  }
 }
 
 export async function executeDelegation(
@@ -896,8 +926,7 @@ export async function resumeApprovedDelegation(userId: number, approvalId: strin
   if (!handoff?.taskId || !handoff.delegation || handoff.status !== "requires_approval") {
     throw new Error("The approved worker action is no longer attached to a resumable handoff.");
   }
-  await updateTask(userId, handoff.taskId, { status: "running", error: undefined, nextAction: "Executing the exact action approved by the owner." });
-  return executeDelegation(userId, {
+  const resumed = await executeClaimedDelegation(userId, {
     worker: handoff.to as CapabilityWorkerName,
     objective: handoff.objective,
     context: { ...handoff.context, toolCall: { name: approval.toolSlug, args: approval.args } },
@@ -916,5 +945,7 @@ export async function resumeApprovedDelegation(userId: number, approvalId: strin
     resume: { handoffId: handoff.id, taskId: handoff.taskId, resumeCount: (handoff.resumeCount ?? 0) + 1 },
     rootHandoffId: handoff.rootHandoffId ?? handoff.id,
     model: handoff.delegation.model,
-  });
+  }, handoff.taskId, true);
+  if (!resumed) throw new Error("The approved worker task is already running or no longer resumable.");
+  return resumed;
 }

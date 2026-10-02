@@ -384,6 +384,9 @@ test("owner approval resumes the exact stored worker action once", async () => {
     assert.equal(resumed.status, "success");
     assert.deepEqual(executions, [{ owner: "sample", repo: "test-repo" }]);
     assert.equal((await getSession(userId)).approvals.find((approval) => approval.id === proposal.approvalId)?.status, "consumed");
+    const resumedTask = (await listTasks(userId)).find((task) => task.id === resumed.taskId);
+    assert.equal(resumedTask?.status, "completed");
+    assert.equal(resumedTask?.lease, undefined, "approval continuation must release its durable lease after settlement");
   } finally {
     config.openRouterApiKey = previousApiKey;
     setSubagentExecutorDependenciesForTests();

@@ -6732,6 +6732,11 @@ export async function renewTaskLease(userId: number, id: string, leaseToken: str
   return backend.renewTaskLease(userId, id, leaseToken, Math.max(1_000, Math.min(10 * 60_000, leaseMs)));
 }
 
+/** Release a continuation lease after the delegated worker has durably settled its task. */
+export async function releaseTaskLease(userId: number, id: string, leaseToken: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => task.lease?.token === leaseToken ? { lease: undefined } : undefined);
+}
+
 async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   if (task.status !== "failed" || !task.missionId || !task.missionStepId) return;
   const mission = await getMission(task.userId, task.missionId);

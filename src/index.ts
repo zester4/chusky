@@ -62,7 +62,7 @@ import { listBlandCuratedVoices } from "./calls/blandVoices.js";
 import { FLUX_TTS_VOICES } from "./voiceSettings.js";
 import { nativeTool, pauseJob, pauseReminder, resumeJob, resumeReminder, runJobNow, runReminderNow } from "./nativeTools.js";
 import { validateNativeToolArguments } from "./agentTools.js";
-import { executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
+import { executeClaimedDelegation, executeDelegation, requestDelegationCancellation } from "./subagents/executor.js";
 import { ATTENTION_PULSE_TOOLS, delegationStageObjective, WORKER_CAPABILITIES } from "./subagents/capabilities.js";
 import { deliverSubagentResult } from "./subagents/delivery.js";
 import { enqueueSubagentToolContinuation, SUBAGENT_TOOL_WAIT_TIMEOUT, subagentWorkflowUrl, type SubagentToolDecision } from "./subagents/workflow.js";
@@ -2467,8 +2467,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           if (!record || record.status !== "queued" || !record.taskId || !record.delegation) {
             throw new WorkflowNonRetryableError("Queued worker continuation is missing or no longer eligible");
           }
-          await updateTask(userId, record.taskId, { status: "running", error: undefined, nextAction: "Resuming from the latest durable checkpoint." });
-          return executeDelegation(userId, {
+          return executeClaimedDelegation(userId, {
             worker: record.to as CapabilityWorkerName,
             objective: record.objective,
             context: { ...record.context, continuation: true },
@@ -2484,8 +2483,9 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           }, {
             resume: { handoffId: record.id, taskId: record.taskId, workflowRunId: workflow.workflowRunId, resumeCount: (record.delegation!.continuationCount ?? 0) },
             deliveryTarget: (record.context?.deliveryTarget as ReminderDeliveryTarget | undefined),
-          });
+          }, record.taskId);
         });
+        if (!resumed) return;
         if (resumed.status === "queued") return;
         if (resumed.status === "requires_tool_request" && resumed.handoffRecord) {
           await workflow.run("queue-next-tool-request", async () => enqueueSubagentToolContinuation(userId, resumed.handoffRecord!.id));
@@ -2538,13 +2538,12 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
         if (record.status !== "requires_tool_request" || !record.taskId || !record.delegation) {
           throw new WorkflowNonRetryableError("Subagent continuation is no longer eligible to resume");
         }
-        await updateTask(userId, record.taskId, { status: "running", error: undefined, nextAction: "Resuming after supervisor granted a verified scoped capability." });
         // A direct test/action payload may have been what caused the original
         // request. It is historical evidence, not an instruction to replay on
         // the resumed turn; otherwise a worker would immediately ask again.
         const resumedContext: Record<string, unknown> = { ...record.context, previousToolRequest: record.toolRequest };
         delete resumedContext.toolCall;
-        return executeDelegation(userId, {
+        return executeClaimedDelegation(userId, {
           worker: record.to as CapabilityWorkerName,
           objective: record.objective,
           context: resumedContext,
@@ -2565,7 +2564,7 @@ ${JSON.stringify(plan.decisionContext)}`.slice(-12_000), deliveryTarget: job.del
           resumeCount: (record.resumeCount ?? 0) + 1,
           },
           deliveryTarget: record.context?.deliveryTarget as ReminderDeliveryTarget | undefined,
-        });
+        }, record.taskId, true);
       });
 
       if (!resumed) return;
