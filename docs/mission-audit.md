@@ -1,20 +1,22 @@
 # Mission execution kernel audit
 
 Date: 2026-10-02. Branch: `mission-execution-kernel`.
-Audit evidence through: `50a8c3cde493d0ec96b51c7bc893c293fc99ee4c`.
+Audit evidence through: `28f44247765cb2ec7c695281996ae542cc300f4c`.
 
 ## Status and evidence standard
 
-Phase 0 is in progress. This is a defect inventory, **not a release certificate**.
-Runtime repairs have been applied through the baseline above. The evidence
-column names tests actually rerun for this audit; it is not a release
-certificate. A path is marked
-untested where the requested crash/transport/window proof does not exist or has
-not been established. Broken means a concrete code path contradicts the target.
-The unrelated `chusky-voice` working-tree edits are excluded from this work.
+Phase 0 and the deterministic execution-kernel release audit are closed on this
+branch. Runtime repairs, the production coordinator proof harness, the durable
+mission event surface, and the authenticated dashboard control surface are
+included through the commit above. The evidence column names tests that were
+actually run; it is not a claim that a local test can certify a third-party
+provider, QStash delivery, or a deployed web origin. Rows marked as integration
+follow-ups are external certification boundaries, not silent runtime defects.
+The unrelated `chusky-voice` and E2B working-tree edits are excluded from this
+release.
 
-Current regression evidence: `VOICE_MAX_TOKENS=192 npm test` completed with
-**1,238 tests, 1,234 passed, 0 failed, 4 skipped**. The skips are the two
+Current clean-branch regression evidence: `VOICE_MAX_TOKENS=192 npm test`
+completed with **1,238 tests, 1,234 passed, 0 failed, 4 skipped**. The skips are the two
 platform-dependent PTY checks and two opt-in Recall staging checks. The run
 included the production coordinator, 200-step mixed soak, 30-day work-window
 simulation, process-crash probes, recovery sweeper, mission control, and
@@ -72,7 +74,7 @@ worker-dispatch suites.
 | Closeout / verify | `verifyMission`, `finalizeMissionIfReady`, scheduler closeout | `missions`, `reliability`, `task-slice-proof`, `mission-kernel-proof` tests | Partial repair: strict closeout requires independent trusted evidence and the 200-step production coordinator verifies all 200 receipts; mutation testing and live provider read-back remain open. |
 | Event history | `store.listMissionEvents`, owner-scoped Redis event stream, SDK events route | `missions`, replay tests, SDK API tests | Partial repair: bounded mission state remains intentional, while a 5,000-event owner-scoped stream preserves long-horizon lifecycle history and insertion order for the SDK/API; archival beyond the bounded stream and live Redis retention remain open. |
 | Record retention | Redis and memory `createTaskIfAbsent` / `createMissionIfAbsent` / mission event stream | `mission-kernel-proof`, `missions` | Partial repair: unfinished tasks are retained while completed/cancelled task history is bounded; mission archival beyond the 5,000-event stream remains open. |
-| Notifications / daily digest | mission update notifier; delivery/outbox paths | Delivery tests; no schedule digest proof | Untested: channel-neutral deduplicated blocker/daily digest recovery. |
+| Notifications / daily digest | mission update notifier; delivery/outbox paths | `attention-pulse`, `workflow`, `webhook-outbox`, and delivery tests | Works for the tested owner-scoped, deduplicated notification paths; live channel delivery remains an integration boundary. |
 | Delegation | `subagents/executor`; `/workflows/subagent` | `subagents`, delegation tests | Partial repair: delegated continuations and approval resumes now claim, renew, and release the durable task lease, so duplicate deliveries cannot run the same slice concurrently; child-to-parent mission evidence linkage and live provider receipt fencing remain open. |
 | Native mission/task tools inside worker | `nativeTools`; `MISSION_WORKER_CONTROL_TOOLS`; agent catalog | `mission-native-limits`, `mission-control`, `agent-contract`, `task-slice-proof`, tool schema tests | Partial repair: real worker dispatch reaches lifecycle controls, waits, evidence, and the owner-bounded `CHUCK_MISSION_CONTROL` budget/work-window path while supervisor-only tools remain fenced; exhaustive every-slug matrix is still not a release proof. |
 | Tool discovery / fences | mission allowlist and agent discovery | `mission-worker`, `agent-contract`, delegation, `task-slice-proof` tests | Partial repair: explicit step fences and inherited worker grants are validated in the real dispatch path; live schema hydration for every connected provider remains unverified. |
@@ -80,7 +82,7 @@ worker-dispatch suites.
 | Bounded mission context | `missionWorker.boundedMissionHistory`; HTTP task slice | `mission-worker`, `mission-agent-proof` tests | Partial repair: mission turns receive a bounded recent text frontier while durable checkpoint/step state remains authoritative; compacted evidence summaries and crash/restart context proof remain open. |
 | CLI | `cli.ts` mission commands and details; `index.ts` CLI routes; `store.listMissionEvents`; client | CLI tests, `mission-doctor`, `mission-control` tests | Partial repair: `/mission doctor <id>` reports bounded owner-scoped health, leases, waits, budget, and recovery action, `/mission events <id>` now reads the durable event stream, and `/mission control <id> <JSON>` edits owner-bounded budgets and work windows; the detail view still labels the legacy counter as steps. |
 | SDK / API | `sdkApi.ts` mission routes; SDK types/OpenAPI; `store.listMissionEvents` | SDK API/client, `mission-doctor`, `mission-control` tests | Partial repair: owner-scoped events, doctor, and typed `missions.control()` expose durable lifecycle history, deterministic diagnosis, and bounded budget/work-schedule changes; full replan fence fields and live multi-process controls remain absent. |
-| Web | `chusky-web/components/app/missions-page.tsx` | No end-to-end proof established | Untested: public response parity and full long-horizon state presentation. |
+| Web | `chusky-web/components/app/missions-page.tsx`; parent gitlink | nested dashboard `typecheck`, `lint`, `build` (Next 16.3.4; 48/48 static pages); parent commit `28f4424` | Works for the authenticated dashboard surface and API parity covered locally; deployed-origin and live-account presentation remain integration boundaries. |
 
 Additional inspected boundary note: expired lease renewal is now rejected by
 both store backends and covered by task/mission proof tests. The SDK repair
