@@ -142,6 +142,35 @@ test("proof an uncertain sibling action blocks even when another call and checkp
   assert.match(outcome.nextAction ?? "", /inspect|verify|reconcile/i);
 });
 
+test("proof per-call outcomes charge repeated provider calls individually", async () => {
+  const userId = 980012;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, { title: "Per-call accounting", objective: "Count every provider call", definitionOfDone: "The calls are accounted", steps: [{ id: "send", title: "Send", objective: "Send two distinct messages" }] });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const taskId = (await getMission(userId, mission.id))!.rootTaskId!;
+  const task = (await claimTask(userId, taskId, "per-call-worker"))!;
+  const current = (await getMission(userId, mission.id))!;
+  const before = captureMissionSliceState(task, current);
+  await checkpointMission(userId, mission.id, "Both provider calls returned receipts", "Record the verified call count");
+  const outcome = await settleMissionSlice({
+    task,
+    mission: current,
+    before,
+    enqueue: queue.enqueue,
+    result: {
+      text: "Two messages sent.",
+      toolsUsed: ["GMAIL_SEND_EMAIL"],
+      toolOutcomes: [
+        { callId: "first-call", toolSlug: "GMAIL_SEND_EMAIL", status: "succeeded", dispatched: true, receiptId: "receipt-1" },
+        { callId: "second-call", toolSlug: "GMAIL_SEND_EMAIL", status: "succeeded", dispatched: true, receiptId: "receipt-2" },
+      ],
+    },
+  });
+  assert.equal(outcome.status, "queued");
+  assert.equal((await getMission(userId, mission.id))?.toolCalls, 2);
+});
+
 test("proof a 30-day mission executes only within its three-hour daily window", async () => withClock(async (clock) => {
   const userId = 980011;
   const queue = new MissionFakeQStash();

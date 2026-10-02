@@ -64,6 +64,7 @@ test("real agent dispatch advances a three-step mission through durable handoffs
         const result = await scriptedAgent(claimed, queue, (round) => round === 0
           ? completion(null, { id: `complete-${slice}`, name: "CHUCK_MISSION_STEP_COMPLETE", args: { id: mission.id, stepId: claimed.missionStepId, result: "Internal unit verified." } })
           : completion("The internal unit is verified and its persisted step is complete."));
+        assert.deepEqual(result.toolOutcomes, [{ callId: `complete-${slice}`, toolSlug: "CHUCK_MISSION_STEP_COMPLETE", status: "succeeded", dispatched: true }]);
         return settleMissionSlice({ task: claimed, mission, before, result, currentMissionStep: mission.steps.find((step) => step.id === claimed.missionStepId), enqueue: queue.enqueue });
       },
     });

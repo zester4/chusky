@@ -11,7 +11,7 @@ import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { executeScheduledMeetingFollowUp } from "./meetings/outcome.js";
 import { decideAutonomyStep } from "./autonomy/decisionLoop.js";
 import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
-import { settleMissionSlice } from "./missionSlice.js";
+import { missionToolCallCount, settleMissionSlice } from "./missionSlice.js";
 import { persistSdkCompanyRun, sdkRunArtifacts } from "./sdkApi.js";
 import type { TaskRecord } from "./store.js";
 import type { TaskRunResult } from "./taskRunner.js";
@@ -259,11 +259,11 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
               },
             );
             if (agentResult.cost) await addUsage(task.userId, agentResult.cost);
-            return { toolsUsed: agentResult.toolsUsed, toolsSucceeded: agentResult.toolsSucceeded, cost: agentResult.cost };
+            return { toolsUsed: agentResult.toolsUsed, toolsSucceeded: agentResult.toolsSucceeded, toolOutcomes: agentResult.toolOutcomes, cost: agentResult.cost };
           },
         });
         meetingFollowUpDisposition = execution.status;
-        return { text: execution.message, toolsUsed: execution.toolsUsed, toolsSucceeded: execution.toolsSucceeded, cost: execution.cost };
+        return { text: execution.message, toolsUsed: execution.toolsUsed, toolsSucceeded: execution.toolsSucceeded, toolOutcomes: [], cost: execution.cost };
       });
       result = await executeAgentTurn(prompt);
       if (missionWakeNeedsRecovery(missionTimerResumed, result)) {
@@ -273,6 +273,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
           ...recovery,
           toolsUsed: [...result.toolsUsed, ...recovery.toolsUsed],
           toolsSucceeded: [...result.toolsSucceeded, ...recovery.toolsSucceeded],
+          toolOutcomes: [...(result.toolOutcomes ?? []), ...(recovery.toolOutcomes ?? [])],
           cost: (result.cost ?? 0) + (recovery.cost ?? 0),
         };
       }
@@ -302,7 +303,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       if (mission) {
         const currentMission = await getMission(task.userId, mission.id);
         const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
-          ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: postWakeNextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
+          ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.taskWait.checkpoint, nextAction: postWakeNextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
           : currentMission;
         if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
       }
@@ -316,7 +317,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     if (result.missionWait && mission) {
       const currentMission = await getMission(task.userId, mission.id);
       const accounted = currentMission && ["running", "waiting"].includes(currentMission.status)
-        ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, toolCalls: result.toolsUsed.length, cost: result.cost })
+        ? await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMission.checkpoint ?? result.missionWait.checkpoint, nextAction: result.missionWait.nextAction, toolCalls: missionToolCallCount(result), cost: result.cost })
         : currentMission;
       if (!accounted || accounted.status === "blocked") return { status: "blocked" as const, message: accounted?.error ?? "Autonomous mission could not record its progress before waiting.", checkpoint: accounted?.checkpoint, nextAction: accounted?.nextAction };
       const timeoutSeconds = result.missionWait.timeoutSeconds === undefined ? undefined : Math.min(30 * 24 * 60 * 60, Math.max(60, result.missionWait.timeoutSeconds));
