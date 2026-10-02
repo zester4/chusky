@@ -1,7 +1,7 @@
 # Mission execution kernel audit
 
 Date: 2026-10-02. Branch: `mission-execution-kernel`.
-Audit evidence through: `3b67e1c4397e8ed424405b88b698cfaaef600aba`.
+Audit evidence through: `ed310a0`.
 
 ## Status and evidence standard
 
