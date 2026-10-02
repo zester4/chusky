@@ -19,10 +19,10 @@ import {
   readScratchpad, updateJob, updateReminder, transitionReminderStatus, writeScratchpad,
   forgetMemory, searchMemories, updateMemory, upsertMemoryAndContext,
   blockTask, cancelTask, checkpointTask, completeTask, createTask, getTask, listTasks, retryTask, scheduleTask, getApproval, getAgentRun, setApprovalStatus, updateTask, getHandoffRecord,
-  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
+  blockMission, cancelMission, cancelMissionTasks, checkpointMission, completeMission, createMission, finalizeMissionIfReady, getMission, listMissions, missionProof, pauseMission, startMission, updateMission, updateMissionControl, waitMission, recordTrustedMissionEvidence, verifyMission, repairMission, missionBudgetPreflight, missingMissionEvidenceRequirements, MissionReplanConflictError,
   createAttentionRecord, getAttentionRecord, listAttentionRecords, updateAttentionRecord,
   type AttentionEntityKind, type DeliveryPreferenceRecord, type ImageAsset, type TinyFishMonitorRecord, type TinyFishResearchRunRecord,
-  type TaskStatus, type MissionStatus,
+  type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
@@ -56,7 +56,7 @@ import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
-import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
@@ -101,6 +101,7 @@ const SUPERVISOR_DELEGATION_TOOLS = new Set([
   "CHUCK_MISSION_BLOCK",
   "CHUCK_MISSION_PAUSE",
   "CHUCK_MISSION_RESUME",
+  "CHUCK_MISSION_CONTROL",
   "CHUCK_MISSION_CANCEL",
   "CHUCK_MISSION_WAIT_EVENT",
 ]);
@@ -1757,6 +1758,26 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const mission = await resumeMissionAndSchedule(userId, missionId, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, args.maxDurationSeconds === undefined ? undefined : Number(args.maxDurationSeconds), budgetPatch as any);
       if (!mission) throw new Error("Only paused, blocked, failed, or already-running missions you own can be resumed");
       return mission;
+    }
+    case "CHUCK_MISSION_CONTROL": {
+      const missionId = text(args.id);
+      if (runtime.missionId && runtime.missionId !== missionId) throw new Error("A mission worker may only control its active mission.");
+      const rawBudget = args.budget;
+      const budget = rawBudget && typeof rawBudget === "object" && !Array.isArray(rawBudget)
+        ? Object.fromEntries(["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"].filter((key) => (rawBudget as Record<string, unknown>)[key] !== undefined).map((key) => [key, Number((rawBudget as Record<string, unknown>)[key])]))
+        : undefined;
+      const rawSchedule = args.workSchedule;
+      const workSchedule = rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule) ? rawSchedule as MissionWorkSchedule : undefined;
+      if (!budget && !workSchedule) throw new Error("Provide a budget or workSchedule change.");
+      const mission = await updateMissionControl(userId, missionId, {
+        ...(budget && Object.keys(budget).length ? { budget: budget as Partial<MissionBudget> } : {}),
+        ...(workSchedule ? { workSchedule } : {}),
+      });
+      if (!mission) throw new Error("Mission not found, finished, unchanged, or not owned by you");
+      if (workSchedule) await rescheduleQueuedMissionTasks(userId, mission);
+      return mission.status === "running"
+        ? (await reconcileMissionExecution(userId, mission.id, runtime.enqueueMissionTask ?? enqueueTaskWorkflow, runtime.taskId)) ?? mission
+        : mission;
     }
     case "CHUCK_MISSION_CANCEL": {
       const mission = await cancelMission(userId, text(args.id), args.reason ? text(args.reason, 2000) : undefined);

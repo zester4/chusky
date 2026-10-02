@@ -10,6 +10,8 @@ import {
   updateMissionControl,
 } from "../src/store.js";
 import { nextMissionWorkAt, reconcileMissionExecution, rescheduleQueuedMissionTasks } from "../src/missionScheduler.js";
+import { nativeTool } from "../src/nativeTools.js";
+import { validateNativeToolArguments } from "../src/agentTools.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -98,4 +100,26 @@ test("reducing an active budget below the consumed frontier blocks with a resume
   assert.ok(blocked);
   assert.equal(blocked.status, "blocked");
   assert.match(blocked.nextAction ?? "", /budget|resume/i);
+});
+
+test("the mission worker can use native control to change its bounded schedule", async () => {
+  const userId = 971005;
+  const original = { timezone: "UTC", windowStart: "09:00", windowEnd: "12:00", dailyBudgetSeconds: 3600, cadenceSeconds: 300 } as const;
+  const changed = { timezone: "UTC", windowStart: "13:00", windowEnd: "16:00", dailyBudgetSeconds: 3600, cadenceSeconds: 300 } as const;
+  const created = await createMission(userId, {
+    title: "Native control",
+    objective: "Let the durable worker adjust its approved work window.",
+    definitionOfDone: "The new work window is persisted and queued work follows it.",
+    workSchedule: original,
+    budgetCeiling: { maxSlices: 20 },
+    steps: [{ id: "step", title: "Step", objective: "Run in the approved window" }],
+  });
+  assert.ok(await startMission(userId, created.id));
+  await reconcileMissionExecution(userId, created.id, enqueue);
+  const args = { id: created.id, budget: { maxSlices: 10 }, workSchedule: changed };
+  validateNativeToolArguments("CHUCK_MISSION_CONTROL", args);
+  const updated = await nativeTool(userId, "CHUCK_MISSION_CONTROL", args, { missionId: created.id, enqueueMissionTask: enqueue }) as { budget: { maxSlices: number }; workSchedule?: typeof changed };
+  assert.equal(updated.budget.maxSlices, 10);
+  assert.equal(updated.workSchedule?.windowStart, "13:00");
+  assert.equal((await getMission(userId, created.id))?.workSchedule?.windowEnd, "16:00");
 });

@@ -43,6 +43,7 @@ export const MISSION_WORKER_CONTROL_TOOLS = [
   "CHUCK_MISSION_REPLAN",
   "CHUCK_MISSION_REPAIR",
   "CHUCK_MISSION_RESUME",
+  "CHUCK_MISSION_CONTROL",
 ] as const;
 
 export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
