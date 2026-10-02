@@ -107,5 +107,18 @@ Required acceptance scenarios remain **not run**: 200-step mixed soak,
 self-managed ceilings, sloppy-model completion, and safety-guard mutation tests.
 The exact recursive-submodule CI command sequence has not been run on this
 branch. No live Redis, QStash or provider behavior is certified by this audit.
-The remaining autonomy/reliability modules, complete SDK/CLI/web surfaces and
-test implementations still require full inspection before runtime edits.
+The autonomy/reliability modules and mission SDK/CLI/web implementations have
+been inspected. Coverage inspection and the worker extraction remain in progress.
+
+### First executable proof tranche
+
+`tests/mission-kernel-proof.test.ts`, backed by the real in-memory store and
+`tests/helpers/missionKernelHarness.ts`, was run before runtime repairs: **1
+passed, 7 failed, 0 skipped**. It reproduces expired lease renewal, stranded
+expired claims, unfinished-task eviction, the 100-step plan limit, early timer
+resume, substring/provider-mismatched event replay, and replan contract loss.
+The fake delivery transport supports dropped, duplicated, delayed and reordered
+publications. Its crash injector supports named before/after await boundaries.
+This is a first regression tranche, not the full acceptance harness: real agent
+execution, exhaustive await injection, schedule simulation and soak proofs are
+still outstanding. No Redis/process-crash guarantee follows from this tranche.
