@@ -81,6 +81,32 @@ test("sweeper quarantines an expired in-flight lease instead of replaying uncert
   assert.match(afterMission?.nextAction ?? "", /receipt|read-back/i);
 });
 
+test("sweeper does not invent a provider receipt for an expired native-only step", async () => {
+  const userId = 981007;
+  const mission = await createMission(userId, {
+    title: "Native recovery proof",
+    objective: "Persist an internal checkpoint.",
+    definitionOfDone: "The internal checkpoint is present.",
+    idempotencyKey: "native-expired-lease",
+    steps: [{ id: "step-1", title: "Record facts", objective: "Record internal facts." }],
+  });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, enqueue);
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+  await updateTask(userId, task.id, { missionAllowedTools: ["CHUCK_MISSION_CHECKPOINT"] });
+  const nativeOnlyTask = (await getTask(userId, task.id))!;
+  assert.deepEqual(nativeOnlyTask.missionAllowedTools, ["CHUCK_MISSION_CHECKPOINT"]);
+  const claimed = await claimTask(userId, task.id, "native-recovery-worker", 1_000);
+  assert.ok(claimed?.lease);
+  await updateTask(userId, task.id, { lease: { ...claimed!.lease!, expiresAt: Date.now() - 1 } });
+
+  await recoverMissionsForOwner(userId, enqueue);
+  const afterMission = await getMission(userId, mission.id);
+  assert.equal(afterMission?.status, "blocked");
+  assert.doesNotMatch(afterMission?.nextAction ?? "", /provider receipt|read-back/i);
+  assert.match(afterMission?.nextAction ?? "", /checkpoint|task events|native-only/i);
+});
+
 test("sweeper performs one bounded automatic repair for a no-progress mission task", async () => {
   const userId = 981005;
   const mission = await runningMission(userId, "no-progress-repair");

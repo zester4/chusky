@@ -18,6 +18,10 @@ import type { TaskRunResult } from "./taskRunner.js";
 import type { ContentPart } from "./types.js";
 import type { MissionTaskEnqueuer } from "./missionScheduler.js";
 
+/** The mission-step lease must outlive a slow model turn and provider read-back. */
+export const MISSION_STEP_LEASE_MS = 3 * 60_000;
+export const MISSION_STEP_LEASE_RENEWAL_MS = 30_000;
+
 export interface TaskSliceContext {
   workflowRunId?: string;
   attempt: number;
@@ -140,7 +144,9 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     const wakeContinuation = missionTimerResumed
       ? `WAKE CONTINUATION CONTRACT: The persisted timer wait has completed, including when a supervisor resumed it before this worker claimed the task. The old persisted nextAction may describe the whole remaining plan; use the active step objective and checkpoint as the authoritative post-wake work. Do not repeat the pre-wait checkpoint or call CHUCK_TASK_WAIT again. A text-only response is invalid: make an executable native or provider tool call in this slice. If this step requires a post-wake checkpoint and step completion, persist that checkpoint and then complete this active step; if it requires a provider read, perform that read now. Do not summarize or defer.`
       : "";
-    const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\n${missionStepInstruction(currentMissionStep)}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nPersisted next action: ${mission.nextAction ?? task.nextAction ?? "Execute the current step's concrete objective."}\n${wakeContinuation}\nBudget consumed: ${mission.consumedSlices ?? 0} worker slices and ${mission.consumedSteps} completed plan steps, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.${task.attempt > 1 ? "\n\nThe previous slice made no persisted progress. Do not return a summary: execute the step's concrete objective now, or persist an explicit block/wait with its reason." : ""}` : undefined;
+    const trustedNow = Date.now();
+    const trustedIso = new Date(trustedNow).toISOString();
+    const missionPrompt = mission ? `Continue autonomous mission ${mission.id}: ${mission.objective}\n\n${missionStepInstruction(currentMissionStep)}\nDefinition of done: ${mission.definitionOfDone}\n\nVerified checkpoint: ${mission.checkpoint ?? "none"}\nPersisted next action: ${mission.nextAction ?? task.nextAction ?? "Execute the current step's concrete objective."}\nTrusted runtime time: ${trustedIso} (epochMs ${trustedNow}). Copy this ISO value verbatim when a checkpoint needs a timestamp; never manually convert epoch values or invent lease expiry metadata. Lease state returned by CHUCK_MISSION_GET or CHUCK_MISSION_PROOF is authoritative.\n${wakeContinuation}\nBudget consumed: ${mission.consumedSlices ?? 0} worker slices and ${mission.consumedSteps} completed plan steps, ${mission.toolCalls} tool calls, $${mission.cost.toFixed(4)}\n\nWork one bounded slice now. Use CHUCK_MISSION_STEP_COMPLETE only once, only after the current active step is verified; after it succeeds, do not call it again for that step (a delivery replay preserves the original result). Use CHUCK_MISSION_CHECKPOINT after meaningful progress. Keep CHUCK_MISSION_* lifecycle controls with the supervisor: do not put them in a delegated specialist's allowedTools. Use CHUCK_MISSION_WAIT_EVENT for an exact provider callback and CHUCK_TASK_WAIT only when an external service is still processing. Use CHUCK_MISSION_COMPLETE only after the definition of done is verified. Use CHUCK_MISSION_PAUSE or CHUCK_MISSION_BLOCK when human input, permissions, or a dependency is required. Do not claim completion without evidence and do not perform risky external actions without the normal approval flow.${task.attempt > 1 ? "\n\nThe previous slice made no persisted progress. Do not return a summary: execute the step's concrete objective now, or persist an explicit block/wait with its reason." : ""}` : undefined;
     const prompt = task.sdkRunId ? await sdkTaskMessage(task) : missionPrompt && task.sdkAttachments?.length ? await sdkTaskMessage(task, missionPrompt + autonomyGuidance) : (missionPrompt ?? `Continue durable task ${task.id}: ${task.objective}\n\nLatest checkpoint: ${task.checkpoint ?? "none"}\nNext action: ${task.nextAction ?? "determine the safest next action"}\n\nUse task tools to checkpoint, block, or complete the task. If an external service is still processing, use CHUCK_TASK_WAIT with the verified checkpoint and exact next action; this pauses the same task without notifying the user and wakes it once. Do not perform risky external actions without the normal approval flow.`) + autonomyGuidance;
     const session = await getSession(task.userId);
     const agentHistory = mission ? boundedMissionHistory(session.history) : session.history;
@@ -175,8 +181,8 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     if (mission) {
       const workerId = `workflow:${context.workflowRunId ?? "task"}:${context.attempt}`;
       const leased = missionLeaseStepId
-        ? await acquireMissionStepLease(task.userId, mission.id, missionLeaseStepId, workerId)
-        : await acquireMissionLease(task.userId, mission.id, workerId);
+        ? await acquireMissionStepLease(task.userId, mission.id, missionLeaseStepId, workerId, MISSION_STEP_LEASE_MS)
+        : await acquireMissionLease(task.userId, mission.id, workerId, MISSION_STEP_LEASE_MS);
       const acquiredLease = missionLeaseStepId ? leased?.executionLeases?.[missionLeaseStepId] : leased?.lease;
       if (!acquiredLease) { if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch(() => undefined); return { status: "queued" as const, message: "Another mission worker currently owns the execution lease.", checkpoint: mission.checkpoint, nextAction: "Retry after the active mission worker releases its lease.", runAt: Date.now() + 2000 }; }
       mission = leased;
@@ -187,8 +193,8 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     const missionLeaseRenewal = mission?.id && missionLeaseToken
       ? setInterval(() => {
         void (missionLeaseStepId
-          ? renewMissionStepLease(task.userId, mission!.id, missionLeaseStepId, missionLeaseToken!, 60_000)
-          : renewMissionLease(task.userId, mission!.id, missionLeaseToken!, 60_000)).then((renewed) => {
+          ? renewMissionStepLease(task.userId, mission!.id, missionLeaseStepId, missionLeaseToken!, MISSION_STEP_LEASE_MS)
+          : renewMissionLease(task.userId, mission!.id, missionLeaseToken!, MISSION_STEP_LEASE_MS)).then((renewed) => {
           if (renewed) {
             missionLeaseRenewalFailures = 0;
             return;
@@ -200,9 +206,10 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
           logger.warn({ err: error, missionId: mission!.id, consecutiveFailures: missionLeaseRenewalFailures }, "Mission lease renewal failed");
           if (missionLeaseRenewalFailures >= 2) missionLeaseLost?.abort(new Error("Mission lease renewal failed repeatedly; stopping before another worker can continue."));
         });
-      }, 20_000)
+      }, MISSION_STEP_LEASE_RENEWAL_MS)
       : undefined;
-    if (missionLeaseRenewal && typeof missionLeaseRenewal === "object" && "unref" in missionLeaseRenewal) missionLeaseRenewal.unref();
+    // A detached timer is unsafe here: a workflow runtime can finish the
+    // invocation's event loop while runAgent is awaiting a slow provider.
     const missionSliceBefore = captureMissionSliceState(task, mission);
     const durationSeconds = mission ? Math.max(1, Math.floor(missionBudgetPreflight(mission, { steps: 0 }).remaining.durationSeconds)) : task.composerBudgetSeconds ?? sdkDurationSeconds(task.sdkBudget?.duration);
     if (task.sdkRunId && durationSeconds && task.sdkStartedAt && Date.now() - task.sdkStartedAt >= durationSeconds * 1000) throw new Error("The configured SDK run duration budget has been exhausted.");
@@ -293,6 +300,30 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       if (cancelled && task.sdkRunId && task.sdkThreadId) {
         const current = await getSession(task.userId); const sdkThread = current.sdkThreads?.find((item) => item.id === task.sdkThreadId); const sdkRun = sdkThread?.runs.find((item) => item.id === task.sdkRunId);
         if (sdkRun) { sdkRun.status = "cancelled"; sdkRun.events.push({ id: `evt_${randomUUID()}`, type: "run.cancelled", at: Date.now() }); sdkRun.updatedAt = Date.now(); if (sdkThread) sdkThread.updatedAt = sdkRun.updatedAt; await saveSession(task.userId, current); await persistSdkCompanyRun(sdkRun); }
+      }
+      const missionLeaseReason = missionLeaseLost?.signal.reason;
+      if (mission && missionLeaseReason instanceof Error && /Mission lease/.test(missionLeaseReason.message)) {
+        const missionId = mission.id;
+        const stepLabel = currentMissionStep?.title ?? task.missionStepId ?? "the active step";
+        const message = `Mission step ${stepLabel} lost its execution lease before the worker could settle the slice. No automatic replay was attempted because provider state is not proven.`;
+        const nextAction = "Inspect the saved checkpoint and task receipt if applicable, then repair or resume this same mission explicitly.";
+        const blocked = await updateMission(task.userId, missionId, (current) => {
+          const currentLease = missionLeaseStepId ? current.executionLeases?.[missionLeaseStepId] : current.lease;
+          if (current.status !== "running" || !currentLease || currentLease.token !== missionLeaseToken) return undefined;
+          return {
+            status: "blocked" as const,
+            error: message,
+            nextAction,
+            waiting: undefined,
+            events: [...current.events, { id: `misevt_${randomUUID()}`, type: "blocked" as const, message, at: Date.now(), ...(missionLeaseStepId ? { stepId: missionLeaseStepId } : {}) }],
+          };
+        }).catch((updateError) => {
+          logger.warn({ err: updateError, missionId, taskId: task.id }, "Mission lease-loss block could not be persisted");
+          return undefined;
+        });
+        if (blocked) {
+          return { status: "blocked" as const, message: blocked.error ?? message, checkpoint: blocked.checkpoint ?? mission.checkpoint, nextAction: blocked.nextAction ?? nextAction, failureClass: "provider_uncertain" };
+        }
       }
       throw error;
     }

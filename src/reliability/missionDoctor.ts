@@ -9,6 +9,7 @@ export interface MissionDoctorTask {
   maxAttempts: number;
   runAt?: number;
   error?: string;
+  nextAction?: string;
   lastFailureClass?: TaskRecord["lastFailureClass"];
   lease?: { workerId: string; expiresAt: number; expired: boolean };
 }
@@ -87,6 +88,7 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
     maxAttempts: task.maxAttempts,
     ...(task.runAt !== undefined ? { runAt: task.runAt } : {}),
     ...(bounded(task.error, 1000) ? { error: bounded(task.error, 1000) } : {}),
+    ...(bounded(task.nextAction, 1000) ? { nextAction: bounded(task.nextAction, 1000) } : {}),
     ...(task.lastFailureClass ? { lastFailureClass: task.lastFailureClass } : {}),
     ...(task.lease ? { lease: { workerId: task.lease.workerId, expiresAt: task.lease.expiresAt, expired: task.lease.expiresAt <= now } } : {}),
   }));
@@ -125,11 +127,15 @@ export function diagnoseMission(input: { mission: MissionRecord; tasks: TaskReco
     if (failedTasks.length) reasons.push("task_failed_or_blocked");
     if (blockedCompensations) reasons.push("compensation_blocked");
     if (failedTasks.some((task) => task.lastFailureClass === "provider_uncertain")) reasons.push("provider_outcome_uncertain");
-    nextActions.push(blockedCompensations ? "Review the blocked compensation and reconcile provider state before resuming." : "Inspect the failed task and provider receipt, then repair or resume from the saved checkpoint.");
+    const failedTaskAction = failedTasks.map((task) => bounded(task.nextAction, 1000)).find(Boolean);
+    nextActions.push(blockedCompensations ? "Review the blocked compensation and reconcile provider state before resuming." : failedTaskAction ?? "Inspect the failed task and provider receipt, then repair or resume from the saved checkpoint.");
   }
   if (expiredLeases.length) {
     reasons.push("expired_worker_lease");
-    nextActions.push("Run mission recovery to reclaim the expired lease and reschedule the saved slice.");
+    const nativeOnlyExpiredLease = expiredLeases.some((task) => task.missionAllowedTools?.length && task.missionAllowedTools.every((tool) => tool.startsWith("CHUCK_")));
+    nextActions.push(nativeOnlyExpiredLease
+      ? "Review the saved checkpoint and task events, then repair or resume the native-only step explicitly; no provider receipt is expected."
+      : "Run mission recovery to reclaim the expired lease and reschedule the saved slice only after provider state is reconciled.");
   }
   if (waiting) {
     reasons.push(waiting.overdue ? "wait_is_due_or_expired" : `waiting_for_${waiting.kind}`);

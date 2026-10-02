@@ -60,3 +60,13 @@ test("mission doctor reports uncertain provider failure as blocked and never rec
   assert.ok(report.reasons.includes("provider_outcome_uncertain"));
   assert.ok(report.nextActions.every((action) => !/retry blindly|replay blindly/i.test(action)));
 });
+
+test("mission doctor preserves the task-specific resume action for native-only lease loss", () => {
+  const report = diagnoseMission({
+    mission: mission({ status: "blocked", error: "Native worker lease expired." }),
+    tasks: [task({ status: "blocked", missionAllowedTools: ["CHUCK_MISSION_CHECKPOINT"], nextAction: "Review the saved checkpoint and task events, then resume the native-only step explicitly." })],
+    now: 1_000,
+  });
+  assert.ok(report.nextActions.some((action) => /saved checkpoint and task events/i.test(action)));
+  assert.ok(report.tasks[0]?.nextAction);
+});

@@ -4,6 +4,14 @@ import { decideRecovery } from "./autonomy/decisionLoop.js";
 
 export interface TaskRunPayload { userId: number; taskId: string; }
 
+/**
+ * A durable workflow can spend longer than one model request in a slice while
+ * it persists checkpoints, evidence, and provider read-backs. Keep the lease
+ * comfortably ahead of the normal request timeout; the heartbeat still
+ * renews it while the slice is active.
+ */
+export const DURABLE_TASK_LEASE_MS = 5 * 60_000;
+
 export interface TaskRunResult {
   status: "completed" | "blocked" | "failed" | "queued" | "cancelled";
   message: string;
@@ -30,7 +38,7 @@ export interface TaskRunnerDependencies {
  * token-checked settlement, so a stale worker can never overwrite a recovered run.
  */
 export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunnerDependencies): Promise<{ claimed: boolean; task?: TaskRecord }> {
-  const leaseMs = Math.max(10_000, Math.min(10 * 60_000, deps.leaseMs ?? 120_000));
+  const leaseMs = Math.max(10_000, Math.min(10 * 60_000, deps.leaseMs ?? DURABLE_TASK_LEASE_MS));
   const task = await claimTask(payload.userId, payload.taskId, deps.workerId, leaseMs);
   if (!task?.lease) {
     logger.info({ userId: payload.userId, taskId: payload.taskId, workerId: deps.workerId }, "Task worker skipped unclaimable task");
@@ -74,8 +82,10 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
       if (++consecutiveRenewalFailures >= 2) leaseAbort.abort(new Error("Task lease renewal failed repeatedly; stopping the worker before lease expiry."));
       logger.warn({ err: error, userId: payload.userId, taskId: task.id, consecutiveFailures: consecutiveRenewalFailures }, "Task lease renewal failed");
     });
-  }, Math.max(1_000, Math.floor(leaseMs / 3)));
-  if (typeof renewal === "object" && "unref" in renewal) renewal.unref();
+  }, Math.max(1_000, Math.floor(leaseMs / 4)));
+  // Do not unref this timer. In a serverless workflow invocation the runtime
+  // may otherwise tear down the event loop while the model/provider request is
+  // still pending, allowing the lease to expire before settlement.
   try {
     const outcome = await deps.execute(task, leaseAbort.signal);
     const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, outcome);
@@ -98,6 +108,27 @@ export async function executeDurableTask(payload: TaskRunPayload, deps: TaskRunn
         checkpoint: task.checkpoint,
       });
       return { claimed: true, task: settled };
+    }
+    const leaseLoss = /lease (?:was )?lost|lease renewal failed repeatedly/i.test(message);
+    if (leaseLoss && current?.lease?.token === task.lease.token) {
+      const nativeOnly = Boolean(task.missionAllowedTools?.length && task.missionAllowedTools.every((tool) => tool.startsWith("CHUCK_")));
+      const leaseMessage = nativeOnly
+        ? "The durable worker lost its task lease during a native-only step. No external provider action was authorized; the saved checkpoint and task events are authoritative."
+        : "The durable worker lost its task lease before settlement. Provider outcome is not proven, so no automatic replay was attempted.";
+      const leaseNextAction = nativeOnly
+        ? "Review the saved checkpoint and task events, then repair or resume this same task or mission explicitly."
+        : "Inspect the saved checkpoint and provider receipt/read-back, then repair or resume this same task or mission explicitly.";
+      const settled = await settleTaskRun(payload.userId, task.id, task.lease.token, {
+        status: "blocked",
+        message: leaseMessage,
+        checkpoint: task.checkpoint,
+        nextAction: leaseNextAction,
+        failureClass: nativeOnly ? "worker" : "provider_uncertain",
+      });
+      if (settled) {
+        logger.warn({ userId: payload.userId, taskId: task.id, workerId: deps.workerId, status: settled.status }, "Task worker stopped after losing its lease");
+        return { claimed: true, task: settled };
+      }
     }
     const recovery = await decideRecovery({
       operation: task.objective,
