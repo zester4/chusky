@@ -58,5 +58,5 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
       return { status: "completed" as const, message: "Mission branch completed; the next dependency-ready branch was scheduled.", result: result.text, checkpoint: refreshed.checkpoint };
     }
   }
-  return { status: "queued" as const, message: "Autonomous mission slice completed", checkpoint: accounted.checkpoint, nextAction: accounted.nextAction ?? "Continue from the verified checkpoint.", runAt: Date.now() + 5000 };
+  return { status: "queued" as const, message: "Autonomous mission slice completed", checkpoint: accounted.checkpoint, nextAction: accounted.nextAction ?? "Continue from the verified checkpoint.", runAt: Date.now() + 5000, progress: true };
 }

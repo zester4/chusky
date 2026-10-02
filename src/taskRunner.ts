@@ -13,6 +13,8 @@ export interface TaskRunResult {
   result?: string;
   /** Distinguishes an intentional durable wait from a retry after failure. */
   waiting?: boolean;
+  /** The slice persisted real durable progress and may reset consecutive retries. */
+  progress?: boolean;
 }
 
 export interface TaskRunnerDependencies {

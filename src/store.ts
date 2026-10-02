@@ -1641,6 +1641,8 @@ interface Backend {
   getMissions(userId: number): Promise<MissionRecord[]>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
+  registerMissionOwner(userId: number): Promise<void>;
+  listMissionOwnerIds(): Promise<number[]>;
   compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
@@ -1893,6 +1895,7 @@ class RedisBackend implements Backend {
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
   private missionk = (id: number) => `chuck:missions:${id}`;
+  private missionOwnersKey = "chuck:missions:owners";
   private reminderk = (id: number) => `chuck:reminders:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
   private attentionKey = (id: number, collection: AttentionCollection) => `chuck:attention:${collection}:${id}`;
@@ -2544,7 +2547,11 @@ class RedisBackend implements Backend {
   async getMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
     if (!raw) return [];
-    try { const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { return []; }
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) void this.r.sadd(this.missionOwnersKey, String(userId));
+      return Array.isArray(parsed) ? parsed as MissionRecord[] : [];
+    } catch { return []; }
   }
   async saveMissions(userId: number, missions: MissionRecord[]): Promise<void> {
     // Mission state is durable control-plane state and must outlive chat history.
@@ -2560,9 +2567,14 @@ class RedisBackend implements Backend {
       const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
       if (existing) { await this.r.unwatch(); return normalizeMission(existing); }
       const result = await this.r.multi().set(key, JSON.stringify([...missions, mission].slice(-100))).exec();
-      if (result) return mission;
+      if (result) { await this.r.sadd(this.missionOwnersKey, String(userId)); return mission; }
     }
     throw new Error("Mission creation changed concurrently; please retry");
+  }
+  async registerMissionOwner(userId: number): Promise<void> { await this.r.sadd(this.missionOwnersKey, String(userId)); }
+  async listMissionOwnerIds(): Promise<number[]> {
+    const values = await this.r.smembers(this.missionOwnersKey);
+    return values.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value >= 0).sort((a, b) => a - b);
   }
   async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined> {
     const key = this.missionk(userId);
@@ -3612,6 +3624,7 @@ class MemoryBackend implements Backend {
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
   private missions = new Map<number, MissionRecord[]>();
+  private missionOwners = new Set<number>();
   async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
@@ -3652,12 +3665,15 @@ class MemoryBackend implements Backend {
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
   async createMissionIfAbsent(userId: number, mission: MissionRecord) {
+    this.missionOwners.add(userId);
     const missions = this.missions.get(userId) ?? [];
     const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
     if (existing) return normalizeMission(existing);
     this.missions.set(userId, [...missions, mission].slice(-100));
     return mission;
   }
+  async registerMissionOwner(userId: number) { this.missionOwners.add(userId); }
+  async listMissionOwnerIds() { return [...this.missionOwners].sort((a, b) => a - b); }
   async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord) {
     const missions = this.missions.get(userId) ?? [];
     const index = missions.findIndex((mission) => mission.id === id);
@@ -6323,6 +6339,11 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
   });
 }
 
+/** Owners with durable mission state; used by the recovery sweeper. */
+export async function listMissionOwnerIds(): Promise<number[]> {
+  return backend.listMissionOwnerIds();
+}
+
 /** Resume the same durable task after its exact persisted timer has elapsed. */
 export async function resumeMissionFromTimer(userId: number, id: string, runAt: number): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
@@ -6497,6 +6518,25 @@ export async function updateTask(userId: number, id: string, patch: Partial<Omit
   return mutateTask(userId, id, () => patch);
 }
 
+/**
+ * Quarantine an expired in-flight task. A provider may have accepted work
+ * before the worker died, so recovery must not turn lease expiry into a blind
+ * replay. The mission remains explicitly blocked until a fresh read-back or
+ * owner-directed repair decides what is safe.
+ */
+export async function quarantineExpiredTask(userId: number, id: string, reason: string, nextAction: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => {
+    if (task.status !== "running" || !task.lease || task.lease.expiresAt > Date.now()) return undefined;
+    return {
+      status: "blocked",
+      lease: undefined,
+      error: reason.slice(0, 2000),
+      nextAction: nextAction.slice(0, 2000),
+      events: [...task.events, taskEvent("blocked", reason, task.attempt)],
+    };
+  });
+}
+
 export async function scheduleTask(userId: number, id: string, runAt: number): Promise<TaskRecord | undefined> {
   return mutateTask(userId, id, (task) => {
     if (["completed", "running"].includes(task.status)) return undefined;
@@ -6594,7 +6634,7 @@ async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   });
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean }): Promise<TaskRecord | undefined> {
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean; progress?: boolean }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
   if (["cancel_requested", "cancelled"].includes(task.status)) {
@@ -6615,6 +6655,7 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     result: normalized.result,
     error: normalized.status === "failed" ? normalized.message : undefined,
     ...(status === "queued" ? { workflowRunId: undefined, enqueueClaim: undefined } : {}),
+    ...(status === "queued" && normalized.status === "queued" && normalized.progress ? { attempt: 0 } : {}),
     runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
   }, taskEvent(eventType, normalized.message, task.attempt));
   if (settled) await reconcileTerminalMissionTask(settled);

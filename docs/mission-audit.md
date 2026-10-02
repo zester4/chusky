@@ -37,8 +37,8 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Path | Implementation | Existing coverage to inspect | Verdict and defect |
 | --- | --- | --- | --- |
 | Create / plan | `store.createMission`, `normalizeMission`; `missionScheduler.validateMissionStepsPayload`; native START | `missions`, `mission-native-limits`, `agent-contract` tests | Broken: 100-step input cap and normalization truncation; typed metadata is not an executable contract throughout transports. |
-| Schedule / enqueue | `missionScheduler.scheduleMissionSteps`, `reconcileMissionExecution`; `taskEnqueue.enqueueTaskWithClaim` | `missions`, `task-enqueue`, `trigger-workflow` tests | Broken: recorded workflow ID prevents republication after accepted-but-lost delivery; no independent recovery scan. |
-| Claim / lease | store backend `claimTask`; `taskRunner.executeDurableTask` | `tasks`, `task-runner` tests | Broken: an expired running task cannot be claimed as queued; recovery needs a fenced transition. |
+| Schedule / enqueue | `missionScheduler.scheduleMissionSteps`, `reconcileMissionExecution`; `taskEnqueue.enqueueTaskWithClaim`; `missionRecovery.recoverAllMissions` | `missions`, `task-enqueue`, `trigger-workflow`, `mission-recovery` tests | Partial repair: expired enqueue claims and lost queued deliveries are republished idempotently by the independent sweeper; accepted-but-unrecorded provider publications still rely on provider idempotency/recovery evidence. |
+| Claim / lease | store backend `claimTask`; `taskRunner.executeDurableTask`; `quarantineExpiredTask` | `tasks`, `task-runner`, `mission-recovery` tests | Partial repair: expired leases are fenced and quarantined rather than replayed; provider read-back/owner repair remains required for ambiguous in-flight work. |
 | Slice execution | `index.ts` `/workflows/task` | Helper tests in `mission-worker`; no extracted whole-route harness | Broken: inline control flow, success/uncertainty collapsed to slug sets, shared session context, no work windows. |
 | Step completion | `store.completeMissionStep`; `completeMissionStepAndAdvance` | `missions` tests | Untested: full-route evidence-driven completion with sloppy model and crash boundaries. |
 | Fan-out / join | `readyMissionSteps`, `scheduleMissionSteps` | `missions` tests | Broken: DAG fan-out exists, but HTTP worker acquires a mission-wide lease and owner lock, serializing execution. A mission-wide wait also parks unrelated branches. |
@@ -60,7 +60,7 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Lease renew / loss | `renewTaskLease`; task runner renewal; HTTP mission renewal | `task-runner`, `tasks` tests | Broken: settlement checks token but not expiry; expired holder can settle before replacement. Mission lease is released before post-turn accounting. |
 | Duplicate delivery | deterministic task IDs; enqueue claims; task leases | `task-enqueue`, `task-runner`, `tasks` tests | Untested: duplicate/reordered deliveries combined with replan, restart and ambiguous provider siblings. |
 | Retry loop | `settleTaskRun`, backend claim, HTTP ten-iteration loop | `task-runner` tests | Broken: healthy continuation consumes attempts; no reset on genuine progress. Prompt labels every attempt above one as prior no-progress. |
-| Recovery sweeper | No mission-level independent scanner established | No coverage | Broken: recovery depends on a subsequent delivery or explicit supervisor reconciliation. |
+| Recovery sweeper | `missionRecovery.recoverAllMissions`, `recoverMissionsForOwner`; two-minute interval in `index.ts` | `tests/mission-recovery.test.ts` | Works for bounded owner discovery, lost queued delivery, overdue timer wakes, and conservative expired-lease quarantine; live multi-instance cadence and QStash publication remain integration follow-ups. |
 | Closeout / verify | `verifyMission`, `finalizeMissionIfReady`, scheduler closeout | `missions`, `reliability` tests | Untested: 200-step strict evidence retention and mutation tests. Legacy closeout is intentionally different and must stay explicitly labelled. |
 | Event history | normalized `mission.events` / evidence arrays | `missions`, replay tests | Broken: last 500 events and 100 mission evidence entries retained; long-horizon proof history is truncated. |
 | Record retention | Redis and memory `createTaskIfAbsent` / `createMissionIfAbsent` | Existing tests do not establish active-record retention | Broken: insertion retains only the newest 100 records, regardless of status. Creating enough work can evict an unfinished task or mission. Memory task CAS also truncates the list. |
@@ -309,3 +309,15 @@ workflow endpoints were confirmed present by variable name only; secret values
 were not printed. The local workflow contract suite passed 28 tests. Per the
 QStash SDK contract, publishing is an external side effect, so no live probe
 was sent during this audit.
+## Durable recovery sweeper proof (2026-10-02)
+
+The recovery path is now independent of a fresh QStash delivery. Mission creation registers the owner in a durable owner index (`chuck:missions:owners` in Redis; a process-local set in memory-only tests). `recoverAllMissions()` scans bounded owner/mission sets and delegates owner-scoped reconciliation to `recoverMissionsForOwner()`.
+
+| Failure state | Recovery behavior | Proof |
+|---|---|---|
+| Running mission with a queued task whose workflow publication was lost | Clears/reuses the expired enqueue claim and republishes through the existing idempotent enqueue path | `tests/mission-recovery.test.ts`: lost-delivery case passed |
+| Overdue timer wait | Resumes the exact persisted mission wait and schedules the existing task; it does not create a replacement task | `tests/mission-recovery.test.ts`: timer case passed |
+| Expired in-flight worker lease | Quarantines the task, clears stale lease authority, blocks the mission, and requires provider receipt/read-back before repair; no blind replay | `tests/mission-recovery.test.ts`: expired-lease case passed |
+| Provider-event, approval, or human-input wait | No automatic resume; the exact external control remains authoritative | Covered by existing provider-event, approval, and human-input wait suites |
+
+The application starts a bounded two-minute recovery interval after store and handler initialization. The interval is `unref()`'d and cleared during shutdown. The sweeper is intentionally conservative around expired leases: lease loss is not proof that a provider write did not happen.
