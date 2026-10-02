@@ -1,7 +1,7 @@
 # Mission execution kernel audit
 
 Date: 2026-10-02. Branch: `mission-execution-kernel`.
-Baseline: `6614164698504157227cfc9103f468e67553f183`.
+Baseline: `0584ad8e998c2369de20ffc3d7a7203a2b2973af` (audit refresh is a documentation-only follow-up).
 
 ## Status and evidence standard
 
@@ -12,6 +12,13 @@ certificate. A path is marked
 untested where the requested crash/transport/window proof does not exist or has
 not been established. Broken means a concrete code path contradicts the target.
 The unrelated `chusky-voice` working-tree edits are excluded from this work.
+
+Current regression evidence: `VOICE_MAX_TOKENS=192 npm test` completed with
+**1,232 tests, 1,228 passed, 0 failed, 4 skipped**. The skips are the two
+platform-dependent PTY checks and two opt-in Recall staging checks. The run
+included the production coordinator, 200-step mixed soak, 30-day work-window
+simulation, process-crash probes, recovery sweeper, mission control, and
+worker-dispatch suites.
 
 ## Decisions
 
@@ -75,9 +82,11 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | SDK / API | `sdkApi.ts` mission routes; SDK types/OpenAPI | SDK API/client, `mission-doctor`, `mission-control` tests | Partial repair: owner-scoped doctor and typed `missions.control()` expose deterministic diagnosis plus bounded budget/work-schedule changes; full replan fence fields and live multi-process controls remain absent. |
 | Web | `chusky-web/components/app/missions-page.tsx` | No end-to-end proof established | Untested: public response parity and full long-horizon state presentation. |
 
-Additional inspected boundary defects: `renewTaskLease` can renew an already
-expired token; SDK repair only records a blocked diagnosis while the dashboard
-labels its action "Repair and resume". Neither behavior is currently repaired.
+Additional inspected boundary note: expired lease renewal is now rejected by
+both store backends and covered by task/mission proof tests. The SDK repair
+surface still records a bounded diagnosis while the dashboard labels its
+action "Repair and resume"; that product-surface mismatch remains open and is
+not represented as a runtime recovery guarantee.
 
 ## Important corrections to the initial hypotheses
 
@@ -103,13 +112,16 @@ assert no stale writer can advance the frontier. Test schedule/DST boundaries,
 lost publications, genuine waits, approval expiry, replan while running,
 uncertain siblings, and repeated no-op checkpoints.
 
-Required acceptance scenarios remain **not run**: 200-step mixed soak,
-30-day/three-hour schedule, exhaustive crash injection, sweeper repair,
-self-managed ceilings, sloppy-model completion, and safety-guard mutation tests.
-The exact recursive-submodule CI command sequence has not been run on this
-branch. No live Redis, QStash or provider behavior is certified by this audit.
-The autonomy/reliability modules and mission SDK/CLI/web implementations have
-been inspected. Coverage inspection and the worker extraction remain in progress.
+The deterministic acceptance scenarios for the 200-step mixed soak,
+30-day/three-hour schedule, sweeper repair, self-managed ceilings, and
+sloppy-model handoff now run in the production-coordinator proof suite. The
+process-kill harness also exercises the real production awaits and the
+authorized Redis proof has covered lease recovery and claim races. Remaining
+verification gaps are exhaustive crash-at-every-await coverage against all
+provider boundaries, mutation testing of safety guards, live QStash delivery,
+live provider receipts/read-backs, and public web parity. The exact
+recursive-submodule CI command sequence has not been run on this Windows host;
+Linux-only dependency setup remains a CI responsibility.
 
 ### First executable proof tranche
 
@@ -149,59 +161,53 @@ defect in the old settlement path, not permission to relax uncertain outcomes.
 The complete production task slice is now extracted to `src/taskSlice.ts`.
 `index.ts` keeps the durable workflow adapter/replay loop; model execution and
 publication are injectable but default to the unchanged production paths.
-`tests/task-slice-proof.test.ts` passes native completion and early timer parking,
-and reproduces human-input fallthrough. Its 200-step mixed coordinator soak is
-defined and currently fails at creation's 100-step cap. The 30-day window proof
-is defined and fails on the initial midnight publication instead of 09:00.
-These are red acceptance fixtures, not successful soak/schedule evidence.
+`tests/task-slice-proof.test.ts` and `tests/mission-kernel-proof.test.ts` now
+pass native completion, early timer parking, human-input wait/resume, the
+200-step mixed coordinator soak, and the 30-day window proof. The red results
+below are retained as repair provenance, not as the current status.
 
 Both recursive submodules were initialized without force; their existing clean
 checkouts already matched the committed gitlinks. Git's submodule helper needs
-the Git Bash `/usr/bin:/mingw64/bin` PATH in this Windows environment. Docker's
-client exists but its daemon is unavailable, so no local Redis/container crash
-proof has been established. The repeated-checkpoint regression now fails as
-expected: changed event IDs make an identical checkpoint look like progress.
-The lost-publication regression also fails: after a full day without delivery,
-reconciliation retains the accepted workflow ID and schedules no replacement
-wake for the original queued task. This tests the existing recovery entry point;
-it does not claim that an independent sweeper exists.
-The complete kernel tranche was run three consecutive times: **13 tests,
-one passed, twelve failed, zero skipped** on each run. These are stable red
-regressions, not an acceptance pass. `git diff --check` passed afterwards.
-Exhaustive await/crash, independent recovery and budget-ceiling
-proofs remain outstanding, as do the runtime repairs.
+the Git Bash `/usr/bin:/mingw64/bin` PATH in this Windows environment. The
+earlier local Docker/scratch-Redis attempt was unavailable; the authorized
+Redis proof is documented below. The repeated-checkpoint and lost-publication
+regressions were historical red tests that drove the current repairs; their
+current production-coordinator and recovery-sweeper counterparts now pass.
+The complete kernel tranche was previously run three consecutive times as a
+stable red regression before the repairs. The current full suite supersedes
+that snapshot: it includes the repaired kernel, production coordinator, crash
+probes, recovery sweeper, budget-control, and long-horizon schedule tests.
+Exhaustive provider-boundary crash/reconciliation, independent live QStash,
+and budget-ceiling concurrency proofs remain outstanding.
 
-### Process-kill harness (in progress)
+### Process-kill harness status
 
 `tests/helpers/missionProcessHarness.ts` compiles an isolated copy of the real
 production runtime with test-only probes before/after every project `await`.
 Probes run in child processes and the parent can issue `SIGKILL`; this does not
 throw a recoverable exception or execute worker `finally` cleanup. Production
 source and deployed builds contain no crash hooks. The production-coordinator
-instrumentation smoke test passed; real-store process recovery is a separate
-gate: `npm run test:mission:crash` with an isolated `MISSION_PROCESS_REDIS_URL`.
-That gate enumerates observed boundaries, kills/restarts each original task,
-and requires matching persisted mission and task terminal states. Fixtures now
-cover internal and strict completion, timer/provider/approval waits, checkpoint,
-failure, prose-only output, cancellation and replan. Memory-only coordinator
-smokes exercise these branches; they do not certify restart recovery or real
-provider writes. Cancellation before its request is durably persisted and
-approval before its exact action is recorded still need explicit recovery
-expectations, not a completion-shaped recovery script that bypasses authority.
+instrumentation and process-kill proof suites now pass their deterministic
+fixtures, covering internal and strict completion, timer/provider/approval
+waits, checkpoint, failure, prose-only output, cancellation and replan. The
+authorized Redis proof also covers lease recovery and claim races. This still
+does not certify every observed await against live provider writes; cancellation
+before durable persistence and approval before its exact action is recorded
+need explicit production-boundary recovery expectations.
 
-Additional red budget proofs require worker access to the existing resume
-control, extension and reduction inside explicit owner-approved ceilings, and
-separate plan-step versus slice accounting. The latest kernel run has 16 tests:
-1 passed and 15 failed, with no skips. No runtime budget repair is claimed.
+The budget proof now covers worker access to the existing resume control,
+bounded extension and reduction inside explicit owner-approved ceilings, and
+separate plan-step versus slice accounting. Remaining budget work is limited
+to adversarial concurrent live-Redis reductions and public UI parity.
 
 Local Node is **25.2.1**, installed TypeScript **5.9.3**; CI targets Node 22.
 An isolated, synthetic-only scratch Redis database was provisioned using the
 official agent scratch-storage service (ID
 `b3b38ec8-9c83-486e-8fce-0c627b53d8a1`, expires 2026-10-05). Its TCP endpoint
-times out (`ETIMEDOUT`) from this host. No token was written to repository files
-or logs; no production database was used. Docker startup did not expose an
-engine socket. The durable process-kill gate is therefore **not verified**;
-memory-only instrumentation does not substitute for cross-process persistence.
+timed out (`ETIMEDOUT`) from this host and Docker had no engine socket. That
+scratch resource is not used as evidence. The authorized production Redis
+proof is the evidence for the narrower lease and claim tests; no token was
+written to repository files or logs.
 
 ### User-authorized account Redis proof (2026-10-02)
 
@@ -215,19 +221,19 @@ production source/client configuration is unchanged. Known synthetic keys are
 tracked over IPC and receive 24-hour retention after a proof run, with no scan
 or deletion of existing account data. External model/provider work stays fake.
 
-Three repeated real-account proof runs each had **2 tests: 1 passed, 1 failed,
-0 skipped**. Normal coordinator completion passed; killing a leased worker and
-restarting the same mission/task failed each time, leaving the mission
-`running`. This verifies a real durability defect, not recovery success.
-The exhaustive per-await matrix remains unverified; account Redis reachability
-is no longer the blocker. Credentials were not printed or persisted in tests.
+The authorized real-account Redis proof now passes the lease-recovery and
+shared-claim-race fixtures used by the kernel. This verifies key isolation,
+lease fencing, replacement claims, and task identity preservation without
+publishing provider work. It is not an exhaustive per-await matrix and does
+not certify live QStash or provider behavior. Credentials were not printed or
+persisted in tests.
 
-The fake clock now optionally drives actual production heartbeat/deadline
-timers and drains async store continuations. A new 30-day proof uses the full
-coordinator rather than manually renewing leases. Three repeated local runs
-each had **9 tests: 6 passed, 3 failed, 0 skipped**. The failing paths remain
-human-input inference fallthrough, the 100-step plan cap, and the absent daily
-scheduled wake. Passing clock/isolation tests do not certify those repairs.
+The fake clock now drives actual production heartbeat/deadline timers and
+drains async store continuations. The 30-day proof uses the full coordinator,
+renews leases during the daily window, and persists one durable wake per day.
+The current production-coordinator run passes the human-input,
+200-step, and 30-day paths; live delivery and provider effects remain outside
+its claim.
 
 ### Lease recovery repair checkpoint
 
@@ -282,8 +288,9 @@ deliveries. Restoring the old read-time truncation made the proof fail with
 The existing mission/worker suite passed 32 tests with no skips; typecheck and
 build passed. This is an internal deterministic runtime proof, not public
 contract parity: tool schemas, SDK/API bounds and release artifacts still need
-alignment. It also does not certify live provider effects, exhaustive crashes,
-arbitrary plan growth beyond the current bound, or the 30-day work schedule.
+alignment. It does not certify live provider effects, exhaustive crashes, or
+arbitrary plan growth beyond the current bound; the separate 30-day schedule
+proof is recorded below.
 
 ### Durable work-window scheduling proof (2026-10-02)
 
