@@ -6,7 +6,7 @@ import { replayMission, replayScenario } from "../src/reliability/replay.js";
 import { compileAutonomyPolicy } from "../src/reliability/policy.js";
 import { compensationView, executeCompensation, listCompensations, queueCompensation, updateCompensation } from "../src/reliability/persistence.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { completeMission, completeMissionStep, createMission, getMission, initStore, listApprovals, startMission, verifyMission, updateMission, recordTrustedMissionEvidence, recordMissionEvidence, type MissionRecord } from "../src/store.js";
+import { checkpointMission, completeMission, completeMissionStep, createMission, finalizeMissionIfReady, getMission, initStore, listApprovals, recordMissionEvidence, recordTrustedMissionEvidence, resumeMissionFromTimer, startMission, verifyMission, waitMission, updateMission, type MissionRecord } from "../src/store.js";
 import { detectMemoryConflicts, memoryEvidenceQuality } from "../src/memory/conflicts.js";
 import { executeOutcomeVerification } from "../src/reliability/outcomeEngine.js";
 import { createComposioOutcomeReadAdapter } from "../src/reliability/composioReadAdapter.js";
@@ -256,6 +256,47 @@ test("native strict mission closes with an exact trusted receipt and completed s
   ] }, { outcomeReadAdapter: { read: async () => ({ observed: { values: [["Item", "Status"], ["Test A", "Ready"], ["Test B", "Ready"]] }, provider: "sheets", evidenceRef: "read_real", observedAt: Date.now() }) } });
   assert.equal((result as { status: string }).status, "completed");
   assert.equal((await getMission(ownerId, mission.id))?.verification?.verified, true);
+});
+
+test("strict native-only missions derive trusted evidence from persisted lifecycle facts", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 9824;
+  const mission = await createMission(ownerId, {
+    title: "Native lifecycle proof",
+    objective: "Prove a durable native-only mission lifecycle.",
+    definitionOfDone: "Three steps, a real durable timer wait, and persisted internal proof are complete.",
+    verificationMode: "strict",
+    requiredEvidence: [
+      "mission ID and step count",
+      "pre-wait durable checkpoint",
+      "60-second durable timer wait",
+      "post-wait durable checkpoint",
+      "all three steps completed",
+    ],
+    steps: [
+      { id: "step-1", title: "Baseline", objective: "Persist the baseline." },
+      { id: "step-2", title: "Wait", objective: "Wait durably.", dependsOn: ["step-1"] },
+      { id: "step-3", title: "Close", objective: "Close with internal proof.", dependsOn: ["step-2"] },
+    ],
+  });
+  await startMission(ownerId, mission.id);
+  await checkpointMission(ownerId, mission.id, "baseline checkpoint", "Enter the durable timer wait.");
+  await completeMissionStep(ownerId, mission.id, "step-1", "Baseline persisted.");
+
+  const runAt = Date.now() - 60_000;
+  await waitMission(ownerId, mission.id, { kind: "timer", runAt, stepId: "step-2" }, "pre-wait checkpoint", "Resume after the durable timer.");
+  assert.ok(await resumeMissionFromTimer(ownerId, mission.id, runAt));
+  await checkpointMission(ownerId, mission.id, "post-wait checkpoint", "Complete the remaining native steps.");
+  await completeMissionStep(ownerId, mission.id, "step-2", "Durable wait completed.");
+  await completeMissionStep(ownerId, mission.id, "step-3", "Internal proof is complete.");
+
+  const verified = await verifyMission(ownerId, mission.id);
+  assert.equal(verified?.verification?.verified, true, verified?.verification?.unresolved?.join("; "));
+  assert.ok(verified?.evidence?.some((item) => item.verifiedBy === "system" && item.summary.includes("60-second durable timer wait")));
+  assert.ok(verified?.evidence?.some((item) => item.verifiedBy === "system" && item.summary.toLowerCase().includes("all three steps completed")));
+
+  const completed = await finalizeMissionIfReady(ownerId, mission.id);
+  assert.equal(completed?.status, "completed");
 });
 
 test("Composio outcome reads preserve bounded provider failure details", async () => {

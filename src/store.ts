@@ -6286,6 +6286,48 @@ export function missingMissionEvidenceRequirements(requirements: string[] | unde
   return (requirements ?? []).filter((requirement) => !evidence?.some((item) => evidenceSatisfiesRequirement(item, requirement)));
 }
 
+/**
+ * Derive proof from durable lifecycle state rather than trusting a model's
+ * evidence description. These records cover internal/native missions only:
+ * they describe facts the store itself persisted, and never claim that an
+ * external provider action happened.
+ */
+function deriveTrustedInternalMissionEvidence(mission: MissionRecord): MissionEvidenceRecord[] {
+  const source = `chusky://mission/${mission.id}`;
+  const make = (key: string, summary: string): MissionEvidenceRecord => ({
+    id: `internal_${createHash("sha256").update(`${mission.id}:${key}`).digest("hex").slice(0, 32)}`,
+    kind: "before_after",
+    summary: summary.slice(0, 2000),
+    source,
+    ref: `mission:${mission.id}:internal:${key}`,
+    verified: true,
+    verifiedAt: Date.now(),
+    verifiedBy: "system",
+  });
+  const evidence: MissionEvidenceRecord[] = [make("identity", `The mission ID and step count are persisted in server state: ${mission.id} has ${mission.steps.length} formal steps.`)];
+  const events = mission.events ?? [];
+  const checkpointIndexes = events.flatMap((event, index) => event.type === "checkpointed" ? [index] : []);
+  const timerResume = events.map((event, index) => ({ event, index })).find(({ event }) => event.type === "resumed" && typeof event.metadata?.timerRunAt === "number");
+  if (timerResume) {
+    const elapsedMs = typeof timerResume.event.metadata?.elapsedMs === "number" ? timerResume.event.metadata.elapsedMs : undefined;
+    evidence.push(make("timer_wait", elapsedMs !== undefined && elapsedMs >= 60_000
+      ? `A 60-second durable timer wait resumed on the same mission after ${Math.floor(elapsedMs / 1000)} seconds elapsed.`
+      : "A durable timer wait resumed on the same mission from its persisted runAt."));
+    if (checkpointIndexes.some((index) => index < timerResume.index)) evidence.push(make("pre_wait_checkpoint", "A pre-wait durable checkpoint is persisted before the timer resume."));
+    if (checkpointIndexes.some((index) => index > timerResume.index)) evidence.push(make("post_wait_checkpoint", "A post-wait durable checkpoint is persisted after the timer resume."));
+  } else if (checkpointIndexes.length) {
+    evidence.push(make("checkpoint", "A durable checkpoint is persisted in the mission lifecycle."));
+  }
+  const completedSteps = mission.steps.filter((candidate) => candidate.status === "completed");
+  if (completedSteps.length) {
+    evidence.push(make("completed_steps", `Persisted lifecycle state records ${completedSteps.length} of ${mission.steps.length} mission steps as completed.`));
+  }
+  if (mission.steps.length === 3 && completedSteps.length === 3) {
+    evidence.push(make("all_steps", "All three steps completed in persisted mission state."));
+  }
+  return evidence;
+}
+
 async function appendMissionEvidence(userId: number, id: string, evidence: MissionEvidenceRecord[], stepId: string | undefined, trusted: boolean): Promise<MissionRecord | undefined> {
   if (!Array.isArray(evidence) || !evidence.length) return undefined;
   const clean = evidence.slice(0, 20).map((item) => ({ ...item, id: item.id || `evidence_${randomUUID()}`, summary: String(item.summary ?? "").slice(0, 2000), verified: trusted && item.verified === true, ...(trusted && item.verified === true ? { verifiedBy: "system" as const, verifiedAt: Date.now() } : { verifiedBy: "agent" as const }), ...(item.source ? { source: item.source.slice(0, 500) } : {}), ...(item.ref ? { ref: item.ref.slice(0, 500) } : {}), ...(item.hash ? { hash: item.hash.slice(0, 200) } : {}) }));
@@ -6300,8 +6342,23 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
   return mutateMission(userId, id, (mission) => {
     if (["cancelled"].includes(mission.status)) return undefined;
     const allStepsComplete = mission.steps.every((step) => step.status === "completed");
-    const evidence = mission.evidence ?? [];
-    const selected = input.evidenceIds?.length ? evidence.filter((item) => input.evidenceIds?.includes(item.id)) : evidence;
+    const existingEvidence = mission.evidence ?? [];
+    const existingIds = new Set(existingEvidence.map((item) => item.id));
+    const internalEvidence = deriveTrustedInternalMissionEvidence(mission).filter((item) => !existingIds.has(item.id));
+    const candidateEvidence = internalEvidence.length ? [...existingEvidence, ...internalEvidence] : existingEvidence;
+    // Keep the bounded persisted list useful for operators: internal lifecycle
+    // proof must not evict the only trusted provider receipt. Verification uses
+    // the complete candidate set below, while the stored projection retains
+    // the newest provider records plus the derived internal summary.
+    const providerCapacity = Math.max(0, 100 - internalEvidence.length);
+    const evidence = candidateEvidence.length > 100
+      ? [...existingEvidence.slice(-providerCapacity), ...internalEvidence].slice(-100)
+      : candidateEvidence;
+    // Explicit evidence selection can narrow model/client evidence, but it
+    // cannot exclude system-derived proof of persisted lifecycle facts.
+    const selected = input.evidenceIds?.length
+      ? [...candidateEvidence.filter((item) => input.evidenceIds?.includes(item.id)), ...internalEvidence]
+      : candidateEvidence;
     const required = mission.verification?.requiredEvidence ?? [];
     const unresolved = [
       ...(allStepsComplete ? [] : ["All mission steps must be completed."]),
@@ -6313,7 +6370,11 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
     // server paths (for example a completed provider tool receipt). A public
     // API or model request must never be able to self-attribute verification
     // as system-authenticated by sending a request field.
-    return { verification: { mode: mission.verification?.mode ?? (required.length ? "strict" : "legacy"), requiredEvidence: required, verified, verifiedAt: verified ? Date.now() : undefined, verifiedBy: input.verifiedBy ?? "agent", unresolved, confidence: input.confidence === undefined ? undefined : Math.max(0, Math.min(1, input.confidence)) }, events: [...mission.events, missionEvent(verified ? "checkpointed" : "verification_failed", verified ? "Mission definition of done verified." : `Mission verification incomplete: ${unresolved.join("; ")}`)] };
+    return {
+      ...(internalEvidence.length ? { evidence } : {}),
+      verification: { mode: mission.verification?.mode ?? (required.length ? "strict" : "legacy"), requiredEvidence: required, verified, verifiedAt: verified ? Date.now() : undefined, verifiedBy: input.verifiedBy ?? "agent", unresolved, confidence: input.confidence === undefined ? undefined : Math.max(0, Math.min(1, input.confidence)) },
+      events: [...mission.events, ...(internalEvidence.length ? [missionEvent("checkpointed", `Added ${internalEvidence.length} trusted internal lifecycle proof record${internalEvidence.length === 1 ? "" : "s"}.`)] : []), missionEvent(verified ? "checkpointed" : "verification_failed", verified ? "Mission definition of done verified." : `Mission verification incomplete: ${unresolved.join("; ")}`)],
+    };
   });
 }
 
@@ -6583,6 +6644,7 @@ export async function resumeMissionFromTimer(userId: number, id: string, runAt: 
   return mutateMission(userId, id, (mission) => {
     if (mission.status !== "waiting" || mission.waiting?.kind !== "timer" || mission.waiting.runAt !== runAt) return undefined;
     if (Date.now() < runAt) return undefined;
+    const resumedAt = Date.now();
     return {
       status: "running",
       waiting: undefined,
@@ -6592,7 +6654,7 @@ export async function resumeMissionFromTimer(userId: number, id: string, runAt: 
       // generic sentence made the worker fall back to the original step
       // objective and repeat CHUCK_TASK_WAIT.
       nextAction: mission.nextAction ?? "Continue from the saved timer checkpoint.",
-      events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, Date.now(), mission.waiting.stepId)],
+      events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, resumedAt, mission.waiting.stepId, { timerRunAt: runAt, elapsedMs: Math.max(0, resumedAt - runAt) })],
     };
   });
 }
