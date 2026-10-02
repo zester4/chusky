@@ -227,3 +227,16 @@ coordinator rather than manually renewing leases. Three repeated local runs
 each had **9 tests: 6 passed, 3 failed, 0 skipped**. The failing paths remain
 human-input inference fallthrough, the 100-step plan cap, and the absent daily
 scheduled wake. Passing clock/isolation tests do not certify those repairs.
+
+### Lease recovery repair checkpoint
+
+Both store backends now allow a running task with an explicitly expired lease
+to be claimed under a new token. Expiry itself also revokes renewal and
+settlement authority; it does not depend on a replacement arriving first.
+Blocked, cancelled and completed tasks remain ineligible. The public task
+regressions first failed, then passed (10 tests, no skips). The isolated account
+Redis process-kill proof now passes both tests in one run, preserving mission
+and task identity. This is not exhaustive crash acceptance: shared-connection
+WATCH/MULTI atomicity, provider replay safety and recovery without a delivery
+still require separate repairs and proofs. Context7 ioredis documentation was
+consulted; installed client remains 5.11.1, and no client API was changed.

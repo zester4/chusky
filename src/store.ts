@@ -2524,7 +2524,7 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
       const index = tasks.findIndex((task) => task.id === id);
       const current = index < 0 ? undefined : tasks[index];
-      if (!current || current.lease?.token !== leaseToken || !["running", "cancel_requested"].includes(current.status)) { await this.r.unwatch(); return undefined; }
+      if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...current, lease: { ...current.lease, expiresAt: Date.now() + leaseMs }, updatedAt: Date.now(), version: current.version + 1 });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -2685,7 +2685,8 @@ class RedisBackend implements Backend {
       const index = tasks.findIndex((task) => task.id === id);
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
       const now = Date.now();
-      if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
+      const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
+      if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) { await this.r.unwatch(); return undefined; }
       // A timer/provider wait is a continuation of the same bounded slice,
       // not a retry. Do not consume another retry attempt when the durable
       // task wakes, otherwise a normal wait can exceed maxAttempts and enter
@@ -2708,7 +2709,7 @@ class RedisBackend implements Backend {
       const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
       const index = tasks.findIndex((task) => task.id === id);
       const task = index < 0 ? undefined : normalizeTask(tasks[index]);
-      if (!task || task.lease?.token !== leaseToken) { await this.r.unwatch(); return undefined; }
+      if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), version: task.version + 1, events: [...task.events, event].slice(-100) });
       tasks[index] = next;
       const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
@@ -3625,7 +3626,7 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const index = tasks.findIndex((task) => task.id === id);
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
-    if (!current || current.lease?.token !== leaseToken || !["running", "cancel_requested"].includes(current.status)) return undefined;
+    if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) return undefined;
     const next = normalizeTask({ ...current, lease: { ...current.lease, expiresAt: Date.now() + leaseMs }, updatedAt: Date.now(), version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
@@ -3663,7 +3664,8 @@ class MemoryBackend implements Backend {
     const index = tasks.findIndex((task) => task.id === id);
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
-    if (!task || task.status !== "queued" || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
+    const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
+    if (!task || (task.status !== "queued" && !expiredRunning) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
     // A timer/provider wait is a continuation of the same bounded slice, not
     // a retry. Preserve the attempt number across that wake so ordinary waits
     // cannot consume the task's retry budget.
@@ -3678,7 +3680,7 @@ class MemoryBackend implements Backend {
     const tasks = this.tasks.get(userId) ?? [];
     const index = tasks.findIndex((task) => task.id === id);
     const task = index < 0 ? undefined : normalizeTask(tasks[index]);
-    if (!task || task.lease?.token !== leaseToken) return undefined;
+    if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) return undefined;
     const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), version: task.version + 1, events: [...task.events, event].slice(-100) });
     tasks[index] = next;
     this.tasks.set(userId, tasks);
