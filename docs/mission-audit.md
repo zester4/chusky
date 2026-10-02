@@ -252,3 +252,17 @@ three-fixture repetition passed; the memory task suite (10 tests), typecheck
 and build also passed. Stored keys and formats
 are unchanged. Other WATCH/MULTI mutators are still under audit; this repair
 does not certify all task/mission transitions or cross-process races.
+
+### Human-input handoff repair
+
+The full production slice regression first confirmed that a human-input wait
+fell through to inference. It now returns a blocked task with the saved owner
+next action, preserving the mission's wait key and checkpoint without calling
+the model. Unknown or missing wait conditions also fail closed. Extending the
+test through explicit owner resume exposed a second failure: generic resume
+rejected human-input waits. Resume now accepts only this additional wait kind;
+timer, provider-event and approval waits retain their distinct gates. The same
+mission and task then complete through real native dispatch and settlement.
+Three repeated runs of normal completion, early timer and human wait/resume
+each passed all three tests without skips. Typecheck and build passed. This
+does not prove notification delivery or live human-input transport behavior.

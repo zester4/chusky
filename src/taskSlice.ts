@@ -101,6 +101,14 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
         if (expiresAt) return { status: "queued" as const, waiting: true, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: mission.nextAction, runAt: expiresAt };
         return { status: "blocked" as const, message: mission.nextAction ?? "Mission is waiting for approval.", checkpoint: mission.checkpoint, nextAction: "Approve or deny the exact pending action; the mission will resume automatically after approval." };
       }
+      if (mission.waiting?.kind === "human_input") {
+        return { status: "blocked", message: "Mission is waiting for owner input; no model or provider action was run.", checkpoint: mission.checkpoint, nextAction: mission.nextAction ?? "Supply the missing owner input, then resume this same mission." };
+      }
+      // Only a validated timer wake may turn a waiting mission into running
+      // here. Missing or future wait kinds must never implicitly grant work.
+      if (mission.status === "waiting") {
+        return { status: "blocked", message: "Mission has an unsupported or missing persisted wait condition.", checkpoint: mission.checkpoint, nextAction: "Repair the mission wait condition, then explicitly resume this same mission." };
+      }
       await checkpointMission(task.userId, mission.id, mission.checkpoint ?? "The previous mission slice completed.", mission.nextAction);
     }
     const activeMission = mission;

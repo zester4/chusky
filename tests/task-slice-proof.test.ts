@@ -4,7 +4,7 @@ import { executeTaskSlice, type TaskSliceContext } from "../src/taskSlice.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { nativeTool } from "../src/nativeTools.js";
 import { acquireUserLock, claimApproval, createApproval, createMission, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, waitMission } from "../src/store.js";
-import { reconcileMissionExecution, replanMissionAndSchedule } from "../src/missionScheduler.js";
+import { reconcileMissionExecution, replanMissionAndSchedule, resumeMissionAndSchedule } from "../src/missionScheduler.js";
 import { resumeMissionTaskAfterApproval } from "../src/missionApproval.js";
 import { ApprovalRequiredError } from "../src/agent.js";
 import type { TaskWaitRequest, MissionWaitRequest } from "../src/types.js";
@@ -78,6 +78,23 @@ test("full production slice does not run a model during a human-input wait", asy
   assert.equal(calls, 0, "A human wait must not silently fall through to inference.");
   assert.equal(run.task?.status, "blocked");
   assert.match(run.task?.nextAction ?? "", /owner choice/);
+  const persisted = await getMission(userId, mission.id);
+  assert.equal(persisted?.status, "waiting");
+  assert.equal(persisted?.waiting?.key, "owner-choice");
+  assert.equal(persisted?.checkpoint, "Saved work");
+  const resumed = await resumeMissionAndSchedule(userId, mission.id, queue.enqueue);
+  assert.equal(resumed?.id, mission.id);
+  assert.equal(resumed?.status, "running");
+  const completion = context(queue, async () => {
+    calls++;
+    await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "unit", result: "Owner choice supplied; unit verified" }, { taskId: task.id, missionId: mission.id, enqueueMissionTask: queue.enqueue });
+    return { text: "Unit verified", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE"] };
+  });
+  const continued = await executeDurableTask({ userId, taskId: task.id }, { workerId: "human-resume-worker", execute: (claimed, signal) => executeTaskSlice(claimed, signal, completion) });
+  assert.equal(calls, 1);
+  assert.equal(continued.task?.id, task.id);
+  assert.equal(continued.task?.status, "completed");
+  assert.equal((await getMission(userId, mission.id))?.status, "completed");
 });
 
 test("200-step production-coordinator soak mixes joins, waits, approvals, replans and failures", async () => {

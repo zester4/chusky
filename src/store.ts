@@ -6240,7 +6240,8 @@ export async function pauseMission(userId: number, id: string, reason = "Mission
 export async function resumeMission(userId: number, id: string, maxDurationSeconds?: number): Promise<MissionRecord | undefined> {
   if (maxDurationSeconds !== undefined && (!Number.isInteger(maxDurationSeconds) || maxDurationSeconds < 60 || maxDurationSeconds > 2592000)) throw new Error("Mission duration must be an integer between 60 and 2592000 seconds.");
   return mutateMission(userId, id, (mission) => {
-    if (!["paused", "blocked", "failed", "running"].includes(mission.status)) return undefined;
+    const ownerInputWait = mission.status === "waiting" && mission.waiting?.kind === "human_input";
+    if (!["paused", "blocked", "failed", "running"].includes(mission.status) && !ownerInputWait) return undefined;
     if (maxDurationSeconds !== undefined && maxDurationSeconds < mission.budget.maxDurationSeconds) throw new Error("Resume can only extend the existing duration budget.");
     const budget = { ...mission.budget, maxDurationSeconds: maxDurationSeconds ?? mission.budget.maxDurationSeconds };
     const events = budget.maxDurationSeconds !== mission.budget.maxDurationSeconds
