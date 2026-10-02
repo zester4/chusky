@@ -158,6 +158,14 @@ Both recursive submodules were initialized without force; their existing clean
 checkouts already matched the committed gitlinks. Git's submodule helper needs
 the Git Bash `/usr/bin:/mingw64/bin` PATH in this Windows environment. Docker's
 client exists but its daemon is unavailable, so no local Redis/container crash
-proof has been established. The new repeated-checkpoint regression still needs
-its first run. Exhaustive await/crash, independent recovery and budget-ceiling
+proof has been established. The repeated-checkpoint regression now fails as
+expected: changed event IDs make an identical checkpoint look like progress.
+The lost-publication regression also fails: after a full day without delivery,
+reconciliation retains the accepted workflow ID and schedules no replacement
+wake for the original queued task. This tests the existing recovery entry point;
+it does not claim that an independent sweeper exists.
+The complete kernel tranche was run three consecutive times: **13 tests,
+one passed, twelve failed, zero skipped** on each run. These are stable red
+regressions, not an acceptance pass. `git diff --check` passed afterwards.
+Exhaustive await/crash, independent recovery and budget-ceiling
 proofs remain outstanding, as do the runtime repairs.

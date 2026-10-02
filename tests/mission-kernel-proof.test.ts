@@ -184,3 +184,24 @@ test("proof repeating an identical checkpoint does not create a new progress fro
   const after = captureMissionSliceState(undefined, (await getMission(userId, mission.id))!);
   assert.equal(missionSliceHasPersistedProgress(before, after), false, "Event IDs are bookkeeping, not real progress.");
 });
+
+test("proof an accepted but lost publication is recoverable with the same task identity", async () => withClock(async (clock) => {
+  const userId = 980013;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, {
+    title: "Lost delivery", objective: "Recover independently of the lost wake",
+    definitionOfDone: "The original unit is executed and verified",
+    steps: [{ id: "unit", title: "Unit", objective: "Execute the same durable unit" }],
+  });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const taskId = (await getMission(userId, mission.id))!.rootTaskId!;
+  assert.ok((await getTask(userId, taskId))?.workflowRunId);
+  queue.drop();
+  clock.advance(86400000);
+  // This is the existing operator recovery entry point, not an invented
+  // sweeper. It must eventually replace an accepted wake that never arrived.
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  assert.equal(queue.deliveries.length, 1, "A persisted provider workflow ID cannot strand queued work forever.");
+  assert.equal(queue.deliveries[0].taskId, taskId, "Recovery must preserve the original work identity.");
+}));
