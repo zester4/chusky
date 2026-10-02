@@ -1,8 +1,10 @@
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomInt } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { runMissionProcess, type ProcessScenario } from "./helpers/missionProcessHarness.js";
+import { expireMissionProofKeys, runMissionProcess, type ProcessScenario } from "./helpers/missionProcessHarness.js";
+
+after(expireMissionProofKeys);
 
 for (const scenario of ["complete", "strict", "timer", "provider", "approval", "checkpoint", "failure", "prose", "cancel", "replan"] as ProcessScenario[]) test(`every ${scenario} production await survives a real process kill and same-identity restart`, { timeout: 600000 }, async () => {
   assert.ok(process.env.MISSION_PROCESS_REDIS_URL, "Set an isolated MISSION_PROCESS_REDIS_URL; never reuse production Redis for crash proofs.");

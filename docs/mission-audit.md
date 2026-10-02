@@ -201,3 +201,29 @@ times out (`ETIMEDOUT`) from this host. No token was written to repository files
 or logs; no production database was used. Docker startup did not expose an
 engine socket. The durable process-kill gate is therefore **not verified**;
 memory-only instrumentation does not substitute for cross-process persistence.
+
+### User-authorized account Redis proof (2026-10-02)
+
+The user explicitly authorized the Redis connection in `.env`. A read-only
+TCP/TLS `PING` succeeded outside the sandbox. The installed production client
+is ioredis **5.11.1**. Test workers now prefix every physical key with a fresh
+`chusky-proof:{UUID}:` namespace. A command guard rejects unprefixed keys,
+database-wide flush/config operations and pattern scans before dispatch. The
+real client key transformation is tested for ordinary keys, WATCH and Lua KEYS;
+production source/client configuration is unchanged. Known synthetic keys are
+tracked over IPC and receive 24-hour retention after a proof run, with no scan
+or deletion of existing account data. External model/provider work stays fake.
+
+Three repeated real-account proof runs each had **2 tests: 1 passed, 1 failed,
+0 skipped**. Normal coordinator completion passed; killing a leased worker and
+restarting the same mission/task failed each time, leaving the mission
+`running`. This verifies a real durability defect, not recovery success.
+The exhaustive per-await matrix remains unverified; account Redis reachability
+is no longer the blocker. Credentials were not printed or persisted in tests.
+
+The fake clock now optionally drives actual production heartbeat/deadline
+timers and drains async store continuations. A new 30-day proof uses the full
+coordinator rather than manually renewing leases. Three repeated local runs
+each had **9 tests: 6 passed, 3 failed, 0 skipped**. The failing paths remain
+human-input inference fallthrough, the 100-step plan cap, and the absent daily
+scheduled wake. Passing clock/isolation tests do not certify those repairs.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { executeTaskSlice, type TaskSliceContext } from "../src/taskSlice.js";
 import { executeDurableTask } from "../src/taskRunner.js";
 import { nativeTool } from "../src/nativeTools.js";
-import { acquireUserLock, claimApproval, createApproval, createMission, getMission, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, waitMission } from "../src/store.js";
+import { acquireUserLock, claimApproval, createApproval, createMission, getMission, getTask, initStore, listTasks, recordTrustedMissionEvidence, releaseUserLock, resumeMissionFromProviderEvent, startMission, waitMission } from "../src/store.js";
 import { reconcileMissionExecution, replanMissionAndSchedule } from "../src/missionScheduler.js";
 import { resumeMissionTaskAfterApproval } from "../src/missionApproval.js";
 import { ApprovalRequiredError } from "../src/agent.js";
@@ -167,5 +167,56 @@ test("200-step production-coordinator soak mixes joins, waits, approvals, replan
     assert.equal(completed.steps.filter((step) => step.status === "completed").length, 200);
     assert.equal(completed.verification?.verified, true);
     assert.equal(replanned, true);
+  } finally { clock.restore(); }
+});
+
+test("30-day production coordinator renews leases during three-hour windows and durably rests between days", async () => {
+  const userId = 982005;
+  const clock = new MissionFakeClock();
+  clock.installTimers();
+  try {
+    const queue = new MissionFakeQStash();
+    const contract = {
+      title: "Thirty daily work windows", objective: "Verify one daily unit for thirty days", definitionOfDone: "Thirty distinct units are verified inside their daily windows",
+      workSchedule: { timezone: "UTC", windowStart: "09:00", windowEnd: "12:00", dailyBudgetSeconds: 10800, cadenceSeconds: 300 },
+      budget: { maxDurationSeconds: 30 * 10800, durationMode: "active" as const, maxLifetimeSeconds: 30 * 86400, maxSteps: 1000, maxToolCalls: 1000, maxCost: 25 },
+      steps: Array.from({ length: 30 }, (_, day) => ({ id: `day-${day}`, title: `Day ${day + 1}`, objective: "Verify the daily unit", dependsOn: day ? [`day-${day - 1}`] : [], evidenceRequired: ["kind:tool_receipt"] })),
+      verificationMode: "strict" as const, requiredEvidence: ["kind:tool_receipt"],
+    };
+    const mission = await createMission(userId, contract);
+    await startMission(userId, mission.id);
+    await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+    const completed = new Set<string>();
+    for (let day = 0; day < 30; day++) {
+      const start = Date.UTC(2026, 0, day + 1, 9);
+      const deliveryIndex = queue.deliveries.findIndex((item) => item.runAt === start);
+      assert.ok(deliveryIndex >= 0, `Day ${day + 1} must have an exact durable 09:00 wake, not a hot loop`);
+      const delivery = queue.deliveries.splice(deliveryIndex, 1)[0];
+      assert.ok(!queue.deliveries.some((item) => item.runAt < start && item.runAt >= clock.now), "No work may be scheduled during rest");
+      await clock.advanceAsync(start - clock.now);
+      // Rebuild the worker context each day; retained state lives in the real
+      // store, not closures. Cross-process persistence is proved separately.
+      const dependencies = context(queue, async (...args) => {
+        const options = args[9]!;
+        assert.equal(options.missionStepId, `day-${day}`);
+        assert.equal(Date.now(), start);
+        assert.equal(completed.has(options.missionStepId!), false);
+        await clock.advanceAsync(10800000 - 1);
+        assert.equal(args[5]?.aborted, false, "Heartbeat renewal must keep the active slice alive");
+        assert.ok((await getTask(userId, options.taskId!))?.lease!.expiresAt! > clock.now);
+        assert.ok(clock.now < Date.UTC(2026, 0, day + 1, 12), "Provider confirmation must occur inside the window");
+        await recordTrustedMissionEvidence(userId, mission.id, [{ id: `receipt-day-${day}`, kind: "tool_receipt", summary: "Daily fixture provider unit verified", ref: `fixture:day-${day}`, verified: true }], options.missionStepId);
+        await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: options.missionStepId, result: "Daily unit verified" }, { taskId: options.taskId, missionId: mission.id, enqueueMissionTask: queue.enqueue });
+        completed.add(options.missionStepId!);
+        return { text: "Daily unit verified", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE"] };
+      });
+      const run = await executeDurableTask({ userId, taskId: delivery.taskId }, { workerId: `daily-worker-${day}`, execute: (task, signal) => executeTaskSlice(task, signal, dependencies) });
+      assert.equal(run.task?.status, "completed");
+      assert.equal(clock.pendingTimers, 0, "Rest periods cannot retain worker heartbeat loops");
+    }
+    const final = (await getMission(userId, mission.id))!;
+    assert.equal(final.status, "completed");
+    assert.equal(final.verification?.verified, true);
+    assert.equal(completed.size, 30);
   } finally { clock.restore(); }
 });

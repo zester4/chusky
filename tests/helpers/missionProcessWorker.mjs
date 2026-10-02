@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { installProofRedisIsolation } from "./missionRedisIsolation.mjs";
 
 const root = process.env.MISSION_PROOF_COMPILED_DIR;
 if (!root) throw new Error("Compile the isolated mission proof runtime before launching workers.");
@@ -35,6 +36,7 @@ globalThis.__missionAwait = async (id, operation) => {
 
 async function main() {
   const input = JSON.parse(process.argv[2]);
+  if (!input.memoryOnly) installProofRedisIsolation(require, process.env.MISSION_PROCESS_REDIS_PREFIX, (key) => process.send({ kind: "redisKey", key }));
   const { logger } = runtime("logger");
   logger.level = "silent";
   const store = runtime("store");
