@@ -1,11 +1,13 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import {
-  claimTask, createMission, createTask, getMission, getTask, initStore,
+  claimTask, checkpointMission, createMission, createTask, getMission, getTask, initStore,
   replanMission, renewTaskLease, resumeMissionFromProviderEvent,
   resumeMissionFromTimer, settleTaskRun, startMission, waitMission,
 } from "../src/store.js";
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
+import { captureMissionSliceState } from "../src/missionWorker.js";
+import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeClock, MissionFakeQStash, MissionCrashInjector, MissionCrash } from "./helpers/missionKernelHarness.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
@@ -92,4 +94,47 @@ test("proof replan retains unchanged step tool fences and evidence requirements"
   const updated = await replanMission(mission.userId, mission.id, [{ id: "read", title: "Read", objective: "Read exact resource" }], "Retry the same work");
   assert.deepEqual(updated?.steps[0].allowedTools, ["GMAIL_FETCH_EMAILS"]);
   assert.deepEqual(updated?.steps[0].evidenceRequired, ["tool_receipt"]);
+});
+
+test("proof real persisted progress restarts the consecutive failure budget", async () => withClock(async (clock) => {
+  const userId = 980009;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, { title: "Long step retry", objective: "Survive a late stumble", definitionOfDone: "Verified unit complete", steps: [{ id: "unit", title: "Unit", objective: "Persist several intermediate results" }] });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const taskId = (await getMission(userId, mission.id))!.rootTaskId!;
+  for (let slice = 0; slice < 4; slice++) {
+    const claimed = await claimTask(userId, taskId, `worker-${slice}`, 1000);
+    assert.ok(claimed?.lease);
+    const current = (await getMission(userId, mission.id))!;
+    const before = captureMissionSliceState(claimed, current);
+    await checkpointMission(userId, mission.id, `Verified intermediate result ${slice}`, "Continue the unit");
+    const outcome = await settleMissionSlice({ task: claimed, mission: current, before, enqueue: queue.enqueue, result: { text: "Progress persisted", toolsUsed: ["CHUCK_MISSION_CHECKPOINT"] } });
+    const settled = await settleTaskRun(userId, taskId, claimed.lease.token, outcome);
+    assert.equal(settled?.attempt, 0, "Healthy slices cannot consume the consecutive failure budget.");
+    clock.advance(5000);
+  }
+}));
+
+test("proof an uncertain sibling action blocks even when another call and checkpoint succeeded", async () => {
+  const userId = 980010;
+  const queue = new MissionFakeQStash();
+  const mission = await createMission(userId, { title: "Mixed provider outcomes", objective: "Never replay uncertain work", definitionOfDone: "Both messages verified", steps: [{ id: "send", title: "Send", objective: "Send two distinct messages" }] });
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  const taskId = (await getMission(userId, mission.id))!.rootTaskId!;
+  const task = (await claimTask(userId, taskId, "mixed-outcome-worker"))!;
+  const current = (await getMission(userId, mission.id))!;
+  const before = captureMissionSliceState(task, current);
+  await checkpointMission(userId, mission.id, "The first message succeeded; the second timed out", "Inspect the second provider outcome");
+  const result = {
+    text: "The first succeeded, the second is unknown", toolsUsed: ["GMAIL_SEND_EMAIL"], toolsSucceeded: ["GMAIL_SEND_EMAIL"],
+    toolOutcomes: [
+      { callId: "first-call", toolSlug: "GMAIL_SEND_EMAIL", status: "succeeded", dispatched: true, receiptId: "first-receipt" },
+      { callId: "second-call", toolSlug: "GMAIL_SEND_EMAIL", status: "uncertain", dispatched: true },
+    ],
+  };
+  const outcome = await settleMissionSlice({ task, mission: current, before, enqueue: queue.enqueue, result });
+  assert.equal(outcome.status, "blocked", "Persisted progress must never conceal a dispatched uncertain sibling.");
+  assert.match(outcome.nextAction ?? "", /inspect|verify|reconcile/i);
 });

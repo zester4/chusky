@@ -122,3 +122,25 @@ publications. Its crash injector supports named before/after await boundaries.
 This is a first regression tranche, not the full acceptance harness: real agent
 execution, exhaustive await injection, schedule simulation and soak proofs are
 still outstanding. No Redis/process-crash guarantee follows from this tranche.
+
+The production post-turn settlement block was extracted unchanged into
+`src/missionSlice.ts`. `tests/mission-agent-proof.test.ts` exercises the real
+`runAgent` tool dispatcher, native mission controls, store, scheduler, task
+runner and settlement; only model HTTP and Composio transport are scripted.
+Both tests passed: three dependency handoffs reach persisted completion, and
+prose alone cannot fabricate completion. Typecheck passed after extraction.
+The HTTP wait/lease/approval coordinator is not yet extracted or certified.
+
+Full baseline suite result (before runtime repairs): 1,182 tests, 1,177 passed,
+one failed, four skipped. The failure is the existing private-voice catalog
+assertion in `tests/agent-contract.test.ts:1056` (128 tools versus 192 expected).
+Skips are two optional PTY tests and two opt-in Recall staging tests. They are
+not counted as verification success and must be resolved or explicitly reported
+before acceptance. The baseline does not include subsequently added proof tests.
+
+The agent/worker/task-runner regression group passed **19/19, zero skipped,
+three consecutive runs** after the behavior-preserving extraction. Build and
+`git diff --check` passed. The red kernel tranche now has ten tests: one passes
+and nine fail, including consecutive-retry reset and an uncertain sibling being
+incorrectly permitted despite a successful checkpoint. The latter is a safety
+defect in the old settlement path, not permission to relax uncertain outcomes.
