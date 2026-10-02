@@ -38,12 +38,12 @@ export class MissionFakeQStash {
     delivery.runAt += milliseconds;
   }
   reverse(): void { this.deliveries.reverse(); }
-  async claimNext(now: number) {
+  async claimNext(now: number, leaseMs = 1000) {
     const index = this.deliveries.findIndex((delivery) => delivery.runAt <= now);
     if (index < 0) return undefined;
     const [delivery] = this.deliveries.splice(index, 1);
     const task = await getTask(delivery.userId, delivery.taskId);
-    return { delivery, prior: task, claimed: await claimTask(delivery.userId, delivery.taskId, delivery.id, 1000) };
+    return { delivery, prior: task, claimed: await claimTask(delivery.userId, delivery.taskId, delivery.id, leaseMs) };
   }
 }
 

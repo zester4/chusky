@@ -2,11 +2,11 @@ import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import {
   claimTask, checkpointMission, createMission, createTask, getMission, getTask, initStore,
-  replanMission, renewTaskLease, resumeMissionFromProviderEvent,
+  completeMissionStep, replanMission, renewTaskLease, resumeMissionFromProviderEvent,
   resumeMissionFromTimer, settleTaskRun, startMission, waitMission,
 } from "../src/store.js";
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
-import { captureMissionSliceState } from "../src/missionWorker.js";
+import { captureMissionSliceState, missionSliceHasPersistedProgress } from "../src/missionWorker.js";
 import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeClock, MissionFakeQStash, MissionCrashInjector, MissionCrash } from "./helpers/missionKernelHarness.js";
 
@@ -137,4 +137,50 @@ test("proof an uncertain sibling action blocks even when another call and checkp
   const outcome = await settleMissionSlice({ task, mission: current, before, enqueue: queue.enqueue, result });
   assert.equal(outcome.status, "blocked", "Persisted progress must never conceal a dispatched uncertain sibling.");
   assert.match(outcome.nextAction ?? "", /inspect|verify|reconcile/i);
+});
+
+test("proof a 30-day mission executes only within its three-hour daily window", async () => withClock(async (clock) => {
+  const userId = 980011;
+  const queue = new MissionFakeQStash();
+  const contract = {
+    title: "Thirty-day scheduled work", objective: "Complete one three-hour unit each day", definitionOfDone: "Thirty daily units are verified",
+    workSchedule: { timezone: "UTC", windowStart: "09:00", windowEnd: "12:00", dailyBudgetSeconds: 10800, cadenceSeconds: 300 },
+    budget: { maxDurationSeconds: 30 * 10800, durationMode: "active" as const, maxLifetimeSeconds: 30 * 86400, maxSteps: 1000, maxToolCalls: 1000, maxCost: 25 },
+    steps: Array.from({ length: 30 }, (_, index) => ({ id: `day-${index}`, title: `Day ${index + 1}`, objective: "Execute a verified daily unit", dependsOn: index ? [`day-${index - 1}`] : [] })),
+  };
+  const mission = await createMission(userId, contract);
+  await startMission(userId, mission.id);
+  await reconcileMissionExecution(userId, mission.id, queue.enqueue);
+  for (let day = 0; day < 30; day++) {
+    // A fresh transport consumer each day models worker restarts. The store is
+    // intentionally not reinitialized; this is not a disk/Redis crash proof.
+    const expectedStart = Date.UTC(2026, 0, 1 + day, 9);
+    const delivery = queue.deliveries.find((candidate) => candidate.runAt >= clock.now);
+    assert.ok(delivery, "Every rest period needs a durable scheduled wake.");
+    assert.equal(delivery.runAt, expectedStart, "The scheduler must not publish a hot-loop wake outside the work window.");
+    clock.advance(expectedStart - clock.now);
+    const wake = await queue.claimNext(clock.now, 600000);
+    assert.ok(wake?.claimed?.lease);
+    for (let interval = 0; interval < 36; interval++) {
+      clock.advance(300000);
+      assert.ok(await renewTaskLease(userId, wake.claimed.id, wake.claimed.lease.token, 600000));
+    }
+    await completeMissionStep(userId, mission.id, wake.claimed.missionStepId!, `Daily unit ${day + 1} verified`);
+    const current = (await getMission(userId, mission.id))!;
+    const outcome = await settleMissionSlice({ task: wake.claimed, mission: current, before: captureMissionSliceState(wake.claimed, mission), enqueue: queue.enqueue, result: { text: "Daily unit complete", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE"] } });
+    await settleTaskRun(userId, wake.claimed.id, wake.claimed.lease.token, outcome);
+    assert.equal(new Date(clock.now).getUTCHours(), 12);
+  }
+  assert.equal((await getMission(userId, mission.id))?.status, "completed");
+}));
+
+test("proof repeating an identical checkpoint does not create a new progress frontier", async () => {
+  const userId = 980012;
+  const mission = await createMission(userId, { title: "Repeated checkpoint", objective: "Bound a stuck model", definitionOfDone: "Actual work advances", steps: [{ id: "unit", title: "Unit", objective: "Advance beyond the same checkpoint" }] });
+  await startMission(userId, mission.id);
+  await checkpointMission(userId, mission.id, "Unchanged state", "Perform the next action");
+  const before = captureMissionSliceState(undefined, (await getMission(userId, mission.id))!);
+  await checkpointMission(userId, mission.id, "Unchanged state", "Perform the next action");
+  const after = captureMissionSliceState(undefined, (await getMission(userId, mission.id))!);
+  assert.equal(missionSliceHasPersistedProgress(before, after), false, "Event IDs are bookkeeping, not real progress.");
 });

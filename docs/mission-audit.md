@@ -144,3 +144,20 @@ three consecutive runs** after the behavior-preserving extraction. Build and
 and nine fail, including consecutive-retry reset and an uncertain sibling being
 incorrectly permitted despite a successful checkpoint. The latter is a safety
 defect in the old settlement path, not permission to relax uncertain outcomes.
+
+The complete production task slice is now extracted to `src/taskSlice.ts`.
+`index.ts` keeps the durable workflow adapter/replay loop; model execution and
+publication are injectable but default to the unchanged production paths.
+`tests/task-slice-proof.test.ts` passes native completion and early timer parking,
+and reproduces human-input fallthrough. Its 200-step mixed coordinator soak is
+defined and currently fails at creation's 100-step cap. The 30-day window proof
+is defined and fails on the initial midnight publication instead of 09:00.
+These are red acceptance fixtures, not successful soak/schedule evidence.
+
+Both recursive submodules were initialized without force; their existing clean
+checkouts already matched the committed gitlinks. Git's submodule helper needs
+the Git Bash `/usr/bin:/mingw64/bin` PATH in this Windows environment. Docker's
+client exists but its daemon is unavailable, so no local Redis/container crash
+proof has been established. The new repeated-checkpoint regression still needs
+its first run. Exhaustive await/crash, independent recovery and budget-ceiling
+proofs remain outstanding, as do the runtime repairs.
