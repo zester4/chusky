@@ -12,7 +12,7 @@ import {
   getSession, appendMessages, addUsage, canSpend, clearHistory, clearSession, setModel, getModel, checkRateLimit,
   getChannelConversation, appendChannelConversationMessages, setChannelConversationModel, clearChannelConversationHistory,
   setTelegramChatId, getApproval, setApprovalStatus, claimApproval, createCliPairing, listCliDevices, revokeCliDeviceHash, setVoiceReplies, listVideoJobs, registerImageAsset,
-  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
+  setLiveVoicePreference, claimTelegramUpdate, listHandoffRecords, saveHandoffRecord, cancelTask, cancelMissionTasks, retryTask, listApprovals, listJobs, listReminders, listTasks, listMissions, getMission, updateMission, updateTask, pauseMission, resumeMission, cancelMission,
   getMeetingRepresentativeProfile, updateMeetingRepresentativeProfile, listRecallMeetings, listCalendarMeetingPreparations, listMeetingContacts, deleteMeetingContact,
   searchMemories, readScratchpad, listBrowserPlaybooks, listBrowserAudit, listBrowserHandoffs,
 } from "./store.js";
@@ -2439,7 +2439,7 @@ export function registerHandlers(bot: Bot): void {
               } else updated = await resumeMission(uid, missionId);
             }
             if (!updated) { await replyHtml(ctx, `Could not ${action} that mission. Check <code>/missions</code> for its current state.`); return; }
-            if (action === "pause" || action === "cancel") { if (updated.rootTaskId) await cancelTask(uid, updated.rootTaskId); }
+            if (action === "pause" || action === "cancel") await cancelMissionTasks(uid, updated.id);
             if (action === "resume" && !resumedApprovalWait && updated.rootTaskId) {
               const task = await retryTask(uid, updated.rootTaskId);
               if (task) await enqueueTaskWithClaim(uid, task.id, task.runAt ?? Date.now());
