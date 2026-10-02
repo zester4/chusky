@@ -42,6 +42,13 @@ test("sweeper republishes a queued mission task whose provider delivery was lost
   assert.match(recovered?.workflowRunId ?? "", /^workflow-recovery-/);
 });
 
+test("the default mission budget does not kill a valid 200-step plan", async () => {
+  const steps = Array.from({ length: 200 }, (_, index) => ({ id: `step-${index + 1}`, title: `Step ${index + 1}`, objective: "Do one bounded unit." }));
+  const mission = await createMission(981004, { title: "Long plan", objective: "Complete the plan.", definitionOfDone: "All units complete.", steps });
+  assert.equal(mission.steps.length, 200);
+  assert.equal(mission.budget.maxSteps, 1000);
+});
+
 test("sweeper resumes an overdue timer without creating a replacement task", async () => {
   const userId = 981002;
   const mission = await runningMission(userId, "timer");

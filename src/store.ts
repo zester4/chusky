@@ -5727,7 +5727,10 @@ export async function getTask(userId: number, id: string): Promise<TaskRecord | 
   return (await backend.getTasks(userId)).map(normalizeTask).find((task) => task.id === id);
 }
 
-const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 100, maxToolCalls: 1000, maxCost: 25 };
+// The default must accommodate a real long-horizon plan. A mission still has
+// independent duration/tool/cost guards; callers may opt into a smaller step
+// ceiling explicitly when the objective is intentionally narrow.
+const DEFAULT_MISSION_BUDGET: MissionBudget = { maxDurationSeconds: 24 * 60 * 60, maxSteps: 1000, maxToolCalls: 1000, maxCost: 25 };
 const MAX_MISSION_PLAN_STEPS = 1000;
 
 function missionEvent(type: MissionEventRecord["type"], message: string, at = Date.now(), stepId?: string, metadata?: MissionEventRecord["metadata"]): MissionEventRecord {
