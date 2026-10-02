@@ -347,6 +347,8 @@ paths:
       responses: { '201': { description: Mission started with persisted timing and bounded extension usage } }
   /missions/{missionId}:
     get: { summary: Get an autonomous mission, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission record } } }
+  /missions/{missionId}/doctor:
+    get: { summary: Explain the current durable mission state and exact safe next action, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Bounded read-only mission diagnosis } } }
   /missions/{missionId}/events:
     get: { summary: List mission lifecycle events, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }], responses: { '200': { description: Mission events } } }
     post: { summary: Resume a mission for its exact expected provider event, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/MissionId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '202': { description: Continuation queued } } }

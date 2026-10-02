@@ -177,6 +177,7 @@ test("CLI client exposes mission proof, context, department, and outcome control
     await client.mission("mis_1");
     await client.missionEvents("mis_1");
     await client.missionProof("mis_1");
+    await client.missionDoctor("mis_1");
     await client.createMission({ title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
     await client.missionAction("mis_1", "pause");
     await client.replanMission("mis_1", { reason: "New evidence", steps: [{ title: "Recheck", objective: "Recheck the evidence" }] });
@@ -194,14 +195,14 @@ test("CLI client exposes mission proof, context, department, and outcome control
     await client.outcome("qualified-fintech-leads");
     await client.planOutcome("qualified-fintech-leads", { "ideal customer profile": "B2B fintech" });
     assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
-      "GET /cli/missions", "GET /cli/missions/mis_1", "GET /cli/missions/mis_1/events", "GET /cli/missions/mis_1/proof",
+      "GET /cli/missions", "GET /cli/missions/mis_1", "GET /cli/missions/mis_1/events", "GET /cli/missions/mis_1/proof", "GET /cli/missions/mis_1/doctor",
       "POST /cli/missions", "POST /cli/missions/mis_1/action", "POST /cli/missions/mis_1/replan", "POST /cli/missions/mis_1/events",
       "POST /cli/missions/mis_1/evidence", "POST /cli/missions/mis_1/verify", "POST /cli/missions/mis_1/steps/step_1/complete",
       "GET /cli/context", "POST /cli/context", "GET /cli/departments/catalog", "GET /cli/departments", "POST /cli/departments",
       "POST /cli/departments/sales/handoffs", "GET /cli/outcomes", "GET /cli/outcomes/qualified-fintech-leads", "POST /cli/outcomes/qualified-fintech-leads/plan",
     ]);
-    assert.deepEqual(calls[4].body, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
-    assert.deepEqual(calls[7].body, { provider: "stripe", providerEventId: "evt_1" });
+    assert.deepEqual(calls[5].body, { title: "Launch", objective: "Prepare launch", definitionOfDone: "Brief delivered", idempotencyKey: "launch-1" });
+    assert.deepEqual(calls[8].body, { provider: "stripe", providerEventId: "evt_1" });
   } finally { globalThis.fetch = original; }
 });
 

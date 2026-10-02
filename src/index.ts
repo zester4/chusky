@@ -94,6 +94,7 @@ import { safeTriggerSummary } from "./triggerEventSummary.js";
 import { ensureTriggerCloseout, TRIGGER_DEFAULT_HANDLING } from "./triggerGuidance.js";
 import { captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { settleMissionSlice } from "./missionSlice.js";
+import { diagnoseMission } from "./reliability/missionDoctor.js";
 
 function xmlEscape(value: string): string {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
@@ -1332,6 +1333,11 @@ async function main(): Promise<void> {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const mission = await getMission(device.userId, c.req.param("id"));
       return mission ? c.json({ ok: true, mission }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.get("/cli/missions/:id/doctor", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const mission = await getMission(device.userId, c.req.param("id"));
+      return mission ? c.json({ ok: true, doctor: diagnoseMission({ mission, tasks: await listTasks(device.userId) }) }) : c.json({ ok: false, error: "mission not found" }, 404);
     });
     app.get("/cli/missions/:id/events", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);

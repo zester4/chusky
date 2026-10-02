@@ -76,6 +76,7 @@ import { normalizeProviderSmokeChecks, PROVIDER_SMOKE_CAPABILITIES } from "./rel
 import { buildReadinessReport } from "./reliability/readiness.js";
 import { listApprovalEscalations, runDueApprovalEscalations, scheduleApprovalEscalation } from "./approvals/escalation.js";
 import { buildOperatorTimeline } from "./reliability/timeline.js";
+import { diagnoseMission } from "./reliability/missionDoctor.js";
 import { checkExecutionQuota, reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
 import { assertSafeBrowserUrl } from "./lib/e2b/urlSafety.js";
 
@@ -2647,6 +2648,7 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 400, "mission_create_failed", error instanceof Error ? error.message : "Mission could not be created."); }
   });
   app.get("/v1/missions/:missionId", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(mission) : apiError(c, 404, "not_found", "Mission not found."); });
+  app.get("/v1/missions/:missionId/doctor", async (c) => { const owner = sdkUser(c)!; const mission = await getMission(owner.userId, c.req.param("missionId")); if (!mission) return apiError(c, 404, "not_found", "Mission not found."); return c.json(diagnoseMission({ mission, tasks: await listTasks(owner.userId), compensations: await listCompensations(owner.userId) })); });
   app.get("/v1/missions/:missionId/events", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json({ data: mission.events }) : apiError(c, 404, "not_found", "Mission not found."); });
   app.get("/v1/missions/:missionId/proof", async (c) => { const mission = await getMission(sdkUser(c)!.userId, c.req.param("missionId")); return mission ? c.json(missionProof(mission)) : apiError(c, 404, "not_found", "Mission not found."); });
   app.post("/v1/missions/:missionId/evidence", async (c) => {

@@ -464,6 +464,10 @@ async function chat(): Promise<void> {
           const id = parts[0];
           if (!id) console.log(formatError(`Usage: /mission ${action} <id>`, color));
           else { const result = await client.missionAction(id, action as "pause" | "resume" | "cancel" | "repair"); console.log(result.ok ? formatSuccess(`Mission ${action} requested: ${id}.`, color) : formatError(result.error || `Mission could not be ${action}d.`, color)); }
+        } else if (action === "doctor") {
+          const id = parts[0];
+          if (!id) console.log(formatError("Usage: /mission doctor <id>", color));
+          else { const result = await client.missionDoctor(id); console.log(result.ok && result.doctor ? JSON.stringify(result.doctor, null, 2) : formatError(result.error || "Mission diagnosis is unavailable.", color)); }
         } else if (["proof", "events"].includes(action)) {
           const id = parts[0];
           if (!id) console.log(formatError(`Usage: /mission ${action} <id>`, color));
@@ -489,7 +493,7 @@ async function chat(): Promise<void> {
           const id = parts[0]; const provider = parts[1]; const providerEventId = parts[2];
           if (!id || !provider || !providerEventId) console.log(formatError("Usage: /mission event <id> <provider> <provider event id>", color));
           else { const result = await client.missionProviderEvent(id, provider, providerEventId); console.log(result.ok ? formatSuccess("Mission provider event accepted; continuation queued.", color) : formatError(result.error || "Mission event was not accepted.", color)); }
-        } else console.log(formatError("Usage: /missions [id] | /mission create|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...", color));
+        } else console.log(formatError("Usage: /missions [id] | /mission create|doctor|pause|resume|cancel|repair|proof|events|step|evidence|verify|replan|event ...", color));
         continue;
       }
       if (line === "/context" || line.startsWith("/context ")) {
