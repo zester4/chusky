@@ -283,3 +283,29 @@ build passed. This is an internal deterministic runtime proof, not public
 contract parity: tool schemas, SDK/API bounds and release artifacts still need
 alignment. It also does not certify live provider effects, exhaustive crashes,
 arbitrary plan growth beyond the current bound, or the 30-day work schedule.
+
+### Durable work-window scheduling proof (2026-10-02)
+
+Mission records now persist an optional validated `workSchedule` containing an
+IANA timezone, same-day opening/closing times, daily execution allowance, and
+slice cadence. Native mission start exposes the contract, idempotency includes
+it, and the scheduler calculates the next local opening without changing the
+immediate behavior of unscheduled missions. A new slice is deferred to the
+next day when the remaining window is shorter than one cadence, preventing a
+same-day hot loop at the closing boundary.
+
+The real coordinator proof passed all five tests: normal production slice,
+timer wait, human-input wait/resume, the 200-step mixed soak, and the 30-day
+mission with a three-hour daily UTC window. The 30-day case renewed the active
+lease while advancing through the window, scheduled exactly one 09:00 durable
+wake per day, retained no heartbeat timers during rest, and completed all 30
+strictly evidenced steps. Typecheck, build, focused mission suites, and
+`git diff --check` passed. The proof uses the real store and scheduler with a
+fake clock/QStash boundary; it does not publish a live QStash message or claim
+live provider delivery.
+
+The configured production QStash token, signing keys, public workflow URL, and
+workflow endpoints were confirmed present by variable name only; secret values
+were not printed. The local workflow contract suite passed 28 tests. Per the
+QStash SDK contract, publishing is an external side effect, so no live probe
+was sent during this audit.

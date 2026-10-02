@@ -21,11 +21,48 @@ import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 /** Enqueue one durable task through the caller's workflow provider. */
 export type MissionTaskEnqueuer = (userId: number, taskId: string, runAt: number) => Promise<string>;
 
+const MAX_MISSION_PLAN_STEPS = 1000;
+
+function localParts(at: Date, timezone: string): { year: number; month: number; day: number; minutes: number } {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(at);
+  const value = Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  return { year: value.year, month: value.month, day: value.day, minutes: value.hour * 60 + value.minute };
+}
+
+function zonedLocalToUtc(year: number, month: number, day: number, minutes: number, timezone: string): number {
+  const naive = Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
+  let result = naive;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const actual = localParts(new Date(result), timezone);
+    const desired = Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60);
+    const observed = Date.UTC(actual.year, actual.month - 1, actual.day, Math.floor(actual.minutes / 60), actual.minutes % 60);
+    result += desired - observed;
+  }
+  return result;
+}
+
+/** Return the next instant at which a scheduled mission may execute. */
+export function nextMissionWorkAt(schedule: MissionRecord["workSchedule"], now = Date.now()): number {
+  if (!schedule) return now;
+  const current = localParts(new Date(now), schedule.timezone);
+  const start = Number(schedule.windowStart.slice(0, 2)) * 60 + Number(schedule.windowStart.slice(3));
+  const end = Number(schedule.windowEnd.slice(0, 2)) * 60 + Number(schedule.windowEnd.slice(3));
+  const currentDayStart = zonedLocalToUtc(current.year, current.month, current.day, start, schedule.timezone);
+  const currentDayEnd = zonedLocalToUtc(current.year, current.month, current.day, end, schedule.timezone);
+  if (now < currentDayStart) return currentDayStart;
+  // Do not start a fresh slice when less than one configured cadence remains;
+  // otherwise a step completed at the end of a window creates a same-day
+  // hot loop instead of resting until the next durable work window.
+  if (now < currentDayEnd && now + schedule.cadenceSeconds * 1000 <= currentDayEnd) return now;
+  const nextLocal = new Date(Date.UTC(current.year, current.month - 1, current.day) + 86400000);
+  return zonedLocalToUtc(nextLocal.getUTCFullYear(), nextLocal.getUTCMonth() + 1, nextLocal.getUTCDate(), start, schedule.timezone);
+}
+
 /** Validate step payloads before transport adapters normalize or omit fields. */
 export function validateMissionStepsPayload(raw: unknown, options: { requireNonEmpty?: boolean } = {}): string | undefined {
   if (raw === undefined) return options.requireNonEmpty ? "At least one mission step is required." : undefined;
   if (!Array.isArray(raw)) return "Mission steps must be an array.";
-  if (raw.length > 100) return "Mission plans can contain at most 100 steps.";
+  if (raw.length > MAX_MISSION_PLAN_STEPS) return `Mission plans can contain at most ${MAX_MISSION_PLAN_STEPS} steps.`;
   if (options.requireNonEmpty && raw.length === 0) return "At least one mission step is required.";
 
   for (const [index, value] of raw.entries()) {
@@ -171,7 +208,7 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
         missionId: current.id,
         missionStepId: stepId,
         missionAllowedTools: step.allowedTools,
-        runAt: now,
+        runAt: nextMissionWorkAt(current.workSchedule, now),
         maxAttempts: Math.max(1, Math.min(10, (step.retryLimit ?? 2) + 1)),
       });
       shouldEnqueue = task.status === "queued";

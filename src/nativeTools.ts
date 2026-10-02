@@ -275,6 +275,7 @@ function missionStartIdempotencyKey(userId: number, args: Record<string, unknown
       maxToolCalls: args.maxToolCalls,
       maxCost: args.maxCost,
     },
+    workSchedule: args.workSchedule,
   };
   const scope = createHash("sha256").update(`${userId}:${runId}`).digest("hex");
   const fingerprint = createHash("sha256").update(stableJson(intent)).digest("hex");
@@ -1643,6 +1644,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         idempotencyKey: missionStartIdempotencyKey(userId, args, runtime),
         requiredEvidence: Array.isArray(args.requiredEvidence) ? args.requiredEvidence.filter((value: unknown): value is string => typeof value === "string") : undefined,
         verificationMode: args.verificationMode === "strict" || (args.verificationMode === undefined && Array.isArray(args.requiredEvidence) && args.requiredEvidence.length > 0) ? "strict" : "legacy",
+        workSchedule: args.workSchedule && typeof args.workSchedule === "object" ? (() => {
+          const schedule = args.workSchedule as Record<string, unknown>;
+          return {
+          timezone: String(schedule.timezone ?? ""),
+          windowStart: String(schedule.windowStart ?? ""),
+          windowEnd: String(schedule.windowEnd ?? ""),
+          dailyBudgetSeconds: Number(schedule.dailyBudgetSeconds),
+          cadenceSeconds: Number(schedule.cadenceSeconds),
+          };
+        })() : undefined,
         steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
           id: typeof step.id === "string" ? step.id : undefined,
           title: missionText(step.title, "step title", 240),

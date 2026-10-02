@@ -868,6 +868,14 @@ export interface MissionBudget {
   maxCost: number;
 }
 
+export interface MissionWorkSchedule {
+  timezone: string;
+  windowStart: string;
+  windowEnd: string;
+  dailyBudgetSeconds: number;
+  cadenceSeconds: number;
+}
+
 export interface MissionEvidenceRecord {
   id: string;
   kind: "source" | "tool_receipt" | "artifact" | "assertion" | "before_after" | "human_confirmation";
@@ -956,6 +964,7 @@ export interface MissionRecord {
   nextAction?: string;
   waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number };
   budget: MissionBudget;
+  workSchedule?: MissionWorkSchedule;
   timing?: { activeMs: number; activeSince?: number; extensionsUsed: number; lastExtensionProgress?: string };
   consumedSteps: number;
   toolCalls: number;
@@ -5748,6 +5757,15 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
       maxToolCalls: Math.max(1, Math.min(10000, Math.floor(numeric(budget.maxToolCalls, DEFAULT_MISSION_BUDGET.maxToolCalls)))),
       maxCost: Math.max(0, Math.min(10000, numeric(budget.maxCost, DEFAULT_MISSION_BUDGET.maxCost))),
     },
+    ...(mission.workSchedule && typeof mission.workSchedule === "object" ? {
+      workSchedule: {
+        timezone: String(mission.workSchedule.timezone ?? "UTC").trim().slice(0, 100),
+        windowStart: String(mission.workSchedule.windowStart ?? "09:00").slice(0, 5),
+        windowEnd: String(mission.workSchedule.windowEnd ?? "17:00").slice(0, 5),
+        dailyBudgetSeconds: Math.max(60, Math.min(86400, Math.floor(numeric(mission.workSchedule.dailyBudgetSeconds, 8 * 3600)))),
+        cadenceSeconds: Math.max(60, Math.min(86400, Math.floor(numeric(mission.workSchedule.cadenceSeconds, 300)))),
+      },
+    } : {}),
     timing: mission.budget?.durationMode === "active" ? {
       activeMs: Math.max(0, numeric(mission.timing?.activeMs, 0)),
       extensionsUsed: Math.max(0, Math.floor(numeric(mission.timing?.extensionsUsed, 0))),
@@ -5757,7 +5775,7 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     consumedSteps: Math.max(0, Number(mission.consumedSteps) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
-    activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, 100) : undefined,
+    activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, MAX_MISSION_PLAN_STEPS) : undefined,
     events: (mission.events ?? []).slice(-500).map((event) => ({ ...event, message: String(event.message ?? "").slice(0, 1000) })),
     evidence: Array.isArray(mission.evidence) ? mission.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-100) : [],
     verification: mission.verification && typeof mission.verification === "object" ? {
@@ -5789,12 +5807,26 @@ type MissionCreateInput = Pick<MissionRecord, "title" | "objective" | "definitio
   budget?: Partial<MissionBudget>;
   requiredEvidence?: string[];
   verificationMode?: "legacy" | "strict";
+  workSchedule?: MissionWorkSchedule;
   a2aContextId?: string;
   steps?: Array<{ id?: string; title: string; objective: string; dependsOn?: string[]; retryLimit?: number; input?: Record<string, unknown>; outputSchema?: Record<string, unknown>; evidenceRequired?: string[]; compensationObjective?: string; retryBackoffSeconds?: number; parallelGroup?: string; allowedTools?: string[] }>;
 };
 
 const MISSION_STEP_TOOL_PATTERN = /^[A-Za-z][A-Za-z0-9_.:-]{0,127}$/;
 const MISSION_STEP_RESERVED_TOOL_PATTERN = /^CHUCK_MISSION_|^CHUCK_TASK_|^COMPOSIO_(?:EXECUTE_TOOL|MULTI_EXECUTE_TOOL)$/;
+
+function validateMissionWorkSchedule(schedule: MissionWorkSchedule): void {
+  if (!schedule || typeof schedule !== "object") throw new Error("Mission workSchedule must be an object.");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: schedule.timezone }).format(); }
+  catch { throw new Error("Mission workSchedule timezone must be a valid IANA timezone."); }
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  if (!timePattern.test(schedule.windowStart) || !timePattern.test(schedule.windowEnd)) throw new Error("Mission workSchedule windows must use HH:MM.");
+  const toMinutes = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const duration = toMinutes(schedule.windowEnd) - toMinutes(schedule.windowStart);
+  if (duration <= 0) throw new Error("Mission workSchedule windowEnd must be after windowStart on the same day.");
+  if (!Number.isInteger(schedule.dailyBudgetSeconds) || schedule.dailyBudgetSeconds < 60 || schedule.dailyBudgetSeconds > duration * 60) throw new Error("Mission workSchedule dailyBudgetSeconds must fit inside the work window.");
+  if (!Number.isInteger(schedule.cadenceSeconds) || schedule.cadenceSeconds < 60 || schedule.cadenceSeconds > 86400) throw new Error("Mission workSchedule cadenceSeconds is outside its supported range.");
+}
 
 function normalizeMissionStepAllowedTools(value: unknown, label: string): string[] | undefined {
   if (value === undefined) return undefined;
@@ -5834,6 +5866,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
   }
   if (Boolean(input.budget?.automaticExtensionSeconds) !== Boolean(input.budget?.maxAutomaticExtensions)) throw new Error("Automatic extension size and count must be supplied together.");
   if (input.budget?.durationMode === "wall_clock" && input.budget.maxAutomaticExtensions) throw new Error("Automatic extensions require active execution timing.");
+  if (input.workSchedule) validateMissionWorkSchedule(input.workSchedule);
   if (!input.title?.trim() || input.title.length > 240) throw new Error("Mission title is required and must be 240 characters or fewer");
   if (!input.objective?.trim() || input.objective.length > 8000) throw new Error("Mission objective is required and must be 8000 characters or fewer");
   if (!input.definitionOfDone?.trim() || input.definitionOfDone.length > 4000) throw new Error("Mission definitionOfDone is required and must be 4000 characters or fewer");
@@ -5893,6 +5926,7 @@ export async function createMission(userId: number, input: MissionCreateInput): 
     currentStepId: ready.id,
     activeStepIds: undefined,
     budget: { ...DEFAULT_MISSION_BUDGET, ...(input.budget ?? {}), durationMode: input.budget?.durationMode ?? "active" },
+    ...(input.workSchedule ? { workSchedule: { ...input.workSchedule } } : {}),
     timing: { activeMs: 0, extensionsUsed: 0 },
     consumedSteps: 0,
     toolCalls: 0,
