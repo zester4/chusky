@@ -1660,6 +1660,8 @@ interface Backend {
   registerMissionOwner(userId: number): Promise<void>;
   listMissionOwnerIds(): Promise<number[]>;
   compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
+  appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void>;
+  listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]>;
   getReminders(userId: number): Promise<ReminderRecord[]>;
   saveReminders(userId: number, reminders: ReminderRecord[]): Promise<void>;
   addReminder(userId: number, reminder: ReminderRecord, maxActive: number): Promise<void>;
@@ -1911,6 +1913,7 @@ class RedisBackend implements Backend {
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
   private missionk = (id: number) => `chuck:missions:${id}`;
+  private missionEventsKey = (userId: number, missionId: string) => `chuck:mission-events:${userId}:${createHash("sha256").update(missionId).digest("hex")}`;
   private missionOwnersKey = "chuck:missions:owners";
   private reminderk = (id: number) => `chuck:reminders:${id}`;
   private jobk = (id: number) => `chuck:jobs:${id}`;
@@ -2587,7 +2590,12 @@ class RedisBackend implements Backend {
       try { const parsed = raw ? JSON.parse(raw) : []; missions = Array.isArray(parsed) ? parsed as MissionRecord[] : []; } catch { missions = []; }
       const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
       if (existing) { await this.r.unwatch(); return normalizeMission(existing); }
-      const result = await this.r.multi().set(key, JSON.stringify([...missions, mission].slice(-100))).exec();
+      const historyKey = this.missionEventsKey(userId, mission.id);
+      const result = await this.r.multi()
+        .set(key, JSON.stringify([...missions, mission].slice(-100)))
+        .rpush(historyKey, ...mission.events.map((event) => JSON.stringify(event)))
+        .ltrim(historyKey, -5000, -1)
+        .exec();
       if (result) { await this.r.sadd(this.missionOwnersKey, String(userId)); return mission; }
     }
     throw new Error("Mission creation changed concurrently; please retry");
@@ -2608,10 +2616,29 @@ class RedisBackend implements Backend {
       const current = index < 0 ? undefined : normalizeMission(missions[index]);
       if (!current || current.version !== expectedVersion) { await this.r.unwatch(); return undefined; }
       missions[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(missions.slice(-100))).exec();
+      const newEvents = next.events.filter((event) => !current.events.some((existing) => existing.id === event.id));
+      const historyKey = this.missionEventsKey(userId, id);
+      const transaction = this.r.multi().set(key, JSON.stringify(missions.slice(-100)));
+      if (newEvents.length) transaction.rpush(historyKey, ...newEvents.map((event) => JSON.stringify(event))).ltrim(historyKey, -5000, -1);
+      const result = await transaction.exec();
       if (result) return next;
     }
     return undefined;
+  }
+  async appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void> {
+    if (!events.length) return;
+    const key = this.missionEventsKey(userId, missionId);
+    await this.r.rpush(key, ...events.map((event) => JSON.stringify(event)));
+    await this.r.ltrim(key, -5000, -1);
+  }
+  async listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]> {
+    const raw = await this.r.lrange(this.missionEventsKey(userId, missionId), -Math.max(1, Math.min(5000, Math.floor(limit))), -1);
+    return (raw ?? []).flatMap((value) => {
+      try {
+        const event = typeof value === "string" ? JSON.parse(value) as MissionEventRecord : value as MissionEventRecord;
+        return event && typeof event.id === "string" ? [event] : [];
+      } catch { return []; }
+    });
   }
   async getReminders(userId: number): Promise<ReminderRecord[]> {
     const raw = await this.r.get(this.reminderk(userId));
@@ -3645,6 +3672,7 @@ class MemoryBackend implements Backend {
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
   private missions = new Map<number, MissionRecord[]>();
+  private missionEvents = new Map<string, MissionEventRecord[]>();
   private missionOwners = new Set<number>();
   async getDaytonaWorkspace(userId: number) { return this.daytona.get(userId); }
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
@@ -3696,6 +3724,7 @@ class MemoryBackend implements Backend {
     const existing = missions.find((item) => item.id === mission.id || (mission.idempotencyKey && item.idempotencyKey === mission.idempotencyKey));
     if (existing) return normalizeMission(existing);
     this.missions.set(userId, [...missions, mission].slice(-100));
+    this.missionEvents.set(`${userId}:${mission.id}`, mission.events.slice(-5000));
     return mission;
   }
   async registerMissionOwner(userId: number) { this.missionOwners.add(userId); }
@@ -3708,7 +3737,21 @@ class MemoryBackend implements Backend {
     const nextList = [...missions];
     nextList[index] = next;
     this.missions.set(userId, nextList.slice(-100));
+    const historyKey = `${userId}:${id}`;
+    const history = this.missionEvents.get(historyKey) ?? [];
+    const newEvents = next.events.filter((event) => !current.events.some((existing) => existing.id === event.id));
+    this.missionEvents.set(historyKey, [...history, ...newEvents].slice(-5000));
     return next;
+  }
+  async appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void> {
+    if (!events.length) return;
+    const key = `${userId}:${missionId}`;
+    const history = this.missionEvents.get(key) ?? [];
+    const known = new Set(history.map((event) => event.id));
+    this.missionEvents.set(key, [...history, ...events.filter((event) => !known.has(event.id))].slice(-5000));
+  }
+  async listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]> {
+    return (this.missionEvents.get(`${userId}:${missionId}`) ?? []).slice(-Math.max(1, Math.min(5000, Math.floor(limit))));
   }
   private attentionKey(userId: number, collection: AttentionCollection): string { return `${userId}:${collection}`; }
   async getAttentionRecords(userId: number, collection: AttentionCollection) {
@@ -6318,6 +6361,28 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
 
 export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
   return (await backend.getMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
+}
+
+/**
+ * Return the durable mission event stream, including the current record's
+ * bounded tail as a repair source if a legacy record predates the event log.
+ * Events are owner-scoped and capped so an operator cannot turn this endpoint
+ * into an unbounded Redis or response read.
+ */
+export async function listMissionEvents(userId: number, id: string, limit = 1000): Promise<MissionEventRecord[]> {
+  const requestedLimit = Number(limit);
+  const boundedLimit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.min(5000, Math.floor(requestedLimit)))
+    : 1000;
+  const mission = await getMission(userId, id);
+  if (!mission) return [];
+  const persisted = await backend.listMissionEvents(userId, id, boundedLimit);
+  const merged = new Map<string, MissionEventRecord>();
+  for (const event of [...persisted, ...mission.events]) merged.set(event.id, event);
+  // Redis list order is the append order and is authoritative. Do not sort by
+  // timestamp: several lifecycle transitions can legitimately share a clock
+  // tick, and event IDs are random, so a tie-break sort can reorder history.
+  return [...merged.values()].slice(-boundedLimit);
 }
 
 /** Cancel every durable slice belonging to a mission, including parallel branches. */

@@ -10,6 +10,7 @@ import {
   finalizeMissionIfReady,
   getMission,
   initStore,
+  listMissionEvents,
   missionBudgetPreflight,
   pauseMission,
   recordMissionSlice,
@@ -25,6 +26,20 @@ import {
 } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
+
+test("mission event history survives the bounded mission-record tail", async () => {
+  const userId = 981020;
+  const mission = await createMission(userId, { title: "Event history", objective: "Retain lifecycle history", definitionOfDone: "History remains readable", steps: [{ id: "history", title: "History", objective: "Checkpoint repeatedly" }] });
+  await startMission(userId, mission.id);
+  for (let index = 0; index < 140; index++) await checkpointMission(userId, mission.id, `checkpoint-${index}`, `continue-${index}`);
+
+  const current = await getMission(userId, mission.id);
+  const events = await listMissionEvents(userId, mission.id, 5000);
+  assert.ok((current?.events.length ?? 0) <= 500, "the mission record remains bounded");
+  assert.ok(events.length > 100, "the durable history must outlive the bounded mission record");
+  assert.equal(events[0]?.type, "created");
+  assert.equal(events.at(-1)?.message, "continue-139");
+});
 
 test("expired mission resume stays blocked until its total duration is explicitly extended", async () => {
   const userId = 951099;
