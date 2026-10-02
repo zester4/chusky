@@ -837,6 +837,12 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   assert.equal(diagnosis.missionId, created.id);
   assert.ok(["healthy", "stalled", "waiting", "blocked"].includes(diagnosis.health));
   assert.ok(Array.isArray(diagnosis.nextActions));
+  const controlled = await api.fetch(new Request(`http://local/v1/missions/${created.id}/control`, { method: "POST", headers, body: JSON.stringify({ budget: { maxSlices: 900 }, workSchedule: { timezone: "UTC", windowStart: "09:00", windowEnd: "17:00", dailyBudgetSeconds: 3600, cadenceSeconds: 300 } }) }));
+  assert.equal(controlled.status, 200);
+  const controlledMission = await controlled.json() as { budget: { maxSlices: number }; workSchedule?: { timezone: string; windowStart: string; windowEnd: string } };
+  assert.equal(controlledMission.budget.maxSlices, 900);
+  assert.equal(controlledMission.workSchedule?.timezone, "UTC");
+  assert.equal(controlledMission.workSchedule?.windowStart, "09:00");
   const hidden = await api.fetch(new Request(`http://local/v1/missions/${created.id}`, { headers: { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "another-owner" } }));
   assert.equal(hidden.status, 404);
   const paused = await api.fetch(new Request(`http://local/v1/missions/${created.id}/pause`, { method: "POST", headers }));

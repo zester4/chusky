@@ -13,7 +13,7 @@ import { registerHandlers } from "./handlers.js";
 import { listAttentionRecords } from "./store.js";
 import type { AttentionCandidateRecord, DeliveryPreferenceRecord, ObservationRecord } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget } from "./store.js";
+import { initStore, getTelegramChatId, claimTriggerEvent, releaseTriggerEvent, createTriggerEvent, getTriggerEvent, updateTriggerEvent, getReminder, updateReminder, getJob, updateJob, claimDelivery, completeDelivery, claimDeliveryLease, completeDeliveryLease, releaseDeliveryLease, consumeCliPairing, createCliDevice, authenticateCliToken, getSession, saveSession, appendMessages, addUsage, checkRateLimit, canSpend, getApproval, setApprovalStatus, claimApproval, acquireUserLock, renewUserLock, releaseUserLock, setModel, clearHistory, clearSession, getTask, getMission, listMissions, createMission, startMission, pauseMission, cancelMission, cancelMissionTasks, recordMissionEvidence, verifyMission, repairMission, missionProof, recordMissionSlice, waitMission, resumeMissionFromProviderEvent, resumeMissionFromTimer, checkpointMission, completeTask, listTasks, cancelTask, retryTask, isDurableStore, listCliDevices, revokeCliDeviceByName, listReminders, listJobs, readScratchpad, writeScratchpad, searchMemories, getChannelInstallation, listChannelIdentities, getChannelInboundEvent, updateChannelInboundEvent, getPhoneCall, updatePhoneCall, getVideoJob, updateVideoJob, listVideoJobs, getHandoffRecord, listHandoffRecords, saveHandoffRecord, updateTask, updateMission, updateMissionControl, listOutbox, createTask, acquireMissionLease, renewMissionLease, releaseMissionLease, missionBudgetPreflight, finalizeMissionIfReady, appendRecallMeetingMessages, getRecallMeeting, listRecallMeetings, readRecallTranscript, recordRecallMeetingRuntime, appendRecallTranscriptSegment, deleteEphemeralRecallTranscriptAfterOutcome, updateRecallMeeting, createRecallChatEvent, getRecallChatEvent, updateRecallChatEvent, saveCalendarMeetingPreparation, getCalendarMeetingPreparationForTrigger, listCalendarMeetingPreparations, getMeetingContact, deleteMeetingContact, updateMeetingRepresentativeProfile, type ReminderDeliveryTarget, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { parseTriggerWebhook, runAgent, VOICE_TURN_NATIVE_TOOLS, fetchModels, ApprovalRequiredError, invalidateSession, transcribeAudio, TriggerWebhookVerificationError, getConnectionUrl, getToolkitStates, searchTools, listTriggers, createTrigger, setTriggerState, deleteTrigger, generateSpeech, queueVideoWorkflow, reconcileComposioTriggerWebhook, listConnectedAccounts, listComposioToolkitActions, listComposioToolkitCatalogue } from "./agent.js";
 import type { ContentPart } from "./types.js";
 import { logger } from "./logger.js";
@@ -26,7 +26,7 @@ import { executeDurableTask } from "./taskRunner.js";
 import { executeTaskSlice } from "./taskSlice.js";
 import { requestMissionDurationApproval } from "./missionApproval.js";
 import { reconcileTinyFishResearchRun } from "./tinyfishResearch.js";
-import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { onComposerTaskSettled } from "./workflows/composer.js";
 import { ChannelGateway } from "./channels/gateway.js";
 import { createAgentChannelHandler } from "./channels/agentHandler.js";
@@ -1338,6 +1338,33 @@ async function main(): Promise<void> {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
       const mission = await getMission(device.userId, c.req.param("id"));
       return mission ? c.json({ ok: true, doctor: diagnoseMission({ mission, tasks: await listTasks(device.userId) }) }) : c.json({ ok: false, error: "mission not found" }, 404);
+    });
+    app.post("/cli/missions/:id/control", async (c) => {
+      const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);
+      const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+      const rawBudget = body.budget;
+      const budget: Record<string, number> = {};
+      if (rawBudget !== undefined) {
+        if (!rawBudget || typeof rawBudget !== "object" || Array.isArray(rawBudget)) return c.json({ ok: false, error: "budget must be an object" }, 400);
+        for (const field of ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const) {
+          const value = (rawBudget as Record<string, unknown>)[field];
+          if (value !== undefined) {
+            if (typeof value !== "number" || !Number.isFinite(value)) return c.json({ ok: false, error: `${field} must be a finite number` }, 400);
+            budget[field] = value;
+          }
+        }
+      }
+      const rawSchedule = body.workSchedule;
+      const workSchedule = rawSchedule === undefined ? undefined : rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule) ? rawSchedule as MissionWorkSchedule : undefined;
+      if (rawSchedule !== undefined && !workSchedule) return c.json({ ok: false, error: "workSchedule must be an object" }, 400);
+      if (!Object.keys(budget).length && !workSchedule) return c.json({ ok: false, error: "provide budget or workSchedule" }, 400);
+      try {
+        const mission = await updateMissionControl(device.userId, c.req.param("id"), { ...(Object.keys(budget).length ? { budget: budget as Partial<MissionBudget> } : {}), ...(workSchedule ? { workSchedule } : {}) });
+        if (!mission) return c.json({ ok: false, error: "mission control update was rejected" }, 409);
+        if (workSchedule) await rescheduleQueuedMissionTasks(device.userId, mission);
+        const reconciled = mission.status === "running" ? await reconcileMissionExecution(device.userId, mission.id, enqueueTaskWorkflow) : mission;
+        return c.json({ ok: true, mission: reconciled ?? mission });
+      } catch (error) { return c.json({ ok: false, error: error instanceof Error ? error.message : "mission control update failed" }, error instanceof MissionEnqueueError ? 503 : 400); }
     });
     app.get("/cli/missions/:id/events", async (c) => {
       const device = await cliAuth(c); if (!device) return c.json({ ok: false, error: "unauthorized" }, 401);

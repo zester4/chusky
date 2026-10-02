@@ -409,6 +409,7 @@ test("SDK exposes mission proof, context, department, and outcome resources", as
   await sdk.missions.list();
   await sdk.missions.proof("mis_1");
   await sdk.missions.doctor("mis_1");
+  await sdk.missions.control("mis_1", { budget: { maxSlices: 20 } });
   await sdk.missions.events("mis_1");
   await sdk.missions.providerEvent("mis_1", "stripe", "evt_1", { idempotencyKey: "event_1" });
   await sdk.context.list({ purpose: "sales", limit: 10 });
@@ -424,6 +425,7 @@ test("SDK exposes mission proof, context, department, and outcome resources", as
   assert.ok(calls.includes("GET:https://example.test/v1/missions"));
   assert.ok(calls.includes("GET:https://example.test/v1/missions/mis_1/proof"));
   assert.ok(calls.includes("GET:https://example.test/v1/missions/mis_1/doctor"));
+  assert.ok(calls.includes("POST:https://example.test/v1/missions/mis_1/control"));
   assert.ok(calls.includes("POST:https://example.test/v1/missions/mis_1/events"));
   assert.ok(calls.includes("GET:https://example.test/v1/context?purpose=sales&limit=10"));
   assert.ok(calls.includes("GET:https://example.test/v1/departments/catalog"));

@@ -6450,6 +6450,64 @@ export async function resumeMission(userId: number, id: string, maxDurationSecon
   });
 }
 
+/**
+ * Apply an owner-scoped execution-policy change without pretending that it is
+ * a new mission or resetting any consumed usage. Budget increases are allowed
+ * only inside the ceiling saved when the mission was created; reductions are
+ * always retained and may honestly move an already-over-budget mission into a
+ * blocked state. Queued slices are moved to the new work window, while a
+ * running slice keeps its lease and is never interrupted by policy editing.
+ */
+export async function updateMissionControl(userId: number, id: string, input: { budget?: Partial<MissionBudget>; workSchedule?: MissionWorkSchedule }): Promise<MissionRecord | undefined> {
+  if (!input.budget && !input.workSchedule) throw new Error("Mission control requires a budget or workSchedule change.");
+  const budgetFields = ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const;
+  const updated = await mutateMission(userId, id, (mission) => {
+    if (["completed", "cancelled"].includes(mission.status)) return undefined;
+    const requested = input.budget ?? {};
+    const ceiling = mission.budgetCeiling ?? {};
+    for (const field of budgetFields) {
+      const value = requested[field];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`Requested mission ${field} is invalid.`);
+      if (field !== "maxCost" && !Number.isInteger(value)) throw new Error(`Requested mission ${field} must be an integer.`);
+      const limit = ceiling[field];
+      if (limit !== undefined && value > limit) throw new Error(`Requested mission ${field} exceeds the owner's saved ceiling.`);
+    }
+    if (requested.maxDurationSeconds !== undefined && requested.maxDurationSeconds < 60) throw new Error("Requested mission maxDurationSeconds must be at least 60 seconds.");
+    if (requested.maxSteps !== undefined && requested.maxSteps < 1) throw new Error("Requested mission maxSteps must be at least 1.");
+    if (requested.maxSlices !== undefined && requested.maxSlices < 1) throw new Error("Requested mission maxSlices must be at least 1.");
+    if (requested.maxToolCalls !== undefined && requested.maxToolCalls < 1) throw new Error("Requested mission maxToolCalls must be at least 1.");
+    if (requested.maxCost !== undefined && requested.maxCost < 0) throw new Error("Requested mission maxCost cannot be negative.");
+    if (input.workSchedule) validateMissionWorkSchedule(input.workSchedule);
+    const budget = { ...mission.budget, ...requested };
+    const scheduleChanged = JSON.stringify(mission.workSchedule ?? null) !== JSON.stringify(input.workSchedule ?? mission.workSchedule ?? null);
+    const budgetChanged = JSON.stringify(mission.budget) !== JSON.stringify(budget);
+    if (!scheduleChanged && !budgetChanged) return undefined;
+    const preflight = missionBudgetPreflight({ ...mission, budget }, { steps: 0 });
+    const sliceExceeded = (mission.consumedSlices ?? 0) > (budget.maxSlices ?? Number.POSITIVE_INFINITY);
+    const toolsExceeded = mission.toolCalls > budget.maxToolCalls;
+    const costExceeded = mission.cost > budget.maxCost;
+    const overBudget = mission.status === "running" && (!preflight.allowed || sliceExceeded || toolsExceeded || costExceeded);
+    const reason = overBudget
+      ? sliceExceeded ? "Mission slice budget exhausted."
+        : toolsExceeded ? "Mission tool-call budget exhausted."
+          : costExceeded ? "Mission cost budget exhausted."
+            : preflight.reason ?? "Mission execution budget is exhausted."
+      : undefined;
+    const message = [
+      budgetChanged ? "Mission execution budget updated; consumed usage was preserved." : "",
+      scheduleChanged ? "Mission work schedule updated; queued slices will use the new window." : "",
+    ].filter(Boolean).join(" ");
+    return {
+      budget,
+      ...(input.workSchedule ? { workSchedule: { ...input.workSchedule } } : {}),
+      ...(overBudget ? { status: "blocked" as const, error: reason, nextAction: "Reduce the remaining work or authorize a larger budget, then resume this mission." } : {}),
+      events: [...mission.events, missionEvent(overBudget ? "budget_exhausted" : "checkpointed", `${message}${reason ? ` ${reason}` : ""}`)],
+    };
+  });
+  return updated;
+}
+
 /** Owners with durable mission state; used by the recovery sweeper. */
 export async function listMissionOwnerIds(): Promise<number[]> {
   return backend.listMissionOwnerIds();

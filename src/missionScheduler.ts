@@ -12,6 +12,7 @@ import {
   resumeMissionFromTimer,
   extendMissionDurationIfEligible,
   retryTask,
+  updateTask,
   updateMission,
   verifyMission,
   type MissionRecord,
@@ -56,6 +57,29 @@ export function nextMissionWorkAt(schedule: MissionRecord["workSchedule"], now =
   if (now < currentDayEnd && now + schedule.cadenceSeconds * 1000 <= currentDayEnd) return now;
   const nextLocal = new Date(Date.UTC(current.year, current.month - 1, current.day) + 86400000);
   return zonedLocalToUtc(nextLocal.getUTCFullYear(), nextLocal.getUTCMonth() + 1, nextLocal.getUTCDate(), start, schedule.timezone);
+}
+
+/** Move queued active branches after a schedule edit without touching a live lease. */
+export async function rescheduleQueuedMissionTasks(userId: number, mission: MissionRecord, now = Date.now()): Promise<void> {
+  if (mission.status !== "running") return;
+  const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
+  const runAt = nextMissionWorkAt(mission.workSchedule, now);
+  const tasks = await listTasks(userId);
+  await Promise.all(tasks
+    .filter((task) => task.missionId === mission.id && task.status === "queued" && active.has(task.missionStepId ?? ""))
+    .map((task) => updateMissionTaskSchedule(userId, task.id, runAt)));
+}
+
+async function updateMissionTaskSchedule(userId: number, taskId: string, runAt: number): Promise<void> {
+  await updateTask(userId, taskId, {
+    runAt,
+    // The old provider delivery may still arrive. Clearing its publication
+    // marker makes the task eligible for one fresh publication, while the
+    // task lease/CAS prevents the old and new deliveries from both executing.
+    workflowRunId: undefined,
+    workflowPublishedAt: undefined,
+    enqueueClaim: undefined,
+  });
 }
 
 /** Validate step payloads before transport adapters normalize or omit fields. */

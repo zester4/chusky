@@ -56,7 +56,7 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Cancel | `cancelMission`, `cancelTask`; abort polling | `tasks`, `task-runner`, route tests | Untested: late external response, duplicate continuation and lease loss at every await. Cancellation cannot undo an already-dispatched provider effect. |
 | Budget preflight | `missionBudgetPreflight`; HTTP worker admission | `mission-timing`, `missions`, `mission-kernel-proof` | Partial repair: completed plan steps and worker slices are separate counters, `maxSlices` is independently enforced, and detailed agent outcomes charge repeated provider calls individually; live multi-worker budget contention remains open. |
 | Budget extend | `extendMissionDurationIfEligible`, duration approval | `mission-timing`, `mission-approval`, `mission-kernel-proof` tests | Partial repair: owner-approved duration extension is bounded by saved ceilings and only consumes on completed progress; general slice/tool/cost ceiling negotiation remains narrower than duration management. |
-| Budget reduce | `resumeMission` and mission budget controls | `mission-kernel-proof`, `mission-timing` tests | Partial repair: the worker can shrink saved budgets only within owner ceilings and cannot widen another budget; public API/CLI exposure and more adversarial concurrent reductions remain open. |
+| Budget reduce | `updateMissionControl`; SDK/CLI mission control routes | `mission-control`, `sdk-api`, `cli-client` tests | Partial repair: the worker and owner-facing API/CLI can shrink saved budgets only within owner ceilings, preserve usage, and block with an exact resume action when the active frontier is exceeded; more adversarial concurrent reductions remain open. |
 | Work schedule / rest | `MissionRecord.workSchedule`; `missionScheduler.nextMissionWorkWindow` | `task-slice-proof`, `mission-timing`, `mission-kernel-proof` tests | Partial repair: UTC daily windows, cadence, active-time accounting, and durable rest across 30 simulated days are covered; DST/timezone matrix and live QStash timers remain integration proofs. |
 | Lease renew / loss | `renewTaskLease`; task runner renewal; HTTP mission renewal | `task-runner`, `tasks`, `mission-kernel-proof` tests | Partial repair: renewal and settlement reject expired tokens, and replacement workers receive a new lease; post-turn mission accounting still needs a broader crash proof. |
 | Duplicate delivery | deterministic task IDs; enqueue claims; task leases | `task-enqueue`, `task-runner`, `tasks`, `real-world-upgrade`, `mission-kernel-proof` tests | Partial repair: deterministic task identity, publication timestamp recovery, and lease fencing prevent immediate duplicate continuations; reordered provider siblings remain a separate proof. |
@@ -71,8 +71,8 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Tool discovery / fences | mission allowlist and agent discovery | `mission-worker`, `agent-contract`, delegation, `task-slice-proof` tests | Partial repair: explicit step fences and inherited worker grants are validated in the real dispatch path; live schema hydration for every connected provider remains unverified. |
 | Batch outcomes | agent execution, tool-activity correlation, autonomous receipts, `missionSlice.settleMissionSlice` | `tool-activity`, `autonomy-actions`, `mission-kernel-proof` tests | Partial repair: per-call outcomes distinguish success, failure, and uncertainty; mixed or unmatched batch actions are non-clean and cannot close a mission. Live provider receipt matrices remain unverified. |
 | Bounded mission context | `missionWorker.boundedMissionHistory`; HTTP task slice | `mission-worker`, `mission-agent-proof` tests | Partial repair: mission turns receive a bounded recent text frontier while durable checkpoint/step state remains authoritative; compacted evidence summaries and crash/restart context proof remain open. |
-| CLI | `cli.ts` mission commands and details; client | CLI tests, `mission-doctor` tests | Partial repair: `/mission doctor <id>` now reports bounded owner-scoped health, leases, waits, budget, and recovery action; schedule/budget editing remains absent and the detail view still labels the legacy counter as steps. |
-| SDK / API | `sdkApi.ts` mission routes; SDK types/OpenAPI | SDK API/client tests, `mission-doctor` tests | Partial repair: owner-scoped `GET /v1/missions/:id/doctor` and typed `missions.doctor()` now expose deterministic diagnosis; public schedule/budget adjustment and full replan fence fields remain absent. |
+| CLI | `cli.ts` mission commands and details; client | CLI tests, `mission-doctor`, `mission-control` tests | Partial repair: `/mission doctor <id>` reports bounded owner-scoped health, leases, waits, budget, and recovery action, while `/mission control <id> <JSON>` edits owner-bounded budgets and work windows; the detail view still labels the legacy counter as steps. |
+| SDK / API | `sdkApi.ts` mission routes; SDK types/OpenAPI | SDK API/client, `mission-doctor`, `mission-control` tests | Partial repair: owner-scoped doctor and typed `missions.control()` expose deterministic diagnosis plus bounded budget/work-schedule changes; full replan fence fields and live multi-process controls remain absent. |
 | Web | `chusky-web/components/app/missions-page.tsx` | No end-to-end proof established | Untested: public response parity and full long-horizon state presentation. |
 
 Additional inspected boundary defects: `renewTaskLease` can renew an already
@@ -322,6 +322,23 @@ The recovery path is now independent of a fresh QStash delivery. Mission creatio
 | Provider-event, approval, or human-input wait | No automatic resume; the exact external control remains authoritative | Covered by existing provider-event, approval, and human-input wait suites |
 
 The application starts a bounded two-minute recovery interval after store and handler initialization. The interval is `unref()`'d and cleared during shutdown. The sweeper is intentionally conservative around expired leases: lease loss is not proof that a provider write did not happen.
+
+### Mission-control proof (2026-10-02)
+
+Owner-facing mission control is now a single bounded path shared by the store,
+SDK API, CLI, and scheduler. A control request may reduce or extend a budget
+only inside the saved owner ceiling and may set a validated timezone-aware daily
+work window. Consumption is never reset by a control edit. If a reduction is
+already below the consumed frontier, the mission becomes explicitly blocked
+with a resume action rather than silently exceeding the new limit. Changing a
+work window reschedules queued branches while leaving a live lease untouched;
+late deliveries still pass through the task claim CAS.
+
+`tests/mission-control.test.ts` proves ceiling enforcement, consumption
+preservation, schedule rescheduling, and active-budget blocking. The SDK API,
+SDK client, and CLI client contract tests prove the owner-scoped public paths.
+This does not yet prove concurrent live Redis control edits or a live QStash
+delivery race.
 
 ### Bounded retry-repair proof (2026-10-02)
 

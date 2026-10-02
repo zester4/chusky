@@ -12,7 +12,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -61,7 +61,7 @@ import {
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
-import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { appendReliabilitySample, compensationView, listCompensations, listOutcomeVerifications, listTraceEvents, reliabilityHealth } from "./reliability/persistence.js";
@@ -2625,7 +2625,7 @@ export function registerSdkApi(app: Hono): void {
     const idempotencyKey = (c.req.header("Idempotency-Key") ?? (typeof body.idempotencyKey === "string" ? body.idempotencyKey : "")).trim().slice(0, 200) || undefined;
     try {
       const requiredEvidence = Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined;
-      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", budgetCeiling: body.budgetCeiling && typeof body.budgetCeiling === "object" && !Array.isArray(body.budgetCeiling) ? body.budgetCeiling as Record<string, number> : undefined, budget: {
+      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", workSchedule: body.workSchedule && typeof body.workSchedule === "object" && !Array.isArray(body.workSchedule) ? body.workSchedule as MissionWorkSchedule : undefined, budgetCeiling: body.budgetCeiling && typeof body.budgetCeiling === "object" && !Array.isArray(body.budgetCeiling) ? body.budgetCeiling as Record<string, number> : undefined, budget: {
         maxDurationSeconds: body.maxDurationSeconds === undefined ? undefined : Number(body.maxDurationSeconds),
         durationMode: body.durationMode as "active" | "wall_clock" | undefined,
         maxLifetimeSeconds: body.maxLifetimeSeconds as number | undefined,
@@ -2666,6 +2666,37 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/missions/:missionId/verify", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const verified = await verifyMission(owner.userId, c.req.param("missionId"), { evidenceIds: Array.isArray(body.evidenceIds) ? body.evidenceIds.filter((item): item is string => typeof item === "string") : undefined, confidence: typeof body.confidence === "number" ? body.confidence : undefined, verifiedBy: "agent" }); if (!verified) return apiError(c, 404, "not_found", "Mission not found."); return c.json(await finalizeMissionCloseout(owner.userId, verified.id) ?? verified); });
   app.post("/v1/missions/:missionId/repair", async (c) => { const body = await c.req.json().catch(() => ({})) as { reason?: unknown; nextAction?: unknown }; if (typeof body.reason !== "string" || !body.reason.trim()) return apiError(c, 400, "invalid_repair", "reason is required."); const mission = await repairMission(sdkUser(c)!.userId, c.req.param("missionId"), { reason: body.reason, nextAction: typeof body.nextAction === "string" ? body.nextAction : undefined }); return mission ? c.json(mission) : apiError(c, 409, "mission_repair_failed", "Mission is not repairable or not owned by you."); });
   app.post("/v1/missions/:missionId/pause", async (c) => { const owner = sdkUser(c)!; const mission = await pauseMission(owner.userId, c.req.param("missionId"), "Mission paused through the API."); if (mission) await cancelMissionTasks(owner.userId, mission.id); return mission ? c.json(mission) : apiError(c, 409, "mission_not_paused", "Only a running or waiting mission can be paused."); });
+  app.post("/v1/missions/:missionId/control", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+    const rawBudget = body.budget;
+    const budget: Record<string, number> = {};
+    if (rawBudget !== undefined) {
+      if (!rawBudget || typeof rawBudget !== "object" || Array.isArray(rawBudget)) return apiError(c, 400, "invalid_mission_control", "budget must be an object.");
+      for (const field of ["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"] as const) {
+        const value = (rawBudget as Record<string, unknown>)[field];
+        if (value !== undefined) {
+          if (typeof value !== "number" || !Number.isFinite(value)) return apiError(c, 400, "invalid_mission_control", `${field} must be a finite number.`);
+          budget[field] = value;
+        }
+      }
+    }
+    const rawSchedule = body.workSchedule;
+    const workSchedule = rawSchedule === undefined ? undefined : rawSchedule && typeof rawSchedule === "object" && !Array.isArray(rawSchedule) ? rawSchedule as MissionWorkSchedule : undefined;
+    if (rawSchedule !== undefined && !workSchedule) return apiError(c, 400, "invalid_mission_control", "workSchedule must be an object.");
+    if (!Object.keys(budget).length && !workSchedule) return apiError(c, 400, "invalid_mission_control", "Provide budget or workSchedule.");
+    try {
+      const mission = await updateMissionControl(owner.userId, c.req.param("missionId"), { ...(Object.keys(budget).length ? { budget: budget as Partial<MissionBudget> } : {}), ...(workSchedule ? { workSchedule } : {}) });
+      if (!mission) return apiError(c, 409, "mission_control_rejected", "This mission is finished, unchanged, or not owned by you.");
+      if (workSchedule) await rescheduleQueuedMissionTasks(owner.userId, mission);
+      const reconciled = mission.status === "running" ? await reconcileMissionExecution(owner.userId, mission.id, sdkTaskWorkflowEnqueuer) : mission;
+      return c.json(reconciled ?? mission);
+    } catch (error) {
+      return error instanceof MissionEnqueueError
+        ? apiError(c, 503, "mission_enqueue_failed", error.message)
+        : apiError(c, 400, "invalid_mission_control", error instanceof Error ? error.message : "Mission control update was rejected.");
+    }
+  });
   app.post("/v1/missions/:missionId/resume", async (c) => {
     const owner = sdkUser(c)!;
     try {
