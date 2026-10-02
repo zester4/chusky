@@ -1,6 +1,6 @@
 export const E2B_BROWSER_ACTIONS = [
   "start", "stop", "status", "state", "session_acquire", "session_list", "session_release",
-  "open", "snapshot", "find", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
+  "open", "snapshot", "find", "health", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
   "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region",
   "screenshot_region_full", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close",
   "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
@@ -15,6 +15,16 @@ export type E2BBrowserNode = {
   role: string;
   name: string;
   index: number;
+  id?: string;
+  nameAttr?: string;
+  placeholder?: string;
+  autocomplete?: string;
+  inputType?: string;
+  tagName?: string;
+  frameIndex?: number;
+  frameUrl?: string;
+  observationId?: string;
+  pageGeneration?: number;
   url: string;
   capturedAt: number;
 };
@@ -30,6 +40,9 @@ export type E2BBrowserRecord = {
   createdAt: number;
   updatedAt: number;
   expiresAt: number;
+  observationId?: string;
+  pageGeneration?: number;
+  health?: Record<string, unknown>;
 };
 
 /** Owner-scoped file metadata. Bytes live in R2; this record contains no file content. */
@@ -54,7 +67,12 @@ export type E2BCommandResult = {
   text?: string;
   pageContent?: string;
   pageContentTruncated?: boolean;
-  matches?: Array<{ role: string; name: string; index: number; nodeId?: string }>;
+  matches?: Array<{ role: string; name: string; index: number; nodeId?: string; id?: string; nameAttr?: string; placeholder?: string; autocomplete?: string; inputType?: string; tagName?: string; frameIndex?: number; frameUrl?: string; observationId?: string; pageGeneration?: number }>;
+  observationId?: string;
+  pageGeneration?: number;
+  accessibilityHash?: string;
+  health?: Record<string, unknown>;
+  formState?: { value?: string; checked?: boolean; selectedText?: string; controlRole?: string };
   downloads?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
   download?: { id: string; name: string; state: string; size: number; createdAt: number; error?: string } | null;
   recordings?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;

@@ -27,6 +27,9 @@ test("E2B browser agent uses a retained headed Playwright profile and safe Chrom
   assert.match(browserAgent, /launchPersistentContext\(PROFILE/);
   assert.match(browserAgent, /--no-sandbox/);
   assert.match(browserAgent, /getByRole/);
+  assert.match(browserAgent, /observation_stale/);
+  assert.match(browserAgent, /frameFor/);
+  assert.match(browserAgent, /healthSnapshot/);
   assert.match(browserAgent, /href: clean/);
   assert.match(browserAgent, /tab_open/);
   assert.match(browserAgent, /page\.keyboard\.type/);
@@ -54,7 +57,8 @@ test("E2B runtime starts display and browser services through separate idempoten
   assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-xvfb\.pid \]/);
   assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-fluxbox\.pid \]/);
   assert.match(browserEngine, /startIfMissing\("if \[ ! -f \/tmp\/chusky-browser\.pid \]/);
-  assert.match(browserEngine, /console\.log\(r\.ok \? 'ready' : 'not-ready'\)/);
+  assert.match(browserEngine, /JSON\.parse\(payload\.body\)\.ok === true/);
+  assert.match(browserEngine, /runtimeDiagnostics/);
   assert.doesNotMatch(browserEngine, /process\.exit\(2\)/);
   assert.doesNotMatch(browserEngine, /bash -lc '[^\n]*chusky-xvfb\.pid[^\n]*chusky-fluxbox\.pid[^\n]*chusky-browser\.pid/);
   assert.match(browserEngine, /x11vnc -display :99 -rfbport 5900/);

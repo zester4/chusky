@@ -38,8 +38,8 @@ function browserContentType(name: string, kind: "download" | "recording"): strin
   return types[extension ?? ""] ?? "application/octet-stream";
 }
 
-function nodeId(role: string, name: string, index: number): string {
-  return `e2b_${createHash("sha256").update(`${role}\0${name}\0${index}`).digest("hex").slice(0, 28)}`;
+function nodeId(role: string, name: string, index: number, observationId?: string, frameIndex?: number): string {
+  return `e2b_${createHash("sha256").update(`${role}\0${name}\0${index}\0${observationId ?? "legacy"}\0${frameIndex ?? 0}`).digest("hex").slice(0, 28)}`;
 }
 
 function encodeRequest(request: Record<string, unknown>): string {
@@ -53,13 +53,30 @@ function parseResult(stdout: string, stderr: string): E2BCommandResult {
   catch { throw new E2BBrowserError(`E2B browser returned invalid result${stderr ? `: ${redactBrowserText(stderr, 500)}` : ""}`); }
 }
 
+function browserFailureCode(message: string): string {
+  const value = message.toLowerCase();
+  if (value.includes("observation_stale") || value.includes("fresh accessible node")) return "stale_observation";
+  if (value.includes("ambiguous")) return "control_ambiguous";
+  if (value.includes("not found") || value.includes("was not found")) return "control_missing";
+  if (value.includes("frame")) return "frame_missing";
+  if (value.includes("challenge") || value.includes("captcha") || value.includes("two_factor")) return "challenge_detected";
+  if (value.includes("timeout") || value.includes("timed out")) return "action_timeout";
+  return "browser_action_failed";
+}
+
 function normalizeMatches(raw: E2BCommandResult, url: string, now: number): E2BBrowserNode[] {
   return (Array.isArray(raw.matches) ? raw.matches : []).slice(0, MAX_NODES).flatMap((item) => {
     const role = redactBrowserText(item?.role, 40).toLowerCase();
     const name = redactBrowserText(item?.name, 160);
     const index = Number(item?.index);
     if (!role || !name || !Number.isSafeInteger(index) || index < 0) return [];
-    return [{ nodeId: nodeId(role, name, index), role, name, index, url, capturedAt: now }];
+    const optional = (field: "id" | "nameAttr" | "placeholder" | "autocomplete" | "inputType" | "tagName" | "frameUrl" | "observationId", max: number) => {
+      const value = item?.[field];
+      return typeof value === "string" && value.trim() && value.length <= max ? { [field]: redactBrowserText(value, max) } : {};
+    };
+    const frameIndex = Number(item?.frameIndex);
+    const pageGeneration = Number(item?.pageGeneration);
+    return [{ nodeId: nodeId(role, name, index, typeof item?.observationId === "string" ? item.observationId : undefined, Number.isSafeInteger(frameIndex) ? frameIndex : undefined), role, name, index, ...optional("id", 160), ...optional("nameAttr", 160), ...optional("placeholder", 200), ...optional("autocomplete", 80), ...optional("inputType", 40), ...optional("tagName", 40), ...(Number.isSafeInteger(frameIndex) && frameIndex >= 0 ? { frameIndex } : {}), ...optional("frameUrl", 1_000), ...optional("observationId", 100), ...(Number.isSafeInteger(pageGeneration) && pageGeneration >= 0 ? { pageGeneration } : {}), url, capturedAt: now }];
   });
 }
 
@@ -93,12 +110,24 @@ export class E2BBrowserEngine {
       const expectedKeyId = authConfigured ? webBotAuthKeyId() : undefined;
       if (authConfigured && prior.webBotAuthKeyId !== expectedKeyId) throw new E2BBrowserError("Web Bot Auth identity changed for this retained browser. Stop and start the browser to safely load the new identity.");
       try {
-        const sandbox = await Sandbox.connect(prior.sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+        let sandbox: Sandbox | undefined;
+        let connectError: unknown;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            sandbox = await Sandbox.connect(prior.sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+            break;
+          } catch (error) {
+            connectError = error;
+            if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+          }
+        }
+        if (!sandbox) throw connectError instanceof Error ? connectError : new Error("E2B sandbox connection failed");
         await sandbox.setTimeout(config.e2bTimeoutMs, { requestTimeoutMs: config.e2bRequestTimeoutMs });
         await this.ensureRuntime(sandbox);
         return { sandbox, record: prior };
       } catch (error) {
         if (!create) throw error;
+        await this.runtimeDiagnostics(prior.sandboxId);
         await this.retireSandbox(prior.sandboxId);
         await this.save(userId, undefined);
       }
@@ -128,6 +157,16 @@ export class E2BBrowserEngine {
     }
   }
 
+  private async runtimeDiagnostics(sandboxId: string): Promise<string> {
+    try {
+      const sandbox = await Sandbox.connect(sandboxId, { apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      const result = await sandbox.commands.run("printf '%s\\n' '[processes]'; ps -eo pid,comm,args | grep -E 'Xvfb|fluxbox|browser-agent|chromium' | grep -v grep | head -20; for file in /tmp/chusky-xvfb.log /tmp/chusky-fluxbox.log /tmp/chusky-browser.log; do if [ -f \"$file\" ]; then printf '%s\\n' \"[$file]\"; tail -20 \"$file\"; fi; done", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      return redactBrowserText((result.stdout || result.stderr || "").replace(/(?:token|secret|password|cookie|authorization)[^\\n]*/gi, "[redacted]"), 2_000);
+    } catch {
+      return "diagnostics unavailable";
+    }
+  }
+
   private async ensureRuntime(sandbox: Sandbox): Promise<void> {
     const displayEnv = { DISPLAY: ":99", XDG_RUNTIME_DIR: "/tmp/chusky-runtime" };
     const startIfMissing = async (command: string) => {
@@ -145,12 +184,18 @@ export class E2BBrowserEngine {
     await startIfMissing("if [ ! -f /tmp/chusky-browser.pid ] || ! kill -0 $(cat /tmp/chusky-browser.pid) 2>/dev/null; then nohup node /app/browser-agent.mjs --server >/tmp/chusky-browser.log 2>&1 & echo $! >/tmp/chusky-browser.pid; fi");
     let lastError = "browser daemon did not become ready";
     for (let attempt = 0; attempt < 24; attempt += 1) {
-      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:8765/health').then(async r => { console.log(r.ok ? 'ready' : 'not-ready'); await r.text(); }).catch(() => console.log('not-ready'))\"", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
-      if (probe.exitCode === 0 && probe.stdout.trim().split(/\r?\n/).at(-1) === "ready") return;
-      lastError = (probe.stderr || probe.stdout || lastError).trim().slice(0, 300);
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      const probe = await sandbox.commands.run("node -e \"fetch('http://127.0.0.1:8765/health').then(async r => { console.log(JSON.stringify({status:r.status,body:await r.text()})); }).catch(error => console.log(JSON.stringify({error:String(error)})))\"", { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs });
+      const probeText = probe.stdout.trim().split(/\r?\n/).at(-1) || "";
+      try {
+        const payload = JSON.parse(probeText) as { status?: number; body?: string; error?: string };
+        if (payload.status === 200 && payload.body && JSON.parse(payload.body).ok === true) return;
+        lastError = redactBrowserText(payload.body || payload.error || lastError, 500);
+      } catch {
+        lastError = redactBrowserText((probe.stderr || probe.stdout || lastError).trim(), 500);
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, 250 * 2 ** Math.min(attempt, 3))));
     }
-    throw new E2BBrowserError(`E2B browser daemon did not become ready: ${lastError}`);
+    throw new E2BBrowserError(`E2B browser daemon did not become ready: ${lastError}; ${await this.runtimeDiagnostics(sandbox.sandboxId)}`);
   }
 
   private async run(sandbox: Sandbox, request: Record<string, unknown>): Promise<E2BCommandResult> {
@@ -161,9 +206,17 @@ export class E2BBrowserEngine {
       timeoutMs: Math.min(config.e2bRequestTimeoutMs, 60_000),
       requestTimeoutMs: config.e2bRequestTimeoutMs,
     });
-    if (result.exitCode !== 0) throw new E2BBrowserError(`E2B browser action failed: ${redactBrowserText(result.stderr || result.stdout, 800)}`);
+    if (result.exitCode !== 0) {
+      const message = redactBrowserText(result.stderr || result.stdout, 800);
+      const code = browserFailureCode(message);
+      throw new E2BBrowserError(`E2B browser action failed [${code}]: ${message}${["stale_observation", "control_missing", "control_ambiguous", "frame_missing"].includes(code) ? ". Reinspect the current page before retrying; do not replay the same selector." : ""}`, code);
+    }
     const parsed = parseResult(result.stdout, result.stderr);
-    if (parsed.ok !== true) throw new E2BBrowserError(redactBrowserText(parsed.error || "E2B browser action failed", 800));
+    if (parsed.ok !== true) {
+      const message = redactBrowserText(parsed.error || "E2B browser action failed", 800);
+      const code = browserFailureCode(message);
+      throw new E2BBrowserError(`${code}: ${message}${["stale_observation", "control_missing", "control_ambiguous", "frame_missing"].includes(code) ? ". Reinspect the current page before retrying; do not replay the same selector." : ""}`, code);
+    }
     return parsed;
   }
 
@@ -252,6 +305,9 @@ export class E2BBrowserEngine {
       ...record,
       ...(typeof result.url === "string" ? { lastUrl: result.url } : {}),
       ...(typeof result.title === "string" ? { title: redactBrowserText(result.title, 160) } : {}),
+      ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}),
+      ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
+      ...(result.health && typeof result.health === "object" ? { health: result.health } : {}),
       nodes: nodes.length ? nodes : record.nodes,
       updatedAt: now,
       expiresAt: record.sessionId ? record.expiresAt : now + config.e2bTimeoutMs,
@@ -304,7 +360,13 @@ export class E2BBrowserEngine {
         if (!record?.sandboxId || record.expiresAt <= Date.now()) {
           return { provider: "e2b", action, status: "stopped" };
         }
-        return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt };
+        try {
+          const { sandbox } = await this.sandbox(userId, false);
+          const health = await this.run(sandbox, { action: "health" });
+          return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: health.health ?? health };
+        } catch (error) {
+          return { provider: "e2b", sandboxId: record.sandboxId, lastUrl: record.lastUrl, title: record.title, sessionId: record.sessionId, expiresAt: record.expiresAt, health: { status: "unhealthy", error: redactBrowserText(error instanceof Error ? error.message : String(error), 400) } };
+        }
       }
       if (["download_get", "recording_download", "recording_get"].includes(action)) {
         if (!internal.ownerPrivateRun) throw new E2BBrowserError("Private browser files can only be retrieved in the owner's private conversation");
@@ -362,7 +424,7 @@ export class E2BBrowserEngine {
       if (["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"].includes(action) && args.nodeId) {
         const saved = record.nodes?.find((item) => item.nodeId === args.nodeId);
         if (!saved || Date.now() - saved.capturedAt > NODE_TTL_MS) throw new E2BBrowserError("E2B browser interaction requires a fresh find/state result");
-        Object.assign(request, { selector: { role: saved.role, name: saved.name, index: saved.index }, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+        Object.assign(request, { selector: { role: saved.role, name: saved.name, index: saved.index, id: saved.id, nameAttr: saved.nameAttr, placeholder: saved.placeholder, autocomplete: saved.autocomplete, inputType: saved.inputType, tagName: saved.tagName, frameIndex: saved.frameIndex, frameUrl: saved.frameUrl, observationId: saved.observationId, pageGeneration: saved.pageGeneration }, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
       }
       if (action === "upload" || action === "upload_files") {
         if (!internal.ownerPrivateRun) throw new E2BBrowserError("File uploads are available only in the owner's private conversation");
@@ -385,11 +447,11 @@ export class E2BBrowserEngine {
         const source = record.nodes?.find((item) => item.nodeId === args.startNodeId);
         const target = record.nodes?.find((item) => item.nodeId === args.endNodeId);
         if (!source || !target) throw new E2BBrowserError("E2B drag requires fresh startNodeId and endNodeId results");
-        request.source = { role: source.role, name: source.name, index: source.index };
-        request.target = { role: target.role, name: target.name, index: target.index };
+        request.source = { role: source.role, name: source.name, index: source.index, frameIndex: source.frameIndex, frameUrl: source.frameUrl, observationId: source.observationId, pageGeneration: source.pageGeneration };
+        request.target = { role: target.role, name: target.name, index: target.index, frameIndex: target.frameIndex, frameUrl: target.frameUrl, observationId: target.observationId, pageGeneration: target.pageGeneration };
       }
       if (action === "scroll") Object.assign(request, { direction: args.direction === "up" ? "up" : "down", amount: Math.max(1, Math.min(10, Number(args.amount ?? 3))) });
-      if (action === "wait") request.timeoutMs = Math.max(50, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 1_000) * (args.timeoutSeconds ? 1_000 : 1)));
+      if (action === "wait") Object.assign(request, { timeoutMs: Math.max(50, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 1_000) * (args.timeoutSeconds ? 1_000 : 1))), ...(args.role ? { role: args.role } : {}), ...(args.name ? { name: args.name, nameMatch: args.nameMatch } : {}) });
       if (action === "tab_focus") request.index = Number(args.index ?? 0);
       if (action === "screenshot_region") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
       if (action === "screenshot_region_full") Object.assign(request, { x: args.x, y: args.y, width: args.width, height: args.height });
@@ -409,13 +471,13 @@ export class E2BBrowserEngine {
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes);
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
+      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
       if (action === "state" || action === "snapshot" || action === "open" || action === "back" || action === "forward" || action === "refresh") {
-        return { ...safeWithChallenge, accessibility: { role: "main", children: nodes.map(({ nodeId, role, name }) => ({ nodeId, role, name })) }, verificationRequired: action !== "state" };
+        return { ...safeWithChallenge, accessibility: { role: "main", children: nodes.map(({ nodeId, role, name, frameIndex, frameUrl, observationId, pageGeneration }) => ({ nodeId, role, name, ...(frameIndex !== undefined ? { frameIndex } : {}), ...(frameUrl ? { frameUrl } : {}), ...(observationId ? { observationId } : {}), ...(pageGeneration !== undefined ? { pageGeneration } : {}) })) }, verificationRequired: !["state", "snapshot", "find", "health", "status", "start"].includes(action) };
       }
-      return safeWithChallenge;
+      return { ...safeWithChallenge, verificationRequired: !["state", "snapshot", "find", "health", "status", "start"].includes(action) };
     });
   }
 
@@ -435,7 +497,7 @@ export class E2BBrowserEngine {
       if (typeof args.value !== "string" || !args.value || args.value.length > 256) throw new E2BBrowserError("Secure checkout field value is invalid");
       const { sandbox } = await this.sandbox(userId, false);
       await guardVaultBrowserAction(userId, record.sandboxId, { action: "fill", currentUrl: record.lastUrl }, true, true);
-      const result = await this.run(sandbox, { action: "fill", currentUrl: record.lastUrl, selector: { role: node.role, name: node.name, index: node.index }, value: args.value });
+      const result = await this.run(sandbox, { action: "fill", currentUrl: record.lastUrl, selector: { role: node.role, name: node.name, index: node.index, frameIndex: node.frameIndex, frameUrl: node.frameUrl, observationId: node.observationId, pageGeneration: node.pageGeneration }, value: args.value });
       await this.persistResult(userId, record, result);
       return { provider: "e2b", action: "secure_fill", filled: true };
     });
