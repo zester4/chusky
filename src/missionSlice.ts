@@ -1,4 +1,4 @@
-import { getMission, getTask, recordMissionSlice, finalizeMissionIfReady, type TaskRecord, type MissionRecord, type MissionStepRecord } from "./store.js";
+import { checkpointMission, getMission, getTask, recordMissionSlice, finalizeMissionIfReady, type TaskRecord, type MissionRecord, type MissionStepRecord } from "./store.js";
 import { captureMissionSliceState, missionSliceHasPersistedProgress, missionNoProgressNextAction, type MissionSliceState } from "./missionWorker.js";
 import { reconcileMissionExecution, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import type { TaskRunResult } from "./taskRunner.js";
@@ -18,9 +18,26 @@ export interface MissionSliceInput {
 /** Production post-turn accounting and dependency handoff, independent of HTTP. */
 export async function settleMissionSlice({ task, mission, currentMissionStep, result, before, enqueue }: MissionSliceInput): Promise<TaskRunResult> {
   const uncertainExternal = (result.toolOutcomes ?? []).some((outcome) => outcome.status === "uncertain" && outcome.dispatched !== false && !outcome.toolSlug.startsWith("CHUCK_"));
-  const currentMissionBeforeAccounting = await getMission(task.userId, mission.id);
-  const currentTaskAfterTurn = await getTask(task.userId, task.id);
-  const missionSliceAfter = captureMissionSliceState(currentTaskAfterTurn, currentMissionBeforeAccounting);
+  let currentMissionBeforeAccounting = await getMission(task.userId, mission.id);
+  let currentTaskAfterTurn = await getTask(task.userId, task.id);
+  let missionSliceAfter = captureMissionSliceState(currentTaskAfterTurn, currentMissionBeforeAccounting);
+  const succeededExternal = [...new Set((result.toolsSucceeded ?? []).filter((tool) => !tool.startsWith("CHUCK_")))];
+  // A confirmed provider write is durable progress even when a sloppy model
+  // narrates instead of calling the lifecycle checkpoint tool. Record that
+  // fact before the no-progress policy so the next slice verifies it instead
+  // of blindly repeating the provider action.
+  if (succeededExternal.length && currentMissionBeforeAccounting?.status === "running" && !missionSliceHasPersistedProgress(before, missionSliceAfter)) {
+    const prior = currentMissionBeforeAccounting.checkpoint ? `${currentMissionBeforeAccounting.checkpoint}\n` : "";
+    await checkpointMission(
+      task.userId,
+      mission.id,
+      `${prior}Provider action(s) already succeeded for ${currentMissionStep?.title ?? "the active step"}: ${succeededExternal.join(", ")}. Do not repeat them; verify the outcome, record evidence, and complete the step.`.slice(-8000),
+      `Verify the provider result for ${currentMissionStep?.title ?? "the active step"} without repeating it, then complete the step.`,
+    );
+    currentMissionBeforeAccounting = await getMission(task.userId, mission.id);
+    currentTaskAfterTurn = await getTask(task.userId, task.id);
+    missionSliceAfter = captureMissionSliceState(currentTaskAfterTurn, currentMissionBeforeAccounting);
+  }
   if (uncertainExternal) {
     const message = `Mission worker has an uncertain dispatched provider action for ${currentMissionStep?.title ?? "the active step"}. The outcome must be reconciled before any retry.`;
     const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", toolCalls: result.toolsUsed.length, cost: result.cost, blockedReason: message });

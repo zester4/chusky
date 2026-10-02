@@ -1036,6 +1036,8 @@ export interface TaskRecord {
   maxAttempts: number;
   runAt?: number;
   workflowRunId?: string;
+  /** When the provider accepted the current workflow publication. */
+  workflowPublishedAt?: number;
   /** Short-lived claim used while publishing a task to QStash. */
   enqueueClaim?: { token: string; expiresAt: number };
   lease?: TaskLease;
@@ -2528,7 +2530,8 @@ class RedisBackend implements Backend {
       const current = index < 0 ? undefined : tasks[index];
       const now = Date.now();
       const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-      const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:");
+      const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
+        && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
       if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) { await this.r.unwatch(); return undefined; }
       const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
       tasks[index] = next;
@@ -3663,7 +3666,8 @@ class MemoryBackend implements Backend {
     const current = index < 0 ? undefined : normalizeTask(tasks[index]);
     const now = Date.now();
     const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
-    const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:");
+    const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
+      && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
     if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
     const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
@@ -5672,6 +5676,7 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     attempt: task.attempt ?? 0,
     version: Number.isSafeInteger(task.version) && task.version >= 0 ? task.version : 0,
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
+    ...(typeof task.workflowRunId === "string" && task.workflowRunId && Number.isFinite(task.workflowPublishedAt) && (task.workflowPublishedAt ?? 0) > 0 ? { workflowPublishedAt: Number(task.workflowPublishedAt) } : { workflowPublishedAt: undefined }),
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
     ...(typeof task.missionStepId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(task.missionStepId) ? { missionStepId: task.missionStepId } : { missionStepId: undefined }),
@@ -6499,7 +6504,7 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
     const consumedSlices = (mission.consumedSlices ?? 0) + 1;
     const toolCalls = mission.toolCalls + (Number.isFinite(input.toolCalls) ? Math.max(0, Math.floor(input.toolCalls ?? 0)) : 0);
     const cost = mission.cost + (typeof input.cost === "number" && Number.isFinite(input.cost) ? Math.max(0, input.cost) : 0);
-    if (mission.status !== "running") return { consumedSteps, toolCalls, cost };
+    if (mission.status !== "running") return { consumedSteps, consumedSlices, toolCalls, cost };
     const durationPreflight = missionBudgetPreflight(mission, { steps: 0 });
     const durationExceeded = durationPreflight.remaining.durationSeconds <= 0;
     const budgetExceeded = durationExceeded || consumedSlices > (mission.budget.maxSlices ?? 1000) || toolCalls > mission.budget.maxToolCalls || cost > mission.budget.maxCost;
@@ -6579,7 +6584,7 @@ export async function scheduleTask(userId: number, id: string, runAt: number): P
 export async function setTaskWorkflowRunId(userId: number, id: string, workflowRunId: string, expectedWorkflowRunId?: string): Promise<TaskRecord | undefined> {
   return mutateTask(userId, id, (task) => expectedWorkflowRunId !== undefined && task.workflowRunId !== expectedWorkflowRunId
     ? undefined
-    : { workflowRunId: workflowRunId ? workflowRunId.slice(0, 200) : undefined, enqueueClaim: undefined });
+    : { workflowRunId: workflowRunId ? workflowRunId.slice(0, 200) : undefined, workflowPublishedAt: workflowRunId ? Date.now() : undefined, enqueueClaim: undefined });
 }
 
 export async function checkpointTask(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<TaskRecord | undefined> {

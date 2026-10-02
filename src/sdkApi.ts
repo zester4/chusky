@@ -2613,7 +2613,7 @@ export function registerSdkApi(app: Hono): void {
     const title = typeof body.title === "string" ? body.title.trim() : "";
     const objective = typeof body.objective === "string" ? body.objective.trim() : "";
     const definitionOfDone = typeof body.definitionOfDone === "string" ? body.definitionOfDone.trim() : "";
-    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+    const steps = Array.isArray(body.steps) ? body.steps.flatMap((value) => {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];
@@ -2631,6 +2631,7 @@ export function registerSdkApi(app: Hono): void {
         automaticExtensionSeconds: body.automaticExtensionSeconds as number | undefined,
         maxAutomaticExtensions: body.maxAutomaticExtensions as number | undefined,
         maxSteps: body.maxSteps === undefined ? undefined : Number(body.maxSteps),
+        maxSlices: body.maxSlices === undefined ? undefined : Number(body.maxSlices),
         maxToolCalls: body.maxToolCalls === undefined ? undefined : Number(body.maxToolCalls),
         maxCost: body.maxCost === undefined ? undefined : Number(body.maxCost),
       } });
@@ -2715,7 +2716,7 @@ export function registerSdkApi(app: Hono): void {
     const reason = typeof body.reason === "string" ? body.reason.trim() : "Verified information changed the remaining plan.";
     const invalidSteps = validateMissionStepsPayload(body.steps, { requireNonEmpty: true });
     if (invalidSteps) return apiError(c, 400, "invalid_replan", invalidSteps);
-    const steps = Array.isArray(body.steps) ? body.steps.slice(0, 100).flatMap((value) => {
+    const steps = Array.isArray(body.steps) ? body.steps.flatMap((value) => {
       if (!value || typeof value !== "object") return [];
       const step = value as Record<string, unknown>;
       if (typeof step.title !== "string" || typeof step.objective !== "string") return [];

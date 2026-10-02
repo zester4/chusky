@@ -226,7 +226,11 @@ export async function scheduleMissionSteps(userId: number, mission: MissionRecor
     // treat an expired marker as recoverable rather than waiting forever.
     const pendingClaimExpired = task.workflowRunId?.startsWith("pending:") === true
       && (!task.enqueueClaim || task.enqueueClaim.expiresAt <= Date.now());
-    const overduePublished = task.status === "queued" && typeof task.runAt === "number" && task.runAt <= now && Boolean(task.workflowRunId) && !task.workflowRunId?.startsWith("pending:");
+    // A persisted provider ID normally suppresses replay. Reconsider it only
+    // after a durable outage window, covering accepted-but-lost deliveries
+    // without making an immediate resume publish a duplicate.
+    const overduePublished = task.status === "queued" && typeof task.runAt === "number" && task.runAt <= now && Boolean(task.workflowRunId) && !task.workflowRunId?.startsWith("pending:")
+      && typeof task.workflowPublishedAt === "number" && now - task.workflowPublishedAt >= 60_000;
     if (shouldEnqueue || (task.status === "queued" && (!task.workflowRunId || pendingClaimExpired || overduePublished))) {
       const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? now, enqueue);
       if (workflowRunId) enqueuedStepIds.add(stepId);

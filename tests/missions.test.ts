@@ -64,7 +64,7 @@ test("settling a slice records usage without reviving a blocked or paused missio
   await pauseMission(userId, mission.id);
   const accounted = await recordMissionSlice(userId, mission.id, { toolCalls: 4, cost: 0.2 });
   assert.equal(accounted?.status, "paused");
-  assert.equal(accounted?.consumedSteps, 1);
+  assert.equal(accounted?.consumedSlices, 1);
   assert.equal(accounted?.toolCalls, 4);
   assert.equal(accounted?.cost, 0.2);
 });
@@ -81,7 +81,7 @@ test("uncertain external progress charges the slice before atomically blocking t
     blockedReason: "An external provider action was attempted without a durable receipt.",
   });
   assert.equal(blocked?.status, "blocked");
-  assert.equal(blocked?.consumedSteps, 1);
+  assert.equal(blocked?.consumedSlices, 1);
   assert.equal(blocked?.toolCalls, 2);
   assert.equal(blocked?.cost, 0.35);
   assert.match(blocked?.error ?? "", /without a durable receipt/);

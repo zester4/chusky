@@ -1675,6 +1675,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           automaticExtensionSeconds: args.automaticExtensionSeconds as number | undefined,
           maxAutomaticExtensions: args.maxAutomaticExtensions as number | undefined,
           maxSteps: args.maxSteps === undefined ? undefined : Number(args.maxSteps),
+          maxSlices: args.maxSlices === undefined ? undefined : Number(args.maxSlices),
           maxToolCalls: args.maxToolCalls === undefined ? undefined : Number(args.maxToolCalls),
           maxCost: args.maxCost === undefined ? undefined : Number(args.maxCost),
         },

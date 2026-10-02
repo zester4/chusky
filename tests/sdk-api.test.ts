@@ -820,8 +820,8 @@ test("SDK autonomous missions are idempotent, owner-scoped, and controllable", a
   assert.match(await invalidMode.text(), /verificationMode must be either legacy or strict/i);
   const malformedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Malformed plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: [{ title: "Keep this", objective: "Do this." }, null] }) }));
   assert.equal(malformedPlan.status, 400, "the API must reject rather than silently drop malformed plan steps");
-  const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 101 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
-  assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over 100 steps");
+  const oversizedPlan = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body: JSON.stringify({ title: "Oversized plan", objective: "Do the task.", definitionOfDone: "The result is verified.", steps: Array.from({ length: 1001 }, (_, index) => ({ title: `Step ${index}`, objective: "Do work." })) }) }));
+  assert.equal(oversizedPlan.status, 400, "the API must reject rather than silently truncate plans over the published maximum");
   const body = JSON.stringify({ title: "Verify launch brief", objective: "Research and verify the launch brief.", definitionOfDone: "Every required claim has a source and the brief is ready.", steps: [{ id: "research", title: "Research", objective: "Collect verified sources." }, { id: "draft", title: "Draft", objective: "Write the brief.", dependsOn: ["research"] }] });
   const first = await api.fetch(new Request("http://local/v1/missions", { method: "POST", headers, body }));
   assert.equal(first.status, 201);
