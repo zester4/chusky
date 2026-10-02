@@ -2624,7 +2624,7 @@ export function registerSdkApi(app: Hono): void {
     const idempotencyKey = (c.req.header("Idempotency-Key") ?? (typeof body.idempotencyKey === "string" ? body.idempotencyKey : "")).trim().slice(0, 200) || undefined;
     try {
       const requiredEvidence = Array.isArray(body.requiredEvidence) ? body.requiredEvidence.filter((item): item is string => typeof item === "string") : undefined;
-      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", budget: {
+      const mission = await createMission(owner.userId, { title, objective, definitionOfDone, idempotencyKey, steps, requiredEvidence, verificationMode: body.verificationMode === "strict" || (body.verificationMode === undefined && Boolean(requiredEvidence?.length)) ? "strict" : "legacy", budgetCeiling: body.budgetCeiling && typeof body.budgetCeiling === "object" && !Array.isArray(body.budgetCeiling) ? body.budgetCeiling as Record<string, number> : undefined, budget: {
         maxDurationSeconds: body.maxDurationSeconds === undefined ? undefined : Number(body.maxDurationSeconds),
         durationMode: body.durationMode as "active" | "wall_clock" | undefined,
         maxLifetimeSeconds: body.maxLifetimeSeconds as number | undefined,

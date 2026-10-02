@@ -272,8 +272,10 @@ function missionStartIdempotencyKey(userId: number, args: Record<string, unknown
     budget: {
       maxDurationSeconds: args.maxDurationSeconds,
       maxSteps: args.maxSteps,
+      maxSlices: args.maxSlices,
       maxToolCalls: args.maxToolCalls,
       maxCost: args.maxCost,
+      budgetCeiling: args.budgetCeiling,
     },
     workSchedule: args.workSchedule,
   };
@@ -1679,6 +1681,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           maxToolCalls: args.maxToolCalls === undefined ? undefined : Number(args.maxToolCalls),
           maxCost: args.maxCost === undefined ? undefined : Number(args.maxCost),
         },
+        budgetCeiling: args.budgetCeiling && typeof args.budgetCeiling === "object" && !Array.isArray(args.budgetCeiling) ? Object.fromEntries(["maxDurationSeconds", "maxSteps", "maxSlices", "maxToolCalls", "maxCost"].filter((key) => (args.budgetCeiling as Record<string, unknown>)[key] !== undefined).map((key) => [key, Number((args.budgetCeiling as Record<string, unknown>)[key])])) : undefined,
       });
       if (mission.status === "queued") {
         const started = await startMission(userId, mission.id);
