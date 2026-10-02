@@ -1,13 +1,14 @@
 # Mission execution kernel audit
 
 Date: 2026-10-02. Branch: `mission-execution-kernel`.
-Baseline: `ed4d6bb5c871315ad1933cdc15251d68b0ce9287`.
+Baseline: `6614164698504157227cfc9103f468e67553f183`.
 
 ## Status and evidence standard
 
 Phase 0 is in progress. This is a defect inventory, **not a release certificate**.
-No runtime repair has been applied. Existing test-file references identify
-coverage to inspect, not tests rerun or end-to-end guarantees. A path is marked
+Runtime repairs have been applied through the baseline above. The evidence
+column names tests actually rerun for this audit; it is not a release
+certificate. A path is marked
 untested where the requested crash/transport/window proof does not exist or has
 not been established. Broken means a concrete code path contradicts the target.
 The unrelated `chusky-voice` working-tree edits are excluded from this work.
@@ -43,8 +44,8 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Step completion | `store.completeMissionStep`; `completeMissionStepAndAdvance` | `missions` tests | Untested: full-route evidence-driven completion with sloppy model and crash boundaries. |
 | Fan-out / join | `readyMissionSteps`, `scheduleMissionSteps` | `missions` tests | Broken: DAG fan-out exists, but HTTP worker acquires a mission-wide lease and owner lock, serializing execution. A mission-wide wait also parks unrelated branches. |
 | Checkpoint | `checkpointMission`; `missionSliceHasPersistedProgress` | `mission-worker`, `missions` tests | Broken: arbitrary event/state differences can count as progress; repeated identical checkpoint events can reset a future retry policy without advancing work. |
-| Timer wait / wake | `waitMission`, `resumeMissionFromTimer`; HTTP timer branch | `mission-timing`, `mission-worker`, `task-wait` tests | Broken: low-level timer resume checks exact timestamp but not that the timestamp elapsed. No daily scheduling contract. |
-| Provider event wait / resume | `resumeMissionFromProviderEvent`; SDK signed events route | `missions`, SDK route tests | Broken: replay detection uses message substring rather than exact structured event identity. Delivery/restart proof remains missing. |
+| Timer wait / wake | `waitMission`, `resumeMissionFromTimer`; HTTP timer branch | `mission-timing`, `mission-worker`, `task-wait`, `mission-kernel-proof` tests | Partial repair: timer resume now rejects future deadlines and the scheduler emits the next daily work-window wake; live QStash wake delivery remains an integration follow-up. |
+| Provider event wait / resume | `resumeMissionFromProviderEvent`; SDK signed events route | `missions`, SDK route tests, `mission-kernel-proof` | Partial repair: replay detection uses exact provider/event identity; signed delivery/restart proof remains missing. |
 | Approval wait / resume | `missionApproval`; `resumeMissionFromApproval`; callbacks | `mission-approval`, `approval`, SDK tests | Untested: mixed parallel branch approval, crash after approval claim, and same-task end-to-end continuation. |
 | Human-input wait | mission waiting union; HTTP waiting dispatch | None established for whole route | Broken: no explicit human-input stop branch; dispatch falls through toward execution. |
 | Replan | `replanMission`, `replanMissionAndSchedule`; SDK replan mapping | `missions` tests | Broken: unfinished step reconstruction loses typed/evidence/compensation metadata; retained task IDs can preserve stale objective/fences. No plan-revision fencing of in-flight work. |
@@ -53,17 +54,17 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Pause | `pauseMission`, `cancelMissionTasks`; native/API surfaces | `missions`, route tests | Untested: cancellation of in-flight provider/model work and late completion after pause across processes. |
 | Resume | `resumeMission`, `resumeMissionAndSchedule` | `missions`, `mission-timing` tests | Broken: scheduler retries blocked/failed/cancelled step tasks without a machine-readable safe-replay distinction. |
 | Cancel | `cancelMission`, `cancelTask`; abort polling | `tasks`, `task-runner`, route tests | Untested: late external response, duplicate continuation and lease loss at every await. Cancellation cannot undo an already-dispatched provider effect. |
-| Budget preflight | `missionBudgetPreflight`; HTTP worker admission | `mission-timing`, `missions` tests | Broken: `consumedSteps` increments per slice, not completed plan step; repeated same-slug calls undercount through deduplicated tool sets. |
+| Budget preflight | `missionBudgetPreflight`; HTTP worker admission | `mission-timing`, `missions`, `mission-kernel-proof` | Partial repair: completed plan steps and worker slices are separate counters, and `maxSlices` is independently enforced; per-call provider outcome accounting remains incomplete. |
 | Budget extend | `extendMissionDurationIfEligible`, duration approval | `mission-timing`, `mission-approval` tests | Broken: only narrow active-duration extension exists, not general owner-ceiling management of slices/tools/cost. |
 | Budget reduce | `resumeMission` rejects smaller duration | No reduction coverage | Broken: no supported shrink operation. |
 | Work schedule / rest | No mission schedule field | No coverage | Broken: healthy slices requeue approximately every five seconds; no hours/day, windows, cadence or timezone. |
-| Lease renew / loss | `renewTaskLease`; task runner renewal; HTTP mission renewal | `task-runner`, `tasks` tests | Broken: settlement checks token but not expiry; expired holder can settle before replacement. Mission lease is released before post-turn accounting. |
-| Duplicate delivery | deterministic task IDs; enqueue claims; task leases | `task-enqueue`, `task-runner`, `tasks` tests | Untested: duplicate/reordered deliveries combined with replan, restart and ambiguous provider siblings. |
-| Retry loop | `settleTaskRun`, backend claim, HTTP ten-iteration loop | `task-runner` tests | Broken: healthy continuation consumes attempts; no reset on genuine progress. Prompt labels every attempt above one as prior no-progress. |
+| Lease renew / loss | `renewTaskLease`; task runner renewal; HTTP mission renewal | `task-runner`, `tasks`, `mission-kernel-proof` tests | Partial repair: renewal and settlement reject expired tokens, and replacement workers receive a new lease; post-turn mission accounting still needs a broader crash proof. |
+| Duplicate delivery | deterministic task IDs; enqueue claims; task leases | `task-enqueue`, `task-runner`, `tasks`, `real-world-upgrade`, `mission-kernel-proof` tests | Partial repair: deterministic task identity, publication timestamp recovery, and lease fencing prevent immediate duplicate continuations; reordered provider siblings remain a separate proof. |
+| Retry loop | `settleTaskRun`, backend claim, HTTP ten-iteration loop | `task-runner`, `missions`, `mission-kernel-proof` tests | Partial repair: healthy persisted progress resets the consecutive retry budget and the worker prompt no longer treats every later slice as no-progress. Automatic repair after exhaustion remains incomplete. |
 | Recovery sweeper | `missionRecovery.recoverAllMissions`, `recoverMissionsForOwner`; two-minute interval in `index.ts` | `tests/mission-recovery.test.ts` | Works for bounded owner discovery, lost queued delivery, overdue timer wakes, and conservative expired-lease quarantine; live multi-instance cadence and QStash publication remain integration follow-ups. |
 | Closeout / verify | `verifyMission`, `finalizeMissionIfReady`, scheduler closeout | `missions`, `reliability` tests | Untested: 200-step strict evidence retention and mutation tests. Legacy closeout is intentionally different and must stay explicitly labelled. |
-| Event history | normalized `mission.events` / evidence arrays | `missions`, replay tests | Broken: last 500 events and 100 mission evidence entries retained; long-horizon proof history is truncated. |
-| Record retention | Redis and memory `createTaskIfAbsent` / `createMissionIfAbsent` | Existing tests do not establish active-record retention | Broken: insertion retains only the newest 100 records, regardless of status. Creating enough work can evict an unfinished task or mission. Memory task CAS also truncates the list. |
+| Event history | normalized `mission.events` / evidence arrays | `missions`, replay tests | Partial: bounded history remains an intentional storage limit; long-horizon archival/event-stream proof is still missing. |
+| Record retention | Redis and memory `createTaskIfAbsent` / `createMissionIfAbsent` | `mission-kernel-proof` | Partial repair: unfinished tasks are retained while completed/cancelled task history is bounded; mission archival and long-horizon event retention remain open. |
 | Notifications / daily digest | mission update notifier; delivery/outbox paths | Delivery tests; no schedule digest proof | Untested: channel-neutral deduplicated blocker/daily digest recovery. |
 | Delegation | `subagents/executor`; `/workflows/subagent` | `subagents`, delegation tests | Broken: continuation marks task running without leased claim; child task lacks mission linkage; provider path needs mission receipt fencing; prose can be classified success. |
 | Native mission/task tools inside worker | `nativeTools`; `MISSION_WORKER_CONTROL_TOOLS`; agent catalog | `mission-native-limits`, `agent-contract`, tool schema tests | Untested: every tool from actual worker context, including deliberate supervisor-only rejection and wait linkage. |
