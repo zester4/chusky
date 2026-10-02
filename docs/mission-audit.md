@@ -49,7 +49,7 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Approval wait / resume | `missionApproval`; `resumeMissionFromApproval`; callbacks | `mission-approval`, `approval`, SDK tests | Untested: mixed parallel branch approval, crash after approval claim, and same-task end-to-end continuation. |
 | Human-input wait | mission waiting union; HTTP waiting dispatch | None established for whole route | Broken: no explicit human-input stop branch; dispatch falls through toward execution. |
 | Replan | `replanMission`, `replanMissionAndSchedule`; SDK replan mapping | `missions` tests | Broken: unfinished step reconstruction loses typed/evidence/compensation metadata; retained task IDs can preserve stale objective/fences. No plan-revision fencing of in-flight work. |
-| Repair | `repairMission`; reliability `diagnoseMissionRepair` | `missions`, `reliability` tests | Broken: diagnosis exists, but exhausted task retries immediately fail the mission rather than entering bounded automatic repair. |
+| Repair | `repairMission`; `claimMissionAutomaticRepair`; `missionRecovery.recoverMissionsForOwner`; reliability `diagnoseMissionRepair` | `missions`, `reliability`, `mission-recovery` tests | Partial repair: a server-classified no-progress exhaustion receives one CAS-claimed automatic reactivation; provider-failed and provider-uncertain outcomes remain manual and cannot be replayed. |
 | Compensation | `autonomy/actions`; reliability persistence / native compensation | `autonomy-actions`, `reliability` tests | Untested: leased execution, provider read-back, approval and restart of compensation attached to a failed branch. |
 | Pause | `pauseMission`, `cancelMissionTasks`; native/API surfaces | `missions`, route tests | Untested: cancellation of in-flight provider/model work and late completion after pause across processes. |
 | Resume | `resumeMission`, `resumeMissionAndSchedule` | `missions`, `mission-timing` tests | Broken: scheduler retries blocked/failed/cancelled step tasks without a machine-readable safe-replay distinction. |
@@ -60,8 +60,8 @@ The unrelated `chusky-voice` working-tree edits are excluded from this work.
 | Work schedule / rest | No mission schedule field | No coverage | Broken: healthy slices requeue approximately every five seconds; no hours/day, windows, cadence or timezone. |
 | Lease renew / loss | `renewTaskLease`; task runner renewal; HTTP mission renewal | `task-runner`, `tasks`, `mission-kernel-proof` tests | Partial repair: renewal and settlement reject expired tokens, and replacement workers receive a new lease; post-turn mission accounting still needs a broader crash proof. |
 | Duplicate delivery | deterministic task IDs; enqueue claims; task leases | `task-enqueue`, `task-runner`, `tasks`, `real-world-upgrade`, `mission-kernel-proof` tests | Partial repair: deterministic task identity, publication timestamp recovery, and lease fencing prevent immediate duplicate continuations; reordered provider siblings remain a separate proof. |
-| Retry loop | `settleTaskRun`, backend claim, HTTP ten-iteration loop | `task-runner`, `missions`, `mission-kernel-proof` tests | Partial repair: healthy persisted progress resets the consecutive retry budget and the worker prompt no longer treats every later slice as no-progress. Automatic repair after exhaustion remains incomplete. |
-| Recovery sweeper | `missionRecovery.recoverAllMissions`, `recoverMissionsForOwner`; two-minute interval in `index.ts` | `tests/mission-recovery.test.ts` | Works for bounded owner discovery, lost queued delivery, overdue timer wakes, and conservative expired-lease quarantine; live multi-instance cadence and QStash publication remain integration follow-ups. |
+| Retry loop | `settleTaskRun`, backend claim, HTTP ten-iteration loop, `TaskFailureClass` | `task-runner`, `missions`, `mission-kernel-proof`, `mission-recovery` tests | Partial repair: healthy persisted progress resets the consecutive retry budget; terminal no-progress failures carry a typed class and receive one bounded sweeper repair. Provider uncertainty is preserved as a manual blocker. |
+| Recovery sweeper | `missionRecovery.recoverAllMissions`, `recoverMissionsForOwner`; two-minute interval in `index.ts` | `tests/mission-recovery.test.ts` | Partial repair: bounded owner discovery, lost queued delivery, overdue timer wakes, conservative expired-lease quarantine, and one idempotent no-progress repair are covered; live multi-instance cadence and QStash publication remain integration follow-ups. |
 | Closeout / verify | `verifyMission`, `finalizeMissionIfReady`, scheduler closeout | `missions`, `reliability` tests | Untested: 200-step strict evidence retention and mutation tests. Legacy closeout is intentionally different and must stay explicitly labelled. |
 | Event history | normalized `mission.events` / evidence arrays | `missions`, replay tests | Partial: bounded history remains an intentional storage limit; long-horizon archival/event-stream proof is still missing. |
 | Record retention | Redis and memory `createTaskIfAbsent` / `createMissionIfAbsent` | `mission-kernel-proof` | Partial repair: unfinished tasks are retained while completed/cancelled task history is bounded; mission archival and long-horizon event retention remain open. |
@@ -322,3 +322,13 @@ The recovery path is now independent of a fresh QStash delivery. Mission creatio
 | Provider-event, approval, or human-input wait | No automatic resume; the exact external control remains authoritative | Covered by existing provider-event, approval, and human-input wait suites |
 
 The application starts a bounded two-minute recovery interval after store and handler initialization. The interval is `unref()`'d and cleared during shutdown. The sweeper is intentionally conservative around expired leases: lease loss is not proof that a provider write did not happen.
+
+### Bounded retry-repair proof (2026-10-02)
+
+Task settlement now persists a typed `lastFailureClass` rather than forcing the
+recovery layer to infer safety from prose. Only `no_progress` is eligible for
+one automatic repair claim; the claim is CAS-protected, resets the consecutive
+task attempt counter, and resumes the existing mission/step/task identity.
+`provider_uncertain` and `provider_failed` never enter this path and retain the
+manual receipt/read-back boundary. `tests/mission-recovery.test.ts` proves the
+repair, the second-sweep idempotency, and the uncertain-provider refusal.

@@ -1,5 +1,6 @@
 import {
   blockMission,
+  claimMissionAutomaticRepair,
   getMission,
   listMissionOwnerIds,
   listMissions,
@@ -42,7 +43,7 @@ export async function recoverMissionsForOwner(
 ): Promise<MissionRecoveryReport> {
   const report: MissionRecoveryReport = { ownersScanned: 1, missionsScanned: 0, repaired: 0, republished: 0, timerWakes: 0, quarantined: 0, blocked: 0, errors: 0 };
   const now = options.now ?? Date.now();
-  const missions = (await listMissions(userId)).filter((mission) => ["running", "waiting"].includes(mission.status)).slice(0, options.maxMissionsPerOwner ?? 100);
+  const missions = (await listMissions(userId)).filter((mission) => ["running", "waiting", "failed"].includes(mission.status)).slice(0, options.maxMissionsPerOwner ?? 100);
   report.missionsScanned = missions.length;
   for (const mission of missions) {
     try {
@@ -51,6 +52,18 @@ export async function recoverMissionsForOwner(
         if (mission.waiting?.kind !== "timer" || !mission.waiting.runAt || mission.waiting.runAt > now) continue;
         const resumed = await resumeMissionAndSchedule(userId, mission.id, enqueue);
         if (resumed?.status === "running") report.timerWakes++;
+        if (resumed?.status === "running") report.repaired++;
+        continue;
+      }
+
+      if (mission.status === "failed") {
+        const failedTask = tasks.find((task) => task.status === "failed" && task.missionStepId && task.lastFailureClass === "no_progress");
+        if (!failedTask) continue;
+        // Only a server-classified no-progress failure is eligible. Provider
+        // failures and uncertain outcomes remain manual recovery cases.
+        const claimedRepair = await claimMissionAutomaticRepair(userId, failedTask.id);
+        if (!claimedRepair) continue;
+        const resumed = await resumeMissionAndSchedule(userId, mission.id, enqueue);
         if (resumed?.status === "running") report.repaired++;
         continue;
       }
@@ -67,6 +80,17 @@ export async function recoverMissionsForOwner(
         }
         continue;
       }
+
+      const activeStepIds = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
+      const needsScheduling = [...activeStepIds].some((stepId) => {
+        const task = tasks.find((candidate) => candidate.missionStepId === stepId && !["completed", "cancelled"].includes(candidate.status));
+        if (!task) return true;
+        if (task.status !== "queued" || !task.workflowRunId || task.workflowRunId.startsWith("pending:")) return true;
+        // A recently accepted publication is already the durable recovery
+        // record. Do not publish it again merely because the sweeper ran.
+        return typeof task.workflowPublishedAt === "number" && now - task.workflowPublishedAt >= 60_000;
+      });
+      if (activeStepIds.size && !needsScheduling) continue;
 
       const before = await getMission(userId, mission.id);
       const reconciled = await reconcileMissionExecution(userId, mission.id, enqueue);

@@ -8,6 +8,7 @@ import {
   initStore,
   listTasks,
   startMission,
+  settleTaskRun,
   updateTask,
   waitMission,
 } from "../src/store.js";
@@ -78,4 +79,53 @@ test("sweeper quarantines an expired in-flight lease instead of replaying uncert
   assert.equal(afterTask?.lease, undefined);
   assert.equal(afterMission?.status, "blocked");
   assert.match(afterMission?.nextAction ?? "", /receipt|read-back/i);
+});
+
+test("sweeper performs one bounded automatic repair for a no-progress mission task", async () => {
+  const userId = 981005;
+  const mission = await runningMission(userId, "no-progress-repair");
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+  await updateTask(userId, task.id, { maxAttempts: 1 });
+  const claimed = await claimTask(userId, task.id, "stuck-worker", 60_000);
+  assert.ok(claimed?.lease);
+  await settleTaskRun(userId, task.id, claimed!.lease!.token, {
+    status: "failed",
+    message: "Mission worker ended the slice without persisting progress.",
+    failureClass: "no_progress",
+  });
+  assert.equal((await getMission(userId, mission.id))?.status, "failed");
+
+  const report = await recoverMissionsForOwner(userId, enqueue);
+  const repaired = await getMission(userId, mission.id);
+  const repairedTask = await getTask(userId, task.id);
+  assert.equal(report.repaired, 1);
+  assert.equal(repaired?.status, "running");
+  assert.equal(repairedTask?.status, "queued");
+  assert.equal(repairedTask?.attempt, 0);
+  assert.ok(repaired?.events.some((event) => /repaired|reactivated|recovered/i.test(event.message)));
+
+  const second = await recoverMissionsForOwner(userId, enqueue);
+  assert.equal(second.republished, 0, `Automatic repair must be bounded and idempotent: ${JSON.stringify(second)}`);
+});
+
+test("sweeper never auto-repairs a failed task with an uncertain provider outcome", async () => {
+  const userId = 981006;
+  const mission = await runningMission(userId, "uncertain-no-replay");
+  const task = (await listTasks(userId)).find((item) => item.missionId === mission.id)!;
+  await updateTask(userId, task.id, { maxAttempts: 1 });
+  const claimed = await claimTask(userId, task.id, "uncertain-worker", 60_000);
+  assert.ok(claimed?.lease);
+  await settleTaskRun(userId, task.id, claimed!.lease!.token, {
+    status: "failed",
+    message: "Provider outcome is uncertain after a timeout.",
+    failureClass: "provider_uncertain",
+  });
+
+  const report = await recoverMissionsForOwner(userId, enqueue);
+  const after = await getMission(userId, mission.id);
+  const afterTask = await getTask(userId, task.id);
+  assert.equal(report.repaired, 0);
+  assert.equal(after?.status, "failed");
+  assert.equal(afterTask?.status, "failed");
+  assert.match(after?.nextAction ?? "", /repair|replan/i);
 });

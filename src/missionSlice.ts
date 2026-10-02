@@ -54,7 +54,7 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
       ? `Mission worker has an uncertain dispatched provider action for ${currentMissionStep?.title ?? "the active step"}. The outcome must be reconciled before any retry.`
       : `Mission worker has a dispatched provider action that did not return a successful outcome for ${currentMissionStep?.title ?? "the active step"}. Inspect the provider result before resuming.`;
     const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", toolCalls: missionToolCallCount(result), cost: result.cost, blockedReason: message });
-    return { status: "blocked", message: accounted?.error ?? message, checkpoint: accounted?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known." };
+    return { status: "blocked", message: accounted?.error ?? message, checkpoint: accounted?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? "Inspect the provider receipt/state, then resume this same mission only after the outcome is known.", failureClass: uncertainExternal ? "provider_uncertain" : "provider_failed" };
   }
   if (!missionSliceHasPersistedProgress(before, missionSliceAfter)) {
     const externalAttempt = (result.toolOutcomes?.length
@@ -72,9 +72,9 @@ export async function settleMissionSlice({ task, mission, currentMissionStep, re
       ...(externalAttempt ? { blockedReason: noProgressMessage } : {}),
     });
     if (externalAttempt || accounted?.status === "blocked") {
-      return { status: "blocked" as const, message: accounted?.error ?? noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? noProgressNextAction };
+      return { status: "blocked" as const, message: accounted?.error ?? noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: accounted?.nextAction ?? noProgressNextAction, failureClass: externalAttempt ? "provider_uncertain" : "no_progress" };
     }
-    return { status: "failed" as const, message: noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: noProgressNextAction };
+    return { status: "failed" as const, message: noProgressMessage, checkpoint: accounted?.checkpoint ?? currentMissionBeforeAccounting?.checkpoint ?? mission.checkpoint, nextAction: noProgressNextAction, failureClass: "no_progress" };
   }
   const beforeAccounting = await getMission(task.userId, mission.id);
   const accounted = await recordMissionSlice(task.userId, mission.id, { checkpoint: beforeAccounting?.checkpoint ?? result.text, nextAction: beforeAccounting?.nextAction ?? "Continue from the verified checkpoint.", toolCalls: missionToolCallCount(result), cost: result.cost });

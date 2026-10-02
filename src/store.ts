@@ -1018,6 +1018,8 @@ export interface TaskEvent {
   attempt: number;
 }
 
+export type TaskFailureClass = "no_progress" | "provider_uncertain" | "provider_failed" | "worker";
+
 /**
  * A task lives outside the expiring chat session so a paused Daytona workspace
  * and its recovery instructions remain available after session/history TTL.
@@ -1036,6 +1038,10 @@ export interface TaskRecord {
   error?: string;
   attempt: number;
   maxAttempts: number;
+  /** Machine-readable terminal failure classification used by recovery. */
+  lastFailureClass?: TaskFailureClass;
+  /** Number of bounded server-side repair cycles already claimed. */
+  automaticRepairCount?: number;
   runAt?: number;
   workflowRunId?: string;
   /** When the provider accepted the current workflow publication. */
@@ -5678,6 +5684,10 @@ function normalizeTask(task: TaskRecord): TaskRecord {
     attempt: task.attempt ?? 0,
     version: Number.isSafeInteger(task.version) && task.version >= 0 ? task.version : 0,
     maxAttempts: Math.max(1, Math.min(10, task.maxAttempts ?? 3)),
+    ...(typeof task.lastFailureClass === "string" && ["no_progress", "provider_uncertain", "provider_failed", "worker"].includes(task.lastFailureClass)
+      ? { lastFailureClass: task.lastFailureClass as TaskFailureClass }
+      : { lastFailureClass: undefined }),
+    automaticRepairCount: Math.max(0, Math.min(3, Math.floor(Number(task.automaticRepairCount) || 0))),
     ...(typeof task.workflowRunId === "string" && task.workflowRunId && Number.isFinite(task.workflowPublishedAt) && (task.workflowPublishedAt ?? 0) > 0 ? { workflowPublishedAt: Number(task.workflowPublishedAt) } : { workflowPublishedAt: undefined }),
     events: (task.events ?? []).slice(-100),
     ...(typeof task.missionId === "string" && /^mis_[A-Za-z0-9_-]{1,160}$/.test(task.missionId) ? { missionId: task.missionId } : { missionId: undefined }),
@@ -6697,6 +6707,8 @@ export async function retryTask(userId: number, id: string): Promise<TaskRecord 
       status: "queued",
       error: undefined,
       result: undefined,
+      attempt: 0,
+      lastFailureClass: undefined,
       // A retry is a new provider publication. Never carry the previous
       // workflow id or an expired/pending enqueue claim into that attempt.
       workflowRunId: undefined,
@@ -6737,7 +6749,25 @@ async function reconcileTerminalMissionTask(task: TaskRecord): Promise<void> {
   });
 }
 
-export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean; progress?: boolean }): Promise<TaskRecord | undefined> {
+/**
+ * Claim one safe, bounded automatic repair after a mission task exhausted its
+ * consecutive no-progress attempts. The CAS prevents two recovery sweepers
+ * from reactivating the same failed task, and the failure class prevents this
+ * path from ever replaying an uncertain provider action.
+ */
+export async function claimMissionAutomaticRepair(userId: number, id: string): Promise<TaskRecord | undefined> {
+  return mutateTask(userId, id, (task) => {
+    if (task.status !== "failed" || task.lastFailureClass !== "no_progress" || (task.automaticRepairCount ?? 0) >= 1) return undefined;
+    return {
+      automaticRepairCount: (task.automaticRepairCount ?? 0) + 1,
+      attempt: 0,
+      error: undefined,
+      nextAction: "A bounded automatic repair will reactivate this step once; if it still makes no progress, review the blocker and replan explicitly.",
+    };
+  });
+}
+
+export async function settleTaskRun(userId: number, id: string, leaseToken: string, outcome: { status: "completed" | "blocked" | "failed" | "queued" | "cancelled"; message: string; checkpoint?: string; nextAction?: string; runAt?: number; result?: string; waiting?: boolean; progress?: boolean; failureClass?: TaskFailureClass }): Promise<TaskRecord | undefined> {
   const task = await getTask(userId, id);
   if (!task || task.lease?.token !== leaseToken) return undefined;
   if (["cancel_requested", "cancelled"].includes(task.status)) {
@@ -6757,6 +6787,7 @@ export async function settleTaskRun(userId: number, id: string, leaseToken: stri
     nextAction: normalized.nextAction,
     result: normalized.result,
     error: normalized.status === "failed" ? normalized.message : undefined,
+    ...(normalized.failureClass ? { lastFailureClass: normalized.failureClass } : normalized.status === "queued" || normalized.status === "completed" ? { lastFailureClass: undefined } : {}),
     ...(status === "queued" ? { workflowRunId: undefined, enqueueClaim: undefined } : {}),
     ...(status === "queued" && normalized.status === "queued" && normalized.progress ? { attempt: 0 } : {}),
     runAt: retryable ? Date.now() + (delayMs ?? 0) : normalized.status === "queued" ? normalized.runAt : undefined,
