@@ -1076,7 +1076,7 @@ export function registerSdkApi(app: Hono): void {
     } catch (error) { return apiError(c, 400, "task_create_failed", error instanceof Error ? error.message : "A2A task could not be created."); }
   });
   app.get("/a2a/tasks/:taskId", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await getMission(owner.userId, c.req.param("taskId")); return mission ? c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission, artifacts: [] }) : apiError(c, 404, "task_not_found", "A2A task not found."); });
-  app.post("/a2a/tasks/:taskId/cancel", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await cancelMission(owner.userId, c.req.param("taskId"), "Cancelled by the delegating agent."); if (!mission) return apiError(c, 409, "task_not_cancellable", "A2A task is already finished or not owned by this key."); if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission }); });
+  app.post("/a2a/tasks/:taskId/cancel", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const mission = await cancelMission(owner.userId, c.req.param("taskId"), "Cancelled by the delegating agent."); if (!mission) return apiError(c, 409, "task_not_cancellable", "A2A task is already finished or not owned by this key."); await cancelMissionTasks(owner.userId, mission.id); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(mission), mission }); });
   app.post("/a2a/tasks/:taskId/send", async (c) => { const owner = (c as any).get("a2aOwner") as SdkOwner; const body = await c.req.json().catch(() => ({})) as { message?: unknown }; const mission = await getMission(owner.userId, c.req.param("taskId")); if (!mission) return apiError(c, 404, "task_not_found", "A2A task not found."); if (typeof body.message !== "string" || !body.message.trim()) return apiError(c, 400, "invalid_message", "message is required."); const updated = await updateMission(owner.userId, mission.id, { checkpoint: body.message.slice(0, 8000), nextAction: "Incorporate the delegating agent's update in the next bounded slice." }); return c.json({ id: mission.id, type: "task", status: missionA2AStatus(updated ?? mission), mission: updated ?? mission }); });
   app.get("/a2a/tasks/:taskId/stream", async (c) => {
     const owner = (c as any).get("a2aOwner") as SdkOwner;
@@ -1187,7 +1187,7 @@ export function registerSdkApi(app: Hono): void {
         if (!taskId) return a2aJsonRpcError(c, id, -32602, "id is required.");
         const mission = await cancelMission(owner.userId, taskId, "Cancelled by the delegating agent.");
         if (!mission) return a2aJsonRpcError(c, id, -32002, "Task is not cancellable or was not found.", 409);
-        if (mission.rootTaskId) await cancelTask(owner.userId, mission.rootTaskId);
+        await cancelMissionTasks(owner.userId, mission.id);
         const task = a2aTaskView(owner, mission);
         return a2aJsonRpcResult(c, id, method === "CancelTask" ? task : { task });
       }
