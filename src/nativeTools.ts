@@ -1017,6 +1017,50 @@ export async function runJobNow(userId: number, id: string): Promise<{ jobId: st
   return { jobId: job.id, occurrenceId, workflowRunId: workflow.workflowRunId };
 }
 
+async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun: boolean): Promise<Record<string, unknown>> {
+  if (!ownerPrivateRun) throw new Error("Private browser handoffs are available only in the owner's private conversation");
+  const handoff = await getBrowserHandoff(userId, id);
+  if (!handoff) throw new Error("Browser handoff not found or not owned by you");
+  if (["expired", "cancelled"].includes(handoff.status)) throw new Error(`This browser handoff is ${handoff.status}. Request a new private handoff.`);
+  if (handoff.status === "completed") return { id, status: "completed", alreadyCompleted: true };
+
+  // Moving to awaiting_verification before reading the page makes the resume
+  // operation durable and lets the normal browser guard permit only the bound
+  // same-origin inspection. No website mutation occurs in this function.
+  if (handoff.status === "waiting") await updateBrowserHandoff(userId, id, "awaiting_verification");
+  const browser = automatedBrowserEngine("state");
+  const observed = await browser.browser(userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: true }) as {
+    provider?: unknown; observedUrl?: unknown; observationMethod?: unknown; title?: unknown; challenge?: unknown; needsUserInteraction?: unknown;
+  };
+  const currentUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
+  if (!currentUrl || !isTrustedBrowserUrlObservation(observed.provider, observed.observationMethod)) {
+    return { id, status: "awaiting_verification", needsUserInteraction: true, next: "The retained browser URL is not yet observable. Keep the handoff open and try resume again." };
+  }
+  let currentOrigin: string;
+  try { currentOrigin = new URL(currentUrl).origin; } catch { throw new Error("The retained browser returned an invalid URL; the handoff remains unverified"); }
+  if (handoff.origin && currentOrigin !== handoff.origin) throw new Error("The retained browser is outside the website origin bound to this handoff");
+  const challenge = observed.challenge && typeof observed.challenge === "object" ? observed.challenge as { detected?: unknown } : undefined;
+  if (observed.needsUserInteraction === true || challenge?.detected === true) {
+    return { id, status: "awaiting_verification", needsUserInteraction: true, ...(typeof observed.title === "string" ? { title: observed.title } : {}), next: "The challenge is still present. Complete it in the retained private browser, then resume again." };
+  }
+
+  const linkedVaultLogin = Boolean(handoff.credentialId || (handoff.reason === "login" && handoff.service));
+  if (linkedVaultLogin) {
+    const credentials = await listVault(userId);
+    const matches = credentials.filter((credential) => credential.session?.workspaceId === handoff.workspaceId && credential.session.status === "awaiting_user_interaction"
+      && (handoff.credentialId ? credential.id === handoff.credentialId : (!handoff.service || credential.service === handoff.service)));
+    const saved = matches.length === 1 ? matches[0] : undefined;
+    if (!saved?.session) throw new Error("The retained browser is no longer linked to a pending vault login");
+    const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
+    await updateBrowserHandoff(userId, id, "completed", Date.now());
+    await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", service: saved.service, origin: saved.origin, status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
+    return { id, status: "completed", handoffCompleted: true, session: { id: session.id, workspaceId: session.workspaceId, status: session.status, origin: session.origin } };
+  }
+  await updateBrowserHandoff(userId, id, "completed", Date.now());
+  await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", ...(handoff.origin ? { origin: handoff.origin } : {}), status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
+  return { id, status: "completed", handoffCompleted: true };
+}
+
 export async function nativeTool(userId: number, slug: string, args: Record<string, unknown>, runtime: NativeToolRuntime = {}): Promise<unknown> {
   const canonicalSlug = canonicalNativeToolSlug(slug);
   if (canonicalSlug !== slug) return nativeTool(userId, canonicalSlug, args, runtime);
@@ -2235,6 +2279,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const updated = await updateBrowserHandoff(userId, id, "awaiting_verification");
       return { id, status: updated?.status ?? "awaiting_verification", next: "Inspect the retained browser, then call CHUCK_BROWSER_VERIFY with this handoffId and required detectors before taking any further action." };
     }
+    case "CHUCK_BROWSER_HANDOFF_RESUME": return abortableToolCall(runtime, () => resumeBrowserHandoff(userId, text(args.id), runtime.ownerPrivateRun === true));
     case "CHUCK_VAULT_SAVE": return beginVaultSetup(userId, args as any);
     case "CHUCK_VAULT_LIST": return listVault(userId);
     case "CHUCK_VAULT_STATUS": return vaultStatus(userId, args.service ? text(args.service) : undefined, args.accountAlias ? normalizeBrowserAlias(args.accountAlias) : undefined, args.origin ? normaliseVaultOrigin(text(args.origin)) : undefined);

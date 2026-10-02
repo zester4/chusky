@@ -80,6 +80,27 @@ function normalizeMatches(raw: E2BCommandResult, url: string, now: number): E2BB
   });
 }
 
+const INTERACTIVE_ACTIONS = ["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"] as const;
+const SAFE_REPLAN_ACTIONS = ["fill", "select_option", "check", "uncheck", "focus", "hover", "wait"] as const;
+
+function selectorForNode(node: E2BBrowserNode): Record<string, unknown> {
+  return {
+    role: node.role,
+    name: node.name,
+    index: node.index,
+    id: node.id,
+    nameAttr: node.nameAttr,
+    placeholder: node.placeholder,
+    autocomplete: node.autocomplete,
+    inputType: node.inputType,
+    tagName: node.tagName,
+    frameIndex: node.frameIndex,
+    frameUrl: node.frameUrl,
+    observationId: node.observationId,
+    pageGeneration: node.pageGeneration,
+  };
+}
+
 async function withUserLock<T>(userId: number, operation: () => Promise<T>): Promise<T> {
   const previous = locks.get(userId) ?? Promise.resolve();
   let release!: () => void;
@@ -299,7 +320,7 @@ export class E2BBrowserEngine {
     await saveSession(userId, session);
   }
 
-  private async persistResult(userId: number, record: E2BBrowserRecord, result: E2BCommandResult, nodes: E2BBrowserNode[] = []): Promise<E2BBrowserRecord> {
+  private async persistResult(userId: number, record: E2BBrowserRecord, result: E2BCommandResult, nodes: E2BBrowserNode[] = [], action = "browser"): Promise<E2BBrowserRecord> {
     const now = Date.now();
     const next: E2BBrowserRecord = {
       ...record,
@@ -308,12 +329,41 @@ export class E2BBrowserEngine {
       ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}),
       ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
       ...(result.health && typeof result.health === "object" ? { health: result.health } : {}),
+      checkpoint: {
+        action,
+        ...(typeof result.url === "string" ? { url: result.url } : {}),
+        ...(typeof result.title === "string" ? { title: redactBrowserText(result.title, 160) } : {}),
+        ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}),
+        ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
+        ...(typeof result.accessibilityHash === "string" ? { accessibilityHash: result.accessibilityHash } : {}),
+        verified: action === "snapshot" || action === "state" || action === "find" || action === "form_inspect" || Boolean(result.formState),
+        updatedAt: now,
+      },
       nodes: nodes.length ? nodes : record.nodes,
       updatedAt: now,
       expiresAt: record.sessionId ? record.expiresAt : now + config.e2bTimeoutMs,
     };
     await this.save(userId, next);
     return next;
+  }
+
+  private async replanInteraction(userId: number, sandbox: Sandbox, record: E2BBrowserRecord, args: Record<string, unknown>, action: string): Promise<{ record: E2BBrowserRecord; selector: Record<string, unknown> }> {
+    const saved = typeof args.nodeId === "string" ? record.nodes?.find((item) => item.nodeId === args.nodeId) : undefined;
+    const role = typeof saved?.role === "string" ? saved.role : typeof args.role === "string" ? args.role : undefined;
+    const name = typeof saved?.name === "string" ? saved.name : typeof args.name === "string" ? args.name : undefined;
+    if (!role || !name) throw new E2BBrowserError("Browser recovery needs the control role and accessible name; inspect the current page before retrying");
+    const inspected = await this.run(sandbox, { action: "find", currentUrl: record.lastUrl, role, name, nameMatch: args.nameMatch, limit: 12 });
+    const url = typeof inspected.url === "string" ? inspected.url : record.lastUrl ?? "";
+    const nodes = normalizeMatches(inspected, url, Date.now());
+    const next = await this.persistResult(userId, record, inspected, nodes, "find");
+    const sameStableIdentity = (candidate: E2BBrowserNode) => Boolean(saved && ["id", "nameAttr", "placeholder", "autocomplete"].some((key) => {
+      const field = key as keyof E2BBrowserNode;
+      return typeof saved[field] === "string" && saved[field] === candidate[field];
+    }));
+    const matching = nodes.filter((candidate) => candidate.role === role && (sameStableIdentity(candidate) || candidate.name === name));
+    const candidate = saved && Number.isSafeInteger(saved.index) ? matching.find((item) => item.index === saved.index) ?? (matching.length === 1 ? matching[0] : undefined) : matching.length === 1 ? matching[0] : undefined;
+    if (!candidate) throw new E2BBrowserError(`Browser recovery could not safely remap ${action} to a unique current ${role} control named ${name}`);
+    return { record: next, selector: selectorForNode(candidate) };
   }
 
   async workspaceId(userId: number): Promise<string> {
@@ -406,25 +456,31 @@ export class E2BBrowserEngine {
         }));
         return { provider: "e2b", action, ...(fileLibraryKind === "download" ? { downloads: files } : { recordings: files }), ...(runtimeError ? { runtimeStatus: "unavailable", runtimeError } : {}) };
       }
-      const { sandbox, record } = await this.sandbox(userId);
+      const { sandbox } = await this.sandbox(userId);
+      let record = (await this.record(userId))!;
       if (action === "start") return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, expiresAt: record.expiresAt };
       if (action === "windows") return { provider: "e2b", sandboxId: record.sandboxId, windows: [{ title: record.title ?? "Chromium", url: record.lastUrl ?? "about:blank" }] };
       if (action === "display_info") return { provider: "e2b", sandboxId: record.sandboxId, width: 1440, height: 900 };
       if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "recording_start", "recording_stop", "recording_get"].includes(action) && !internal.ownerPrivateRun) {
         throw new E2BBrowserError("Screenshots and browser recordings are available only in the owner's private conversation");
       }
-      if (record.sessionId && action !== "state" && action !== "snapshot" && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
+      if (record.sessionId && !["state", "snapshot", "find", "form_inspect"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
       const request: Record<string, unknown> = { action };
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
-      if (["state", "snapshot", "find", "open", "wait", "back", "forward", "refresh"].includes(action)) request.includePageContent = internal.ownerPrivateRun === true;
-      if (["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"].includes(action) && args.nodeId) {
+      if (["state", "snapshot", "find", "form_inspect", "open", "wait", "back", "forward", "refresh"].includes(action)) request.includePageContent = internal.ownerPrivateRun === true;
+      if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && args.nodeId) {
         const saved = record.nodes?.find((item) => item.nodeId === args.nodeId);
         if (!saved || Date.now() - saved.capturedAt > NODE_TTL_MS) throw new E2BBrowserError("E2B browser interaction requires a fresh find/state result");
-        Object.assign(request, { selector: { role: saved.role, name: saved.name, index: saved.index, id: saved.id, nameAttr: saved.nameAttr, placeholder: saved.placeholder, autocomplete: saved.autocomplete, inputType: saved.inputType, tagName: saved.tagName, frameIndex: saved.frameIndex, frameUrl: saved.frameUrl, observationId: saved.observationId, pageGeneration: saved.pageGeneration }, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+        Object.assign(request, { selector: selectorForNode(saved), ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
+      }
+      if ((INTERACTIVE_ACTIONS as readonly string[]).includes(action) && !request.selector && (args.role || args.name)) {
+        const replanned = await this.replanInteraction(userId, sandbox, record, args, action);
+        record = replanned.record;
+        Object.assign(request, { selector: replanned.selector, ...(action === "fill" || action === "select_option" ? { value: args.value ?? args.text } : {}) });
       }
       if (action === "upload" || action === "upload_files") {
         if (!internal.ownerPrivateRun) throw new E2BBrowserError("File uploads are available only in the owner's private conversation");
@@ -458,7 +514,22 @@ export class E2BBrowserEngine {
       if (action === "wait_download") request.timeoutMs = Math.max(100, Math.min(30_000, Number(args.timeoutSeconds ?? args.timeoutMs ?? 10_000) * (args.timeoutSeconds ? 1_000 : 1)));
       if (action === "recording_start") request.durationSeconds = Math.max(10, Math.min(900, Number(args.timeoutSeconds ?? 900)));
       if (action === "recording_stop" || action === "recording_get") request.recordingId = boundedText(args.recordingId ?? args.fileId, "recordingId", 128);
-      let result = await this.run(sandbox, request);
+      let result: E2BCommandResult;
+      try {
+        result = await this.run(sandbox, request);
+      } catch (error) {
+        // Only replay idempotent control operations. A click, keypress, type,
+        // submit, or coordinate action may already have caused an external
+        // effect and must be re-inspected by the agent instead.
+        const retryable = (SAFE_REPLAN_ACTIONS as readonly string[]).includes(action);
+        const retryableCode = error instanceof E2BBrowserError && ["stale_observation", "action_timeout", "browser_action_failed"].includes(error.code);
+        if (!retryable || !retryableCode) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        const replanned = await this.replanInteraction(userId, sandbox, record, args, action);
+        record = replanned.record;
+        Object.assign(request, { selector: replanned.selector });
+        result = await this.run(sandbox, request);
+      }
       let importedFiles: E2BBrowserFileRecord[] = [];
       if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");
       if (action === "recording_stop" && result.runtimeFilePath && result.recording?.id && result.recording.size) {
@@ -469,13 +540,14 @@ export class E2BBrowserEngine {
       if (typeof result.url === "string" && /^https?:$/i.test(new URL(result.url).protocol)) await assertSafeBrowserUrl(result.url);
       const url = typeof result.url === "string" ? result.url : record.lastUrl ?? "";
       const nodes = normalizeMatches(result, url, Date.now());
-      const next = await this.persistResult(userId, record, result, nodes);
+      const next = await this.persistResult(userId, record, result, nodes, action);
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
       const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
+      Object.assign(safe, result.forms ? { forms: result.forms } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
-      if (action === "state" || action === "snapshot" || action === "open" || action === "back" || action === "forward" || action === "refresh") {
-        return { ...safeWithChallenge, accessibility: { role: "main", children: nodes.map(({ nodeId, role, name, frameIndex, frameUrl, observationId, pageGeneration }) => ({ nodeId, role, name, ...(frameIndex !== undefined ? { frameIndex } : {}), ...(frameUrl ? { frameUrl } : {}), ...(observationId ? { observationId } : {}), ...(pageGeneration !== undefined ? { pageGeneration } : {}) })) }, verificationRequired: !["state", "snapshot", "find", "health", "status", "start"].includes(action) };
+      if (action === "state" || action === "snapshot" || action === "form_inspect" || action === "open" || action === "back" || action === "forward" || action === "refresh") {
+        return { ...safeWithChallenge, accessibility: { role: "main", children: nodes.map(({ nodeId, role, name, frameIndex, frameUrl, observationId, pageGeneration }) => ({ nodeId, role, name, ...(frameIndex !== undefined ? { frameIndex } : {}), ...(frameUrl ? { frameUrl } : {}), ...(observationId ? { observationId } : {}), ...(pageGeneration !== undefined ? { pageGeneration } : {}) })) }, verificationRequired: !["state", "snapshot", "find", "form_inspect", "health", "status", "start"].includes(action) };
       }
       return { ...safeWithChallenge, verificationRequired: !["state", "snapshot", "find", "health", "status", "start"].includes(action) };
     });

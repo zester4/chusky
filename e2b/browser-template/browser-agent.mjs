@@ -229,7 +229,14 @@ async function controlState(locator) {
   return await locator.evaluate((element) => {
     const input = element;
     const state = { controlRole: input.getAttribute("role") || input.tagName.toLowerCase() };
-    if (typeof input.value === "string") state.value = input.value;
+    if (typeof input.value === "string") { state.value = input.value; state.valueLength = input.value.length; }
+    state.required = input.required === true || input.getAttribute("aria-required") === "true";
+    state.disabled = input.disabled === true || input.getAttribute("aria-disabled") === "true";
+    const invalid = input.getAttribute("aria-invalid") === "true" || (typeof input.checkValidity === "function" && !input.checkValidity());
+    if (invalid) {
+      state.invalid = true;
+      state.validationMessage = String(input.validationMessage || "").slice(0, 300);
+    }
     if (typeof input.checked === "boolean") state.checked = input.checked;
     const ariaChecked = input.getAttribute("aria-checked");
     if (ariaChecked === "true" || ariaChecked === "false") state.checked = ariaChecked === "true";
@@ -263,18 +270,43 @@ async function selectControl(page, locator, value, root) {
     try { await locator.selectOption({ label: String(value) }); }
     catch { await locator.selectOption(String(value)); }
   } else {
-    await locator.click({ timeout: 15_000 });
-    const option = root.getByRole("option", { name: String(value), exact: true }).first();
-    if (await option.count()) await option.click({ timeout: 15_000 });
-    else {
-      const visibleText = root.getByText(String(value), { exact: true }).first();
-      if (!(await visibleText.count())) throw new Error(`Dropdown option "${String(value).slice(0, 120)}" was not found`);
-      await visibleText.click({ timeout: 15_000 });
+    try {
+      await locator.click({ timeout: 15_000 });
+      const option = root.getByRole("option", { name: String(value), exact: true }).first();
+      if (await option.count()) await option.click({ timeout: 15_000 });
+      else {
+        const visibleText = root.getByText(String(value), { exact: true }).first();
+        if (!(await visibleText.count())) throw new Error(`Dropdown option "${String(value).slice(0, 120)}" was not found`);
+        await visibleText.click({ timeout: 15_000 });
+      }
+    } catch (error) {
+      // Many custom comboboxes expose keyboard semantics even when their
+      // popup is not a native ARIA listbox. Focus, type the requested label,
+      // and commit with Enter before verifying the resulting state.
+      await locator.focus({ timeout: 15_000 });
+      await page.keyboard.press("Control+A").catch(() => {});
+      await page.keyboard.type(String(value), { delay: 15 });
+      await page.keyboard.press("Enter");
+      if (!String(error?.message || error).trim()) throw error;
     }
   }
   const state = await controlState(locator);
   const selected = state.selectedText || state.value || "";
   if (!selected.toLowerCase().includes(String(value).toLowerCase())) throw new Error(`Dropdown did not select "${String(value).slice(0, 120)}"`);
+  return state;
+}
+
+async function fillControl(page, locator, value) {
+  try {
+    await locator.fill(value);
+  } catch (error) {
+    await locator.focus({ timeout: 15_000 });
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.type(value, { delay: 10 });
+    if (!String(error?.message || error).trim()) throw error;
+  }
+  const state = await controlState(locator);
+  if (state.value !== value && state.valueLength !== value.length) throw new Error("Field value did not persist after fill");
   return state;
 }
 
@@ -324,6 +356,51 @@ async function roleMatches(page, request = {}) {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+async function inspectForms(page) {
+  const forms = [];
+  for (const frame of page.frames()) {
+    const frameForms = await frame.evaluate(() => {
+      const cleanText = (value, max = 180) => String(value || "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+      const labelFor = (element) => {
+        const labels = Array.from(element.labels || []).map((label) => label.innerText || label.textContent || "");
+        if (labels.length) return cleanText(labels.join(" "));
+        const labelledBy = element.getAttribute("aria-labelledby");
+        if (labelledBy) return cleanText(labelledBy.split(/\\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" "));
+        return cleanText(element.getAttribute("aria-label") || element.getAttribute("title") || element.getAttribute("placeholder") || element.getAttribute("name") || "");
+      };
+      const serializeControl = (element) => {
+        const input = element;
+        const tag = element.tagName.toLowerCase();
+        const role = element.getAttribute("role") || (tag === "select" ? "combobox" : tag === "textarea" ? "textbox" : tag === "input" ? (input.type === "checkbox" ? "checkbox" : input.type === "radio" ? "radio" : "textbox") : tag === "button" ? "button" : "textbox");
+        const type = tag === "input" ? String(input.type || "text").toLowerCase() : tag;
+        const rawValue = typeof input.value === "string" ? input.value : "";
+        const selected = tag === "select" ? Array.from(input.selectedOptions || []).map((option) => option.textContent || "").join(", ") : undefined;
+        const invalid = element.getAttribute("aria-invalid") === "true" || (typeof input.checkValidity === "function" && !input.checkValidity());
+        const describedBy = element.getAttribute("aria-errormessage") || element.getAttribute("aria-describedby") || "";
+        const validationMessage = cleanText(describedBy.split(/\\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" ") || (invalid && typeof input.validationMessage === "string" ? input.validationMessage : ""), 300);
+        return {
+          ...(element.id ? { id: cleanText(element.id, 160) } : {}),
+          role: cleanText(role, 40), type: cleanText(type, 40), name: labelFor(element), required: element.required === true || element.getAttribute("aria-required") === "true", disabled: element.disabled === true || element.getAttribute("aria-disabled") === "true",
+          ...(rawValue ? { valuePresent: true, valueLength: rawValue.length } : { valuePresent: false, valueLength: 0 }),
+          ...(typeof input.checked === "boolean" ? { checked: input.checked } : {}), ...(selected ? { selectedText: cleanText(selected, 300) } : {}),
+          ...(tag === "select" ? { options: Array.from(input.options || []).slice(0, 100).map((option) => ({ label: cleanText(option.textContent || "", 160), value: cleanText(option.value || "", 160), disabled: option.disabled === true, selected: option.selected === true })) } : {}),
+          ...(invalid ? { invalid: true } : {}), ...(validationMessage ? { validationMessage } : {}),
+        };
+      };
+      const selector = 'input,select,textarea,button,[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"]';
+      const roots = Array.from(document.querySelectorAll("form"));
+      const groups = roots.length ? roots : [document.body];
+      return groups.slice(0, 40).map((root, index) => {
+        const controls = Array.from(root.querySelectorAll(selector)).filter((element) => !element.closest("form") || element.closest("form") === root).map(serializeControl);
+        const submitControls = Array.from(root.querySelectorAll('button,input[type="submit"],input[type="button"],[role="button"]')).slice(0, 20).map((element) => ({ role: element.getAttribute("role") || "button", name: labelFor(element) || cleanText(element.innerText || element.value || "Submit"), ...(element.id ? { id: cleanText(element.id, 160) } : {}), disabled: element.disabled === true || element.getAttribute("aria-disabled") === "true" }));
+        return { formId: root.id ? cleanText(root.id, 160) : `implicit-${index}`, ...(root.getAttribute("aria-label") ? { name: cleanText(root.getAttribute("aria-label"), 180) } : {}), ...(root.getAttribute("action") ? { action: cleanText(root.getAttribute("action"), 500) } : {}), ...(root.getAttribute("method") ? { method: cleanText(root.getAttribute("method"), 20).toUpperCase() } : {}), controls, submitControls };
+      }).filter((form) => form.controls.length || form.submitControls.length);
+    }).catch(() => []);
+    for (const form of frameForms) forms.push({ ...form, controls: form.controls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })) });
+  }
+  return forms;
 }
 
 async function challengeFor(page) {
@@ -592,6 +669,7 @@ async function execute(context, pageState, request) {
     }, request.value);
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
+  else if (action === "form_inspect") return result(page, context, { forms: await inspectForms(page) }, request.includePageContent === true);
   else if (action === "health") return result(page, context, { health: { status: "ready", daemon: "ready", chromium: page.isClosed() ? "closed" : "ready", pages: context.pages().length, display: DISPLAY, profile: PROFILE } });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
     if (action === "click") await page.mouse.click(Number(request.x), Number(request.y));
@@ -604,9 +682,7 @@ async function execute(context, pageState, request) {
     if (action === "focus") await target.focus();
     if (action === "fill") {
       const value = String(request.value ?? request.text ?? "");
-      await target.fill(value);
-      const state = await controlState(target);
-      if (state.value !== value) throw new Error("Field value did not persist after fill");
+      await fillControl(page, target, value);
     }
     if (action === "select_option") await selectControl(page, target, request.value ?? "", frameFor(page, request.selector));
     if (action === "check") await setCheckbox(target, true);
@@ -665,7 +741,8 @@ async function execute(context, pageState, request) {
   } else if (["tabs", "windows"].includes(action)) return result(page, context);
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
   const formState = target && ["fill", "select_option", "check", "uncheck"].includes(action) ? await controlState(target) : undefined;
-  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}) }, request.includePageContent === true);
+  const formMutation = ["fill", "select_option", "check", "uncheck", "click", "press"].includes(action);
+  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {

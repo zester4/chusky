@@ -1,6 +1,6 @@
 export const E2B_BROWSER_ACTIONS = [
   "start", "stop", "status", "state", "session_acquire", "session_list", "session_release",
-  "open", "snapshot", "find", "health", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
+  "open", "snapshot", "find", "form_inspect", "health", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
   "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region",
   "screenshot_region_full", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close",
   "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
@@ -43,6 +43,45 @@ export type E2BBrowserRecord = {
   observationId?: string;
   pageGeneration?: number;
   health?: Record<string, unknown>;
+  checkpoint?: E2BBrowserCheckpoint;
+};
+
+export type E2BBrowserFormControl = {
+  id?: string;
+  role: string;
+  type?: string;
+  name: string;
+  required: boolean;
+  disabled: boolean;
+  valuePresent?: boolean;
+  valueLength?: number;
+  checked?: boolean;
+  selectedText?: string;
+  options?: Array<{ label: string; value: string; disabled: boolean; selected: boolean }>;
+  invalid?: boolean;
+  validationMessage?: string;
+  frameIndex?: number;
+  frameUrl?: string;
+};
+
+export type E2BBrowserForm = {
+  formId: string;
+  name?: string;
+  action?: string;
+  method?: string;
+  controls: E2BBrowserFormControl[];
+  submitControls: Array<{ role: string; name: string; id?: string; disabled: boolean }>;
+};
+
+export type E2BBrowserCheckpoint = {
+  action: string;
+  url?: string;
+  title?: string;
+  observationId?: string;
+  pageGeneration?: number;
+  accessibilityHash?: string;
+  verified?: boolean;
+  updatedAt: number;
 };
 
 /** Owner-scoped file metadata. Bytes live in R2; this record contains no file content. */
@@ -72,7 +111,9 @@ export type E2BCommandResult = {
   pageGeneration?: number;
   accessibilityHash?: string;
   health?: Record<string, unknown>;
-  formState?: { value?: string; checked?: boolean; selectedText?: string; controlRole?: string };
+  forms?: E2BBrowserForm[];
+  checkpoint?: E2BBrowserCheckpoint;
+  formState?: { value?: string; valueLength?: number; checked?: boolean; selectedText?: string; controlRole?: string; required?: boolean; disabled?: boolean; invalid?: boolean; validationMessage?: string };
   downloads?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
   download?: { id: string; name: string; state: string; size: number; createdAt: number; error?: string } | null;
   recordings?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;

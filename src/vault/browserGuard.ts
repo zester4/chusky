@@ -70,7 +70,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
         workspaceId,
       );
       if (["status", "start", "stop", "windows"].includes(action)) return;
-      if (["state", "snapshot", "find", "accessibility_tree"].includes(action)) {
+      if (["state", "snapshot", "find", "form_inspect", "accessibility_tree"].includes(action)) {
         if (!currentOrigin || !pendingOrigins.includes(currentOrigin)) throw new Error("Inspect the same saved website origin after completing the private browser handoff; Chusky will not inspect a different page.");
         return;
       }

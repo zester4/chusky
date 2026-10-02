@@ -38,7 +38,7 @@ export function assertE2BBrowserHandoffAllowsAction(
   }
   let currentOrigin = "";
   try { currentOrigin = currentUrl ? new URL(currentUrl).origin : ""; } catch { /* origin checked below */ }
-  if (!["state", "snapshot"].includes(action) || (active.origin && currentOrigin !== active.origin)) {
+  if (!["state", "snapshot", "find", "form_inspect"].includes(action) || (active.origin && currentOrigin !== active.origin)) {
     throw new Error("A private browser handoff is awaiting same-origin verification. Inspect only that retained page, then call CHUCK_BROWSER_VERIFY before any further action.");
   }
 }

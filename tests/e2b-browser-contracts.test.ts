@@ -14,6 +14,29 @@ test("the model schema and dispatcher expose exactly the supported E2B browser a
   assert.equal(shouldUseE2BBrowser("not-an-action", true, true), false);
 });
 
+test("form inspection is a structured, safe browser capability", () => {
+  const schema = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as { properties?: { action?: { enum?: string[] } } } | undefined;
+  assert.ok(schema?.properties?.action?.enum?.includes("form_inspect"));
+  const agent = readFileSync("e2b/browser-template/browser-agent.mjs", "utf8");
+  assert.match(agent, /async function inspectForms/);
+  assert.match(agent, /validationMessage/);
+  assert.match(agent, /valuePresent/);
+  assert.match(agent, /selectedText/);
+  assert.match(agent, /validationMessage/);
+  assert.match(agent, /formMutation/);
+  assert.match(agent, /form_inspect/);
+  assert.match(agent, /page\.keyboard\.press\("Control\+A"\)/);
+  assert.match(agent, /Dropdown option/);
+  const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
+  assert.match(engine, /Only replay idempotent control operations/);
+  assert.match(engine, /replanInteraction/);
+  assert.match(engine, /stale_observation.*action_timeout.*browser_action_failed/);
+  assert.match(engine, /recovery needs the control role and accessible name/);
+  assert.match(engine, /retryableCode/);
+  assert.doesNotMatch(engine, /retryable = .*click/);
+  assert.doesNotMatch(agent, /forms.*password.*value/);
+});
+
 test("page content is bounded, sanitized, and explicit about truncation", () => {
   const sample = `contact owner@example.com ${"A useful paragraph ".repeat(40)}${"more content ".repeat(100)}`;
   const result = normalizeE2BPageContent(sample, 320);
