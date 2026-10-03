@@ -645,6 +645,12 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Use Neon's direct (non-pooler) URL only for explicit schema migrations.
   betterAuthMigrationDatabaseUrl: optional("BETTER_AUTH_MIGRATION_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
+  // Opt-in canonical durable documents for high-growth Chusky session state.
+  // Keep this separate from Better Auth so application-state rollout and auth
+  // migrations can be operated, observed, and rolled back independently.
+  durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
+  durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
+  durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
   // ── Credential vault (opt-in; Cloudflare Worker + D1) ───────────────
   // The encryption master key is deliberately *not* available in this
   // process. It is held only by the Cloudflare Worker. Railway has just the
