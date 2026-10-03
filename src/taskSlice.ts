@@ -2,7 +2,7 @@ import { extendMissionDurationIfEligible } from "./store.js";
 import { config } from "./config.js";
 import { appendSdkRunHistoryToSession, getMeetingRepresentativeProfile } from "./store.js";
 import { reserveExecutionQuota, releaseExecutionQuota } from "./reliability/quotas.js";
-import { getTelegramChatId, getSession, saveSession, addUsage, canSpend, getApproval, getTask, getMission, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, getRecallMeeting, getMeetingContact } from "./store.js";
+import { getTelegramChatId, getSession, saveSession, addUsage, canSpend, getApproval, getTask, getMission, isTaskCancellationRequested, recordMissionSlice, waitMission, resumeMissionFromTimer, checkpointMission, completeTask, updateTask, updateMission, acquireMissionLease, renewMissionLease, releaseMissionLease, acquireMissionStepLease, renewMissionStepLease, releaseMissionStepLease, missionBudgetPreflight, getRecallMeeting, getMeetingContact } from "./store.js";
 import { runAgent as defaultRunAgent, ApprovalRequiredError } from "./agent.js";
 import { logger } from "./logger.js";
 import { randomUUID } from "node:crypto";
@@ -21,6 +21,7 @@ import type { MissionTaskEnqueuer } from "./missionScheduler.js";
 /** The mission-step lease must outlive a slow model turn and provider read-back. */
 export const MISSION_STEP_LEASE_MS = 3 * 60_000;
 export const MISSION_STEP_LEASE_RENEWAL_MS = 30_000;
+const TASK_CANCELLATION_CHECK_MS = 5_000;
 
 export interface TaskSliceContext {
   workflowRunId?: string;
@@ -227,12 +228,11 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
     // Conservatively bound one worker slice rather than aborting immediately.
     const budgetTimer = remainingMs ? setTimeout(() => budgetAbort.abort(new Error("Execution duration budget exhausted")), Math.min(remainingMs, 2_147_483_647)) : undefined;
     const cancellationPoll = setInterval(() => {
-      void getTask(task.userId, task.id).then((latest) => {
-        if (latest?.status === "cancel_requested" || latest?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));
+      void isTaskCancellationRequested(task.userId, task.id).then((requested) => {
+        if (requested) budgetAbort.abort(new Error("Task cancellation requested"));
       }).catch(() => undefined);
-    }, 500);
-    const initialTaskState = await getTask(task.userId, task.id);
-    if (initialTaskState?.status === "cancel_requested" || initialTaskState?.status === "cancelled") budgetAbort.abort(new Error("Task cancellation requested"));
+    }, TASK_CANCELLATION_CHECK_MS);
+    if (await isTaskCancellationRequested(task.userId, task.id)) budgetAbort.abort(new Error("Task cancellation requested"));
     let result;
     let meetingFollowUpDisposition: "completed" | "blocked" | undefined;
     try {

@@ -1661,6 +1661,10 @@ interface Backend {
   saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord): Promise<void>;
   clearDaytonaWorkspace(userId: number): Promise<void>;
   getTasks(userId: number): Promise<TaskRecord[]>;
+  getTask(userId: number, id: string): Promise<TaskRecord | undefined>;
+  /** Small, per-task cancellation signal for active workers. */
+  isTaskCancellationRequested(userId: number, id: string): Promise<boolean>;
+  setTaskCancellationRequested(userId: number, id: string, requested: boolean): Promise<void>;
   saveTasks(userId: number, tasks: TaskRecord[]): Promise<void>;
   createTaskIfAbsent(userId: number, task: TaskRecord): Promise<TaskRecord>;
   compareAndUpdateTask(userId: number, id: string, expectedVersion: number, next: TaskRecord): Promise<TaskRecord | undefined>;
@@ -1924,6 +1928,11 @@ class RedisBackend implements Backend {
   private rk = (id: number) => `chuck:rate:${id}`;
   private dk = (id: number) => `chuck:daytona:${id}`;
   private taskk = (id: number) => `chuck:tasks:${id}`;
+  private taskKey = (userId: number, id: string) => `chuck:task:${userId}:${id}`;
+  private taskIndexKey = (userId: number) => `chuck:tasks:${userId}:index`;
+  private taskMigrationKey = (userId: number) => `chuck:tasks:${userId}:v2`;
+  private taskCancellationKey = (userId: number, id: string) => `chuck:task:cancel:${userId}:${id}`;
+  private migratedTaskOwners = new Set<number>();
   private missionk = (id: number) => `chuck:missions:${id}`;
   private missionEventsKey = (userId: number, missionId: string) => `chuck:mission-events:${userId}:${createHash("sha256").update(missionId).digest("hex")}`;
   private missionOwnersKey = "chuck:missions:owners";
@@ -2500,83 +2509,102 @@ class RedisBackend implements Backend {
   async clearDaytonaWorkspace(userId: number): Promise<void> {
     await this.r.del(this.dk(userId));
   }
+  private async ensureTaskMigration(userId: number): Promise<void> {
+    if (this.migratedTaskOwners.has(userId)) return;
+    const legacyKey = this.taskk(userId); const indexKey = this.taskIndexKey(userId); const markerKey = this.taskMigrationKey(userId);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.r.watch(legacyKey, indexKey, markerKey);
+      if (await this.r.exists(markerKey)) { await this.r.unwatch(); this.migratedTaskOwners.add(userId); return; }
+      const [legacyRaw, count] = await Promise.all([this.r.get(legacyKey), this.r.zcard(indexKey)]);
+      const tx = this.r.multi();
+      if (count === 0 && legacyRaw) {
+        let tasks: TaskRecord[] = [];
+        try { const parsed = JSON.parse(legacyRaw); tasks = Array.isArray(parsed) ? parsed.map(normalizeTask) : []; } catch { /* migrate an empty set */ }
+        for (const task of tasks) { tx.set(this.taskKey(userId, task.id), JSON.stringify(task)).zadd(indexKey, task.updatedAt, task.id); if (["cancel_requested", "cancelled"].includes(task.status)) tx.set(this.taskCancellationKey(userId, task.id), "1", "EX", 604800); }
+        tx.del(legacyKey);
+      }
+      tx.set(markerKey, "1");
+      if (await tx.exec()) { this.migratedTaskOwners.add(userId); return; }
+    }
+    throw new Error("Task storage migration changed concurrently; retry");
+  }
+  private async readTask(userId: number, id: string): Promise<TaskRecord | undefined> {
+    await this.ensureTaskMigration(userId); const raw = await this.r.get(this.taskKey(userId, id));
+    try { return raw ? normalizeTask(JSON.parse(raw) as TaskRecord) : undefined; } catch { return undefined; }
+  }
+  private async writeTaskIfVersion(userId: number, expectedVersion: number, task: TaskRecord): Promise<boolean> {
+    const cancelled = ["cancel_requested", "cancelled"].includes(task.status) ? "1" : "0";
+    const result = await this.r.eval("local v=redis.call('GET',KEYS[1]); if not v then return 0 end; local c=cjson.decode(v); if tonumber(c.version or 0) ~= tonumber(ARGV[1]) then return 0 end; redis.call('SET',KEYS[1],ARGV[2]); redis.call('ZADD',KEYS[2],ARGV[3],ARGV[4]); if ARGV[5]=='1' then redis.call('SET',KEYS[3],'1','EX',604800) else redis.call('DEL',KEYS[3]) end; return 1", 3, this.taskKey(userId, task.id), this.taskIndexKey(userId), this.taskCancellationKey(userId, task.id), String(expectedVersion), JSON.stringify(task), String(task.updatedAt), task.id, cancelled);
+    return Number(result) === 1;
+  }
   async getTasks(userId: number): Promise<TaskRecord[]> {
-    const raw = await this.r.get(this.taskk(userId));
-    if (!raw) return [];
-    try { return JSON.parse(raw) as TaskRecord[]; } catch { return []; }
+    await this.ensureTaskMigration(userId); const ids = await this.r.zrevrange(this.taskIndexKey(userId), 0, -1); if (!ids.length) return [];
+    const values = await this.r.mget(...ids.map((id) => this.taskKey(userId, id)));
+    return values.flatMap((raw) => { try { return raw ? [normalizeTask(JSON.parse(raw) as TaskRecord)] : []; } catch { return []; } });
+  }
+  async getTask(userId: number, id: string): Promise<TaskRecord | undefined> { return this.readTask(userId, id); }
+  async isTaskCancellationRequested(userId: number, id: string): Promise<boolean> {
+    return (await this.r.exists(this.taskCancellationKey(userId, id))) === 1;
+  }
+  async setTaskCancellationRequested(userId: number, id: string, requested: boolean): Promise<void> {
+    const key = this.taskCancellationKey(userId, id);
+    if (requested) {
+      // A cancellation signal only needs to outlive the active worker and any
+      // short delivery retry. Retrying a task clears it explicitly.
+      await this.r.set(key, "1", "EX", 7 * 24 * 60 * 60);
+    } else {
+      await this.r.del(key);
+    }
   }
   async saveTasks(userId: number, tasks: TaskRecord[]): Promise<void> {
-    // Intentionally no expiry: task recovery must outlive conversational context.
-    await this.r.set(this.taskk(userId), JSON.stringify(tasks));
+    await this.ensureTaskMigration(userId);
+    const oldIds = await this.r.zrange(this.taskIndexKey(userId), 0, -1);
+    const tx = this.r.multi();
+    for (const id of oldIds) tx.del(this.taskKey(userId, id), this.taskCancellationKey(userId, id));
+    tx.del(this.taskIndexKey(userId));
+    for (const task of tasks.map(normalizeTask)) {
+      tx.set(this.taskKey(userId, task.id), JSON.stringify(task)).zadd(this.taskIndexKey(userId), task.updatedAt, task.id);
+      if (["cancel_requested", "cancelled"].includes(task.status)) tx.set(this.taskCancellationKey(userId, task.id), "1", "EX", 604800);
+    }
+    await tx.exec();
   }
   async createTaskIfAbsent(userId: number, task: TaskRecord): Promise<TaskRecord> {
-    const key = this.taskk(userId);
+    await this.ensureTaskMigration(userId);
+    const key = this.taskKey(userId, task.id);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
+      await this.r.watch(key, this.taskIndexKey(userId));
       const raw = await this.r.get(key);
-      let tasks: TaskRecord[] = [];
-      try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
-      const existing = tasks.find((item) => item.id === task.id);
-      if (existing) { await this.r.unwatch(); return existing; }
-      const retained = [...tasks, task];
-      const unfinished = retained.filter((item) => !["completed", "cancelled"].includes(item.status));
-      const finished = retained.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100);
-      const result = await this.r.multi().set(key, JSON.stringify([...unfinished, ...finished])).exec();
+      if (raw) { await this.r.unwatch(); return normalizeTask(JSON.parse(raw) as TaskRecord); }
+      const result = await this.r.multi().set(key, JSON.stringify(task)).zadd(this.taskIndexKey(userId), task.updatedAt, task.id).exec();
       if (result) return task;
     }
     throw new Error("Task creation changed concurrently; please retry");
   }
   async compareAndUpdateTask(userId: number, id: string, expectedVersion: number, next: TaskRecord): Promise<TaskRecord | undefined> {
-    const key = this.taskk(userId);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
-      const raw = await this.r.get(key);
-      let tasks: TaskRecord[] = [];
-      try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
-      const index = tasks.findIndex((task) => task.id === id);
-      const current = index < 0 ? undefined : tasks[index];
-      if (!current || current.version !== expectedVersion) { await this.r.unwatch(); return undefined; }
-      tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
-    }
-    return undefined;
+    await this.ensureTaskMigration(userId);
+    return await this.writeTaskIfVersion(userId, expectedVersion, next) ? next : undefined;
   }
   async claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number): Promise<TaskRecord | undefined> {
-    const key = this.taskk(userId);
+    await this.ensureTaskMigration(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
-      const raw = await this.r.get(key);
-      let tasks: TaskRecord[] = [];
-      try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
-      const index = tasks.findIndex((task) => task.id === id);
-      const current = index < 0 ? undefined : tasks[index];
+      const current = await this.readTask(userId, id);
       const now = Date.now();
       const claimActive = current?.enqueueClaim && current.enqueueClaim.expiresAt > now;
       const overduePublishedTask = current?.status === "queued" && typeof current.runAt === "number" && current.runAt <= now && current.workflowRunId && !current.workflowRunId.startsWith("pending:")
         && typeof current.workflowPublishedAt === "number" && now - current.workflowPublishedAt >= 60_000;
-      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) { await this.r.unwatch(); return undefined; }
+      if (!current || current.status !== "queued" || (current.workflowRunId && !current.workflowRunId.startsWith("pending:") && !overduePublishedTask) || claimActive) return undefined;
       const next = normalizeTask({ ...current, workflowRunId: `pending:${token}`, enqueueClaim: { token, expiresAt: now + claimMs }, updatedAt: now, version: current.version + 1 });
-      tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
+      if (await this.writeTaskIfVersion(userId, current.version, next)) return next;
     }
     return undefined;
   }
   async renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number): Promise<TaskRecord | undefined> {
-    const key = this.taskk(userId);
+    await this.ensureTaskMigration(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
-      const raw = await this.r.get(key);
-      let tasks: TaskRecord[] = [];
-      try { const parsed = raw ? JSON.parse(raw) : []; tasks = Array.isArray(parsed) ? parsed.map((item) => normalizeTask(item)) : []; } catch { tasks = []; }
-      const index = tasks.findIndex((task) => task.id === id);
-      const current = index < 0 ? undefined : tasks[index];
-      if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) { await this.r.unwatch(); return undefined; }
+      const current = await this.readTask(userId, id);
+      if (!current || current.lease?.token !== leaseToken || current.lease.expiresAt <= Date.now() || !["running", "cancel_requested"].includes(current.status)) return undefined;
       const next = normalizeTask({ ...current, lease: { ...current.lease, expiresAt: Date.now() + leaseMs }, updatedAt: Date.now(), version: current.version + 1 });
-      tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
+      if (await this.writeTaskIfVersion(userId, current.version, next)) return next;
     }
     return undefined;
   }
@@ -2758,12 +2786,9 @@ class RedisBackend implements Backend {
     throw new Error("Attention state changed concurrently; please retry");
   }
   async claimTask(userId: number, id: string, workerId: string, leaseMs: number): Promise<TaskRecord | undefined> {
-    const key = this.taskk(userId);
+    await this.ensureTaskMigration(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      const raw = await this.r.get(key);
-      const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
-      const index = tasks.findIndex((task) => task.id === id);
-      const task = index < 0 ? undefined : normalizeTask(tasks[index]);
+      const task = await this.readTask(userId, id);
       const now = Date.now();
       const expiredRunning = task?.status === "running" && task.lease !== undefined && task.lease.expiresAt <= now;
       if (!task || (task.status !== "queued" && !expiredRunning) || (expiredRunning && task.lease?.workerId === workerId) || (task.runAt && task.runAt > now) || (task.lease && task.lease.expiresAt > now)) return undefined;
@@ -2775,36 +2800,17 @@ class RedisBackend implements Backend {
       const nextAttempt = continuationWake ? task.attempt : task.attempt + 1;
       const lease: TaskLease = { token: randomUUID(), workerId, acquiredAt: now, expiresAt: now + leaseMs };
       const next = normalizeTask({ ...task, status: "running", lease, attempt: nextAttempt, updatedAt: now, version: task.version + 1, events: [...task.events, taskEvent("claimed", `Claimed by ${workerId}`, nextAttempt, now)].slice(-100) });
-      tasks[index] = next;
-      // WATCH belongs to the connection, not this invocation. Concurrent
-      // claims on a shared client can clear each other's watch on EXEC.
-      // Compare the entire owner record atomically so only one lease wins
-      // and changes to sibling tasks cannot be overwritten.
-      const result = await this.r.eval(`
-        local current = redis.call('GET', KEYS[1])
-        if ARGV[2] == 'missing' then
-          if current then return 0 end
-        elseif current ~= ARGV[1] then return 0 end
-        redis.call('SET', KEYS[1], ARGV[3])
-        return 1
-      `, 1, key, raw ?? "", raw === null ? "missing" : "present", JSON.stringify(tasks));
-      if (result === 1) return next;
+      if (await this.writeTaskIfVersion(userId, task.version, next)) return next;
     }
     return undefined;
   }
   async settleTask(userId: number, id: string, leaseToken: string, patch: Partial<TaskRecord>, event: TaskEvent): Promise<TaskRecord | undefined> {
-    const key = this.taskk(userId);
+    await this.ensureTaskMigration(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.r.watch(key);
-      const raw = await this.r.get(key);
-      const tasks = raw ? JSON.parse(raw) as TaskRecord[] : [];
-      const index = tasks.findIndex((task) => task.id === id);
-      const task = index < 0 ? undefined : normalizeTask(tasks[index]);
-      if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) { await this.r.unwatch(); return undefined; }
+      const task = await this.readTask(userId, id);
+      if (!task || task.lease?.token !== leaseToken || task.lease.expiresAt <= Date.now()) return undefined;
       const next = normalizeTask({ ...task, ...patch, id: task.id, userId: task.userId, createdAt: task.createdAt, lease: undefined, updatedAt: Date.now(), version: task.version + 1, events: [...task.events, event].slice(-100) });
-      tasks[index] = next;
-      const result = await this.r.multi().set(key, JSON.stringify(tasks)).exec();
-      if (result) return next;
+      if (await this.writeTaskIfVersion(userId, task.version, next)) return next;
     }
     return undefined;
   }
@@ -3683,6 +3689,7 @@ class MemoryBackend implements Backend {
   }
   private daytona = new Map<number, DaytonaWorkspaceRecord>();
   private tasks = new Map<number, TaskRecord[]>();
+  private taskCancellationRequests = new Set<string>();
   private missions = new Map<number, MissionRecord[]>();
   private missionEvents = new Map<string, MissionEventRecord[]>();
   private missionOwners = new Set<number>();
@@ -3690,6 +3697,13 @@ class MemoryBackend implements Backend {
   async saveDaytonaWorkspace(userId: number, workspace: DaytonaWorkspaceRecord) { this.daytona.set(userId, workspace); }
   async clearDaytonaWorkspace(userId: number) { this.daytona.delete(userId); }
   async getTasks(userId: number) { return this.tasks.get(userId) ?? []; }
+  async getTask(userId: number, id: string) { return (this.tasks.get(userId) ?? []).find((task) => task.id === id); }
+  async isTaskCancellationRequested(userId: number, id: string) { return this.taskCancellationRequests.has(`${userId}:${id}`); }
+  async setTaskCancellationRequested(userId: number, id: string, requested: boolean) {
+    const key = `${userId}:${id}`;
+    if (requested) this.taskCancellationRequests.add(key);
+    else this.taskCancellationRequests.delete(key);
+  }
   async saveTasks(userId: number, tasks: TaskRecord[]) { this.tasks.set(userId, tasks); }
   async createTaskIfAbsent(userId: number, task: TaskRecord) {
     const tasks = this.tasks.get(userId) ?? [];
@@ -3706,6 +3720,7 @@ class MemoryBackend implements Backend {
     if (!current || current.version !== expectedVersion) return undefined;
     const nextList = [...tasks]; nextList[index] = next;
     this.tasks.set(userId, [...nextList.filter((item) => !["completed", "cancelled"].includes(item.status)), ...nextList.filter((item) => ["completed", "cancelled"].includes(item.status)).slice(-100)]);
+    await this.setTaskCancellationRequested(userId, id, ["cancel_requested", "cancelled"].includes(next.status));
     return next;
   }
   async claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number) {
@@ -5813,7 +5828,13 @@ export async function listTasks(userId: number, statuses?: TaskStatus[]): Promis
 }
 
 export async function getTask(userId: number, id: string): Promise<TaskRecord | undefined> {
-  return (await backend.getTasks(userId)).map(normalizeTask).find((task) => task.id === id);
+  const task = await backend.getTask(userId, id);
+  return task ? normalizeTask(task) : undefined;
+}
+
+/** Read only a tiny cancellation marker; never use the full task list in a hot worker loop. */
+export async function isTaskCancellationRequested(userId: number, id: string): Promise<boolean> {
+  return backend.isTaskCancellationRequested(userId, id);
 }
 
 // The default must accommodate a real long-horizon plan. A mission still has
