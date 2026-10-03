@@ -6310,6 +6310,17 @@ function evidenceSatisfiesRequirement(item: MissionEvidenceRecord, requirement: 
   if (typed) return item.kind === typed;
   const kindAlias = requirement.toLowerCase().trim();
   if (["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"].includes(kindAlias)) return item.kind === kindAlias;
+  // Step plans are often authored as human-readable prose even when they
+  // name the exact provider action, for example "trusted receipt for
+  // GMAIL_FETCH_EMAILS". A system-verified provider receipt must satisfy
+  // that explicit tool-name reference; otherwise the worker can execute the
+  // provider action, persist the trusted receipt, and still be unable to
+  // close the step because the prose was compared literally.
+  if (item.kind === "tool_receipt" && item.verifiedBy === "system") {
+    const providerSlugs = requirement.match(/\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b/g) ?? [];
+    const observed = `${item.summary} ${item.source ?? ""} ${item.ref ?? ""}`.toLowerCase();
+    if (providerSlugs.some((slug) => observed.includes(slug.toLowerCase()))) return true;
+  }
   // Mission authors may describe an internal lifecycle proof in prose instead
   // of using the compact kind alias. Only a server-verified before/after
   // record may satisfy this fallback; provider receipts, artifacts, sources,

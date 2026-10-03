@@ -99,6 +99,34 @@ test("mission step completion rejects missing required trusted evidence", async 
   assert.equal(completed.status, "completed");
 });
 
+test("provider tool names in prose step requirements match trusted receipts", async () => {
+  const userId = 972010;
+  const mission = await createMission(userId, {
+    title: "Prose provider receipt",
+    objective: "Execute one bounded provider read.",
+    definitionOfDone: "The provider read is complete and its trusted receipt is attached.",
+    steps: [{
+      id: "read",
+      title: "Read Gmail",
+      objective: "Read a bounded inbox view.",
+      evidenceRequired: ["A trusted server receipt for the successful GMAIL_FETCH_EMAILS provider action."],
+    }],
+  });
+  const started = await startMission(userId, mission.id);
+  await recordTrustedMissionEvidence(userId, mission.id, [{
+    id: "gmail-receipt",
+    kind: "tool_receipt",
+    summary: "GMAIL_FETCH_EMAILS completed successfully with provider receipt log_test_gmail.",
+    source: "composio:GMAIL_FETCH_EMAILS",
+    ref: "log_test_gmail",
+    verified: true,
+    verifiedBy: "system",
+    verifiedAt: Date.now(),
+  }], "read");
+  const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: started!.currentStepId, result: "The trusted Gmail receipt confirms the read." }) as { status?: string };
+  assert.equal(completed.status, "completed");
+});
+
 test("native lifecycle checkpoints satisfy step-local internal evidence without satisfying provider receipts", async () => {
   const userId = 972008;
   const mission = await createMission(userId, {
