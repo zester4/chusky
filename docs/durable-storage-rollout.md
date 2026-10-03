@@ -1,6 +1,6 @@
 # Durable storage rollout status
 
-Updated: 2026-10-03
+Updated: 2026-10-04
 
 ## Decision
 
@@ -52,6 +52,40 @@ Updated: 2026-10-03
   fields, and the latest Chusky deployment was still building during inspection.
   Therefore deployed Neon enablement/reachability and real-user writes are not
   verified by this rollout.
+
+## 2026-10-04 local live verification
+
+Using the configured local `.env` without printing connection values:
+
+- `npm run durable-state:migrate` completed against the configured direct
+  migration URL. A read-only Neon catalog query before migration found the
+  session, conversation, SDK-run, and memory tables, but not object-catalog or
+  mission tables. A subsequent application startup with mission/catalog
+  assertions enabled succeeded, proving the runtime URL sees the newly applied
+  `0008`-`0010` schemas. The migration runner recorded all 10 file checksums;
+  a second invocation skipped all 10 without replaying DDL.
+- `npm run durable-state:live-smoke` passed against configured Neon and Redis:
+  all five session domains round-tripped, one SDK run was stored separately,
+  embedded SDK run arrays were empty, a no-op repeat save left versions
+  unchanged, and deleting only the generated test owner's Redis session/cache
+  keys caused Neon recovery to succeed. Synthetic Neon rows and Redis keys were
+  then confirmed cleaned up. No payloads or owner identifiers were printed.
+- `npm run durable-missions:backfill` in default read-only mode reported zero
+  mission owners/records/events in the configured Redis scope and zero writes.
+  No mission owner was migrated.
+- `npm run r2:retention` in default dry-run mode scanned zero expired catalog
+  objects and deleted none. No R2 object was read or changed.
+
+- The migration runner now serializes concurrent invocations with a PostgreSQL
+  session advisory lock, records each numbered SQL file's SHA-256 after it
+  succeeds, skips unchanged applied files, and refuses checksum drift or a
+  missing applied file. Tests cover ordering, repeat runs, drift, failure, and
+  missing-file protection.
+
+This is local-process verification against the configured Neon/Redis URLs, not
+proof that Railway's deployed process uses those same URLs or feature flags.
+There is still no live R2 object canary, and the zero-record mission/retention
+dry runs do not prove those paths against populated production data.
 
 ## Next implementation slices
 

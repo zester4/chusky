@@ -1,7 +1,7 @@
-import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { config } from "./config.js";
+import { applyDurableStateMigrations } from "./durableStateMigrations.js";
 
 async function main(): Promise<void> {
   // Chusky's auth and durable state can intentionally share one Neon database.
@@ -10,16 +10,10 @@ async function main(): Promise<void> {
   const connectionString = config.durableStateMigrationDatabaseUrl || config.betterAuthMigrationDatabaseUrl;
   if (!connectionString) throw new Error("Set DURABLE_STATE_MIGRATION_DATABASE_URL or BETTER_AUTH_MIGRATION_DATABASE_URL to Neon's direct connection string before running durable-state migrations.");
   const migrationsDirectory = resolve(process.cwd(), "migrations");
-  const migrations = (await readdir(migrationsDirectory))
-    .filter((name) => /^\d{4}_[a-z0-9_-]+\.sql$/i.test(name))
-    .sort();
-  if (!migrations.length) throw new Error("No durable-state SQL migrations were found.");
   const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
   try {
-    for (const migration of migrations) {
-      const sql = await readFile(resolve(migrationsDirectory, migration), "utf8");
-      await pool.query(sql);
-    }
+    const result = await applyDurableStateMigrations(pool, migrationsDirectory);
+    console.log(JSON.stringify({ migrationsApplied: result.applied.length, migrationsAlreadyApplied: result.skipped.length }));
   } finally {
     await pool.end();
   }

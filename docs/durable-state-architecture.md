@@ -30,6 +30,15 @@ application's relational source of truth.
 
 ## Initial Neon migration
 
+Numbered SQL files are applied in order by `npm run durable-state:migrate`.
+The runner holds a PostgreSQL session advisory lock while it checks/applies
+files, stores each applied file's SHA-256 in
+`chusky_durable_state_migration`, skips matching files on later runs, and
+fails closed if an applied file was removed or edited. Add a new numbered
+migration instead of rewriting applied SQL. If a process exits after the SQL
+commits but before its checksum is recorded, rerunning is safe because the SQL
+migrations are idempotent; the runner serializes that retry with the same lock.
+
 `DURABLE_STATE_ENABLED=true` activates five canonical Neon domains per owner:
 
 - `profile`: selected preferences and small session metadata; encrypted provider
