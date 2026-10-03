@@ -1600,6 +1600,10 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
+  listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]>;
+  deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void>;
+  deleteSdkRunsForThread(userId: number, threadId: string): Promise<void>;
   getDurableStateHealth(): Promise<DurableStateStatus>;
   getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
   saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
@@ -1909,7 +1913,7 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
-  constructor(private r: Redis, private readonly durableState?: NeonDurableState) {}
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false) {}
 
   getDurableStateHealth(): Promise<DurableStateStatus> {
     return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
@@ -2014,10 +2018,10 @@ class RedisBackend implements Backend {
   async saveSession(userId: number, s: UserSession): Promise<void> {
     let persisted = s;
     if (this.durableState && userId !== 0) {
-      const { core, domains } = splitSessionDomains(s);
+      const { core, domains, sdkRuns } = splitSessionDomains(s, this.durableSdkRunsEnabled);
       // Neon commits all domains before Redis points at them. If this fails,
       // the old Redis session remains canonical and can be retried safely.
-      await this.durableState.writeSessionDomains(userId, domains);
+      await this.durableState.writeSessionDomains(userId, domains, sdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run })));
       persisted = core;
     }
     // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
@@ -2027,6 +2031,26 @@ class RedisBackend implements Backend {
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
     await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...persisted, approvals: [] }));
+  }
+
+  async getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {
+    const durable = this.durableSdkRunsEnabled ? await this.durableState?.readSdkRun(userId, threadId, runId) : undefined;
+    if (durable) return durable.payload as SdkRunRecord;
+    return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
+  }
+
+  async listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]> {
+    if (!this.durableState || !this.durableSdkRunsEnabled) return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? [];
+    const durable = await this.durableState.listSdkRuns(userId, threadId, 200);
+    return durable.map((record) => record.payload as SdkRunRecord);
+  }
+
+  async deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void> {
+    if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRun(userId, threadId, runId);
+  }
+
+  async deleteSdkRunsForThread(userId: number, threadId: string): Promise<void> {
+    if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRunsForThread(userId, threadId);
   }
 
   async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
@@ -3317,6 +3341,24 @@ class MemoryBackend implements Backend {
   }
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
+  async getSdkRun(userId: number, threadId: string, runId: string) {
+    const session = this.sessions.get(userId);
+    const run = session?.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((item) => item.id === runId);
+    return run ? structuredClone(run) : undefined;
+  }
+  async listSdkRuns(userId: number, threadId: string) {
+    return structuredClone(this.sessions.get(userId)?.sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? []);
+  }
+  async deleteSdkRun(userId: number, threadId: string, runId: string) {
+    const session = this.sessions.get(userId);
+    const thread = session?.sdkThreads?.find((item) => item.id === threadId);
+    if (thread) thread.runs = thread.runs.filter((run) => run.id !== runId);
+  }
+  async deleteSdkRunsForThread(userId: number, threadId: string) {
+    const session = this.sessions.get(userId);
+    const thread = session?.sdkThreads?.find((item) => item.id === threadId);
+    if (thread) thread.runs = [];
+  }
   async getTregSpend(userId: number, dayKey: string) {
     const snapshot = this.tregSpend.get(`${userId}:${dayKey}`);
     return snapshot ? structuredClone(snapshot) : undefined;
@@ -4081,6 +4123,10 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableStateEnabled && !durableState) {
     throw new Error("DURABLE_STATE_DATABASE_URL is required when DURABLE_STATE_ENABLED=true.");
   }
+  if (!options.memoryOnly && config.durableStateSdkRunsEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_SDK_RUNS_ENABLED=true.");
+  }
+  if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4097,7 +4143,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       });
       await r.connect();
       await r.ping();
-      backend = new RedisBackend(r, durableState);
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled);
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
@@ -4517,6 +4563,38 @@ export async function getSession(uid: number): Promise<UserSession> {
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
+/** Load per-run records only for SDK operations that actually need run state. */
+export async function getSessionWithSdkRuns(uid: number, threadId?: string): Promise<UserSession> {
+  const session = await getSession(uid);
+  for (const thread of session.sdkThreads ?? []) {
+    if (threadId && thread.id !== threadId) continue;
+    const runs = new Map(thread.runs.map((run) => [run.id, run]));
+    for (const run of await backend.listSdkRuns(uid, thread.id)) runs.set(run.id, run);
+    thread.runs = [...runs.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }
+  return session;
+}
+
+export async function getSdkRun(uid: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) return undefined;
+  return backend.getSdkRun(uid, threadId, runId);
+}
+
+export async function listSdkRuns(uid: number, threadId: string): Promise<SdkRunRecord[]> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return [];
+  return backend.listSdkRuns(uid, threadId);
+}
+
+export async function deleteSdkRun(uid: number, threadId: string, runId: string): Promise<void> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) throw new Error("SDK run identity is invalid.");
+  await backend.deleteSdkRun(uid, threadId, runId);
+}
+
+export async function deleteSdkRunsForThread(uid: number, threadId: string): Promise<void> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("SDK thread identity is invalid.");
+  await backend.deleteSdkRunsForThread(uid, threadId);
+}
+
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   compactSessionPersistence(s);
   s.updatedAt = Date.now();
@@ -4633,7 +4711,7 @@ export async function releaseTregSpendLock(userId: number, dayKey: string, token
  * short; callers should keep the mutator CPU-only and never perform provider
  * I/O while holding it.
  */
-export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>): Promise<T> {
+export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: { sdkThreadId?: string; allSdkRuns?: boolean } = {}): Promise<T> {
   const token = randomUUID();
   const key = `session-mutate:${uid}`;
   let acquired = false;
@@ -4643,7 +4721,7 @@ export async function mutateSession<T>(uid: number, mutator: (session: UserSessi
   }
   if (!acquired) throw new Error("Session mutation is busy; retry shortly.");
   try {
-    const session = await getSession(uid);
+    const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
     const result = await mutator(session);
     await saveSession(uid, session);
     return result;
@@ -4831,7 +4909,7 @@ export function appendSdkRunHistoryToSession(session: UserSession, threadId: str
 /** One-time import of completed first-party dashboard runs written before account history was canonical. */
 export async function backfillSdkPrivateRunHistory(userId: number): Promise<void> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return;
-  if ((await getSession(userId)).sdkPrivateHistoryBackfilled) return;
+  if ((await getSessionWithSdkRuns(userId)).sdkPrivateHistoryBackfilled) return;
 
   await mutateSession(userId, (session) => {
     if (session.sdkPrivateHistoryBackfilled) return;
@@ -4860,13 +4938,13 @@ export async function backfillSdkPrivateRunHistory(userId: number): Promise<void
       }
     }
     session.sdkPrivateHistoryBackfilled = true;
-  });
+  }, { allSdkRuns: true });
 }
 
 /** Merge only private web conversation context into its explicitly linked Telegram owner. */
 export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number): Promise<void> {
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
-  const source = await getSession(sourceUserId);
+  const source = await getSessionWithSdkRuns(sourceUserId);
   const existingTarget = await getSession(telegramUserId);
   if (existingTarget.linkedWebSessionImports?.some((item) => item.sourceUserId === sourceUserId && item.sourceUpdatedAt === source.updatedAt)) return;
   let importedMemories: MemoryFact[] = [];

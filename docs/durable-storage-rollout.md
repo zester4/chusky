@@ -19,12 +19,12 @@ Updated: 2026-10-03
 | --- | --- | --- |
 | Verify conversation, memories, assets, and SDK session writes in Neon | `npm run durable-state:live-smoke` exercised Chusky `getSession`/`saveSession` against the configured Neon endpoint and Redis; all four domains round-tripped, payloads were not logged, and synthetic rows/key were removed. | Local live smoke passed; deployed-user writes remain unverified. |
 | Backfill and retire legacy Redis session domains | Lazy migration occurs on session writes. `npm run durable-state:backfill` scans and reports aggregate dry-run counts only. Bulk apply is deliberately disabled: Neon write followed by Redis CAS is not atomic across stores and can race with a live session write. | Dry-run tooling only; safe bulk backfill protocol and production retirement pending. |
-| Store SDK runs as per-run Neon rows | Migration `0002_neon_sdk_runs.sql` and typed owner/thread-scoped Neon read/list/upsert/delete operations now exist. SDK API and task-worker runtime still read/write nested runs in the `sdk` session-domain document; no production run cutover has happened. | Schema/repository foundation implemented; runtime migration and legacy backfill not implemented. |
+| Store SDK runs as per-run Neon rows | With `DURABLE_STATE_SDK_RUNS_ENABLED=true`, API, CLI, quota, and task-worker paths hydrate runs from owner/thread-scoped rows. Session writes transactionally import embedded legacy runs and store only thread metadata in the `sdk` domain. Migrations 0002 and 0003 completed against the `.env`-configured Neon endpoint. `npm run durable-state:live-smoke` wrote/read all four domains plus one run row, confirmed zero embedded run rows, and removed its synthetic Neon rows and Redis session key without printing payloads. | Local code against configured live Neon/Redis passed; deployed-service canary and real-user parity are not verified. The flag remains default-off. |
 | Store missions, steps, evidence, and event history in Neon | Mission records remain in Redis; mission events have a separate Redis list. | Not implemented. |
 | Measure Redis commands, bytes, key sizes, and operation families | No Redis-family telemetry was added in this change. Neon session read/write/failure counters are process-local and not Redis metrics. | Not implemented. |
 | Archive large transcripts, tool outputs, files, images, and videos to R2 | Existing SDK uploads and image assets already use R2. This change does not migrate transcript/tool-output payloads or add their Neon metadata records. | Partial existing capability; requested archival path not implemented. |
 | Add retention and safe archival jobs | Existing domain-specific TTLs/limits remain; no general Neon/R2 retention or archival worker was added. | Not implemented. |
-| Full CI and production verification | Clean `npm ci`, typecheck, 1,269 tests (1,265 pass, 0 fail, 4 platform skips), app build, SDK build, SDK tests (25 pass), `git diff --check`, and a synthetic live Neon/Redis round-trip passed locally. | Local checks passed on Windows/Node 25; CI uses Ubuntu/Node 22 and installs FFmpeg, so the exact hosted CI job and deployed production verification remain outstanding. |
+| Full CI and production verification | On this branch, typecheck, 1,275 tests (1,271 pass, 0 fail, 4 platform skips), app build, SDK build, SDK tests (25 pass), and `git diff --check` passed locally. A subsequent SDK-run live smoke against configured Neon/Redis also passed and cleaned its isolated data. | Local checks passed on Windows/Node 25; CI uses Ubuntu/Node 22 and installs FFmpeg, so the exact hosted CI job and deployed-service verification remain outstanding. |
 
 ## Operational safeguards
 
@@ -54,10 +54,10 @@ Updated: 2026-10-03
 3. Keep the guarded backfill in dry-run until stable reads/writes are observed;
    then apply in bounded batches with post-migration parity checks and rollback
    evidence before removing legacy payloads.
-4. Wire the per-run SDK repository into API/task-worker paths, with an
-   idempotent legacy-run backfill and concurrency-safe state transitions; only
-   then stop embedding runs in the `sdk` session document. Next, design and test
-   mission tables/events with explicit Redis coordination semantics before
-   cutover.
+4. Run the SDK-run schema migration, enable `DURABLE_STATE_SDK_RUNS_ENABLED`
+   for a canary owner, and verify list/get/events/cancel/resume parity across
+   SDK, CLI, and durable workers using aggregate status/count checks. Keep the
+   flag off if schema or parity checks fail. Then design and test mission
+   tables/events with explicit Redis coordination semantics before cutover.
 5. Add sampled Redis command/operation-family metrics and R2 archival/retention
    manifests with owner-scoped metadata and recovery tests.

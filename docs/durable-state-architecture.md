@@ -17,11 +17,11 @@ The existing Cloudflare D1 vault remains scoped to the vault Worker. It is not a
 - `conversation`: history and summaries
 - `memories`: normalized owner memory facts
 - `assets`: R2 metadata, SDK file metadata, and artifact metadata; never bytes
-- `sdk`: SDK thread metadata, run history, and indexes. As of migration 0002,
-  a normalized per-run table and owner/thread-scoped repository methods are
-  available, but the live runtime still stores and reads runs inside this
-  document; do not claim per-run persistence is active until API and worker
-  callers are cut over and existing run rows are migrated safely.
+- `sdk`: SDK thread metadata, idempotency/audit/webhook indexes. With
+  `DURABLE_STATE_SDK_RUNS_ENABLED=true`, run payloads are written to the
+  owner-scoped `chusky_sdk_run` table in the same Neon transaction and are
+  hydrated for API, CLI, and worker operations. The default-off flag preserves
+  the existing embedded-run behavior until the run-table migration is applied.
 
 The Redis session record retains small operational/profile fields and a
 `durableSessionFormat` marker. On every first save after enablement, Chusky
@@ -53,9 +53,15 @@ R2 retroactively.
    before a user has migrated; a migrated user must keep the Neon URL present
    until a deliberate reverse migration is implemented.
 
-Migration `0002_neon_sdk_runs.sql` prepares individually addressable SDK run
-rows. The next runtime migration must route SDK API and durable task-worker
-reads/writes through those rows, safely import existing nested runs, and retain
-Redis owner locks for cross-request coordination. Mission records/evidence/event
-history remain a separate future migration because they require their own
-cross-store idempotency and recovery semantics.
+Migrations `0002_neon_sdk_runs.sql` and
+`0003_neon_sdk_run_cli_thread_ids.sql` prepare individually addressable SDK
+run rows and preserve existing CLI thread IDs. Apply them before enabling
+`DURABLE_STATE_SDK_RUNS_ENABLED=true`; startup checks the table exists and
+fails closed if the schema is absent. On each
+session save after cutover, embedded legacy runs are imported transactionally
+while thread metadata is saved with empty run arrays. SDK API, CLI, quota, and
+durable task-worker paths hydrate runs from the per-run repository. Existing
+`cli_thread_` identifiers remain supported. The flag remains off by default;
+production enablement and real-user parity are not verified by local tests.
+Mission records/evidence/event history remain a separate future migration
+because they require their own cross-store idempotency and recovery semantics.

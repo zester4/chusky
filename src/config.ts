@@ -651,6 +651,8 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
   durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
+  // Per-run SDK records require migration 0002; cut over independently after it is applied.
+  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
   // ── Credential vault (opt-in; Cloudflare Worker + D1) ───────────────
   // The encryption master key is deliberately *not* available in this
   // process. It is held only by the Cloudflare Worker. Railway has just the

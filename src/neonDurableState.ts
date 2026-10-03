@@ -49,7 +49,7 @@ function assertUserId(userId: number): void {
 }
 
 function assertSdkRunIdentity(threadId: string, runId: string): void {
-  if (!/^thr_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) {
     throw new Error("Durable SDK run identity is invalid.");
   }
 }
@@ -106,6 +106,11 @@ export class NeonDurableState {
     }
   }
 
+  /** Fail startup before enabling run cutover if migration 0002 is absent. */
+  async assertSdkRunSchema(): Promise<void> {
+    await this.database.query("SELECT user_id, thread_id, run_id, payload FROM chusky_sdk_run LIMIT 0");
+  }
+
   async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
     assertUserId(userId);
     const result = await this.database.query<SessionRow>(
@@ -119,7 +124,7 @@ export class NeonDurableState {
   }
 
   /** Write all supplied domains in one Postgres transaction. */
-  async writeSessionDomains(userId: number, documents: ReadonlyMap<DurableSessionDomain, unknown>): Promise<void> {
+  async writeSessionDomains(userId: number, documents: ReadonlyMap<DurableSessionDomain, unknown>, sdkRuns: readonly { threadId: string; runId: string; payload: unknown }[] = []): Promise<void> {
     assertUserId(userId);
     if (documents.size !== DURABLE_SESSION_DOMAINS.length || DURABLE_SESSION_DOMAINS.some((domain) => !documents.has(domain))) {
       throw new Error("A durable session write must include every session domain.");
@@ -135,6 +140,9 @@ export class NeonDurableState {
            SET payload = EXCLUDED.payload, version = chusky_session_domain.version + 1, updated_at = NOW()`,
           [userId, domain, JSON.stringify(documents.get(domain))],
         );
+      }
+      for (const run of sdkRuns) {
+        await this.writeSdkRunWithClient(client, userId, run.threadId, run.runId, run.payload);
       }
       await client.query("COMMIT");
     } catch (error) {
@@ -159,7 +167,7 @@ export class NeonDurableState {
   /** List one thread's runs in stable creation order, with a hard query bound. */
   async listSdkRuns(userId: number, threadId: string, limit = 100): Promise<DurableSdkRun[]> {
     assertUserId(userId);
-    if (!/^thr_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
+    if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(200, limit)) : 100;
     const result = await this.database.query<SdkRunRow>(
       "SELECT user_id, thread_id, run_id, payload, created_at, updated_at FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 ORDER BY created_at ASC, run_id ASC LIMIT $3",
@@ -196,10 +204,38 @@ export class NeonDurableState {
     if (!result.rows.length) throw new Error("Durable SDK run identity conflicts with an existing owner run.");
   }
 
+  private async writeSdkRunWithClient(client: Queryable, userId: number, threadId: string, runId: string, payload: unknown): Promise<void> {
+    assertSdkRunIdentity(threadId, runId);
+    const value = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : undefined;
+    if (!value || value.id !== runId || !["queued", "running", "requires_approval", "completed", "failed", "cancelled"].includes(String(value.status)) || !Array.isArray(value.events)) {
+      throw new Error("Durable SDK run payload is invalid.");
+    }
+    const createdAt = Number(value.createdAt);
+    const updatedAt = Number(value.updatedAt);
+    if (!Number.isSafeInteger(createdAt) || createdAt < 0 || !Number.isSafeInteger(updatedAt) || updatedAt < createdAt) throw new Error("Durable SDK run timestamps are invalid.");
+    const result = await client.query(
+      `INSERT INTO chusky_sdk_run (user_id, thread_id, run_id, payload, created_at, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, to_timestamp($5 / 1000.0), to_timestamp($6 / 1000.0))
+       ON CONFLICT (user_id, run_id) DO UPDATE
+       SET payload = EXCLUDED.payload, updated_at = EXCLUDED.updated_at
+       WHERE chusky_sdk_run.thread_id = EXCLUDED.thread_id
+         AND chusky_sdk_run.created_at = EXCLUDED.created_at
+       RETURNING run_id`,
+      [userId, threadId, runId, JSON.stringify(value), createdAt, updatedAt],
+    );
+    if (!result.rows.length) throw new Error("Durable SDK run identity conflicts with an existing owner run.");
+  }
+
   async deleteSdkRunsForThread(userId: number, threadId: string): Promise<void> {
     assertUserId(userId);
-    if (!/^thr_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
+    if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("Durable SDK thread identity is invalid.");
     await this.database.query("DELETE FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2", [userId, threadId]);
+  }
+
+  async deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void> {
+    assertUserId(userId);
+    assertSdkRunIdentity(threadId, runId);
+    await this.database.query("DELETE FROM chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 AND run_id = $3", [userId, threadId, runId]);
   }
 
   async close(): Promise<void> { await this.database.end(); }

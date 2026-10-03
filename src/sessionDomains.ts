@@ -12,19 +12,21 @@ export function sessionUsesNeonDomains(session: UserSession): boolean {
 }
 
 /** Separate high-growth fields without changing the UserSession API used by callers. */
-export function splitSessionDomains(session: UserSession): { core: UserSession; domains: DurableSessionPayloads } {
+export function splitSessionDomains(session: UserSession, separateSdkRuns = false): { core: UserSession; domains: DurableSessionPayloads; sdkRuns: Array<{ threadId: string; run: SdkThreadRecord["runs"][number] }> } {
+  const sdkRuns = separateSdkRuns ? (session.sdkThreads ?? []).flatMap((thread) => thread.runs.map((run) => ({ threadId: thread.id, run }))) : [];
+  const sdkThreads = separateSdkRuns ? (session.sdkThreads ?? []).map((thread) => ({ ...thread, runs: [] })) : session.sdkThreads ?? [];
   const domains: DurableSessionPayloads = new Map([
     ["conversation", { history: session.history, summaries: session.summaries }],
     ["memories", { memories: session.memories }],
     ["assets", { imageAssets: session.imageAssets, sdkFiles: session.sdkFiles ?? [], artifacts: session.artifacts ?? [] }],
-    ["sdk", { sdkThreads: session.sdkThreads ?? [], sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }],
+    ["sdk", { sdkThreads, sdkIdempotency: session.sdkIdempotency ?? {}, sdkAudit: session.sdkAudit ?? [], sdkWebhooks: session.sdkWebhooks ?? [], sdkProjects: session.sdkProjects ?? [] }],
   ]);
   const core = {
     ...session,
     history: [], summaries: [], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], sdkThreads: [], sdkIdempotency: {}, sdkAudit: [], sdkWebhooks: [], sdkProjects: [],
     durableSessionFormat: DURABLE_SESSION_FORMAT,
   } as SessionWithDurableMarker;
-  return { core, domains };
+  return { core, domains, sdkRuns };
 }
 
 function object(value: unknown): Record<string, unknown> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
