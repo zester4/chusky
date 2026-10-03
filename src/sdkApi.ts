@@ -12,7 +12,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -736,7 +736,7 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
 function runView(threadId: string, run: SdkRunRecord) {
-  const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, ...visible } = run;
+  const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, durableVersion: _durableVersion, durablePayloadHash: _durablePayloadHash, ...visible } = run;
   return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
 }
 
@@ -762,8 +762,12 @@ async function persistSdkRunSnapshot(
     const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200);
     const events = [...activityEvents, ...subagentEvents, ...otherEvents].sort((left, right) => left.at - right.at);
     const previousStatus = stored.status;
+    const durableVersion = stored.durableVersion;
     const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
     Object.assign(stored, run, { events });
+    // This token belongs to the row version read inside the lock, not the
+    // potentially stale run snapshot held by the long-running request.
+    stored.durableVersion = durableVersion;
     if (preserveCancellation) {
       stored.status = "cancelled";
       stored.approvalId = undefined;
@@ -973,6 +977,22 @@ async function resolveRunInput(session: Awaited<ReturnType<typeof getSession>>, 
 }
 
 type AccountHistoryMessage = { role: "user" | "assistant"; content: string; createdAt?: number };
+type ConversationHistoryCursor = { createdAt: number; id: string };
+
+function encodeConversationHistoryCursor(cursor: ConversationHistoryCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeConversationHistoryCursor(value: string): ConversationHistoryCursor | undefined {
+  if (value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<ConversationHistoryCursor>;
+    if (!Number.isSafeInteger(parsed.createdAt) || Number(parsed.createdAt) < 0 || typeof parsed.id !== "string" || !/^[A-Za-z0-9:_-]{1,180}$/.test(parsed.id)) return undefined;
+    return { createdAt: Number(parsed.createdAt), id: parsed.id };
+  } catch {
+    return undefined;
+  }
+}
 
 function dashboardRequest(c: any): boolean {
   return Boolean(c.get("webAuthUserId"));
@@ -1466,8 +1486,27 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/account/history", async (c) => {
-    const session = await getSession(sdkUser(c)!.userId);
-    return c.json({ data: accountHistoryView(session) });
+    const userId = sdkUser(c)!.userId;
+    const beforeValue = c.req.query("before");
+    if (beforeValue !== undefined) {
+      const before = decodeConversationHistoryCursor(beforeValue);
+      if (!before) return apiError(c, 400, "invalid_history_cursor", "before must be a valid conversation history cursor.");
+      const limitValue = c.req.query("limit");
+      const limit = limitValue === undefined ? 50 : Number(limitValue);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return apiError(c, 400, "invalid_history_limit", "limit must be an integer from 1 to 100.");
+      const messages = await readConversationHistoryBefore(userId, before, limit);
+      if (!messages) return apiError(c, 503, "durable_history_unavailable", "Older conversation history is unavailable because durable Neon history is not enabled.");
+      const data = messages.map(({ id, role, content, createdAt }) => ({ id, role, content, createdAt }));
+      const oldest = messages[0];
+      return c.json({ data, ...(messages.length === limit && oldest ? { nextCursor: encodeConversationHistoryCursor({ createdAt: oldest.createdAt, id: oldest.id }) } : {}) });
+    }
+    const session = await getSession(userId);
+    const data = accountHistoryView(session);
+    const oldestHotMessage = session.history[0];
+    const nextCursor = oldestHotMessage?.id && Number.isSafeInteger(oldestHotMessage.createdAt)
+      ? encodeConversationHistoryCursor({ createdAt: oldestHotMessage.createdAt!, id: oldestHotMessage.id })
+      : undefined;
+    return c.json({ data, ...(nextCursor ? { nextCursor } : {}) });
   });
 
   app.get("/v1/account/voice-options", async (c) => {

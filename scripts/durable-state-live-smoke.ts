@@ -17,7 +17,7 @@ process.env.DURABLE_STATE_ENABLED = "true";
 process.env.DURABLE_STATE_DATABASE_URL = databaseUrl;
 process.env.DURABLE_STATE_SDK_RUNS_ENABLED = "true";
 
-const expectedDomains = ["assets", "conversation", "memories", "sdk"];
+const expectedDomains = ["assets", "conversation", "memories", "profile", "sdk"];
 const userId = 8_000_000_000_000_000 + randomInt(0, 1_000_000);
 const marker = `durable-state-smoke-${randomInt(1_000_000, 9_999_999)}`;
 const threadId = `thr_smoke_${randomInt(1_000_000, 9_999_999)}`;
@@ -27,9 +27,11 @@ const redis = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 1, connec
 
 async function main(): Promise<void> {
   let runError: unknown;
+  let stage = "initialize-store";
   try {
     const store = await import("../src/store.js");
     await store.initStore();
+    stage = "load-session";
     const session = await store.getSession(userId);
     session.history = [{ role: "user", content: marker }];
     session.totalMessages = 1;
@@ -42,9 +44,15 @@ async function main(): Promise<void> {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }];
+    stage = "save-session";
+    await store.saveSession(userId, session);
+    // Request handlers can persist one in-memory session repeatedly. A no-op
+    // second save must not conflict or bump durable row versions.
     await store.saveSession(userId, session);
 
+    stage = "read-session-and-sdk-runs";
     const restored = await store.getSessionWithSdkRuns(userId, threadId);
+    stage = "inspect-neon-row-counts";
     const result = await pool.query<{ domain: string; records: number }>(
       "SELECT domain, COUNT(*)::int AS records FROM public.chusky_session_domain WHERE user_id = $1 GROUP BY domain ORDER BY domain",
       [userId],
@@ -57,41 +65,83 @@ async function main(): Promise<void> {
       "SELECT COALESCE(SUM(jsonb_array_length(thread.value->'runs')), 0)::int AS embedded_runs FROM public.chusky_session_domain CROSS JOIN LATERAL jsonb_array_elements(payload->'sdkThreads') AS thread(value) WHERE user_id = $1 AND domain = 'sdk'",
       [userId],
     );
+    const messageRows = await pool.query<{ records: number }>(
+      "SELECT COUNT(*)::int AS records FROM public.chusky_conversation_message WHERE user_id = $1",
+      [userId],
+    );
+    const domainVersions = await pool.query<{ total: number }>(
+      "SELECT COALESCE(SUM(version), 0)::int AS total FROM public.chusky_session_domain WHERE user_id = $1",
+      [userId],
+    );
+    const runVersion = await pool.query<{ version: number }>(
+      "SELECT version::int AS version FROM public.chusky_sdk_run WHERE user_id = $1 AND thread_id = $2 AND run_id = $3",
+      [userId, threadId, runId],
+    );
     const presentDomains = result.rows.map((row) => row.domain);
     const restoredRun = restored.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
-    if (restored.history?.[0]?.content !== marker || restoredRun?.output !== marker
-      || expectedDomains.some((domain) => !presentDomains.includes(domain))
-      || runRows.rows[0]?.records !== 1 || sdkDomain.rows[0]?.embedded_runs !== 0) {
+    const smokeChecks = {
+      historyRoundTrip: restored.history?.[0]?.content === marker,
+      sdkRunRoundTrip: restoredRun?.output === marker,
+      allDomainsPresent: expectedDomains.every((domain) => presentDomains.includes(domain)),
+      oneRunRow: runRows.rows[0]?.records === 1,
+      noEmbeddedRuns: sdkDomain.rows[0]?.embedded_runs === 0,
+      oneMessageRow: messageRows.rows[0]?.records === 1,
+      unchangedDomainVersions: domainVersions.rows[0]?.total === 5,
+      unchangedSdkRunVersion: runVersion.rows[0]?.version === 1,
+    };
+    if (Object.values(smokeChecks).some((passed) => !passed)) {
+      console.error(JSON.stringify({ liveSmokeChecks: smokeChecks, domainVersionTotal: domainVersions.rows[0]?.total, sdkRunVersion: runVersion.rows[0]?.version }));
       throw new Error("Chusky session domains or per-run SDK storage did not round-trip through Neon.");
+    }
+
+    // Simulate expiration of both Redis session and domain cache. Recovery must
+    // use Neon's durable profile/domains and recent message table, not return a
+    // blank session or depend on cache payloads.
+    stage = "expire-redis-cache-and-recover-from-neon";
+    const expiredKeys = await redis.del(`chuck:session:${userId}`, `chuck:session-domains:${userId}`);
+    const recovered = await store.getSession(userId);
+    stage = "read-sdk-run-after-cache-expiry";
+    const recoveredWithRuns = await store.getSessionWithSdkRuns(userId, threadId);
+    const recoveredThread = recovered.sdkThreads?.find((thread) => thread.id === threadId);
+    const recoveredRun = recoveredWithRuns.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
+    if (recovered.history?.[0]?.content !== marker || recovered.model !== session.model
+      || !recoveredThread || recoveredThread.runs.length !== 0 || recoveredRun?.output !== marker) {
+      throw new Error("Expired Redis session did not recover its recent context and profile from Neon.");
     }
 
     console.log(JSON.stringify({
       chuskyStoreWrite: true,
       sessionReadBack: true,
+      expiredRedisCacheRecoveredFromNeon: true,
       domains: result.rows.map(({ domain, records }) => ({ domain, records })),
       sdkRunRows: runRows.rows[0]?.records ?? 0,
+      conversationRows: messageRows.rows[0]?.records ?? 0,
+      unchangedRepeatSaveKeptDomainAndRunVersions: domainVersions.rows[0]?.total === 5 && runVersion.rows[0]?.version === 1,
       embeddedSdkRuns: sdkDomain.rows[0]?.embedded_runs ?? 0,
+      redisKeysExpiredForRecoveryTest: expiredKeys,
       payloadInspected: false,
     }));
   } catch (error) {
     runError = error;
+    console.error(JSON.stringify({ liveSmokeFailureStage: stage }));
   } finally {
     // The smoke uses a synthetic, high-range owner ID and removes only its own
     // test rows and Redis session, including after a partially successful write.
     const cleanup = await Promise.allSettled([
       pool.query("DELETE FROM public.chusky_session_domain WHERE user_id = $1", [userId]),
       pool.query("DELETE FROM public.chusky_sdk_run WHERE user_id = $1", [userId]),
-      redis.del(`chuck:session:${userId}`),
+      pool.query("DELETE FROM public.chusky_conversation_message WHERE user_id = $1", [userId]),
+      redis.del(`chuck:session:${userId}`, `chuck:session-domains:${userId}`),
     ]);
     const leftovers = await pool.query<{ present: boolean }>(
-      "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) AS present",
+      "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
       [userId],
     ).catch((error: unknown) => { throw error; });
     await Promise.allSettled([pool.end(), redis.quit()]);
     if (cleanup.some((result) => result.status === "rejected") || leftovers.rows[0]?.present) {
       throw new Error("The live smoke could not confirm cleanup of its isolated test records.");
     }
-    console.log(JSON.stringify({ isolatedTestDataCleaned: true, redisSessionKeyRemoved: cleanup[2]?.status === "fulfilled" && cleanup[2].value === 1 }));
+    console.log(JSON.stringify({ isolatedTestDataCleaned: true, redisSessionKeysRemoved: cleanup[3]?.status === "fulfilled" ? cleanup[3].value : 0 }));
   }
   if (runError) throw runError;
 }
