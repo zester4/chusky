@@ -259,6 +259,30 @@ test("native strict mission closes with an exact trusted receipt and completed s
   assert.equal((await getMission(ownerId, mission.id))?.verification?.verified, true);
 });
 
+test("strict native-only closeout verifies a server-derived before-after check", async () => {
+  await initStore({ memoryOnly: true });
+  const ownerId = 9825;
+  const mission = await createMission(ownerId, {
+    title: "Internal proof closeout",
+    objective: "Verify persisted native lifecycle state",
+    definitionOfDone: "The internal lifecycle proof is verified.",
+    verificationMode: "strict",
+    requiredEvidence: ["kind:before_after"],
+    steps: [{ id: "checkpoint", title: "Checkpoint", objective: "Persist and verify an internal checkpoint." }],
+  });
+  await startMission(ownerId, mission.id);
+  await checkpointMission(ownerId, mission.id, "Server-derived checkpoint", "Complete the checkpoint step.");
+  await completeMissionStep(ownerId, mission.id, "checkpoint", "Checkpoint persisted.");
+  const proof = (await getMission(ownerId, mission.id))?.evidence?.find((item) => item.kind === "before_after" && item.verifiedBy === "system");
+  assert.ok(proof);
+  const result = await nativeTool(ownerId, "CHUCK_MISSION_VERIFY", {
+    id: mission.id,
+    checks: [{ id: "internal", kind: "before_after", description: "The server-derived internal checkpoint is persisted.", evidenceId: proof.id }],
+  });
+  assert.equal((result as { status: string }).status, "completed");
+  assert.equal((await getMission(ownerId, mission.id))?.verification?.verified, true);
+});
+
 test("strict native-only missions derive trusted evidence from persisted lifecycle facts", async () => {
   const clock = new MissionFakeClock();
   clock.install();

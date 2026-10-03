@@ -34,13 +34,13 @@ export async function executeOutcomeVerification(input: {
   const results: OutcomeCheckResult[] = [];
   const mission = input.missionId ? await getMission(input.ownerId, input.missionId) : undefined;
   for (const check of input.checks.slice(0, 50)) {
-    if (!["provider_read", "receipt", "artifact", "human"].includes(check.kind)) {
-      results.push({ checkId: check.id, status: "uncertain", reason: "Unsupported check kind; use provider_read, receipt, artifact, or human." });
+    if (!["provider_read", "receipt", "artifact", "before_after", "human"].includes(check.kind)) {
+      results.push({ checkId: check.id, status: "uncertain", reason: "Unsupported check kind; use provider_read, receipt, artifact, before_after, or human." });
       continue;
     }
     if (check.kind !== "provider_read") {
       const evidence = mission?.evidence?.find((item) => item.id === check.evidenceId);
-      const kinds = check.kind === "receipt" ? ["tool_receipt"] : check.kind === "artifact" ? ["artifact"] : ["human_confirmation"];
+      const kinds = check.kind === "receipt" ? ["tool_receipt"] : check.kind === "artifact" ? ["artifact"] : check.kind === "before_after" ? ["before_after"] : ["human_confirmation"];
       const trustedBy = check.kind === "human" ? "human" : "system";
       if (!evidence || !kinds.includes(evidence.kind) || !evidence.verified || evidence.verifiedBy !== trustedBy
         || !evidence.verifiedAt || evidence.verifiedAt > now || !(evidence.source || evidence.ref || evidence.hash)

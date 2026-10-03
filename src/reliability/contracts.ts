@@ -2,7 +2,7 @@
 
 export type ReliabilityStatus = "verified" | "failed" | "uncertain" | "blocked";
 
-export type OutcomeCheckKind = "provider_read" | "receipt" | "artifact" | "human";
+export type OutcomeCheckKind = "provider_read" | "receipt" | "artifact" | "before_after" | "human";
 
 export interface OutcomeCheck {
   id: string;
