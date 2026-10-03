@@ -2180,8 +2180,9 @@ class RedisBackend implements Backend {
           break;
         } catch (error) {
           const isVersionConflict = error instanceof Error && /(?:domain version conflict|SDK run version conflict)/i.test(error.message);
-          if (!isVersionConflict || writeAttempts >= 2) throw error;
+          if (!isVersionConflict || writeAttempts >= 7) throw error;
           writeAttempts += 1;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(500, 10 * (2 ** (writeAttempts - 1)))));
           const latest = await this.durableState.readSessionDomains(userId);
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
         }
