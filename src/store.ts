@@ -2176,7 +2176,28 @@ class RedisBackend implements Backend {
       // Neon commits all domains before Redis points at them. If this fails,
       // the old Redis session remains canonical and can be retried safely.
       const changedSdkRuns = this.durableSdkRunsEnabled ? sdkRuns.filter(({ run }) => run.durablePayloadHash !== durableSdkRunHash(run)) : sdkRuns;
-      const writtenVersions = await this.durableState.writeSessionDomains(userId, changedDomains, changedSdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run, expectedVersion: run.durableVersion })), expectedVersions);
+      // Telegram, web, SDK, audit, and proactive handlers can all save the
+      // same owner session concurrently. A stale optimistic version is a
+      // normal race, not a user-visible failure. Refresh the domain versions
+      // and retry a bounded number of times before surfacing a real database
+      // error. Conversation messages have already been appended idempotently
+      // above, so this retry only repairs the durable domain metadata.
+      let writtenVersions: Map<DurableSessionDomain, number>;
+      let writeExpectedVersions = expectedVersions;
+      let writeAttempts = 0;
+      while (true) {
+        try {
+          writtenVersions = await this.durableState.writeSessionDomains(userId, changedDomains, changedSdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run, expectedVersion: run.durableVersion })), writeExpectedVersions);
+          break;
+        } catch (error) {
+          const isVersionConflict = error instanceof Error && /(?:domain version conflict|SDK run version conflict)/i.test(error.message);
+          if (!isVersionConflict || writeAttempts >= 7) throw error;
+          writeAttempts += 1;
+          await new Promise((resolve) => setTimeout(resolve, Math.min(500, 10 * (2 ** (writeAttempts - 1)))));
+          const latest = await this.durableState.readSessionDomains(userId);
+          writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
+        }
+      }
       for (const { run } of changedSdkRuns) {
         run.durableVersion = (run.durableVersion ?? 0) + 1;
         run.durablePayloadHash = durableSdkRunHash(run);

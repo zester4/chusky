@@ -678,6 +678,10 @@ export class NeonDurableState {
     const client = await this.database.connect();
     try {
       await this.measuredQuery(client, "BEGIN");
+      // Session domains are owner-scoped documents. Serialize writes for one
+      // owner across Railway replicas so normal web, Telegram, audit, and
+      // background saves do not all race on the same optimistic version.
+      await this.measuredQuery(client, "SELECT pg_advisory_xact_lock($1::bigint)", [userId]);
       for (const [domain, payload] of documents) {
         const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
         const expected = expectedVersions.get(domain);
