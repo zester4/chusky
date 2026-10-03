@@ -5,6 +5,8 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { createNeonDurableState, type NeonDurableState } from "./neonDurableState.js";
+import { joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
@@ -1906,7 +1908,7 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
-  constructor(private r: Redis) {}
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState) {}
   /** Avoid a Redis EXISTS call before every idle recovery pass after startup. */
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
@@ -1985,19 +1987,41 @@ class RedisBackend implements Backend {
   async getSession(userId: number): Promise<UserSession> {
     const raw = await this.r.get(this.sk(userId));
     if (raw) {
-      try { const session = JSON.parse(raw) as UserSession; session.approvals = await this.listApprovals(userId, 20); return session; } catch { /* fallthrough */ }
+      try {
+        let session = JSON.parse(raw) as UserSession;
+        const migrated = sessionUsesNeonDomains(session);
+        if (migrated) {
+          if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
+          const documents = await this.durableState.readSessionDomains(userId);
+          session = joinSessionDomains(session, new Map([...documents].map(([domain, document]) => [domain, document.payload])));
+        }
+        session.approvals = await this.listApprovals(userId, 20);
+        return session;
+      } catch (error) {
+        // A migrated session must never silently fall back to an empty or stale
+        // Redis core document. Legacy malformed records retain prior behavior.
+        if (raw.includes("\"durableSessionFormat\"")) throw error;
+      }
     }
     const session = fresh(); session.approvals = await this.listApprovals(userId, 20); return session;
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
+    let persisted = s;
+    if (this.durableState && userId !== 0) {
+      const { core, domains } = splitSessionDomains(s);
+      // Neon commits all domains before Redis points at them. If this fails,
+      // the old Redis session remains canonical and can be retried safely.
+      await this.durableState.writeSessionDomains(userId, domains);
+      persisted = core;
+    }
     // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
     // It must survive the normal chat-session TTL just like durable tasks and CLI devices.
-    if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(s)); return; }
+    if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(persisted)); return; }
     // Approval records live in their own short-lived keyspace. Keep an empty
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
-    await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+    await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...persisted, approvals: [] }));
   }
 
   async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
@@ -4043,6 +4067,14 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
     recordFailure("redis_failure", error, { phase: "startup", reason: "missing_url" });
     throw error;
   }
+  // An explicitly enabled canonical store must never degrade to an unrelated
+  // memory backend because of a typo or unavailable Postgres connection.
+  const durableState = !options.memoryOnly && config.durableStateEnabled
+    ? await createNeonDurableState(config.durableStateDatabaseUrl)
+    : undefined;
+  if (!options.memoryOnly && config.durableStateEnabled && !durableState) {
+    throw new Error("DURABLE_STATE_DATABASE_URL is required when DURABLE_STATE_ENABLED=true.");
+  }
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4059,7 +4091,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       });
       await r.connect();
       await r.ping();
-      backend = new RedisBackend(r);
+      backend = new RedisBackend(r, durableState);
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
