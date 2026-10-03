@@ -15,7 +15,7 @@ verified rollback path.
 
 | Data/path | Current implementation | Metadata / access | Finding |
 | --- | --- | --- | --- |
-| Generated and imported images (`images/<owner>/...`) | `saveImageAsset`, `registerImageAsset` in `src/store.ts`; S3 operations in `src/lib/storage/r2.ts` | Image metadata is held in the session `assets` domain (Neon only when `DURABLE_STATE_ENABLED` is active; otherwise legacy Redis). Reads resolve metadata for the owner before issuing a 5-minute signed URL or server-side read. | Bytes already use R2; there is no dedicated normalized Neon object catalog, content hash, or expiry. Replacement cleanup is best effort and old metadata can be evicted by the 100-item cap. |
+| Generated and imported images (`images/<owner>/...`) | `saveImageAsset`, `registerImageAsset` in `src/store.ts`; S3 operations in `src/lib/storage/r2.ts` | Asset discovery metadata remains in the session `assets` domain. With `DURABLE_OBJECT_CATALOG_ENABLED`, registration verifies bounded R2 size/type/bytes and writes owner-scoped Neon object metadata with SHA-256; reads require a matching available catalog row before signing; deletion tombstones Neon before deleting R2. | New writes are cataloged behind the flag. Existing image assets are not backfilled, so enabling the flag without a verified image inventory/backfill makes legacy catalog-missing images unavailable through the guarded read path. Expiry and automated orphan cleanup remain outstanding. |
 | Dashboard/SDK file uploads (`sdk/<owner>/...`) | `/v1/files` creates a signed upload intent; `/complete` checks `HeadObject` type and size in `src/sdkApi.ts` | `sdkFiles` live in the session `assets` domain; only `available` records are downloadable and owner identity comes from authenticated SDK context. | Upload verification and ownership exist. Intent expiry is five minutes, but stale intent records and rejected/unreferenced R2 objects do not have a complete cleanup job. No checksum or explicit retention metadata. |
 | Channel and Telegram attachments (`channels/...`, `telegram/...`) | `src/channels/agentHandler.ts`, `src/handlers.ts`, `src/lib/storage/r2.ts` | Image attachments are registered as owner image assets; some document attachments are uploaded without a durable asset-catalog record. | R2 keeps bytes out of Redis, but the object inventory and cleanup coverage are inconsistent across attachment types. |
 | Generated Sendblue media | `src/channels/sendblueMedia.ts` writes temporary objects and may issue a short-lived signed URL. | Delivery metadata is returned to the channel adapter; there is no general Neon retention record. | Temporary delivery objects need an explicit expiry/cleanup policy, not a permanent asset policy. |
@@ -107,8 +107,9 @@ pending-to-available Neon transition wins, and losing copies are cleaned up
 best-effort. Staging cleanup can still leave an orphan if the process crashes,
 so an expiry/orphan sweeper is required before broad rollout.
 
-This is not the R2 phase completion: other image/file and attachment flows do
-not yet write the catalog. Encrypted transcript/run-trace archival,
-retention/orphan-cleanup workers, inventory/backfill tooling, production
-migration, and a live R2 canary remain outstanding. No lifecycle expiry rules
-are configured for user object prefixes.
+This is not the R2 phase completion: the image integration is opt-in and does
+not backfill existing images; channel/Telegram document attachments and other
+asset flows do not all write the catalog. Encrypted transcript/run-trace
+archival, retention/orphan-cleanup workers, complete inventory/backfill
+tooling, production migration, and a live R2 canary remain outstanding. No
+lifecycle expiry rules are configured for user object prefixes.

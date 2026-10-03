@@ -16,7 +16,8 @@ import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
-import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
+import { deleteR2Object, inspectR2Object, putR2Object, r2Configured, readR2ObjectBounded, signR2Download } from "./lib/storage/r2.js";
+import { deleteDurableImageAsset, durableImageObjectId, isAuthorizedDurableImage, registerDurableImageAsset } from "./durableImageCatalog.js";
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
@@ -8374,12 +8375,28 @@ export async function registerImageAsset(uid: number, input: { id?: string; name
   const now = Date.now();
   const id = input.id ?? `img_${now}_${randomUUID().slice(0, 8)}`;
   const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: input.r2Key, contentType: input.contentType, size: input.size, createdAt: now, updatedAt: now };
+  if (config.durableObjectCatalogEnabled) {
+    await registerDurableImageAsset({ userId: uid, assetId: asset.id, r2Key: asset.r2Key, contentType: asset.contentType, size: asset.size }, {
+      inspect: inspectR2Object,
+      readBounded: readR2ObjectBounded,
+      create: createDurableObjectMetadata,
+      get: getDurableObjectMetadata,
+      markDeleting: markDurableObjectDeleting,
+      markDeleted: markDurableObjectDeleted,
+      deleteObject: deleteR2Object,
+    }, config.sdkMaxFileBytes);
+  }
   const session = await getSession(uid);
   const previous = session.imageAssets.find((item) => item.name === asset.name || item.r2Key === asset.r2Key);
   session.imageAssets = [...session.imageAssets.filter((item) => item.name !== asset.name), asset].slice(-100);
   await saveSession(uid, session);
   if (previous) {
-    if (previous.r2Key !== asset.r2Key) void deleteR2Object(previous.r2Key).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset cleanup failed"));
+    if (previous.r2Key !== asset.r2Key) void (config.durableObjectCatalogEnabled
+      ? deleteDurableImageAsset({ userId: uid, assetId: previous.id, r2Key: previous.r2Key, contentType: previous.contentType, size: previous.size }, {
+        inspect: inspectR2Object, readBounded: readR2ObjectBounded, create: createDurableObjectMetadata, get: getDurableObjectMetadata,
+        markDeleting: markDurableObjectDeleting, markDeleted: markDurableObjectDeleted, deleteObject: deleteR2Object,
+      })
+      : deleteR2Object(previous.r2Key)).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset cleanup failed"));
     if (vectorConfigured()) void new UpstashKnowledgeStore().deleteDocument(String(uid), `image_asset:${previous.id}`).catch((error) => logger.warn({ err: error, userId: uid, assetId: previous.id }, "Previous image asset vector cleanup failed"));
   }
   if (vectorConfigured()) {
@@ -8397,7 +8414,21 @@ export async function saveImageAsset(uid: number, input: { name: string; purpose
   const id = `img_${Date.now()}_${randomUUID().slice(0, 8)}`;
   const r2Key = `images/${uid}/${id}.${imageExtension(input.contentType)}`;
   await putR2Object(r2Key, bytes, input.contentType);
-  return registerImageAsset(uid, { ...input, id, r2Key, size: bytes.byteLength });
+  try {
+    return await registerImageAsset(uid, { ...input, id, r2Key, size: bytes.byteLength });
+  } catch (error) {
+    try {
+      if (config.durableObjectCatalogEnabled) await deleteDurableImageAsset({ userId: uid, assetId: id, r2Key, contentType: input.contentType, size: bytes.byteLength }, {
+        inspect: inspectR2Object, readBounded: readR2ObjectBounded, create: createDurableObjectMetadata, get: getDurableObjectMetadata,
+        markDeleting: markDurableObjectDeleting, markDeleted: markDurableObjectDeleted, deleteObject: deleteR2Object,
+      });
+      else await deleteR2Object(r2Key);
+    }
+    catch (cleanupError) {
+      logger.warn({ assetId: id, errorName: cleanupError instanceof Error ? cleanupError.name : "UnknownError" }, "Image upload cleanup failed after registration error");
+    }
+    throw error;
+  }
 }
 
 export async function searchImageAssets(uid: number, query?: string, limit = 5): Promise<ImageAsset[]> {
@@ -8423,6 +8454,11 @@ export async function searchImageAssets(uid: number, query?: string, limit = 5):
 export async function getImageAsset(uid: number, idOrName: string): Promise<(ImageAsset & { downloadUrl: string }) | undefined> {
   const asset = (await getSession(uid)).imageAssets.find((item) => item.id === idOrName || item.name.toLowerCase() === idOrName.toLowerCase());
   if (!asset || !r2Configured()) return undefined;
+  if (config.durableObjectCatalogEnabled) {
+    const object = await getDurableObjectMetadata(uid, durableImageObjectId(asset.id));
+    if (!isAuthorizedDurableImage(object, { userId: uid, assetId: asset.id, r2Key: asset.r2Key, contentType: asset.contentType, size: asset.size })) return undefined;
+    return { ...asset, downloadUrl: await signR2Download(object.objectKey) };
+  }
   return { ...asset, downloadUrl: await signR2Download(asset.r2Key) };
 }
 
@@ -8430,7 +8466,13 @@ export async function forgetImageAsset(uid: number, idOrName: string): Promise<b
   const session = await getSession(uid);
   const asset = session.imageAssets.find((item) => item.id === idOrName || item.name.toLowerCase() === idOrName.toLowerCase());
   if (!asset) return false;
-  if (r2Configured()) await deleteR2Object(asset.r2Key);
+  if (r2Configured()) {
+    if (config.durableObjectCatalogEnabled) await deleteDurableImageAsset({ userId: uid, assetId: asset.id, r2Key: asset.r2Key, contentType: asset.contentType, size: asset.size }, {
+      inspect: inspectR2Object, readBounded: readR2ObjectBounded, create: createDurableObjectMetadata, get: getDurableObjectMetadata,
+      markDeleting: markDurableObjectDeleting, markDeleted: markDurableObjectDeleted, deleteObject: deleteR2Object,
+    });
+    else await deleteR2Object(asset.r2Key);
+  }
   session.imageAssets = session.imageAssets.filter((item) => item.id !== asset.id);
   await saveSession(uid, session);
   if (vectorConfigured()) void new UpstashKnowledgeStore().deleteDocument(String(uid), `image_asset:${asset.id}`).catch((error) => logger.warn({ err: error, userId: uid, assetId: asset.id }, "Image asset vector deletion unavailable; R2 asset removed"));
