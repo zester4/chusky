@@ -165,6 +165,11 @@ VOICE_STT_EAGER_EOT_THRESHOLD=0.45
 VOICE_STT_EOT_THRESHOLD=0.65
 VOICE_STT_EOT_TIMEOUT_MS=800
 VOICE_TTS_MODEL=flux-haley-en
+VOICE_ELEVENLABS_ENABLED=false
+# Required only when VOICE_ELEVENLABS_ENABLED=true.
+# ELEVENLABS_API_KEY=<server-only ElevenLabs key>
+# ELEVENLABS_VOICE_ID=<approved ElevenLabs voice ID>
+# ELEVENLABS_MODEL_ID=eleven_flash_v2_5
 VOICE_BARGE_IN_MIN_CHARS=2
 VOICE_GREETING=Hi, this is Chusky. How can I help?
 VOICE_TURN_START_BUDGET_MS=10000
@@ -173,6 +178,14 @@ VOICE_TURN_FALLBACK_ENABLED=true
 
 The bridge uses Deepgram Flux conversational STT (`/v2/listen`) and streaming
 Flux TTS (`/v2/speak`) in Twilio's native raw 8 kHz μ-law format by default.
+Set `VOICE_ELEVENLABS_ENABLED=true` to replace only the direct Twilio TTS
+backend with ElevenLabs streaming TTS. When it is `false` (the default), the
+Deepgram Flux TTS path remains active and the ElevenLabs settings are ignored.
+The ElevenLabs path requires `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, and
+an optional `ELEVENLABS_MODEL_ID`; it requests `ulaw_8000` audio, keeps the
+Chusky brain and Deepgram Flux STT unchanged, and closes the active provider
+context on caller interruption. Recall meetings do not use this flag and
+continue to use their existing Deepgram path.
 The authenticated Chusky service may provide the owner's selected Flux voice
 for an individual Twilio call; that choice is bound into the short-lived HMAC
 stream ticket and overrides this environment default for that call only.

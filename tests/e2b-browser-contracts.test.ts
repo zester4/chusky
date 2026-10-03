@@ -25,6 +25,11 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /validationMessage/);
   assert.match(agent, /formMutation/);
   assert.match(agent, /form_inspect/);
+  assert.match(agent, /form_fill/);
+  assert.match(agent, /applyFormControl/);
+  assert.match(agent, /screenshotHash/);
+  assert.match(agent, /Visual target is stale/);
+  assert.match(agent, /workflowCheckpoint/);
   assert.match(agent, /page\.keyboard\.press\("Control\+A"\)/);
   assert.match(agent, /Dropdown option/);
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
@@ -35,6 +40,17 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(engine, /retryableCode/);
   assert.doesNotMatch(engine, /retryable = .*click/);
   assert.doesNotMatch(agent, /forms.*password.*value/);
+});
+
+test("browser reliability contract keeps visual fallback fresh and checkpoints non-sensitive", () => {
+  const agent = readFileSync("e2b/browser-template/browser-agent.mjs", "utf8");
+  const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
+  assert.match(engine, /form_plan/);
+  assert.match(engine, /planFormSubmission/);
+  assert.match(agent, /completedControls/);
+  assert.match(agent, /Visual coordinate clicks require a screenshotHash/);
+  assert.match(agent, /Correct the reported validation errors/);
+  assert.doesNotMatch(agent, /workflowCheckpoint.*value/);
 });
 
 test("page content is bounded, sanitized, and explicit about truncation", () => {

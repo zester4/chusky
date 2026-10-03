@@ -132,6 +132,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "E2B handoffs now persist the browser provider, challenge type, and resolution state while preserving legacy owner-scoped sessions and same-origin verification.",
     "The contract is ready for opt-in Browserbase or Browser Use Cloud adapters without weakening Chusky's authorization, account isolation, or post-challenge verification boundary.",
   ],
+  browserReliability: [
+    "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
+    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints so interrupted forms can resume without replaying completed work.",
+    "Screenshot fallback now exposes a fresh visual fingerprint and rejects stale coordinate clicks; accessibility-first targeting remains the default.",
+  ],
   webBotAuth: [
     "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
     "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",

@@ -84,6 +84,19 @@ provider solving events, but a provider's “solved” signal is never treated a
 verified access until Chusky re-inspects the live page and confirms the bound
 origin and expected result.
 
+Browser form reliability is provider-neutral. `CHUCK_BROWSER` supports
+`form_plan` and `form_fill`, which inspect the live forms, match requested
+labels to current controls, and handle textboxes, native selects, custom
+comboboxes, checkboxes, radios, and submit controls without hardcoded site
+selectors. Each planned control is re-resolved against the current page. The
+result includes bounded validation errors, post-action evidence, and a durable
+checkpoint containing only control labels and recovery instructions; values are
+never copied into the checkpoint. Screenshots return a short-lived visual
+fingerprint for owner-private visual fallback, and coordinate clicks marked as
+visual fallback are rejected when the page no longer matches that fingerprint.
+Accessibility targeting remains the default, and a screenshot never proves a
+submission succeeded by itself.
+
 ## Transparent browser identity (optional)
 
 When `WEB_BOT_AUTH_ENABLED=true`, the service publishes a signed, public-only

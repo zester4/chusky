@@ -310,6 +310,17 @@ async function fillControl(page, locator, value) {
   return state;
 }
 
+async function applyFormControl(page, control) {
+  const locator = await resolveLocator(page, control);
+  await locator.waitFor({ state: "attached", timeout: 10_000 });
+  const action = String(control.action || "fill");
+  if (action === "fill") return fillControl(page, locator, String(control.value ?? ""));
+  if (action === "select_option") return selectControl(page, locator, String(control.value ?? ""), frameFor(page, control));
+  if (action === "check") return setCheckbox(locator, true);
+  if (action === "uncheck") return setCheckbox(locator, false);
+  throw new Error(`Unsupported planned form action: ${action}`);
+}
+
 async function roleMatches(page, request = {}) {
   ensurePageTracking(page);
   const requestedRole = typeof request.role === "string" && ROLES.includes(request.role) ? request.role : undefined;
@@ -398,7 +409,7 @@ async function inspectForms(page) {
         return { formId: root.id ? cleanText(root.id, 160) : `implicit-${index}`, ...(root.getAttribute("aria-label") ? { name: cleanText(root.getAttribute("aria-label"), 180) } : {}), ...(root.getAttribute("action") ? { action: cleanText(root.getAttribute("action"), 500) } : {}), ...(root.getAttribute("method") ? { method: cleanText(root.getAttribute("method"), 20).toUpperCase() } : {}), controls, submitControls };
       }).filter((form) => form.controls.length || form.submitControls.length);
     }).catch(() => []);
-    for (const form of frameForms) forms.push({ ...form, controls: form.controls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })) });
+    for (const form of frameForms) forms.push({ ...form, controls: form.controls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })), submitControls: form.submitControls.map((control) => ({ ...control, frameIndex: page.frames().indexOf(frame), frameUrl: clean(frame.url(), 1_000) })) });
   }
   return forms;
 }
@@ -649,6 +660,8 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
+  const mutationAction = ["click", "invoke", "fill", "select_option", "check", "uncheck", "type", "press", "form_fill"].includes(action);
+  const beforeAction = mutationAction ? { url: page.url(), title: await page.title().catch(() => ""), generation: await pageGeneration(page) } : undefined;
   const target = request.selector ? await resolveLocator(page, request.selector) : null;
   if (action === "open") {
     await page.goto((await safeHttpUrl(request.url)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
@@ -670,8 +683,38 @@ async function execute(context, pageState, request) {
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
   else if (action === "form_inspect") return result(page, context, { forms: await inspectForms(page) }, request.includePageContent === true);
+  else if (action === "form_fill") {
+    const completedControls = [];
+    const pendingControls = [];
+    const actionErrors = [];
+    for (const control of Array.isArray(request.controls) ? request.controls.slice(0, 100) : []) {
+      const label = clean(control?.label || control?.name || "form control", 200);
+      try { await applyFormControl(page, control); completedControls.push(label); }
+      catch (error) { pendingControls.push(label); actionErrors.push({ label, message: clean(error?.message || error, 300) }); }
+    }
+    const forms = await inspectForms(page);
+    const validationErrors = forms.flatMap((form) => form.controls.filter((control) => control.invalid).map((control) => ({ label: control.name, message: control.validationMessage || "The field is invalid" })));
+    let submitted = false;
+    if (request.submit === true && !actionErrors.length && !validationErrors.length && request.submitControl) {
+      try { const submitLocator = await resolveLocator(page, request.submitControl); await submitLocator.click({ timeout: 15_000 }); submitted = true; }
+      catch (error) { actionErrors.push({ label: clean(request.submitControl.name || "Submit", 200), message: clean(error?.message || error, 300) }); }
+    }
+    const allErrors = [...actionErrors, ...validationErrors];
+    const workflowCheckpoint = { action: "form_fill", formId: clean(request.formId || "", 160), completedControls, pendingControls: [...pendingControls, ...validationErrors.map((item) => item.label)], validationErrors: allErrors, nextAction: submitted ? "Inspect and verify the submitted result" : allErrors.length ? "Correct the reported validation errors, then retry the pending controls" : "Review the filled form and submit only after the required fields are verified" };
+    const afterUrl = page.url();
+    const afterTitle = await page.title().catch(() => "");
+    const afterGeneration = await pageGeneration(page);
+    const actionVerification = beforeAction ? { attempted: true, observed: true, urlChanged: beforeAction.url !== afterUrl, titleChanged: beforeAction.title !== afterTitle, pageGenerationChanged: beforeAction.generation !== afterGeneration, validationErrors: allErrors } : undefined;
+    return result(page, context, { matches: await roleMatches(page), forms, workflowCheckpoint, ...(allErrors.length ? { validationErrors: allErrors } : {}), submitted, ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
+  }
   else if (action === "health") return result(page, context, { health: { status: "ready", daemon: "ready", chromium: page.isClosed() ? "closed" : "ready", pages: context.pages().length, display: DISPLAY, profile: PROFILE } });
   else if ((action === "click" || action === "move") && Number.isFinite(Number(request.x)) && Number.isFinite(Number(request.y))) {
+    if (action === "click" && request.visualFallback === true) {
+      if (typeof request.screenshotHash !== "string" || !request.screenshotHash) throw new Error("Visual coordinate clicks require a screenshotHash from a fresh screenshot");
+      const currentShot = await page.screenshot({ type: "jpeg", quality: 75 });
+      const currentHash = createHash("sha256").update(currentShot).digest("hex").slice(0, 32);
+      if (currentHash !== request.screenshotHash) throw new Error("Visual target is stale; capture a fresh screenshot before retrying the coordinate click");
+    }
     if (action === "click") await page.mouse.click(Number(request.x), Number(request.y));
     else await page.mouse.move(Number(request.x), Number(request.y));
   } else if (["invoke", "click", "focus", "fill", "move", "hover", "select_option", "check", "uncheck"].includes(action)) {
@@ -720,7 +763,8 @@ async function execute(context, pageState, request) {
     const clipped = ["screenshot_region", "screenshot_region_full"].includes(action);
     const clip = clipped && [request.x, request.y, request.width, request.height].every((value) => Number.isFinite(Number(value))) ? { x: Number(request.x), y: Number(request.y), width: Number(request.width), height: Number(request.height) } : undefined;
     const image = await page.screenshot({ type: "jpeg", quality: 75, fullPage: action === "screenshot_full", ...(clip ? { clip } : {}) });
-    return result(page, context, { screenshot: image.toString("base64") });
+    const encoded = image.toString("base64");
+    return result(page, context, { screenshot: encoded, screenshotId: randomUUID(), screenshotHash: createHash("sha256").update(image).digest("hex").slice(0, 32), screenshotCapturedAt: Date.now() });
   } else if (action === "downloads" || action === "download_register") {
     return result(page, context, { downloads: await runtimeFileList("download") });
   } else if (action === "wait_download") {
@@ -742,7 +786,11 @@ async function execute(context, pageState, request) {
   await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
   const formState = target && ["fill", "select_option", "check", "uncheck"].includes(action) ? await controlState(target) : undefined;
   const formMutation = ["fill", "select_option", "check", "uncheck", "click", "press"].includes(action);
-  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}) }, request.includePageContent === true);
+  const afterUrl = page.url();
+  const afterTitle = await page.title().catch(() => "");
+  const afterGeneration = await pageGeneration(page);
+  const actionVerification = beforeAction ? { attempted: true, observed: true, urlChanged: beforeAction.url !== afterUrl, titleChanged: beforeAction.title !== afterTitle, pageGenerationChanged: beforeAction.generation !== afterGeneration } : undefined;
+  return result(page, context, { matches: await roleMatches(page), ...(formState ? { formState } : {}), ...(formMutation ? { forms: await inspectForms(page) } : {}), ...(actionVerification ? { actionVerification } : {}) }, request.includePageContent === true);
 }
 
 async function vaultLogin(context, request) {
