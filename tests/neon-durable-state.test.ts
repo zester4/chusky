@@ -9,9 +9,16 @@ class FakeClient {
   released = false;
   failOnInsert = false;
   failOnMissionEventInsert = false;
+  staleSessionDomainInsertOnce = false;
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
     if (this.failOnInsert && text.includes("INSERT INTO chusky_session_domain")) throw new Error("database unavailable");
+    if (this.staleSessionDomainInsertOnce && text.includes("INSERT INTO chusky_session_domain")) {
+      this.staleSessionDomainInsertOnce = false;
+      return { rows: [] as never[] };
+    }
+    if (text.includes("SELECT version FROM chusky_session_domain")) return { rows: [{ version: 2 }] as never[] };
+    if (text.startsWith("UPDATE chusky_session_domain")) return { rows: [{ version: 3 }] as never[] };
     if (this.failOnMissionEventInsert && text.includes("INSERT INTO chusky_mission_event")) throw new Error("mission event store unavailable");
     if (text.includes("INSERT INTO chusky_mission (") || text.includes("UPDATE chusky_mission SET")) {
       const [owner, id, status, idempotencyKey, payload, version, createdAt, updatedAt] = text.includes("UPDATE chusky_mission SET")
@@ -91,6 +98,22 @@ test("Neon durable session domains write atomically and permit versioned partial
   assert.match(compareAndSwap.text, /RETURNING version/);
   assert.deepEqual(compareAndSwap.values?.[3], 1);
   await assert.rejects(() => state.writeSessionDomains(42, new Map([["unknown", {}]] as never)), /unknown domain/);
+});
+
+test("Neon durable session writes refresh a stale expected version under the owner lock", async () => {
+  const pool = new FakePool();
+  pool.client.staleSessionDomainInsertOnce = true;
+  const state = new NeonDurableState(pool as never);
+
+  const versions = await state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]]));
+  const statements = pool.client.calls.map((call) => call.text);
+
+  assert.deepEqual([...versions], [["conversation", 3]]);
+  assert.ok(statements.indexOf("SELECT pg_advisory_xact_lock($1::bigint)") < statements.findIndex((sql) => sql.includes("INSERT INTO chusky_session_domain")));
+  assert.ok(statements.findIndex((sql) => sql.includes("INSERT INTO chusky_session_domain")) < statements.findIndex((sql) => sql.includes("SELECT version FROM chusky_session_domain")));
+  assert.ok(statements.findIndex((sql) => sql.includes("SELECT version FROM chusky_session_domain")) < statements.findIndex((sql) => sql.startsWith("UPDATE chusky_session_domain")));
+  assert.equal(statements.at(-1), "COMMIT");
+  assert.equal(pool.client.released, true);
 });
 
 test("Neon durable session-domain failures roll back and release the connection", async () => {
