@@ -127,6 +127,39 @@ test("provider tool names in prose step requirements match trusted receipts", as
   assert.equal(completed.status, "completed");
 });
 
+test("strict provider closeout records a system verification after step completion", async () => {
+  const userId = 972011;
+  const mission = await createMission(userId, {
+    title: "System-trusted provider closeout",
+    objective: "Execute one bounded provider read and close it with a trusted receipt.",
+    definitionOfDone: "The read completed and its server receipt is verified.",
+    verificationMode: "strict",
+    requiredEvidence: ["Trusted server receipt for GMAIL_FETCH_EMAILS."],
+    steps: [{
+      id: "read",
+      title: "Read Gmail",
+      objective: "Read a bounded inbox view.",
+      evidenceRequired: ["Trusted server receipt for GMAIL_FETCH_EMAILS."],
+    }],
+  });
+  const started = await startMission(userId, mission.id);
+  await recordTrustedMissionEvidence(userId, mission.id, [{
+    id: "gmail-receipt-system-closeout",
+    kind: "tool_receipt",
+    summary: "GMAIL_FETCH_EMAILS completed successfully with provider receipt log_system_closeout.",
+    source: "composio:GMAIL_FETCH_EMAILS",
+    ref: "log_system_closeout",
+    verified: true,
+    verifiedBy: "system",
+    verifiedAt: Date.now(),
+  }], "read");
+  const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: started!.currentStepId, result: "The trusted Gmail receipt confirms the read." }) as { status?: string };
+  assert.equal(completed.status, "completed");
+  const verified = await verifyMission(userId, mission.id, { verifiedBy: "agent" });
+  assert.equal(verified?.verification?.verified, true);
+  assert.equal(verified?.verification?.verifiedBy, "system");
+});
+
 test("native lifecycle checkpoints satisfy step-local internal evidence without satisfying provider receipts", async () => {
   const userId = 972008;
   const mission = await createMission(userId, {

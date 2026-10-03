@@ -6451,13 +6451,19 @@ export async function verifyMission(userId: number, id: string, input: { evidenc
       ...missingMissionEvidenceRequirements(required, selected),
     ];
     const verified = unresolved.length === 0;
+    // A strict pass whose every required criterion is satisfied by evidence
+    // independently recorded by the server is a system verification. Keep
+    // model-authored verification labels for legacy/agent-only closeouts, but
+    // never let the caller's `verifiedBy` value downgrade a trusted result.
+    const systemVerified = verified && required.length > 0 && required.every((requirement) => selected.some((item) => item.verifiedBy === "system" && evidenceSatisfiesRequirement(item, requirement)));
+    const verificationBy = systemVerified ? "system" as const : input.verifiedBy ?? "agent" as const;
     // `system` is reserved for evidence independently recorded by trusted
     // server paths (for example a completed provider tool receipt). A public
     // API or model request must never be able to self-attribute verification
     // as system-authenticated by sending a request field.
     return {
       ...(internalEvidence.length ? { evidence } : {}),
-      verification: { mode: mission.verification?.mode ?? (required.length ? "strict" : "legacy"), requiredEvidence: required, verified, verifiedAt: verified ? Date.now() : undefined, verifiedBy: input.verifiedBy ?? "agent", unresolved, confidence: input.confidence === undefined ? undefined : Math.max(0, Math.min(1, input.confidence)) },
+      verification: { mode: mission.verification?.mode ?? (required.length ? "strict" : "legacy"), requiredEvidence: required, verified, verifiedAt: verified ? Date.now() : undefined, verifiedBy: verificationBy, unresolved, confidence: input.confidence === undefined ? undefined : Math.max(0, Math.min(1, input.confidence)) },
       events: [...mission.events, ...(internalEvidence.length ? [missionEvent("checkpointed", `Added ${internalEvidence.length} trusted internal lifecycle proof record${internalEvidence.length === 1 ? "" : "s"}.`)] : []), missionEvent(verified ? "checkpointed" : "verification_failed", verified ? "Mission definition of done verified." : `Mission verification incomplete: ${unresolved.join("; ")}`)],
     };
   });
