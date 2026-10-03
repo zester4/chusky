@@ -6262,7 +6262,10 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     // has already advanced or from bypassing the dependency graph.
     const active = new Set(mission.activeStepIds?.length ? mission.activeStepIds : mission.currentStepId ? [mission.currentStepId] : []);
     if (!step || step.status !== "running" || !active.has(stepId) || !step.dependsOn.every((dependency) => mission.steps.find((candidate) => candidate.id === dependency)?.status === "completed")) return undefined;
-    const missingEvidence = missingMissionEvidenceRequirements(step.evidenceRequired, step.evidence);
+    const internalEvidence = deriveTrustedInternalStepEvidence(mission, step)
+      .filter((item) => !(step.evidence ?? []).some((existing) => existing.id === item.id));
+    const stepEvidence = internalEvidence.length ? [...(step.evidence ?? []), ...internalEvidence].slice(-50) : step.evidence;
+    const missingEvidence = missingMissionEvidenceRequirements(step.evidenceRequired, stepEvidence);
     if (missingEvidence.length) return undefined;
     const now = Date.now();
     const steps = mission.steps.map((candidate) => candidate.id === stepId ? { ...candidate, status: "completed" as const, result: result.slice(0, 12000), updatedAt: now } : candidate);
@@ -6274,7 +6277,10 @@ export async function completeMissionStep(userId: number, id: string, stepId: st
     }
     const next = nextActive.map((candidate) => steps.find((item) => item.id === candidate)).find(Boolean);
     const newlyStarted = ready.filter((candidate) => nextActive.includes(candidate.id));
-    return { steps, activeStepIds: nextActive, currentStepId: next?.id, consumedSteps: mission.consumedSteps + 1, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
+    const evidenceEvent = internalEvidence.length
+      ? [missionEvent("checkpointed", `Added ${internalEvidence.length} trusted internal lifecycle proof record${internalEvidence.length === 1 ? "" : "s"} to step ${step.id}.`, now, step.id)]
+      : [];
+    return { steps: steps.map((candidate) => candidate.id === stepId && stepEvidence ? { ...candidate, evidence: stepEvidence } : candidate), evidence: internalEvidence.length ? [...(mission.evidence ?? []), ...internalEvidence].slice(-100) : mission.evidence, activeStepIds: nextActive, currentStepId: next?.id, consumedSteps: mission.consumedSteps + 1, checkpoint: result.slice(0, 8000), nextAction: next ? `Continue with ${nextActive.length > 1 ? `${nextActive.length} parallel steps` : `step: ${next.title}`}.` : "Verify the mission definition of done, then complete the mission.", events: [...mission.events, ...evidenceEvent, missionEvent("step_completed", next ? `Step ${step.title} completed; ${nextActive.length > 1 ? "parallel work is ready" : `next step is ${next.title}`}.` : `Step ${step.title} completed; verify the mission definition of done.`, now, stepId), ...newlyStarted.map((readyStep) => missionEvent("step_started", `Mission step ${readyStep.id} started after its dependencies completed.`, now, readyStep.id))] };
   });
 }
 
@@ -6305,6 +6311,32 @@ function evidenceSatisfiesRequirement(item: MissionEvidenceRecord, requirement: 
 
 export function missingMissionEvidenceRequirements(requirements: string[] | undefined, evidence: MissionEvidenceRecord[] | undefined): string[] {
   return (requirements ?? []).filter((requirement) => !evidence?.some((item) => evidenceSatisfiesRequirement(item, requirement)));
+}
+
+/**
+ * Derive only step-local proof that the store itself observed. This lets a
+ * native-only lifecycle step require a persisted checkpoint without allowing
+ * model-authored text to masquerade as a provider receipt or human assertion.
+ */
+function deriveTrustedInternalStepEvidence(mission: MissionRecord, step: MissionStepRecord): MissionEvidenceRecord[] {
+  const checkpoints = (mission.checkpointHistory ?? []).filter((checkpoint) => checkpoint.stepId === step.id);
+  if (!checkpoints.length) return [];
+  const checkpoint = checkpoints.at(-1)!;
+  const title = step.title.toLowerCase();
+  const nextAction = (checkpoint.nextAction ?? "").toLowerCase();
+  const preWait = /pre[- ]?wait|before.*wait|wait.*checkpoint/.test(title) || /pre[- ]?wait|before.*wait|wait.*checkpoint/.test(nextAction);
+  return [{
+    id: `internal_${createHash("sha256").update(`${mission.id}:step:${step.id}:checkpoint:${checkpoint.id}`).digest("hex").slice(0, 32)}`,
+    kind: "before_after",
+    summary: preWait
+      ? `A trusted pre-wait durable checkpoint for step “${step.title}” is persisted in mission state.`
+      : `A trusted durable checkpoint for step “${step.title}” is persisted in mission state.`,
+    source: `chusky://mission/${mission.id}`,
+    ref: `mission:${mission.id}:checkpoint:${checkpoint.id}`,
+    verified: true,
+    verifiedAt: Date.now(),
+    verifiedBy: "system",
+  }];
 }
 
 /**

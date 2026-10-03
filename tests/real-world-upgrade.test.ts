@@ -1,6 +1,6 @@
 import test, { beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { claimTask, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, replanMission, updateTask, verifyMission, missionBudgetPreflight, resumeMission, waitMission } from "../src/store.js";
+import { claimTask, checkpointMission, createTask, initStore, createMission, getMission, listMissions, listTasks, retryTask, settleTaskRun, startMission, completeMission, completeMissionStep, recordMissionEvidence, recordTrustedMissionEvidence, replanMission, updateTask, verifyMission, missionBudgetPreflight, resumeMission, waitMission } from "../src/store.js";
 import { contextPrompt, selectContext, upsertContextNode } from "../src/contextGraph.js";
 import { createDepartmentHandoff, provisionDepartment } from "../src/departments.js";
 import { getOutcomePackage, planOutcome } from "../src/outcomes/catalog.js";
@@ -97,6 +97,23 @@ test("mission step completion rejects missing required trusted evidence", async 
   await recordTrustedMissionEvidence(userId, mission.id, [{ id: "receipt-step", kind: "tool_receipt", summary: "Provider confirmed the message", ref: "receipt://send-1", verified: true, verifiedBy: "system" }], "send");
   const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "send", result: "The provider receipt confirms delivery." }) as { status: string };
   assert.equal(completed.status, "completed");
+});
+
+test("native lifecycle checkpoints satisfy step-local internal evidence without satisfying provider receipts", async () => {
+  const userId = 972008;
+  const mission = await createMission(userId, {
+    title: "Internal checkpoint evidence",
+    objective: "Persist a native-only checkpoint before a durable wait.",
+    definitionOfDone: "The checkpoint step completes from server-observed lifecycle state.",
+    steps: [{ id: "checkpoint", title: "Persist pre-wait checkpoint", objective: "Save the checkpoint before waiting.", evidenceRequired: ["kind:before_after"] }],
+  });
+  await startMission(userId, mission.id);
+  await checkpointMission(userId, mission.id, "pre-wait checkpoint", "Start the durable timer wait.");
+
+  const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: "checkpoint", result: "Checkpoint persisted." }) as { status?: string; steps?: Array<{ status?: string; evidence?: Array<{ kind?: string; verifiedBy?: string }> }> };
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.steps?.[0]?.status, "completed");
+  assert.ok(completed.steps?.[0]?.evidence?.some((item) => item.kind === "before_after" && item.verifiedBy === "system"));
 });
 
 test("mission creation and replanning reject supervisor-owned step tools at the store boundary", async () => {
