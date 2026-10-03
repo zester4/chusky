@@ -3174,7 +3174,7 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
             generatedFiles.push({ data: bytes, name: file.name, contentType: file.contentType, artifactId: file.id, type: artifactType });
             execResult = { browserFileReady: true, fileId: file.id, name: file.name, size: file.size, contentType: file.contentType, kind: file.kind, expiresAt: file.expiresAt };
           }
-          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
+          if ((slug === "CHUCK_DAYTONA_COMPUTER" || slug === "CHUCK_BROWSER" || slug === "CHUCK_BROWSER_OBSERVE" || slug === "CHUCK_BROWSER_ACT" || slug === "CHUCK_BROWSER_AGENT" || slug === "CHUCK_DAYTONA_APP") && execResult && typeof execResult === "object" && ("__daytonaScreenshot" in execResult || "__browserScreenshot" in execResult)) {
             const screenshot = execResult as unknown as { base64: string; mediaType: string; sizeBytes?: number; app?: { id?: string; status?: string }; url?: string };
             const screenshotBytes = Buffer.from(screenshot.base64, "base64");
             const screenshotType = String(screenshot.mediaType).toLowerCase().split(";", 1)[0];

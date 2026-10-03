@@ -75,12 +75,20 @@ async function main() {
 
     const fixture = await requestBrowser({ action: "smoke_fixture" });
     assertCheck("private smoke fixture content", String(fixture.pageContent).includes("Visible content proves page reading works."));
+    const adaptiveObservation = await requestBrowser({ action: "observe", includeForms: true, includeScreenshot: true });
+    assertCheck("adaptive observation returns controls, forms, and visual evidence", Array.isArray(adaptiveObservation.matches) && Array.isArray(adaptiveObservation.forms) && typeof adaptiveObservation.screenshotHash === "string");
+    const adaptiveExtraction = await requestBrowser({ action: "extract", schema: { type: "object", properties: { search: { label: "Search fixture", role: "textbox" }, continueButton: { label: "Continue", role: "button" } } } });
+    assertCheck("schema extraction returns only requested fixture controls", adaptiveExtraction.extracted && typeof adaptiveExtraction.extracted === "object" && "search" in adaptiveExtraction.extracted, JSON.stringify(adaptiveExtraction).slice(0, 800));
     const inspectedForms = await requestBrowser({ action: "form_inspect" });
     const inspectedControls = (inspectedForms.forms as Array<any> | undefined)?.flatMap((form) => Array.isArray(form.controls) ? form.controls : []) ?? [];
     assertCheck("structured form inspection exposes required controls safely", inspectedControls.some((control) => control.name === "Legal first name") && inspectedControls.some((control) => control.name === "Business headquarters") && inspectedControls.some((control) => control.name === "Technology") && inspectedControls.some((control) => control.name === "5") && !JSON.stringify(inspectedForms).includes("Chusky-") && !JSON.stringify(inspectedForms).includes("chusky.tester@example.invalid"), JSON.stringify(inspectedControls.map((control) => ({ name: control.name, role: control.role, type: control.type }))));
     const textbox = (fixture.matches as Array<any>).find((item) => item.role === "textbox" && item.name === "Search fixture");
     const button = (fixture.matches as Array<any>).find((item) => item.role === "button" && item.name === "Continue");
     if (!textbox || !button) throw new Error("Smoke fixture did not expose its accessible text field and button");
+    const acted = await requestBrowser({ action: "act", step: { action: "focus", selector: selectorFor(textbox) } });
+    assertCheck("bounded act executes a fresh semantic step", acted.ok === true);
+    const agentProbe = await requestBrowser({ action: "agent", maxSteps: 1, steps: [{ action: "screenshot" }] });
+    assertCheck("bounded agent loop returns an ordered action trace", agentProbe.agent?.completed === true && Array.isArray(agentProbe.agent?.steps) && agentProbe.agent.steps[0]?.status === "succeeded");
     await requestBrowser({ action: "fill", selector: selectorFor(textbox), value: "E2B form test" });
     await requestBrowser({ action: "click", selector: selectorFor(button) });
     const submitted = await requestBrowser({ action: "snapshot", includePageContent: true });

@@ -33,6 +33,8 @@ test("form inspection is a structured, safe browser capability", () => {
   assert.match(agent, /page\.keyboard\.press\("Control\+A"\)/);
   assert.match(agent, /Dropdown option/);
   const engine = readFileSync("src/lib/e2b/browser.ts", "utf8");
+  assert.match(engine, /activeTabIndex/);
+  assert.match(engine, /result\.tabs/);
   assert.match(engine, /Only replay idempotent control operations/);
   assert.match(engine, /replanInteraction/);
   assert.match(engine, /stale_observation.*action_timeout.*browser_action_failed/);

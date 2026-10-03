@@ -108,6 +108,8 @@ test("browser intent classification treats ambiguous and high-impact controls co
   const plan = createBrowserOperationPlan("Prepare the cart and stop before payment", "https://shop.example.com");
   assert.equal(plan.requiresApproval, false);
   assert.match(plan.stopBefore.join(" "), /payment/i);
+  assert.match(plan.successCriteria.join(" "), /fresh read/i);
+  assert.match(plan.failureSignals.join(" "), /unexpected origin/i);
 });
 
 test("browser playbooks are bounded, origin-scoped, and never accept secret fields", () => {
@@ -164,6 +166,11 @@ test("browser verification requires every required detector and returns no page 
   assert.match(alternatives.detectors[0]?.matched.join(" ") ?? "", /title contains 'payment'/i);
   assert.match(alternatives.detectors[0]?.missing.join(" ") ?? "", /page text contains 'confirmation'/i);
   assert.deepEqual(alternatives.missing, []);
+  const forbidden = verifyBrowserResult({ title: "Order confirmed", text: "Thanks", detectors: [{ titleIncludes: "confirmed", titleExcludes: "error", required: true }] });
+  assert.equal(forbidden.passed, true);
+  const rejected = verifyBrowserResult({ title: "Order error", detectors: [{ titleIncludes: "confirmed", titleExcludes: "error", required: true }] });
+  assert.equal(rejected.passed, false);
+  assert.match(rejected.missing.join(" "), /does not contain 'error'/i);
 });
 
 test("browser handoffs are durable, owner-scoped, expiring, and require verification", async () => {

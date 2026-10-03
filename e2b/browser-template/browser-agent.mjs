@@ -653,6 +653,62 @@ async function runtimeFileList(kind) {
   return records.slice(-50).map((item) => ({ id: item.id, name: item.name, state: item.state, size: item.size, createdAt: item.createdAt, ...(item.error ? { error: item.error } : {}) }));
 }
 
+function normalizedText(value) { return clean(value, 300).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
+
+async function extractRequestedSchema(page, schema) {
+  const forms = await inspectForms(page);
+  const nodes = await roleMatches(page, {});
+  const properties = schema && typeof schema === "object" && schema.properties && typeof schema.properties === "object" ? Object.entries(schema.properties).slice(0, 100) : [];
+  const extracted = {};
+  for (const [key, definition] of properties) {
+    const item = definition && typeof definition === "object" ? definition : {};
+    const label = normalizedText(item.label || key);
+    let control;
+    for (const form of forms) {
+      control = form.controls.find((candidate) => {
+        const name = normalizedText(candidate.name);
+        return (!item.role || candidate.role === item.role) && name && (name === label || name.includes(label) || label.includes(name));
+      });
+      if (control) break;
+    }
+    if (control) {
+      if (["checkbox", "radio", "switch"].includes(control.role)) extracted[key] = control.checked === true;
+      else if (control.selectedText !== undefined) extracted[key] = control.selectedText;
+      else extracted[key] = { present: true, role: control.role, name: control.name, valuePresent: control.valuePresent === true, valueLength: control.valueLength || 0 };
+      continue;
+    }
+    const node = nodes.find((candidate) => {
+      const name = normalizedText(candidate.name);
+      return (!item.role || candidate.role === item.role) && name && (name === label || name.includes(label) || label.includes(name));
+    });
+    if (node) extracted[key] = { present: true, role: node.role, name: node.name, nodeId: node.nodeId };
+  }
+  return { extracted, forms };
+}
+
+async function boundedAgentRun(context, pageState, request) {
+  const steps = Array.isArray(request.steps) ? request.steps.slice(0, Math.max(1, Math.min(50, Number(request.maxSteps || 20)))) : [];
+  if (!steps.length) throw new Error("agent requires at least one bounded browser step");
+  const trace = [];
+  let last;
+  for (let index = 0; index < steps.length; index += 1) {
+    const step = steps[index];
+    if (!step || typeof step !== "object" || typeof step.action !== "string" || ["agent", "act", "observe"].includes(step.action)) throw new Error(`agent step ${index + 1} is invalid or recursive`);
+    const startedAt = Date.now();
+    try {
+      last = await execute(context, pageState, step);
+      trace.push({ index, action: step.action, status: "succeeded", durationMs: Date.now() - startedAt, screenshotHash: last?.screenshotHash });
+    } catch (error) {
+      trace.push({ index, action: step.action, status: "failed", durationMs: Date.now() - startedAt, error: clean(error?.message || error, 300), recovery: String(error?.message || error).toLowerCase().includes("stale") ? "reobserve" : "stop" });
+      break;
+    }
+  }
+  const safeLast = last && typeof last === "object" ? { ...last } : undefined;
+  const screenshot = safeLast && typeof safeLast.screenshot === "string" ? { screenshot: safeLast.screenshot, screenshotHash: safeLast.screenshotHash, screenshotId: safeLast.screenshotId } : {};
+  if (safeLast) delete safeLast.screenshot;
+  return result(context.pages()[Math.max(0, Number(pageState.activeIndex || 0))] || context.pages()[0], context, { agent: { steps: trace, completed: trace.length === steps.length, maxSteps: steps.length }, ...(safeLast ? { lastResult: safeLast } : {}), ...screenshot }, false);
+}
+
 async function execute(context, pageState, request) {
   let page = context.pages()[Math.max(0, Math.min(9, Number(pageState.activeIndex ?? 0)))] || context.pages()[0] || await context.newPage();
   if (request.action === "tab_open") page = await context.newPage();
@@ -660,7 +716,7 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
-  const mutationAction = ["click", "invoke", "fill", "select_option", "check", "uncheck", "type", "press", "form_fill"].includes(action);
+  const mutationAction = ["click", "invoke", "fill", "select_option", "check", "uncheck", "type", "press", "form_fill", "act", "agent"].includes(action);
   const beforeAction = mutationAction ? { url: page.url(), title: await page.title().catch(() => ""), generation: await pageGeneration(page) } : undefined;
   const target = request.selector ? await resolveLocator(page, request.selector) : null;
   if (action === "open") {
@@ -682,6 +738,21 @@ async function execute(context, pageState, request) {
     }, request.value);
     return result(page, context, { linkPayToken: { filled: true, merchantAccountId: match.merchantAccountId } });
   } else if (["state", "snapshot", "find"].includes(action)) return result(page, context, { matches: await roleMatches(page, request) }, request.includePageContent === true);
+  else if (action === "observe") {
+    const observed = { matches: await roleMatches(page, request), forms: request.includeForms === false ? undefined : await inspectForms(page) };
+    if (request.includeScreenshot === true) {
+      const image = await page.screenshot({ type: "jpeg", quality: 75 });
+      observed.screenshot = image.toString("base64");
+      observed.screenshotHash = createHash("sha256").update(image).digest("hex").slice(0, 32);
+    }
+    return result(page, context, observed, request.includePageContent === true);
+  } else if (action === "extract") {
+    const extracted = await extractRequestedSchema(page, request.schema || {});
+    return result(page, context, extracted, request.includePageContent === true);
+  } else if (action === "act") {
+    if (!request.step || typeof request.step !== "object") throw new Error("act requires one browser step");
+    return execute(context, pageState, request.step);
+  } else if (action === "agent") return boundedAgentRun(context, pageState, request);
   else if (action === "form_inspect") return result(page, context, { forms: await inspectForms(page) }, request.includePageContent === true);
   else if (action === "form_fill") {
     const completedControls = [];

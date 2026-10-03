@@ -467,6 +467,48 @@ async function abortableToolCall<T>(runtime: NativeToolRuntime, operation: () =>
   return result;
 }
 
+type LiveBrowserVerificationInput = {
+  userId: number;
+  runtime: NativeToolRuntime;
+  detectors: Parameters<typeof verifyBrowserResult>[0]["detectors"];
+  waitMs?: number;
+  pollMs?: number;
+};
+
+/**
+ * Verify a browser postcondition against fresh server-observed state. Dynamic
+ * sites often render success after the click has already returned, so a
+ * bounded retry belongs at this boundary rather than in the model prompt.
+ */
+async function verifyLiveBrowser(input: LiveBrowserVerificationInput): Promise<Record<string, unknown>> {
+  const waitMs = Math.max(0, Math.min(30_000, Math.floor(Number(input.waitMs ?? 0))));
+  const pollMs = Math.max(250, Math.min(5_000, Math.floor(Number(input.pollMs ?? 500))));
+  const startedAt = Date.now();
+  let attempts = 0;
+  let last: ReturnType<typeof verifyBrowserResult> = { passed: false, matched: [], missing: ["No live browser observation"], detectors: [] };
+  let lastUrl: string | undefined;
+  let lastTitle: string | undefined;
+  while (true) {
+    throwIfAborted(input.runtime.signal);
+    const browser = automatedBrowserEngine("state");
+    const observed = await abortableToolCall(input.runtime, () => browser.browser(input.userId, { action: "state", maxDepth: 8 }, { ownerPrivateRun: input.runtime.ownerPrivateRun })) as {
+      observedUrl?: unknown; title?: unknown; accessibility?: unknown; pageContent?: unknown;
+    };
+    attempts += 1;
+    lastUrl = typeof observed.observedUrl === "string" ? observed.observedUrl : undefined;
+    lastTitle = typeof observed.title === "string" ? observed.title : undefined;
+    last = verifyBrowserResult({
+      currentUrl: lastUrl,
+      title: lastTitle,
+      text: `${JSON.stringify(observed.accessibility ?? "")} ${typeof observed.pageContent === "string" ? observed.pageContent : ""}`.slice(0, 12_000),
+      detectors: input.detectors,
+    });
+    if (last.passed || Date.now() - startedAt >= waitMs) break;
+    await abortable(new Promise<void>((resolve) => setTimeout(resolve, pollMs)), input.runtime.signal);
+  }
+  return { ...last, attempts, waitedMs: Math.max(0, Date.now() - startedAt), ...(lastUrl ? { observedUrl: lastUrl } : {}), ...(lastTitle ? { observedTitle: lastTitle } : {}) };
+}
+
 async function daytonaCall<T>(runtime: NativeToolRuntime, operation: () => Promise<T>): Promise<T> {
   return abortableToolCall(runtime, operation);
 }
@@ -2222,11 +2264,16 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       if (handoffId && !handoff) throw new Error("Browser handoff not found or not owned by you");
       if (handoff && !["waiting", "awaiting_verification"].includes(handoff.status)) throw new Error(`Browser handoff is ${handoff.status} and cannot be verified`);
       const detectors = args.detectors as Parameters<typeof verifyBrowserResult>[0]["detectors"];
-      if (!detectors?.length || !detectors.some((detector) => detector.urlIncludes || detector.titleIncludes || detector.textIncludes)) {
+      if (!detectors?.length || !detectors.some((detector) => detector.urlIncludes || detector.urlExcludes || detector.titleIncludes || detector.titleExcludes || detector.textIncludes || detector.textExcludes)) {
         throw new Error("Provide at least one detector with a URL, title, or page-text condition");
       }
-      if (handoff && !detectors.some((detector) => detector.required !== false && (detector.urlIncludes || detector.titleIncludes || detector.textIncludes))) {
+      if (handoff && !detectors.some((detector) => detector.required !== false && (detector.urlIncludes || detector.urlExcludes || detector.titleIncludes || detector.titleExcludes || detector.textIncludes || detector.textExcludes))) {
         throw new Error("A browser handoff requires at least one non-optional verification detector");
+      }
+      if (!handoff && Number(args.waitMs ?? 0) > 0) {
+        const result = await verifyLiveBrowser({ userId, runtime, detectors, waitMs: Number(args.waitMs), pollMs: Number(args.pollMs ?? 500) });
+        await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: result.passed ? "verification_passed" : "verification_failed", status: result.passed ? "succeeded" : "failed", summary: result.passed ? "Browser result verification passed after bounded polling" : "Browser result verification remained incomplete after bounded polling", createdAt: Date.now() });
+        return result;
       }
       // Never let model-authored metadata authorize a retained website session.
       // Read the live retained desktop and verify only its observed state.
@@ -2274,6 +2321,33 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
         return { ...result, handoffId, handoffCompleted: true, session: { id: session.id, workspaceId: session.workspaceId, status: session.status, origin: session.origin } };
       }
       return result;
+    }
+    case "CHUCK_BROWSER_OBSERVE": {
+      const browser = automatedBrowserEngine("observe");
+      return abortableToolCall(runtime, () => browser.browser(userId, {
+        action: "observe",
+        includeScreenshot: args.includeScreenshot === true,
+        includeForms: args.includeForms !== false,
+        includePageContent: args.includePageContent === true,
+      }, { ownerPrivateRun: runtime.ownerPrivateRun }));
+    }
+    case "CHUCK_BROWSER_ACT": {
+      const browser = automatedBrowserEngine("act");
+      const step = { ...args, action: args.action };
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "act", step }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
+    }
+    case "CHUCK_BROWSER_EXTRACT": {
+      const browser = automatedBrowserEngine("extract");
+      return abortableToolCall(runtime, () => browser.browser(userId, { action: "extract", schema: args.schema }, { ownerPrivateRun: runtime.ownerPrivateRun }));
+    }
+    case "CHUCK_BROWSER_AGENT": {
+      const browser = automatedBrowserEngine("agent");
+      return abortableToolCall(runtime, () => browser.browser(userId, {
+        action: "agent",
+        steps: args.steps,
+        maxSteps: args.maxSteps,
+        sessionId: args.sessionId,
+      }, { ownerPrivateRun: runtime.ownerPrivateRun, ownerApprovedAction: Boolean(runtime.approvedApprovalId) }));
     }
     case "CHUCK_BROWSER": {
       const action = classifyBrowserIntent({ label: typeof args.label === "string" ? args.label : String(args.action ?? "browse"), url: typeof args.url === "string" ? args.url : undefined });

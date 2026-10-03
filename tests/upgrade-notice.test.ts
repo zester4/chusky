@@ -226,8 +226,16 @@ test("browser reliability preset covers planning, recovery, checkpoints, and vis
   const bullets = getAgentUpgradePreset("browserReliability");
   assert.equal(bullets.length, 3);
   assert.match(bullets[0]!, /form planning.*comboboxes.*checkboxes/i);
-  assert.match(bullets[1]!, /validation recovery.*checkpoints/i);
-  assert.match(bullets[2]!, /visual fingerprint.*stale coordinate/i);
+  assert.match(bullets[1]!, /validation recovery.*active tab frontier/i);
+  assert.match(bullets[2]!, /bounded polling.*positive and negative.*visual fingerprint.*stale coordinate/i);
+});
+
+test("browser frontier preset describes bounded primitives and verification boundaries", () => {
+  const bullets = getAgentUpgradePreset("browserFrontier");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /fresh observation.*schema-bounded extraction.*per-step trace/i);
+  assert.match(bullets[1]!, /accessibility.*visual-target ranking.*concurrency limits/i);
+  assert.match(bullets[2]!, /runtime adapter contract.*explicit verification or a trusted provider receipt/i);
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {

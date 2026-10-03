@@ -337,6 +337,7 @@ export class E2BBrowserEngine {
 
   private async persistResult(userId: number, record: E2BBrowserRecord, result: E2BCommandResult, nodes: E2BBrowserNode[] = [], action = "browser"): Promise<E2BBrowserRecord> {
     const now = Date.now();
+    const activeTabIndex = Number.isSafeInteger(result.activeIndex) && Number(result.activeIndex) >= 0 ? Number(result.activeIndex) : undefined;
     const next: E2BBrowserRecord = {
       ...record,
       ...(typeof result.url === "string" ? { lastUrl: result.url } : {}),
@@ -351,6 +352,8 @@ export class E2BBrowserEngine {
         ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}),
         ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
         ...(typeof result.accessibilityHash === "string" ? { accessibilityHash: result.accessibilityHash } : {}),
+        ...(activeTabIndex !== undefined ? { activeTabIndex } : {}),
+        ...(Array.isArray(result.tabs) ? { tabs: result.tabs.slice(0, 10).map((tab) => ({ index: Number(tab.index), url: redactBrowserText(tab.url, 2_000), title: redactBrowserText(tab.title, 160), active: tab.active === true })) } : {}),
         verified: action === "snapshot" || action === "state" || action === "find" || action === "form_inspect" || Boolean(result.formState),
         ...(result.workflowCheckpoint ? { ...result.workflowCheckpoint, action: result.workflowCheckpoint.action ?? action } : {}),
         updatedAt: now,

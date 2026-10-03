@@ -134,8 +134,13 @@ export const AGENT_UPGRADE_PRESETS = {
   ],
   browserReliability: [
     "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
-    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints so interrupted forms can resume without replaying completed work.",
-    "Screenshot fallback now exposes a fresh visual fingerprint and rejects stale coordinate clicks; accessibility-first targeting remains the default.",
+    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints, including the active tab frontier for multi-page workflows.",
+    "Outcome verification supports bounded polling plus positive and negative URL, title, and text detectors; screenshot fallback exposes a fresh visual fingerprint and rejects stale coordinate clicks.",
+  ],
+  browserFrontier: [
+    "Added provider-neutral browser primitives for fresh observation, bounded semantic action, schema-bounded extraction, and ordered browser-agent execution with per-step trace data.",
+    "E2B now combines accessibility and form controls with bounded screenshot evidence, deterministic visual-target ranking, stale-observation recovery guidance, and owner-scoped browser-session concurrency limits.",
+    "Added a browser runtime adapter contract and benchmark manifest for forms, dynamic controls, extraction, frames, tabs, visual fallback, human handoff, checkpoints, and DOM redesign recovery; business completion still requires explicit verification or a trusted provider receipt.",
   ],
   webBotAuth: [
     "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",

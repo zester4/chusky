@@ -243,6 +243,15 @@ test("Daytona accessibility search exposes a valid matching mode", () => {
   validateNativeToolArguments("CHUCK_BROWSER", { action: "find", name: "OpenRouter", nameMatch: "substring" });
 });
 
+test("browser verification exposes bounded dynamic waits and failure detectors", () => {
+  validateNativeToolArguments("CHUCK_BROWSER_VERIFY", {
+    waitMs: 2_000,
+    pollMs: 500,
+    detectors: [{ textIncludes: "success", textExcludes: "error", required: true }],
+  });
+  assert.throws(() => validateNativeToolArguments("CHUCK_BROWSER_VERIFY", { waitMs: 30_001, detectors: [{ textIncludes: "success" }] }), /waitMs.*(?:maximum|at most)/i);
+});
+
 test("Daytona browser tools are not exposed or accepted", () => {
   assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER", { action: "status" }), /unknown|not found|unsupported/i);
   assert.throws(() => validateNativeToolArguments("CHUCK_DAYTONA_BROWSER_HANDOFF", { reason: "user_requested" }), /unknown|not found|unsupported/i);

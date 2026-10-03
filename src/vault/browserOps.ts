@@ -11,8 +11,11 @@ export type BrowserRecipeStep = {
 
 export type BrowserDetector = {
   urlIncludes?: string;
+  urlExcludes?: string;
   titleIncludes?: string;
+  titleExcludes?: string;
   textIncludes?: string;
+  textExcludes?: string;
   required?: boolean;
 };
 
@@ -118,6 +121,8 @@ export type BrowserOperationPlan = {
   stopBefore: string[];
   steps: string[];
   verification: BrowserDetector[];
+  successCriteria: string[];
+  failureSignals: string[];
   recovery: string[];
 };
 
@@ -202,6 +207,16 @@ export function createBrowserOperationPlan(goal: string, origin?: string, playbo
       "Verify the result with URL, title, text, or a provider confirmation",
     ],
     verification,
+    successCriteria: verification.length ? verification.map((detector) => [detector.urlIncludes && `URL contains ${detector.urlIncludes}`, detector.titleIncludes && `title contains ${detector.titleIncludes}`, detector.textIncludes && `page text contains ${detector.textIncludes}`].filter(Boolean).join(" OR ")) : [
+      "The intended page or control state is visibly present",
+      "No required validation or site error is present",
+      "A fresh read confirms the requested business outcome",
+    ],
+    failureSignals: [
+      "The page reports an error, validation failure, or rejected submission",
+      "The browser is redirected to an unexpected origin or login state",
+      "The result cannot be confirmed from a fresh live read",
+    ],
     recovery: [
       "If the page is ambiguous, stop and request a private browser handoff",
       "If a login or session expires, use the saved identity and re-check the page",
@@ -223,25 +238,35 @@ export function verifyBrowserResult(input: { currentUrl?: string; title?: string
     if (!rawDetector || typeof rawDetector !== "object" || Array.isArray(rawDetector)) throw new Error(`detectors[${index}] must be an object`);
     const detector = rawDetector as BrowserDetector;
     for (const [key, value] of Object.entries(detector)) {
-      if (!["urlIncludes", "titleIncludes", "textIncludes", "required"].includes(key)) throw new Error(`detectors[${index}].${key} is not supported`);
+      if (!["urlIncludes", "urlExcludes", "titleIncludes", "titleExcludes", "textIncludes", "textExcludes", "required"].includes(key)) throw new Error(`detectors[${index}].${key} is not supported`);
       if (key === "required" ? typeof value !== "boolean" : typeof value !== "string") throw new Error(`detectors[${index}].${key} has an invalid type`);
     }
     const detectorMatched: string[] = [];
     const detectorMissing: string[] = [];
     const checks = [
       detector.urlIncludes ? { label: `url contains '${detector.urlIncludes}'`, value: currentUrl, expected: detector.urlIncludes.toLowerCase() } : undefined,
+      detector.urlExcludes ? { label: `url does not contain '${detector.urlExcludes}'`, value: currentUrl, expected: detector.urlExcludes.toLowerCase(), negate: true } : undefined,
       detector.titleIncludes ? { label: `title contains '${detector.titleIncludes}'`, value: title, expected: detector.titleIncludes.toLowerCase() } : undefined,
+      detector.titleExcludes ? { label: `title does not contain '${detector.titleExcludes}'`, value: title, expected: detector.titleExcludes.toLowerCase(), negate: true } : undefined,
       detector.textIncludes ? { label: `page text contains '${detector.textIncludes}'`, value: text, expected: detector.textIncludes.toLowerCase() } : undefined,
-    ].filter((check): check is { label: string; value: string; expected: string } => Boolean(check));
+      detector.textExcludes ? { label: `page text does not contain '${detector.textExcludes}'`, value: text, expected: detector.textExcludes.toLowerCase(), negate: true } : undefined,
+    ].filter((check): check is { label: string; value: string; expected: string; negate?: boolean } => Boolean(check));
     if (checks.length) {
-      // A detector is an OR across its URL/title/text alternatives. Each
-      // detector is then ANDed with the other required detectors.
-      const matchedChecks = checks.filter((check) => check.value.includes(check.expected));
-      const failedChecks = checks.filter((check) => !check.value.includes(check.expected));
-      detectorMatched.push(...matchedChecks.map((check) => check.label));
-      detectorMissing.push(...failedChecks.map((check) => check.label));
-      if (matchedChecks.length) matched.push(...detectorMatched);
+      // Positive URL/title/text alternatives are ORed. Negative signals are
+      // mandatory guards, so a known error cannot be masked by a success word.
+      const positive = checks.filter((check) => !check.negate);
+      const exclusions = checks.filter((check) => check.negate);
+      const matchedPositive = positive.filter((check) => check.value.includes(check.expected));
+      const failedPositive = positive.filter((check) => !check.value.includes(check.expected));
+      const passedExclusions = exclusions.filter((check) => !check.value.includes(check.expected));
+      const failedExclusions = exclusions.filter((check) => check.value.includes(check.expected));
+      detectorMatched.push(...matchedPositive.map((check) => check.label), ...passedExclusions.map((check) => check.label));
+      detectorMissing.push(...failedPositive.map((check) => check.label), ...failedExclusions.map((check) => check.label));
+      const passed = (!positive.length || matchedPositive.length > 0) && failedExclusions.length === 0;
+      if (passed) matched.push(...detectorMatched);
       else missing.push(...detectorMissing);
+      detectorResults.push({ index, required: detector.required !== false, passed, matched: detectorMatched, missing: detectorMissing });
+      continue;
     }
     detectorResults.push({ index, required: detector.required !== false, passed: checks.length === 0 || detectorMatched.length > 0, matched: detectorMatched, missing: detectorMissing });
   }
@@ -270,8 +295,11 @@ export function normalizePlaybook(input: Omit<BrowserPlaybookRecord, "id" | "cre
   const cleanSteps = (steps: BrowserRecipeStep[] | undefined, max: number) => (steps ?? []).slice(0, max).map((step) => ({ role: step.role, name: bounded(step.name, 160, "step.name"), nameMatch: step.nameMatch ?? "substring", action: step.action, ...(step.optional ? { optional: true } : {}) }));
   const cleanDetectors = (detectors: BrowserDetector[] | undefined) => (detectors ?? []).slice(0, 12).map((detector) => ({
     ...(detector.urlIncludes ? { urlIncludes: bounded(detector.urlIncludes, 300, "detector.urlIncludes") } : {}),
+    ...(detector.urlExcludes ? { urlExcludes: bounded(detector.urlExcludes, 300, "detector.urlExcludes") } : {}),
     ...(detector.titleIncludes ? { titleIncludes: bounded(detector.titleIncludes, 300, "detector.titleIncludes") } : {}),
+    ...(detector.titleExcludes ? { titleExcludes: bounded(detector.titleExcludes, 300, "detector.titleExcludes") } : {}),
     ...(detector.textIncludes ? { textIncludes: bounded(detector.textIncludes, 300, "detector.textIncludes") } : {}),
+    ...(detector.textExcludes ? { textExcludes: bounded(detector.textExcludes, 300, "detector.textExcludes") } : {}),
     ...(detector.required === false ? { required: false } : {}),
   }));
   if (!cleanSteps(input.login.steps, 20).length) throw new Error("login.steps must contain at least one step");

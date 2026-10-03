@@ -4,8 +4,8 @@
   "title": "Chusky has been upgraded",
   "bullets": [
     "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
-    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints so interrupted forms can resume without replaying completed work.",
-    "Screenshot fallback now exposes a fresh visual fingerprint and rejects stale coordinate clicks; accessibility-first targeting remains the default."
+    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints, including the active tab frontier for multi-page workflows.",
+    "Outcome verification supports bounded polling plus positive and negative URL, title, and text detectors; screenshot fallback exposes a fresh visual fingerprint and rejects stale coordinate clicks."
   ],
   "createdAt": "2026-10-03T04:15:00.000Z"
 }

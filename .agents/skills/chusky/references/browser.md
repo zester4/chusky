@@ -97,6 +97,38 @@ visual fallback are rejected when the page no longer matches that fingerprint.
 Accessibility targeting remains the default, and a screenshot never proves a
 submission succeeded by itself.
 
+Browser outcome verification is also bounded and provider-neutral. `CHUCK_BROWSER_VERIFY`
+can poll fresh live state for a short period when a single-page application
+renders success asynchronously. Detectors support positive and negative URL,
+title, and page-text conditions, so a successful confirmation can be required
+while a known error or login page is explicitly rejected. The browser engine
+persists the active tab and bounded tab metadata in its checkpoint, allowing a
+multi-tab workflow to resume by re-inspecting the saved frontier rather than
+replaying the last write. A passed detector is evidence of the observed page
+state; it is not a provider receipt unless the site or connected provider
+itself supplies that receipt.
+
+The adaptive browser protocol adds four provider-neutral primitives:
+`CHUCK_BROWSER_OBSERVE` captures a fresh accessible/form observation and can
+include a guarded screenshot; `CHUCK_BROWSER_ACT` executes one semantic action;
+`CHUCK_BROWSER_EXTRACT` returns only fields requested by a bounded schema; and
+`CHUCK_BROWSER_AGENT` runs a bounded ordered sequence with per-step trace and
+failure metadata. The E2B template also exposes the corresponding
+`observe`/`act`/`extract`/`agent` actions. These primitives do not bypass human
+challenges or approval boundaries, and an `agent` sequence is not evidence of
+business success until `CHUCK_BROWSER_VERIFY` or a trusted provider receipt
+confirms the outcome.
+
+The runtime contracts in `src/lib/browser-runtime/` are provider-neutral. E2B
+currently supplies the adapter; Browserbase, Browser Use Cloud, local
+Playwright, or another approved backend can implement the same observation,
+action, extraction, and bounded-run interface without receiving Chusky policy
+authority. Session pooling is owner-scoped and refuses concurrency above the
+configured limit. The benchmark manifest in `benchmarks/browser-cases.ts`
+covers forms, custom controls, extraction, visual fallback, tabs, frames,
+handoffs, checkpoints, and redesign recovery; live provider coverage remains a
+separate release gate.
+
 ## Transparent browser identity (optional)
 
 When `WEB_BOT_AUTH_ENABLED=true`, the service publishes a signed, public-only

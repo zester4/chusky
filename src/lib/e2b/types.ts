@@ -2,6 +2,7 @@ export const E2B_BROWSER_ACTIONS = [
   "start", "stop", "status", "state", "session_acquire", "session_list", "session_release",
   "open", "snapshot", "find", "form_inspect", "health", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
   "form_plan", "form_fill",
+  "observe", "act", "extract", "agent",
   "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region",
   "screenshot_region_full", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close",
   "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
@@ -87,6 +88,8 @@ export type E2BBrowserCheckpoint = {
   pendingControls?: string[];
   validationErrors?: Array<{ label: string; message: string }>;
   nextAction?: string;
+  activeTabIndex?: number;
+  tabs?: Array<{ index: number; url: string; title: string; active: boolean }>;
   updatedAt: number;
 };
 
@@ -135,6 +138,7 @@ export type E2BCommandResult = {
   needsUserInteraction?: boolean;
   challenge?: { type: "captcha" | "two_factor" | "site_challenge"; detected: boolean };
   tabs?: Array<{ index: number; url: string; title: string; active: boolean }>;
+  activeIndex?: number;
   error?: string;
   [key: string]: unknown;
 };
