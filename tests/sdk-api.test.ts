@@ -1244,6 +1244,28 @@ test("root-only admin routes never require an SDK end-user header", async () => 
   assert.deepEqual(await response.json(), { data: [] });
 });
 
+test("Redis storage metrics are private, root-only, bounded aggregates", async () => {
+  const api = app();
+  const root = { Authorization: "Bearer sdk-test-key" };
+  const response = await api.fetch(new Request("http://local/v1/admin/storage/metrics", { headers: root }));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "private, no-store");
+  const body = await response.json() as { scope: string; data: Record<string, number> };
+  assert.equal(body.scope, "process-local");
+  assert.equal(typeof body.data["redis.session.commands"], "number");
+  assert.equal(typeof body.data["redis.missions.responseBytes"], "number");
+  assert.equal(JSON.stringify(body).includes("chuck:"), false);
+
+  const project = await api.fetch(new Request("http://local/v1/admin/projects", {
+    method: "POST", headers: { ...root, "Content-Type": "application/json" }, body: JSON.stringify({ name: "Metrics reader" }),
+  }));
+  const projectKey = (await project.json() as { key: string }).key;
+  const denied = await api.fetch(new Request("http://local/v1/admin/storage/metrics", { headers: { Authorization: `Bearer ${projectKey}` } }));
+  assert.equal(denied.status, 403);
+  const unauthenticated = await api.fetch(new Request("http://local/v1/admin/storage/metrics"));
+  assert.equal(unauthenticated.status, 401);
+});
+
 test("project scopes are enforced at the v1 boundary", async () => {
   const api = app(); const root = { Authorization: "Bearer sdk-test-key", "Content-Type": "application/json" };
   const provision = await api.fetch(new Request("http://local/v1/admin/projects", { method: "POST", headers: root, body: JSON.stringify({ name: "Read only", scopes: ["threads:read"] }) }));
