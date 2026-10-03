@@ -2420,13 +2420,14 @@ export async function runAgent(
     if (composioDecision) {
       composioRouteContext = composioDecisionContext(composioDecision);
       // Expose routed actions with their real schema so the model can call the
-      // exact action without a broad search round. Only for the owner's full
-      // private tool surface; explicit allowlists are never widened here.
-      if (composioDecision.directTools.length && sessionObj && !allow && fullComposioTools.length > 80) {
+      // exact action without a broad search round. For an explicit mission
+      // allowlist, only inject a routed action when that exact slug is already
+      // granted; this adds its schema without widening the worker's fence.
+      if (composioDecision.directTools.length && sessionObj && fullComposioTools.length > 80) {
         const present = new Set(availableTools.map((tool) => toolName(tool)));
         for (const tool of composioDecision.directTools) {
           const slug = toolName(tool);
-          if (!slug || present.has(slug) || deny.has(slug) || slug.startsWith("COMPOSIO_") || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
+          if (!slug || (allow && !allow.has(slug)) || present.has(slug) || deny.has(slug) || slug.startsWith("COMPOSIO_") || slug.startsWith("CHUCK_") || slug.startsWith("MCP_")) continue;
           registerComposioToolMetadata(tool);
           availableTools.push(addAccountSelector(tool));
           present.add(slug);

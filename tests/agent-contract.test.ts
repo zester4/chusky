@@ -88,6 +88,80 @@ async function withAgentMocks(responses: Response[], execute: (slug: string, arg
   }
 }
 
+test("mission provider allowlists receive the routed direct action schema", async () => {
+  const userId = 831236;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = { jevMode: config.jevMode, jevSurfaces: config.jevSurfaces, jevTurnBudgetMs: config.jevTurnBudgetMs };
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const directSchema = {
+    type: "object",
+    properties: { user_id: { type: "string" }, max_results: { type: "integer" }, include_payload: { type: "boolean" } },
+    required: ["user_id"],
+    additionalProperties: false,
+  };
+  const sessionTools = [
+    { type: "function", function: { name: "COMPOSIO_SEARCH_TOOL", parameters: { type: "object" } } },
+    ...Array.from({ length: 85 }, (_, index) => ({ type: "function", function: { name: `COMPOSIO_TEST_META_${index}`, parameters: { type: "object" } } })),
+  ];
+  const session = {
+    sessionId: "mission-direct-schema-session",
+    tools: async () => sessionTools,
+    execute: async () => ({ successful: true, data: { resultSizeEstimate: 1 } }),
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [{ id: "ca_gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }) },
+    tools: { getRawComposioToolBySlug: async () => undefined, getRawComposioTools: async () => [{ slug: "GMAIL_FETCH_EMAILS", name: "Fetch emails", description: "Read inbox messages", toolkit: { slug: "gmail" }, inputParameters: directSchema }] },
+  } });
+  config.jevMode = "enforce";
+  config.jevSurfaces = new Set(["composio"]);
+  config.jevTurnBudgetMs = 5_000;
+  setJevClientForTests(new JevClient({ apiKey: "test-jev-key", fetchImpl: (async (_url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    const answers: Record<string, unknown> = {};
+    for (const [key, question] of Object.entries<any>(body.questions ?? {})) {
+      if (question.type === "noul") { answers[key] = { type: "noul", noul: 0.99 }; continue; }
+      const ids = Object.keys(question.criteria).filter((id) => id !== "__none__");
+      const selected = ids.find((id) => id === "GMAIL_FETCH_EMAILS") ?? ids.find((id) => id.toLowerCase() === "gmail") ?? ids[0] ?? "__none__";
+      const probabilities = Object.fromEntries(Object.keys(question.criteria).map((id) => [id, id === selected ? 0.99 : 0.01 / Math.max(1, Object.keys(question.criteria).length - 1)]));
+      answers[key] = { type: "choice", choice: selected, confidence: 0.99, probabilities };
+    }
+    return new Response(JSON.stringify({ model: body.model, answers, usage: { input_tokens: 20, cost: 0 } }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch }));
+  let modelResponse = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push(body);
+      return modelResponse++ === 0
+        ? toolResponse("GMAIL_FETCH_EMAILS", JSON.stringify({ user_id: "me", max_results: 3, include_payload: false }))
+        : chatResponse({ role: "assistant", content: "read complete" });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Read the owner's Gmail inbox", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+      ephemeral: true,
+      toolAllow: ["GMAIL_FETCH_EMAILS"],
+      taskId: "task_mission_direct_schema",
+      missionId: "mis_mission_direct_schema",
+      missionStepId: "step-gmail",
+    });
+    assert.equal(result.text, "read complete");
+    assert.deepEqual(result.toolsSucceeded, ["GMAIL_FETCH_EMAILS"]);
+    const visible = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.ok(visible.includes("GMAIL_FETCH_EMAILS"), "the exact mission-granted provider action must be visible");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+    setJevClientForTests(undefined);
+  }
+});
+
 test("interactive mission start hands execution to the durable worker before another model round", async () => {
   const userId = 831235;
   await initStore({ memoryOnly: true });
