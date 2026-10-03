@@ -1,9 +1,14 @@
 ---
 name: openrouter-video-editing
-description: Generate one or many video clips through OpenRouter's unified video API (text-to-video, image-to-video, reference-to-video) across models like Veo 3.1, Sora 2 Pro, Seedance, Wan, Hailuo, Grok Imagine, and FLUX 3 Video — including generating a *sequence* of N clips (e.g. "make 3 10-second videos") and automatically merging them into one final video with ffmpeg. Use this skill whenever the user wants to create a video from a text prompt, animate a still image, extend/continue a clip, restyle via a reference image, build a multi-scene video/ad/story from several generated clips, or asks about "AI video generation," "OpenRouter video," or wants to compare/pick a video model by cost, resolution, or duration — even if they don't name OpenRouter or a specific model explicitly. Also covers brand videos, ads, UGC-style content, and avatar/talking-head clips — see references/use-cases.md. Requires an OPENROUTER_API_KEY.
+description: Generate one or many video clips through OpenRouter's unified video API (text-to-video, image-to-video, reference-to-video) using Chusky's approved Seedance, Wan, Hailuo, FLUX, HeyGen, and Veo families. Use this skill for AI video generation, image animation, reference editing, storyboards, brand videos, ads, UGC, avatars, and multi-scene video assembly. Requires an OPENROUTER_API_KEY.
 ---
 
 # OpenRouter Video Editing
+
+The Chusky runtime's approved model families are Seedance, Wan, Hailuo, FLUX,
+HeyGen, and Veo. Use the live `CHUCK_LIST_VIDEO_MODELS` capability view before
+choosing a model; duration, resolution, aspect ratio, frame mode, and audio
+support vary by model and must not be guessed.
 
 Generate short video clips via OpenRouter's video generation API
 (`POST /api/v1/videos`), which sits in front of many providers (Google Veo,
@@ -142,6 +147,27 @@ desynced output rather than erroring.
 - Full field reference, provider passthrough params, and webhooks are in
   `references/api-reference.md`. Use-case prompting patterns (brand videos,
   UGC ads, avatars) and their honest limits are in `references/use-cases.md`.
+
+## Video design prompt references
+
+Use the curated prompt library in `references/prompts/` when the user asks for
+high-quality commercial direction. Read only the relevant category:
+
+- `fashion-editorial.md` for fashion, beauty, jewelry, and lookbook work.
+- `product-ads.md` for product launches, demonstrations, and performance ads.
+- `ugc-social.md` for creator-style, testimonial, and vertical social content.
+- `cinematic-storytelling.md` for narrative scenes and atmosphere.
+- `storyboards.md` for multi-shot campaigns and sequence planning.
+- `avatar-presenter.md` for sales, training, explainers, and spokespersons.
+- `action-and-specialty.md` for chases, combat, long takes, macro work, and transformations.
+
+These are original examples designed to teach the agent how to specify subject,
+action, camera movement, lighting, continuity, sound, timing, and delivery
+constraints. They are not instructions to copy a campaign, person, brand,
+wording, composition, or distinctive style. Invent new identities and creative
+direction for every request. When a reference image is supplied, say explicitly
+what must stay unchanged and what should animate. For exact copy, logos, UI,
+prices, or legal text, generate clean footage and add the typography in post.
 
 ## Test prompts
 

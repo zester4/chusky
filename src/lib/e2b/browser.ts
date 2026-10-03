@@ -10,6 +10,7 @@ import { assertSafeBrowserUrl } from "./urlSafety.js";
 import { E2B_BROWSER_DENY_OUT_CIDRS } from "./networkPolicy.js";
 import { deleteR2Object, putR2Object, r2Configured, readR2Object } from "../../lib/storage/r2.js";
 import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
+import { planFormSubmission, type RequestedFormField } from "./formPlanner.js";
 import { webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthKeyId, webBotAuthSandboxEnvironment, webBotAuthSigningEnabled } from "../../webBotAuth.js";
 
 const MAX_OUTPUT = 16_000;
@@ -82,6 +83,20 @@ function normalizeMatches(raw: E2BCommandResult, url: string, now: number): E2BB
 
 const INTERACTIVE_ACTIONS = ["invoke", "fill", "focus", "click", "move", "hover", "select_option", "check", "uncheck", "type", "press", "upload", "upload_files"] as const;
 const SAFE_REPLAN_ACTIONS = ["fill", "select_option", "check", "uncheck", "focus", "hover", "wait"] as const;
+
+function requestedFormFields(value: unknown): RequestedFormField[] {
+  if (!Array.isArray(value) || value.length > 100) throw new E2BBrowserError("fields must be an array of at most 100 form fields");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new E2BBrowserError(`fields[${index}] must be an object`);
+    const field = item as Record<string, unknown>;
+    const label = boundedText(field.label, `fields[${index}].label`, 200);
+    if (field.value !== undefined && (typeof field.value !== "string" || field.value.length > 8_000)) throw new E2BBrowserError(`fields[${index}].value is invalid`);
+    if (field.checked !== undefined && typeof field.checked !== "boolean") throw new E2BBrowserError(`fields[${index}].checked must be boolean`);
+    const action = field.action === undefined ? undefined : boundedText(field.action, `fields[${index}].action`, 32) as RequestedFormField["action"];
+    if (action && !["fill", "select_option", "check", "uncheck"].includes(action)) throw new E2BBrowserError(`fields[${index}].action is unsupported`);
+    return { label, ...(field.value !== undefined ? { value: field.value as string } : {}), ...(field.checked !== undefined ? { checked: field.checked as boolean } : {}), ...(action ? { action } : {}) };
+  });
+}
 
 function selectorForNode(node: E2BBrowserNode): Record<string, unknown> {
   return {
@@ -337,6 +352,7 @@ export class E2BBrowserEngine {
         ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}),
         ...(typeof result.accessibilityHash === "string" ? { accessibilityHash: result.accessibilityHash } : {}),
         verified: action === "snapshot" || action === "state" || action === "find" || action === "form_inspect" || Boolean(result.formState),
+        ...(result.workflowCheckpoint ? { ...result.workflowCheckpoint, action: result.workflowCheckpoint.action ?? action } : {}),
         updatedAt: now,
       },
       nodes: nodes.length ? nodes : record.nodes,
@@ -458,16 +474,27 @@ export class E2BBrowserEngine {
       }
       const { sandbox } = await this.sandbox(userId);
       let record = (await this.record(userId))!;
+      let compositeRequest: Record<string, unknown> | undefined;
       if (action === "start") return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, expiresAt: record.expiresAt };
+      if (action === "form_plan" || action === "form_fill") {
+        const inspected = await this.run(sandbox, { action: "form_inspect", currentUrl: record.lastUrl, includePageContent: internal.ownerPrivateRun === true });
+        const forms = Array.isArray(inspected.forms) ? inspected.forms : [];
+        const plan = planFormSubmission(forms, requestedFormFields(args.fields), typeof args.formId === "string" ? args.formId : undefined);
+        record = await this.persistResult(userId, record, inspected, normalizeMatches(inspected, inspected.url ?? record.lastUrl ?? "", Date.now()), "form_inspect");
+        if (action === "form_plan") return { provider: "e2b", action, plan, checkpoint: record.checkpoint };
+        if (plan.missing.length) return { provider: "e2b", action, plan, checkpoint: { action, formId: plan.formId, pendingControls: plan.missing, nextAction: "Provide values for the missing form fields and retry form_fill", updatedAt: Date.now() } };
+        const requestControls = plan.controls.map((control) => ({ role: control.role, name: control.name, ...(control.id ? { id: control.id } : {}), ...(control.frameIndex !== undefined ? { frameIndex: control.frameIndex } : {}), ...(control.frameUrl ? { frameUrl: control.frameUrl } : {}), action: control.action, ...(control.value !== undefined ? { value: control.value } : {}), ...(control.checked !== undefined ? { checked: control.checked } : {}) }));
+        compositeRequest = { action: "form_fill", controls: requestControls, submit: args.submit === true, submitControl: plan.submit, formId: plan.formId };
+      }
       if (action === "windows") return { provider: "e2b", sandboxId: record.sandboxId, windows: [{ title: record.title ?? "Chromium", url: record.lastUrl ?? "about:blank" }] };
       if (action === "display_info") return { provider: "e2b", sandboxId: record.sandboxId, width: 1440, height: 900 };
       if (["screenshot", "screenshot_full", "screenshot_region", "screenshot_region_full", "recording_start", "recording_stop", "recording_get"].includes(action) && !internal.ownerPrivateRun) {
         throw new E2BBrowserError("Screenshots and browser recordings are available only in the owner's private conversation");
       }
-      if (record.sessionId && !["state", "snapshot", "find", "form_inspect"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
+      if (record.sessionId && !["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
-      const request: Record<string, unknown> = { action };
+      const request: Record<string, unknown> = compositeRequest ?? { action };
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
@@ -499,6 +526,7 @@ export class E2BBrowserEngine {
       if (["click", "move", "type", "press"].includes(action) && !args.nodeId && (args.x !== undefined || args.y !== undefined)) Object.assign(request, { x: Number(args.x), y: Number(args.y) });
       if (action === "type") Object.assign(request, { text: args.text, delayMs: args.delayMs });
       if (action === "press") Object.assign(request, { key: args.key ?? args.keys });
+      if (action === "click" && args.visualFallback === true) Object.assign(request, { visualFallback: true, screenshotHash: args.screenshotHash });
       if (action === "drag") {
         const source = record.nodes?.find((item) => item.nodeId === args.startNodeId);
         const target = record.nodes?.find((item) => item.nodeId === args.endNodeId);
@@ -542,7 +570,7 @@ export class E2BBrowserEngine {
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes, action);
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75) } : {}) };
+      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
       Object.assign(safe, result.forms ? { forms: result.forms } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };

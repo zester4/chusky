@@ -20,7 +20,7 @@ test("image generation requests the requested count and returns every image", as
     }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
   try {
-    const images = await generateImages("three distinct icons", 3);
+    const images = await generateImages("three distinct icons", 3, { preferredModel: "x-ai/grok-imagine-image-2.0" });
     assert.equal(requests.length, 3);
     assert.deepEqual(requests, [
       { model: "x-ai/grok-imagine-image-2.0", prompt: "three distinct icons" },
@@ -44,6 +44,7 @@ test("Grok image generation keeps supported controls and omits unsupported studi
   }) as typeof fetch;
   try {
     await generateImages("refresh the brand mark", 1, {
+      preferredModel: "x-ai/grok-imagine-image-2.0",
       inputReferences: [{ type: "image_url", image_url: { url: "https://example.com/logo.png" } }],
       aspectRatio: "9:16",
       resolution: "2K",

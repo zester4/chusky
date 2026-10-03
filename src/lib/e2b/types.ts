@@ -1,6 +1,7 @@
 export const E2B_BROWSER_ACTIONS = [
   "start", "stop", "status", "state", "session_acquire", "session_list", "session_release",
   "open", "snapshot", "find", "form_inspect", "health", "focus", "invoke", "fill", "click", "move", "drag", "type", "press",
+  "form_plan", "form_fill",
   "select_option", "check", "uncheck", "hover", "wait", "screenshot", "screenshot_full", "screenshot_region",
   "screenshot_region_full", "windows", "display_info", "tabs", "tab_open", "tab_focus", "tab_close",
   "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
@@ -70,7 +71,7 @@ export type E2BBrowserForm = {
   action?: string;
   method?: string;
   controls: E2BBrowserFormControl[];
-  submitControls: Array<{ role: string; name: string; id?: string; disabled: boolean }>;
+  submitControls: Array<{ role: string; name: string; id?: string; disabled: boolean; frameIndex?: number; frameUrl?: string }>;
 };
 
 export type E2BBrowserCheckpoint = {
@@ -81,6 +82,11 @@ export type E2BBrowserCheckpoint = {
   pageGeneration?: number;
   accessibilityHash?: string;
   verified?: boolean;
+  formId?: string;
+  completedControls?: string[];
+  pendingControls?: string[];
+  validationErrors?: Array<{ label: string; message: string }>;
+  nextAction?: string;
   updatedAt: number;
 };
 
@@ -113,6 +119,8 @@ export type E2BCommandResult = {
   health?: Record<string, unknown>;
   forms?: E2BBrowserForm[];
   checkpoint?: E2BBrowserCheckpoint;
+  workflowCheckpoint?: Omit<E2BBrowserCheckpoint, "action" | "updatedAt"> & { action?: string };
+  actionVerification?: { attempted: boolean; observed: boolean; urlChanged: boolean; titleChanged: boolean; pageGenerationChanged: boolean; accessibilityChanged?: boolean; validationErrors?: Array<{ label: string; message: string }> };
   formState?: { value?: string; valueLength?: number; checked?: boolean; selectedText?: string; controlRole?: string; required?: boolean; disabled?: boolean; invalid?: boolean; validationMessage?: string };
   downloads?: Array<{ id: string; name: string; state: string; size: number; createdAt: number; error?: string }>;
   download?: { id: string; name: string; state: string; size: number; createdAt: number; error?: string } | null;

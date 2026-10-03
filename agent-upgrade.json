@@ -1,11 +1,11 @@
 {
-  "id": "release-4.39.0",
-  "version": "4.39.0",
+  "id": "release-4.40.0",
+  "version": "4.40.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "Added provider-neutral browser challenge states that distinguish detection, provider solving, unverified clearance, owner handoff, verification, expiry, and blocking.",
-    "E2B handoffs now persist the browser provider, challenge type, and resolution state while preserving legacy owner-scoped sessions and same-origin verification.",
-    "The contract is ready for opt-in Browserbase or Browser Use Cloud adapters without weakening Chusky's authorization, account isolation, or post-challenge verification boundary."
+    "Added universal, label-aware form planning and bounded end-to-end form filling for text fields, selects, custom comboboxes, checkboxes, radios, and submit controls.",
+    "Browser mutations now return structured validation recovery, post-action evidence, and durable non-sensitive checkpoints so interrupted forms can resume without replaying completed work.",
+    "Screenshot fallback now exposes a fresh visual fingerprint and rejects stale coordinate clicks; accessibility-first targeting remains the default."
   ],
-  "createdAt": "2026-10-03T03:50:28.085Z"
+  "createdAt": "2026-10-03T04:15:00.000Z"
 }

@@ -215,11 +215,19 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces browser challenge resolution", async () => {
+test("current upgrade manifest announces browser reliability", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.39.0");
-  assert.equal(notice?.version, "4.39.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserChallengeResolution"));
+  assert.equal(notice?.id, "release-4.40.0");
+  assert.equal(notice?.version, "4.40.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserReliability"));
+});
+
+test("browser reliability preset covers planning, recovery, checkpoints, and visual freshness", () => {
+  const bullets = getAgentUpgradePreset("browserReliability");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /form planning.*comboboxes.*checkboxes/i);
+  assert.match(bullets[1]!, /validation recovery.*checkpoints/i);
+  assert.match(bullets[2]!, /visual fingerprint.*stale coordinate/i);
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {

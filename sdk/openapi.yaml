@@ -110,9 +110,9 @@ paths:
     get: { summary: List owner-scoped Recall meeting rooms, preparations, meetings, participants, and contacts, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: OK } } }
     post: { summary: Join or schedule a Recall meeting, parameters: [{ $ref: '#/components/parameters/UserId' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Meeting lifecycle record } } }
   /meetings/prepare:
+    post: { summary: Generate a private client-bound meeting brief without joining, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Prepared meeting mission } } }
   /meetings/stream:
     get: { summary: Stream owner-scoped meeting workspace snapshots over Server-Sent Events, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: text/event-stream meeting snapshots } } }
-    post: { summary: Generate a private client-bound meeting brief without joining, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Prepared meeting mission } } }
   /meetings/profile:
     get: { summary: Get the account meeting representative profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Profile } } }
     patch: { summary: Update the account meeting representative profile, parameters: [{ $ref: '#/components/parameters/UserId' }], responses: { '200': { description: Updated profile } } }
@@ -160,7 +160,7 @@ paths:
   /triggers/{triggerId}:
     patch:
       summary: Enable, disable, or update the owner-authored instructions for a trigger
-        parameters: [{ name: triggerId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }]
+      parameters: [{ name: triggerId, in: path, required: true, schema: { type: string } }, { $ref: '#/components/parameters/UserId' }]
       requestBody:
         required: true
         content:

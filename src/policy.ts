@@ -57,7 +57,7 @@ const PRIVATE_NATIVE_TOOLS = new Set([
   // reconciliation, or start an internal durable mission. Provider side
   // effects remain governed by the normal tool approval boundary.
   "CHUCK_AUTONOMY_STATUS", "CHUCK_AUTONOMY_RECONCILE", "CHUCK_AUTONOMY_PLAYBOOK",
-  "CHUCK_GENERATE_IMAGE", "CHUCK_GENERATE_VIDEO",
+  "CHUCK_GENERATE_IMAGE", "CHUCK_LIST_IMAGE_MODELS", "CHUCK_GENERATE_VIDEO", "CHUCK_LIST_VIDEO_MODELS", "CHUCK_VIDEO_CANCEL",
   "CHUCK_LIST_JOBS", "CHUCK_LIST_REMINDERS", "CHUCK_SAVE_MEMORY",
   "CHUCK_SCHEDULE_JOB", "CHUCK_PAUSE_JOB", "CHUCK_RESUME_JOB", "CHUCK_RUN_JOB_NOW", "CHUCK_SCRATCHPAD_READ",
   "CHUCK_SCRATCHPAD_WRITE", "CHUCK_SEARCH_MEMORY", "CHUCK_MEMORY_BRIEF", "CHUCK_SET_REMINDER",
@@ -250,6 +250,9 @@ const STATUSES: Record<string, string> = {
   COMPOSIO_EXECUTE_TOOL: "⚡ I’m carrying that out through the connected app…",
   COMPOSIO_MULTI_EXECUTE_TOOL: "⚡ I’m carrying those steps out through the connected apps…",
   CHUCK_GENERATE_IMAGE: "🎨 I’m creating your image…",
+  CHUCK_LIST_IMAGE_MODELS: "🎨 I’m checking the image model capabilities…",
+  CHUCK_LIST_VIDEO_MODELS: "🎬 I’m checking the video model capabilities…",
+  CHUCK_VIDEO_CANCEL: "🎬 I’m cancelling that video job…",
   CHUCK_GENERATE_VIDEO: "🎬 I’m creating your video…",
   CHUCK_CREATE_TRIGGER: "🔔 I’m setting up that automation…",
   CHUCK_LIST_TRIGGER_APPS: "🔔 I’m checking which connected apps can send events…",
