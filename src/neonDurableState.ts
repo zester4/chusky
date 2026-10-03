@@ -652,7 +652,7 @@ export class NeonDurableState {
       for (const [domain, payload] of documents) {
         const bytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
         const expected = expectedVersions.get(domain);
-        const result = await this.measuredQuery<{ version: number }>(client,
+        let result = await this.measuredQuery<{ version: number }>(client,
           `INSERT INTO chusky_session_domain (user_id, domain, payload, version, updated_at)
            SELECT $1, $2, $3::jsonb, 1, NOW() WHERE $4::integer IS NULL
            ON CONFLICT (user_id, domain) DO UPDATE
@@ -661,6 +661,25 @@ export class NeonDurableState {
            RETURNING version`,
           [userId, domain, JSON.stringify(payload), expected ?? null],
         );
+        // The caller's expected version may have been read before the
+        // advisory lock was acquired. Refresh it inside the locked
+        // transaction and retry once, so a waiting writer does not turn a
+        // normal concurrent save into a user-visible failure.
+        if (!result.rows.length) {
+          const current = await this.measuredQuery<{ version: number }>(client,
+            "SELECT version FROM chusky_session_domain WHERE user_id = $1 AND domain = $2 FOR UPDATE",
+            [userId, domain],
+          );
+          if (current.rows[0]) {
+            result = await this.measuredQuery<{ version: number }>(client,
+              `UPDATE chusky_session_domain
+               SET payload = $3::jsonb, version = version + 1, updated_at = NOW()
+               WHERE user_id = $1 AND domain = $2 AND version = $4
+               RETURNING version`,
+              [userId, domain, JSON.stringify(payload), Number(current.rows[0].version)],
+            );
+          }
+        }
         if (!result.rows.length) throw new Error(`Durable session domain version conflict: ${domain}.`);
         versions.set(domain, Number(result.rows[0]!.version));
         writtenBytes += bytes;
