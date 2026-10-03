@@ -4,7 +4,7 @@ Chusky uses three stores with deliberately different responsibilities:
 
 | Store | Canonical data | Not used for |
 | --- | --- | --- |
-| Neon Postgres | Durable structured user state: conversation context, memories, asset metadata, SDK thread state; later mission definitions, evidence, and audit history | File bytes, locks, leases, or short-lived delivery coordination |
+| Neon Postgres | Durable structured user state: conversation context, memories, asset metadata, SDK thread metadata and (after runtime cutover) individual SDK runs; later mission definitions, evidence, and audit history | File bytes, locks, leases, or short-lived delivery coordination |
 | Redis | Task leases, cancellation signals, locks, rate limits, QStash/delivery deduplication, and cache-like operational records | Long-lived conversation blobs or large audit payloads |
 | Cloudflare R2 | Private files, images, videos, transcripts, screenshots, and large provider/model payloads | Queryable application state or authorization decisions |
 
@@ -17,7 +17,11 @@ The existing Cloudflare D1 vault remains scoped to the vault Worker. It is not a
 - `conversation`: history and summaries
 - `memories`: normalized owner memory facts
 - `assets`: R2 metadata, SDK file metadata, and artifact metadata; never bytes
-- `sdk`: SDK thread metadata, runs, and indexes
+- `sdk`: SDK thread metadata, run history, and indexes. As of migration 0002,
+  a normalized per-run table and owner/thread-scoped repository methods are
+  available, but the live runtime still stores and reads runs inside this
+  document; do not claim per-run persistence is active until API and worker
+  callers are cut over and existing run rows are migrated safely.
 
 The Redis session record retains small operational/profile fields and a
 `durableSessionFormat` marker. On every first save after enablement, Chusky
@@ -49,7 +53,9 @@ R2 retroactively.
    before a user has migrated; a migrated user must keep the Neon URL present
    until a deliberate reverse migration is implemented.
 
-The next migration should make SDK runs individually addressable rows, then
-move mission records/evidence/event history to normalized Neon tables. Those
-are intentionally separate changes because they require cross-store
-idempotency and recovery semantics beyond a session-document migration.
+Migration `0002_neon_sdk_runs.sql` prepares individually addressable SDK run
+rows. The next runtime migration must route SDK API and durable task-worker
+reads/writes through those rows, safely import existing nested runs, and retain
+Redis owner locks for cross-request coordination. Mission records/evidence/event
+history remain a separate future migration because they require their own
+cross-store idempotency and recovery semantics.

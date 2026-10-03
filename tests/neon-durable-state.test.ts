@@ -19,9 +19,11 @@ class FakeClient {
 class FakePool {
   readonly client = new FakeClient();
   reads: unknown[] = [];
+  calls: Array<{ text: string; values?: unknown[] }> = [];
   failRead = false;
   ended = false;
-  async query(_text: string, _values?: unknown[]) {
+  async query(text: string, values?: unknown[]) {
+    this.calls.push({ text, values });
     if (this.failRead) throw new Error("database unavailable");
     return { rows: this.reads as never[] };
   }
@@ -76,6 +78,52 @@ test("Neon health reports unavailable state without leaking database errors", as
   const health = await state.healthStatus();
   assert.equal(health.reachable, false);
   assert.deepEqual(health, { enabled: true, reachable: false });
+});
+
+test("Neon SDK run reads are owner- and thread-scoped and listing is bounded", async () => {
+  const pool = new FakePool();
+  const at = new Date("2026-10-03T00:00:00.000Z");
+  pool.reads = [{ user_id: "42", thread_id: "thr_test", run_id: "run_test", payload: { id: "run_test", status: "completed", events: [] }, created_at: at, updated_at: at }];
+  const state = new NeonDurableState(pool as never);
+
+  const run = await state.readSdkRun(42, "thr_test", "run_test");
+  assert.equal(run?.userId, 42);
+  assert.equal(run?.payload && (run.payload as { id: string }).id, "run_test");
+  assert.deepEqual(pool.calls[0]?.values, [42, "thr_test", "run_test"]);
+
+  const listed = await state.listSdkRuns(42, "thr_test", 50_000);
+  assert.equal(listed.length, 1);
+  assert.match(pool.calls[1]?.text ?? "", /ORDER BY created_at ASC, run_id ASC LIMIT \$3/);
+  assert.deepEqual(pool.calls[1]?.values, [42, "thr_test", 200]);
+  pool.reads = [];
+  assert.equal(await state.readSdkRun(42, "thr_test", "run_other"), undefined);
+  assert.deepEqual(pool.calls[2]?.values, [42, "thr_test", "run_other"]);
+  await assert.rejects(() => state.listSdkRuns(42, "bad", 50), /identity is invalid/);
+});
+
+test("Neon SDK run writes validate identities and upsert a single run row", async () => {
+  const pool = new FakePool();
+  pool.reads = [{ run_id: "run_test" }];
+  const state = new NeonDurableState(pool as never);
+  const run = { id: "run_test", status: "running", events: [], createdAt: 1000, updatedAt: 1000 };
+  await state.writeSdkRun(42, "thr_test", "run_test", run);
+  const write = pool.calls[0]!;
+  assert.match(write.text, /INSERT INTO chusky_sdk_run/);
+  assert.match(write.text, /ON CONFLICT \(user_id, run_id\) DO UPDATE/);
+  assert.match(write.text, /WHERE chusky_sdk_run.thread_id = EXCLUDED.thread_id/);
+  assert.deepEqual(write.values, [42, "thr_test", "run_test", JSON.stringify(run), 1000, 1000]);
+  pool.reads = [];
+  await assert.rejects(() => state.writeSdkRun(42, "thr_test", "run_test", run), /identity conflicts/);
+  await assert.rejects(() => state.writeSdkRun(42, "thr_test", "run_other", run), /payload is invalid/);
+  await assert.rejects(() => state.writeSdkRun(42, "thr_test", "run_test", { ...run, updatedAt: 999 }), /timestamps are invalid/);
+});
+
+test("Neon SDK run deletion is constrained to the owner and thread", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.deleteSdkRunsForThread(42, "thr_test");
+  assert.match(pool.calls[0]?.text ?? "", /DELETE FROM chusky_sdk_run WHERE user_id = \$1 AND thread_id = \$2/);
+  assert.deepEqual(pool.calls[0]?.values, [42, "thr_test"]);
 });
 
 test("session split leaves no high-growth payload in the Redis core and restores it exactly", () => {

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Pool } from "pg";
 import { config } from "./config.js";
@@ -9,10 +9,17 @@ async function main(): Promise<void> {
   // their already-configured direct Better Auth migration URL.
   const connectionString = config.durableStateMigrationDatabaseUrl || config.betterAuthMigrationDatabaseUrl;
   if (!connectionString) throw new Error("Set DURABLE_STATE_MIGRATION_DATABASE_URL or BETTER_AUTH_MIGRATION_DATABASE_URL to Neon's direct connection string before running durable-state migrations.");
-  const sql = await readFile(resolve(process.cwd(), "migrations", "0001_neon_durable_session.sql"), "utf8");
+  const migrationsDirectory = resolve(process.cwd(), "migrations");
+  const migrations = (await readdir(migrationsDirectory))
+    .filter((name) => /^\d{4}_[a-z0-9_-]+\.sql$/i.test(name))
+    .sort();
+  if (!migrations.length) throw new Error("No durable-state SQL migrations were found.");
   const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
   try {
-    await pool.query(sql);
+    for (const migration of migrations) {
+      const sql = await readFile(resolve(migrationsDirectory, migration), "utf8");
+      await pool.query(sql);
+    }
   } finally {
     await pool.end();
   }
