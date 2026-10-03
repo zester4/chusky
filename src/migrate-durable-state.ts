@@ -4,8 +4,11 @@ import { Pool } from "pg";
 import { config } from "./config.js";
 
 async function main(): Promise<void> {
-  const connectionString = config.durableStateMigrationDatabaseUrl;
-  if (!connectionString) throw new Error("DURABLE_STATE_MIGRATION_DATABASE_URL must be set to Neon's direct connection string before running durable-state migrations.");
+  // Chusky's auth and durable state can intentionally share one Neon database.
+  // Prefer the dedicated setting, while allowing existing installations to use
+  // their already-configured direct Better Auth migration URL.
+  const connectionString = config.durableStateMigrationDatabaseUrl || config.betterAuthMigrationDatabaseUrl;
+  if (!connectionString) throw new Error("Set DURABLE_STATE_MIGRATION_DATABASE_URL or BETTER_AUTH_MIGRATION_DATABASE_URL to Neon's direct connection string before running durable-state migrations.");
   const sql = await readFile(resolve(process.cwd(), "migrations", "0001_neon_durable_session.sql"), "utf8");
   const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
   try {

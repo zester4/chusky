@@ -34,7 +34,9 @@ R2 retroactively.
 ## Rollout
 
 1. Set `DURABLE_STATE_MIGRATION_DATABASE_URL` to Neon's direct (non-pooler)
-   URL and run `npm run durable-state:migrate` once.
+   URL and run `npm run durable-state:migrate` once. When Chusky shares the
+   Better Auth Neon database, the script safely falls back to
+   `BETTER_AUTH_MIGRATION_DATABASE_URL`.
 2. Verify `chusky_session_domain` exists and that the application role can
    read and write it.
 3. Set `DURABLE_STATE_DATABASE_URL` to the Neon pooled runtime URL and deploy
