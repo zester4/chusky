@@ -808,7 +808,7 @@ export function sdkRunImages(generatedImages: NonNullable<Awaited<ReturnType<typ
   const images = generatedImages?.flatMap((image) => {
     const contentType = image.mediaType.toLowerCase().split(";", 1)[0];
     if (!image.assetId || !["image/jpeg", "image/png", "image/webp"].includes(contentType) || image.data.byteLength < 1) return [];
-    return [{ id: image.assetId, name: `generated-image.${contentType === "image/jpeg" ? "jpg" : contentType.slice("image/".length)}`, contentType: contentType as SdkRunImage["contentType"], size: image.data.byteLength }];
+    return [{ id: image.assetId, name: `generated-image.${contentType === "image/jpeg" ? "jpg" : contentType.slice("image/".length)}`, contentType: contentType as SdkRunImage["contentType"], size: image.data.byteLength, ...(image.model ? { model: image.model } : {}) }];
   }).slice(0, 10);
   return images?.length ? images : undefined;
 }

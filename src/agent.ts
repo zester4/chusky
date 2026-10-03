@@ -1804,7 +1804,7 @@ export interface AgentResult {
   /** Per-call outcome evidence used by durable mission settlement. */
   toolOutcomes: Array<{ callId: string; toolSlug: string; status: "succeeded" | "failed" | "uncertain"; dispatched: boolean; receiptId?: string }>;
   cost?: number;
-  generatedImages?: { data: Buffer; mediaType: string; cost?: number; assetId?: string }[];
+  generatedImages?: { data: Buffer; mediaType: string; cost?: number; assetId?: string; model?: string }[];
   retrievedImages?: { data: Buffer; mediaType: string; name?: string }[];
   generatedFiles?: { data: Buffer; name: string; contentType: string; artifactId: string; type: string }[];
   speech?: { data: Buffer; mediaType: string };
@@ -2535,6 +2535,10 @@ export async function runAgent(
   const retrievedImages: AgentResult["retrievedImages"] = [];
   const generatedFiles: AgentResult["generatedFiles"] = [];
   const privateLinks: NonNullable<AgentResult["privateLinks"]> = [];
+  let modelTextStreamed = false;
+  const streamModelText = onDelta
+    ? async (text: string) => { modelTextStreamed = true; await onDelta(text); }
+    : undefined;
   let taskWaitRequest: TaskWaitRequest | undefined;
   let missionWaitRequest: MissionWaitRequest | undefined;
   let missionStartHandoff: MissionStartHandoff | undefined;
@@ -2621,7 +2625,7 @@ export async function runAgent(
     let response: ChatResponse;
     try {
       await persistRun("running", "run.model_requested", undefined, { model: requestModel, round, messageCount: messages.length });
-      response = await orChat(requestModel, messages, modelAvailableTools, signal, onDelta, undefined, voiceTurn ? {
+      response = await orChat(requestModel, messages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
         preferredMaxLatencySeconds: 2,
         preferredMinThroughput: 50,
         fallbackModels: config.voiceFallbackModels,
@@ -2636,7 +2640,7 @@ export async function runAgent(
         requestModel = config.visionModel;
         if (onStatus) await onStatus(`👁️ I’m switching to a model that can understand ${modality} input…`);
         logger.warn({ requestedModel: model, requestModel, modality }, "Selected model rejected media input; using fallback");
-        response = await orChat(requestModel, messages, modelAvailableTools, signal, onDelta, undefined, voiceTurn ? {
+        response = await orChat(requestModel, messages, modelAvailableTools, signal, streamModelText, undefined, voiceTurn ? {
           preferredMaxLatencySeconds: 2,
           preferredMinThroughput: 50,
           fallbackModels: config.voiceFallbackModels,
@@ -2645,6 +2649,13 @@ export async function runAgent(
           latencyOptimized: true,
         } : (structuredArtifactRequest || malformedToolCallPending ? { maxTokens: config.openRouterArtifactMaxTokens } : undefined));
       } else {
+        if (generatedImages.length && !modelTextStreamed && /OpenRouter|in-stream|stream ended/i.test(message)) {
+          const models = [...new Set(generatedImages.map((image) => image.model).filter((value): value is string => Boolean(value)))];
+          const assetIds = generatedImages.map((image) => image.assetId).filter((value): value is string => Boolean(value));
+          const fallback = `The image was generated and saved successfully, but OpenRouter interrupted my final response stream. ${assetIds.length ? `Saved asset${assetIds.length === 1 ? "" : "s"}: ${assetIds.join(", ")}.` : "The generated image is available in this turn."}${models.length ? ` Model used: ${models.join(", ")}.` : ""}`;
+          await persistRun("completed", "run.completed_with_media", fallback, { mediaCount: generatedImages.length, assetIds, models, streamError: message.slice(0, 500) });
+          return { text: fallback, toolsUsed, toolsSucceeded, toolOutcomes, cost: totalCost, generatedImages, retrievedImages, generatedFiles, ...(privateLinks.length ? { privateLinks } : {}) };
+        }
         await persistRun("failed", "run.failed", undefined, { error: message.slice(0, 1000), model: requestModel, round });
         throw e;
       }
@@ -2929,6 +2940,9 @@ export async function runAgent(
                 description: String(args.prompt ?? "").slice(0, 4000),
                 tags: ["generated", "image"],
                 contentType: contentType as "image/jpeg" | "image/png" | "image/webp",
+                model: image.model,
+                generationRunId: durableRunId,
+                conversationId: channelContext?.conversationId,
               }, image.data);
               assetIdsByImage[index] = asset.id;
               persistedImageCount++;
@@ -3986,6 +4000,7 @@ export interface GeneratedImage {
   data: Buffer;
   mediaType: string;
   cost?: number;
+  model?: string;
 }
 
 export interface ImageGenerationOptions {
@@ -4058,7 +4073,7 @@ export async function generateImages(prompt: string, count = 1, options: ImageGe
 
   const images = responses.flatMap((result) => (result.data ?? [])
     .filter((image) => typeof image.b64_json === "string" && image.b64_json.length > 0)
-    .map((image, index) => ({ data: Buffer.from(image.b64_json!, "base64"), mediaType: image.media_type || "image/png", ...(index === 0 && result.usage?.cost !== undefined ? { cost: result.usage.cost } : {}) })));
+    .map((image, index) => ({ data: Buffer.from(image.b64_json!, "base64"), mediaType: image.media_type || "image/png", model, ...(index === 0 && result.usage?.cost !== undefined ? { cost: result.usage.cost } : {}) })));
   if (!images.length) throw new Error("Image generation returned no images");
   return images.slice(0, normalizedCount);
 }

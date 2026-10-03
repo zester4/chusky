@@ -674,6 +674,7 @@ export interface SdkRunImage {
   name: string;
   contentType: ImageAsset["contentType"];
   size: number;
+  model?: string;
 }
 
 export interface SdkRunRecord {
@@ -1279,6 +1280,10 @@ export interface ImageAsset {
   r2Key: string;
   contentType: "image/jpeg" | "image/png" | "image/webp";
   size: number;
+  /** Provenance for generated assets; uploads may omit these fields. */
+  model?: string;
+  generationRunId?: string;
+  conversationId?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -8418,11 +8423,11 @@ export async function forgetMemory(uid: number, key: string): Promise<boolean> {
 
 function imageExtension(contentType: ImageAsset["contentType"]): string { return contentType === "image/jpeg" ? "jpg" : contentType === "image/webp" ? "webp" : "png"; }
 
-export async function registerImageAsset(uid: number, input: { id?: string; name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"]; r2Key: string; size: number }): Promise<ImageAsset> {
+export async function registerImageAsset(uid: number, input: { id?: string; name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"]; r2Key: string; size: number; model?: string; generationRunId?: string; conversationId?: string }): Promise<ImageAsset> {
   if (!r2Configured()) throw new Error("R2 storage is not configured");
   const now = Date.now();
   const id = input.id ?? `img_${now}_${randomUUID().slice(0, 8)}`;
-  const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: input.r2Key, contentType: input.contentType, size: input.size, createdAt: now, updatedAt: now };
+  const asset: ImageAsset = { id, userId: uid, name: input.name.trim().slice(0, 120), purpose: input.purpose.trim().slice(0, 500), description: (input.description ?? "").trim().slice(0, 4000), tags: [...new Set((input.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].slice(0, 30), r2Key: input.r2Key, contentType: input.contentType, size: input.size, ...(typeof input.model === "string" && input.model.trim() ? { model: input.model.trim().slice(0, 240) } : {}), ...(typeof input.generationRunId === "string" && input.generationRunId.trim() ? { generationRunId: input.generationRunId.trim().slice(0, 160) } : {}), ...(typeof input.conversationId === "string" && input.conversationId.trim() ? { conversationId: input.conversationId.trim().slice(0, 240) } : {}), createdAt: now, updatedAt: now };
   if (config.durableObjectCatalogEnabled) {
     await registerDurableImageAsset({ userId: uid, assetId: asset.id, r2Key: asset.r2Key, contentType: asset.contentType, size: asset.size }, {
       inspect: inspectR2Object,
@@ -8457,7 +8462,7 @@ export async function registerImageAsset(uid: number, input: { id?: string; name
   return asset;
 }
 
-export async function saveImageAsset(uid: number, input: { name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"] }, bytes: Uint8Array): Promise<ImageAsset> {
+export async function saveImageAsset(uid: number, input: { name: string; purpose: string; description?: string; tags?: string[]; contentType: ImageAsset["contentType"]; model?: string; generationRunId?: string; conversationId?: string }, bytes: Uint8Array): Promise<ImageAsset> {
   if (!r2Configured()) throw new Error("R2 storage is not configured");
   const id = `img_${Date.now()}_${randomUUID().slice(0, 8)}`;
   const r2Key = `images/${uid}/${id}.${imageExtension(input.contentType)}`;
