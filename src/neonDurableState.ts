@@ -36,6 +36,25 @@ export interface DurableConversationMessage {
   sourceId?: string;
 }
 
+export interface DurableMissionRecord {
+  ownerUserId: number;
+  missionId: string;
+  status: string;
+  idempotencyKey?: string;
+  payload: Record<string, unknown>;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DurableMissionEvent {
+  id: string;
+  type: string;
+  message: string;
+  at: number;
+  [key: string]: unknown;
+}
+
 export type DurableObjectKind = "image" | "file" | "transcript_segment" | "agent_run_archive" | "temporary_media" | "other";
 export type DurableObjectStatus = "pending" | "available" | "deleting" | "deleted" | "failed";
 
@@ -85,6 +104,8 @@ interface TransactionPool extends Queryable {
 
 type SessionRow = { domain: DurableSessionDomain; payload: unknown; version: number; updated_at: Date };
 type SdkRunRow = { user_id: string | number; thread_id: string; run_id: string; payload: unknown; created_at: Date; updated_at: Date; version: number };
+type MissionRow = { owner_user_id: string | number; mission_id: string; status: string; idempotency_key: string | null; payload: unknown; version: number; created_at: Date; updated_at: Date };
+const MISSION_STATUSES = new Set(["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"]);
 
 const DOMAIN_SET = new Set<string>(DURABLE_SESSION_DOMAINS);
 
@@ -105,6 +126,27 @@ function assertUserId(userId: number): void {
 function assertSdkRunIdentity(threadId: string, runId: string): void {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) {
     throw new Error("Durable SDK run identity is invalid.");
+  }
+}
+
+function validateMissionRecord(record: DurableMissionRecord): void {
+  assertUserId(record.ownerUserId);
+  if (!/^mis_[A-Za-z0-9_-]{1,160}$/.test(record.missionId) || !MISSION_STATUSES.has(record.status)) throw new Error("Durable mission identity or status is invalid.");
+  if (record.idempotencyKey !== undefined && (record.idempotencyKey.length < 1 || record.idempotencyKey.length > 200 || /[\r\n\0]/.test(record.idempotencyKey))) throw new Error("Durable mission idempotency key is invalid.");
+  if (!record.payload || typeof record.payload !== "object" || Array.isArray(record.payload)
+    || record.payload.id !== record.missionId || record.payload.userId !== record.ownerUserId || record.payload.status !== record.status
+    || record.payload.version !== record.version || !Array.isArray(record.payload.steps)) throw new Error("Durable mission payload is invalid.");
+  if (!Number.isSafeInteger(record.version) || record.version < 0 || !Number.isSafeInteger(record.createdAt) || record.createdAt <= 0
+    || !Number.isSafeInteger(record.updatedAt) || record.updatedAt < record.createdAt) throw new Error("Durable mission version or timestamps are invalid.");
+  if (Buffer.byteLength(JSON.stringify(record.payload), "utf8") > 1_000_000) throw new Error("Durable mission payload exceeds the storage limit.");
+}
+
+function validateMissionEvents(events: readonly DurableMissionEvent[]): void {
+  if (events.length > 5000) throw new Error("Durable mission event batch exceeds the storage limit.");
+  for (const event of events) {
+    if (!event || !/^[A-Za-z0-9_-]{1,180}$/.test(event.id) || !/^[a-z][a-z0-9_]{0,63}$/.test(event.type)
+      || typeof event.message !== "string" || event.message.length > 2000 || !Number.isSafeInteger(event.at) || event.at < 0
+      || Buffer.byteLength(JSON.stringify(event), "utf8") > 16_384) throw new Error("Durable mission event is invalid or too large.");
   }
 }
 
@@ -192,6 +234,27 @@ function toDocument(row: SessionRow): DurableSessionDocument {
     version: Number.isSafeInteger(row.version) && row.version > 0 ? row.version : 1,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.getTime() : Date.now(),
   };
+}
+
+function toDurableMission(row: MissionRow): DurableMissionRecord {
+  const ownerUserId = Number(row.owner_user_id);
+  const payload = row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+    ? row.payload as Record<string, unknown>
+    : undefined;
+  const asMillis = (value: unknown): number => value instanceof Date ? value.getTime() : typeof value === "string" || typeof value === "number" ? new Date(value).getTime() : NaN;
+  if (!payload) throw new Error("Durable mission record is malformed.");
+  const record: DurableMissionRecord = {
+    ownerUserId,
+    missionId: row.mission_id,
+    status: row.status,
+    ...(row.idempotency_key ? { idempotencyKey: row.idempotency_key } : {}),
+    payload,
+    version: Number(row.version),
+    createdAt: asMillis(row.created_at),
+    updatedAt: asMillis(row.updated_at),
+  };
+  validateMissionRecord(record);
+  return record;
 }
 
 /**
@@ -330,6 +393,132 @@ export class NeonDurableState {
   async assertObjectMetadataSchema(): Promise<void> {
     await this.measuredQuery(this.database,
       "SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256 FROM chusky_object_metadata LIMIT 0");
+  }
+
+  /** Fail startup when the opt-in mission repository schema is not installed. */
+  async assertMissionSchema(): Promise<void> {
+    await this.measuredQuery(this.database,
+      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission LIMIT 0");
+    await this.measuredQuery(this.database,
+      "SELECT event_order, owner_user_id, mission_id, event_id, event_type, occurred_at, payload FROM chusky_mission_event LIMIT 0");
+  }
+
+  async readMission(userId: number, missionId: string): Promise<DurableMissionRecord | undefined> {
+    assertUserId(userId);
+    if (!/^mis_[A-Za-z0-9_-]{1,160}$/.test(missionId)) throw new Error("Durable mission identity is invalid.");
+    const result = await this.measuredQuery<MissionRow>(this.database,
+      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND mission_id = $2",
+      [userId, missionId]);
+    return result.rows[0] ? toDurableMission(result.rows[0]) : undefined;
+  }
+
+  async listMissions(userId: number, limit = 100): Promise<DurableMissionRecord[]> {
+    assertUserId(userId);
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(500, limit)) : 100;
+    const result = await this.measuredQuery<MissionRow>(this.database,
+      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 ORDER BY updated_at DESC, mission_id LIMIT $2",
+      [userId, boundedLimit]);
+    return result.rows.map(toDurableMission);
+  }
+
+  async listMissionOwnerIds(): Promise<number[]> {
+    const result = await this.measuredQuery<{ owner_user_id: string | number }>(this.database,
+      "SELECT DISTINCT owner_user_id FROM chusky_mission ORDER BY owner_user_id");
+    return result.rows.map((row) => Number(row.owner_user_id)).filter((id) => Number.isSafeInteger(id) && id >= 0);
+  }
+
+  async createMission(record: DurableMissionRecord): Promise<DurableMissionRecord> {
+    validateMissionRecord(record);
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      const inserted = await this.measuredQuery<MissionRow>(client,
+        `INSERT INTO chusky_mission (owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6, to_timestamp($7 / 1000.0), to_timestamp($8 / 1000.0))
+         ON CONFLICT DO NOTHING
+         RETURNING owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at`,
+        [record.ownerUserId, record.missionId, record.status, record.idempotencyKey ?? null, JSON.stringify(record.payload), record.version, record.createdAt, record.updatedAt]);
+      if (inserted.rows[0]) {
+        await this.insertMissionEvents(client, record.ownerUserId, record.missionId, Array.isArray(record.payload.events) ? record.payload.events as DurableMissionEvent[] : []);
+        await this.measuredQuery(client, "COMMIT");
+        return toDurableMission(inserted.rows[0]);
+      }
+      const existing = await this.measuredQuery<MissionRow>(client,
+        "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND (mission_id = $2 OR ($3::text IS NOT NULL AND idempotency_key = $3)) ORDER BY (mission_id = $2) DESC LIMIT 1",
+        [record.ownerUserId, record.missionId, record.idempotencyKey ?? null]);
+      await this.measuredQuery(client, "COMMIT");
+      if (!existing.rows[0]) throw new Error("Durable mission create conflicted without an owner-scoped existing record.");
+      return toDurableMission(existing.rows[0]);
+    } catch (error) {
+      await this.measuredQuery(client, "ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async compareAndUpdateMission(userId: number, missionId: string, expectedVersion: number, record: DurableMissionRecord, events: readonly DurableMissionEvent[]): Promise<DurableMissionRecord | undefined> {
+    assertUserId(userId);
+    validateMissionRecord(record);
+    validateMissionEvents(events);
+    if (record.ownerUserId !== userId || record.missionId !== missionId || record.version !== expectedVersion + 1) throw new Error("Durable mission update identity or version is invalid.");
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      const result = await this.measuredQuery<MissionRow>(client,
+        `UPDATE chusky_mission SET status = $4, idempotency_key = $5, payload = $6::jsonb, version = $7,
+           created_at = to_timestamp($8 / 1000.0), updated_at = to_timestamp($9 / 1000.0)
+         WHERE owner_user_id = $1 AND mission_id = $2 AND version = $3
+         RETURNING owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at`,
+        [userId, missionId, expectedVersion, record.status, record.idempotencyKey ?? null, JSON.stringify(record.payload), record.version, record.createdAt, record.updatedAt]);
+      if (!result.rows[0]) {
+        await this.measuredQuery(client, "ROLLBACK");
+        return undefined;
+      }
+      await this.insertMissionEvents(client, userId, missionId, events);
+      await this.measuredQuery(client, "COMMIT");
+      return toDurableMission(result.rows[0]);
+    } catch (error) {
+      await this.measuredQuery(client, "ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  private async insertMissionEvents(queryable: Queryable, userId: number, missionId: string, events: readonly DurableMissionEvent[]): Promise<void> {
+    validateMissionEvents(events);
+    for (const event of events) {
+      await this.measuredQuery(queryable,
+        `INSERT INTO chusky_mission_event (owner_user_id, mission_id, event_id, event_type, occurred_at, payload)
+         VALUES ($1, $2, $3, $4, to_timestamp($5 / 1000.0), $6::jsonb)
+         ON CONFLICT (owner_user_id, mission_id, event_id) DO NOTHING`,
+        [userId, missionId, event.id, event.type, event.at, JSON.stringify(event)]);
+    }
+  }
+
+  async appendMissionEvents(userId: number, missionId: string, events: readonly DurableMissionEvent[]): Promise<void> {
+    assertUserId(userId);
+    if (!/^mis_[A-Za-z0-9_-]{1,160}$/.test(missionId)) throw new Error("Durable mission identity is invalid.");
+    validateMissionEvents(events);
+    if (!events.length) return;
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      await this.insertMissionEvents(client, userId, missionId, events);
+      await this.measuredQuery(client, "COMMIT");
+    } catch (error) {
+      await this.measuredQuery(client, "ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async listMissionEvents(userId: number, missionId: string, limit = 1000): Promise<DurableMissionEvent[]> {
+    assertUserId(userId);
+    if (!/^mis_[A-Za-z0-9_-]{1,160}$/.test(missionId)) throw new Error("Durable mission identity is invalid.");
+    const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(5000, limit)) : 1000;
+    const result = await this.measuredQuery<{ payload: unknown }>(this.database,
+      `SELECT payload FROM (SELECT payload, event_order FROM chusky_mission_event
+       WHERE owner_user_id = $1 AND mission_id = $2 ORDER BY event_order DESC LIMIT $3) recent
+       ORDER BY event_order`, [userId, missionId, boundedLimit]);
+    return result.rows.flatMap((row) => row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
+      ? [row.payload as DurableMissionEvent] : []);
   }
 
   /** Fail startup before enabling the durable conversation/domain schema. */

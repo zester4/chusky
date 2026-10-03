@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { durableSdkRunHash, DURABLE_SESSION_DOMAINS, NeonDurableState } from "../src/neonDurableState.js";
+import { durableSdkRunHash, DURABLE_SESSION_DOMAINS, NeonDurableState, type DurableMissionRecord } from "../src/neonDurableState.js";
 import { DURABLE_SESSION_FORMAT, joinSessionDomains, splitSessionDomains } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
 
@@ -8,9 +8,17 @@ class FakeClient {
   calls: Array<{ text: string; values?: unknown[] }> = [];
   released = false;
   failOnInsert = false;
+  failOnMissionEventInsert = false;
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
     if (this.failOnInsert && text.includes("INSERT INTO chusky_session_domain")) throw new Error("database unavailable");
+    if (this.failOnMissionEventInsert && text.includes("INSERT INTO chusky_mission_event")) throw new Error("mission event store unavailable");
+    if (text.includes("INSERT INTO chusky_mission (") || text.includes("UPDATE chusky_mission SET")) {
+      const [owner, id, status, idempotencyKey, payload, version, createdAt, updatedAt] = text.includes("UPDATE chusky_mission SET")
+        ? [values?.[0], values?.[1], values?.[3], values?.[4], values?.[5], values?.[6], values?.[7], values?.[8]]
+        : values ?? [];
+      return { rows: [{ owner_user_id: owner, mission_id: id, status, idempotency_key: idempotencyKey, payload: JSON.parse(String(payload)), version, created_at: new Date(Number(createdAt)), updated_at: new Date(Number(updatedAt)) }] as never[] };
+    }
     if (text.includes("UPDATE chusky_object_metadata")) return { rows: [{ object_id: String(values?.[1]) }] as never[] };
     if (text.includes("INSERT INTO chusky_object_metadata")) {
       const [owner, id, kind, key, status, contentType, size, sha256, encryptionVersion, expiresAt, metadata, createdAt, updatedAt] = values ?? [];
@@ -50,6 +58,17 @@ function session(): UserSession {
     triggerIds: [], reminders: [], jobs: [], scratchpad: {}, memories: [{ id: "mem_1", category: "fact", key: "k", value: "v", confidence: 1, source: "test", sensitivity: "sensitive", status: "active", createdAt: now, updatedAt: now }],
     imageAssets: [{ id: "img_1", name: "image", r2Key: "owner/image", contentType: "image/png", sizeBytes: 1, createdAt: now, updatedAt: now }], summaries: ["summary"], approvals: [], sdkThreads: [{ id: "thr_1", externalId: "external", metadata: {}, history: [], runs: [{ id: "run_1", status: "completed", input: "private", output: "result", events: [], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now }], createdAt: now, updatedAt: now,
   };
+}
+
+function missionRecord(version = 0): DurableMissionRecord {
+  const now = 1_800_000_000_000;
+  const payload = {
+    id: "mis_test_1", userId: 42, status: version ? "running" : "queued", version,
+    steps: [{ id: "step-1", status: version ? "running" : "pending", dependsOn: [] }],
+    events: [{ id: "misevt_test_1", type: "created", message: "Mission created", at: now }],
+    createdAt: now, updatedAt: now,
+  };
+  return { ownerUserId: 42, missionId: payload.id, status: payload.status, idempotencyKey: "test-key", payload, version, createdAt: now, updatedAt: now };
 }
 
 test("Neon durable session domains write atomically and permit versioned partial writes", async () => {
@@ -108,6 +127,53 @@ test("Neon health reports unavailable state without leaking database errors", as
   const health = await state.healthStatus();
   assert.equal(health.reachable, false);
   assert.deepEqual(health, { enabled: true, reachable: false });
+});
+
+test("Neon mission repository checks both canonical mission and event tables", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.assertMissionSchema();
+  assert.match(pool.calls[0]?.text ?? "", /FROM chusky_mission LIMIT 0/);
+  assert.match(pool.calls[1]?.text ?? "", /FROM chusky_mission_event LIMIT 0/);
+});
+
+test("Neon mission creation atomically stores owner record and initial event", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  const created = await state.createMission(missionRecord());
+  assert.equal(created.missionId, "mis_test_1");
+  assert.equal(pool.client.calls[0]?.text, "BEGIN");
+  const insert = pool.client.calls.find((call) => call.text.includes("INSERT INTO chusky_mission ("))!;
+  assert.match(insert.text, /ON CONFLICT DO NOTHING/);
+  assert.deepEqual(insert.values?.slice(0, 4), [42, "mis_test_1", "queued", "test-key"]);
+  const eventInsert = pool.client.calls.find((call) => call.text.includes("INSERT INTO chusky_mission_event"))!;
+  assert.match(eventInsert.text, /ON CONFLICT \(owner_user_id, mission_id, event_id\) DO NOTHING/);
+  assert.equal(pool.client.calls.at(-1)?.text, "COMMIT");
+  assert.equal(pool.client.released, true);
+});
+
+test("Neon mission CAS and new history events share one transaction", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  const current = missionRecord();
+  const next = missionRecord(1);
+  const newEvent = { id: "misevt_test_2", type: "started", message: "Mission started", at: next.updatedAt };
+  const saved = await state.compareAndUpdateMission(42, current.missionId, 0, next, [newEvent]);
+  assert.equal(saved?.version, 1);
+  const update = pool.client.calls.find((call) => call.text.includes("UPDATE chusky_mission SET"))!;
+  assert.match(update.text, /WHERE owner_user_id = \$1 AND mission_id = \$2 AND version = \$3/);
+  assert.deepEqual(update.values?.slice(0, 3), [42, "mis_test_1", 0]);
+  assert.ok(pool.client.calls.findIndex((call) => call.text.includes("INSERT INTO chusky_mission_event")) < pool.client.calls.findIndex((call) => call.text === "COMMIT"));
+  assert.equal(pool.client.released, true);
+});
+
+test("Neon mission creation rolls back when its event insert fails", async () => {
+  const pool = new FakePool();
+  pool.client.failOnMissionEventInsert = true;
+  const state = new NeonDurableState(pool as never);
+  await assert.rejects(() => state.createMission(missionRecord()), /mission event store unavailable/);
+  assert.ok(pool.client.calls.some((call) => call.text === "ROLLBACK"));
+  assert.equal(pool.client.released, true);
 });
 
 test("Neon object metadata is owner-scoped, idempotently created, and finalized only from pending state", async () => {
