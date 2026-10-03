@@ -223,6 +223,19 @@ test("SDK parses NDJSON run events in order", async () => {
   assert.deepEqual(events.map((event) => event.type), ["run.started", "run.delta"]);
 });
 
+test("SDK parses owner-scoped meeting SSE snapshots in order", async () => {
+  const workspace = { rooms: [], preparations: [], meetings: [{ id: "mtg_1", platform: "google_meet", status: "in_call", interactionMode: "representative", screenShareUnderstanding: false, searchableTranscript: false, createdAt: "2026-09-15T12:00:00.000Z", updatedAt: "2026-09-15T12:00:01.000Z" }], contacts: [] };
+  const stream = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode(`event: snapshot\ndata: ${JSON.stringify(workspace)}\n\nevent: keepalive\ndata: 123\n\n`)); controller.close(); } });
+  let request: { url: string; headers: Headers } | undefined;
+  const sdk = new Chusky({ apiKey: "key", userId: "customer_1", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { request = { url, headers: new Headers(init?.headers) }; return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }); }) });
+  const events = [] as Array<{ type: string; workspace?: typeof workspace }>;
+  for await (const event of sdk.meetings.stream("org_1")) events.push(event as typeof events[number]);
+  assert.equal(request?.url, "https://example.test/v1/meetings/stream?organizationId=org_1");
+  assert.equal(request?.headers.get("accept"), "text/event-stream");
+  assert.deepEqual(events.map((event) => event.type), ["snapshot", "keepalive"]);
+  assert.equal(events[0]?.workspace?.meetings[0]?.id, "mtg_1");
+});
+
 test("SDK exposes root project lifecycle endpoints", async () => {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];
   const sdk = new Chusky({ apiKey: "root", userId: "operator", baseUrl: "https://example.test", fetch: mockFetch((url, init) => { calls.push({ url, method: init?.method, body: String(init?.body ?? "") }); return new Response(init?.method === "DELETE" ? null : JSON.stringify({ id: "proj_1", name: "Acme", keyPrefix: "chsk_proj", scopes: ["*"], createdAt: "2026-01-01T00:00:00.000Z" }), { status: init?.method === "DELETE" ? 204 : 200 }); }) });

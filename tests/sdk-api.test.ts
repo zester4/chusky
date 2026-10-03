@@ -1631,7 +1631,27 @@ test("linked dashboard can read owner-scoped meeting preparation, outcomes, rost
   const otherLink = await createWebTelegramLinkCode("other-meeting-owner");
   assert.equal(await redeemWebTelegramLinkCode(otherLink.code, 820002), "linked");
   const other = await api.fetch(new Request("http://local/v1/meetings", { headers: { ...headers, "X-Test-Web-User": "other-meeting-owner" } }));
-  assert.deepEqual(await other.json(), { preparations: [], meetings: [], contacts: [] });
+  assert.deepEqual(await other.json(), { rooms: [], preparations: [], meetings: [], contacts: [] });
+});
+
+test("linked dashboard receives an owner-scoped meeting workspace snapshot over SSE", async () => {
+  (config as { betterAuthEnabled: boolean }).betterAuthEnabled = true;
+  setWebAuthSessionResolverForTests(async (headers) => headers.get("x-test-web-user") ? { user: { id: headers.get("x-test-web-user")!, emailVerified: true } } : null);
+  const link = await createWebTelegramLinkCode("meeting-stream-owner");
+  assert.equal(await redeemWebTelegramLinkCode(link.code, 820004), "linked");
+  await addRecallMeeting(820004, { id: "mtg_stream_owner_1", userId: 820004, platform: "google_meet", status: "in_call", interactionMode: "representative", meetingUrlHash: "b".repeat(64), history: [], createdAt: Date.now(), updatedAt: Date.now() });
+  const controller = new AbortController();
+  const response = await app().fetch(new Request("http://local/v1/meetings/stream", { headers: { "X-Test-Web-User": "meeting-stream-owner" }, signal: controller.signal }));
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+  const reader = response.body!.getReader();
+  const first = await reader.read();
+  const text = new TextDecoder().decode(first.value);
+  assert.match(text, /event: snapshot/);
+  assert.match(text, /mtg_stream_owner_1/);
+  assert.equal(text.includes("meetingUrlHash"), false);
+  controller.abort();
+  await reader.cancel();
 });
 
 test("linked dashboard can manage the meeting representative profile and per-provider live voices", async () => {

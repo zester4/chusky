@@ -1,8 +1,9 @@
 import { ChuskyAuthenticationError, ChuskyError, ChuskyRateLimitError } from "./errors.js";
-import { readNdjson } from "./stream.js";
+import { readNdjson, readSse } from "./stream.js";
 import type { A2AMessageInput } from "./types.js";
 import type { ImageDownload } from "./types.js";
 import type { McpConnectionCredentials } from "./types.js";
+import type { MeetingStreamEvent } from "./types.js";
 import type { A2AAgentCard, A2APushNotificationConfig, A2AStreamEvent, A2ATask, A2ATaskPage, AccountPreferences, Activity, AddCustomMcpServerParams, AppConnection, Approval, ApprovalDecision, ApprovalEscalation, Artifact, AuditEvent, AutonomySnapshot, CallRecord, CallsResponse, ChannelConnection, ChuskyClientOptions, CliDevice, CompanyAgent, CompanyAgentCreateParams, CompanyAgentTemplate, CompanyAuditEvent, CompanyBranding, CompanyRunSummary, CompanyUsage, ComposerStageInput, Compensation, ContextNode, CreateRunParams, CreateThreadParams, DepartmentCatalogItem, DepartmentSpace, DeveloperProject, Delivery, FileDownload, FileRecord, FileUpload, JobOccurrence, JoinMeetingParams, LinkableChannelProvider, LiveVoicePreference, McpCatalogEntry, McpConnection, MeetingBrief, MeetingContext, MeetingProfile, MeetingRecord, MeetingsResponse, MemoryFact, Mission, MissionBudgetPatch, MissionCreateParams, MissionDoctorReport, MissionEvidence, MissionProof, MissionWorkSchedule, OperatorReadiness, OperatorTraceEvent, OutcomePackage, OutcomePlan, OutcomeVerification, Page, RecurringJob, ReliabilityHealth, Reminder, RequestOptions, Run, RunEvent, RunStreamEvent, ScratchpadEntry, Skill, SkillFile, Task, Thread, Tool, ToolReliabilitySlug, Trigger, TriggerCatalogueItem, TriggerCreateParams, TriggerToolkit, Usage, VideoJob, VoiceCallProfile, VoiceOptions, Webhook, WebhookDelivery, WorkflowComposerRecord, WorkPacket, Worker } from "./types.js";
 
 // Hosted SDK users do not need to configure an API origin. Keep `baseUrl` as
@@ -203,7 +204,7 @@ export class Chusky {
   }
 
   /** @internal Shared transport for resource streams. */
-  async streamRequest(path: string, init: RequestInit, options: RequestOptions = {}): Promise<{ response: Response; dispose: () => void }> {
+  async streamRequest(path: string, init: RequestInit, options: RequestOptions = {}, accept = "application/x-ndjson"): Promise<{ response: Response; dispose: () => void }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new ChuskyError("Chusky stream request timed out")), this.timeoutMs);
     const relayAbort = () => controller.abort(options.signal?.reason);
@@ -212,7 +213,7 @@ export class Chusky {
       const headers = new Headers(init.headers);
       headers.set("Authorization", `Bearer ${this.apiKey}`);
       headers.set("X-Chusky-User-Id", this.userId);
-      headers.set("Accept", "application/x-ndjson");
+      headers.set("Accept", accept);
       headers.set("User-Agent", this.userAgent);
       headers.set("Content-Type", "application/json");
       if (options.idempotencyKey) headers.set("Idempotency-Key", options.idempotencyKey);
@@ -523,6 +524,17 @@ export class CallsResource {
 export class MeetingsResource {
   constructor(private readonly client: Chusky) {}
   list(options?: RequestOptions): Promise<MeetingsResponse> { return this.client.request("/meetings", {}, options); }
+  async *stream(organizationId?: string, options: RequestOptions = {}): AsyncIterable<MeetingStreamEvent> {
+    const suffix = organizationId ? `?organizationId=${encodeURIComponent(organizationId)}` : "";
+    const { response, dispose } = await this.client.streamRequest(`/meetings/stream${suffix}`, {}, options, "text/event-stream");
+    try {
+      for await (const record of readSse(response.body)) {
+        if (record.event === "snapshot") yield { type: "snapshot", workspace: JSON.parse(record.data) as MeetingsResponse };
+        else if (record.event === "error") yield JSON.parse(record.data) as MeetingStreamEvent;
+        else if (record.event === "keepalive") yield { type: "keepalive" };
+      }
+    } finally { dispose(); }
+  }
   get(meetingId: string, options?: RequestOptions): Promise<MeetingRecord> { return this.client.request(`/meetings/${encodeURIComponent(meetingId)}`, {}, options); }
   profile(options?: RequestOptions): Promise<MeetingProfile> { return this.client.request("/meetings/profile", {}, options); }
   updateProfile(profile: Partial<MeetingProfile>, options?: RequestOptions): Promise<MeetingProfile> { return this.client.request("/meetings/profile", { method: "PATCH", body: JSON.stringify(profile) }, options); }

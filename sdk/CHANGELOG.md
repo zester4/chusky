@@ -2,6 +2,11 @@
 
 Releases use semantic versioning and are tagged `sdk-vX.Y.Z`.
 
+## 1.9.1 - 2026-10-03
+
+- Add an owner- and workspace-scoped SSE meeting stream for live dashboard and
+  SDK synchronization, including typed snapshot and keepalive events.
+
 ## 1.9.0 - 2026-10-01
 
 - New missions default to pause-aware active execution time with a separate

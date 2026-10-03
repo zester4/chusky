@@ -631,6 +631,53 @@ function meetingView(meeting: any) {
   };
 }
 
+async function meetingWorkspaceView(c: any, owner: SdkOwner, organizationId = "") {
+  const [preparations, records, contacts] = await Promise.all([
+    listCalendarMeetingPreparations(owner.userId, 20),
+    listRecallMeetings(owner.userId, 20),
+    listMeetingContacts(owner.userId, 50),
+  ]);
+  const prepared = await Promise.all(preparations.map(async (item) => {
+    const trigger = await getTriggerEvent(item.sourceTriggerEventId);
+    return {
+      ...item,
+      brief: trigger?.userId === owner.userId && trigger.status === "completed" ? trigger.result?.slice(0, 12_000) : undefined,
+      briefStatus: trigger?.userId === owner.userId ? trigger.status : undefined,
+      createdAt: new Date(item.createdAt).toISOString(),
+      updatedAt: new Date(item.updatedAt).toISOString(),
+    };
+  }));
+  const personal = {
+    rooms: [],
+    preparations: prepared,
+    meetings: records.map(meetingView),
+    contacts: contacts.map((contact) => ({
+      ...contact,
+      userId: undefined,
+      followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined,
+      createdAt: new Date(contact.createdAt).toISOString(),
+      updatedAt: new Date(contact.updatedAt).toISOString(),
+    })),
+  };
+  if (!organizationId) return personal;
+
+  const rooms = await listMeetingRooms(organizationId, 100);
+  const visibleRooms: MeetingRoomRecord[] = [];
+  for (const room of rooms) if (await meetingRoomAccessForRequest(c, room)) visibleRooms.push(room);
+  const visibleRoomIds = new Set(visibleRooms.map((room) => room.id));
+  const pointers = (await listWorkspaceMeetingPointers(organizationId, 100)).filter((pointer) => visibleRoomIds.has(pointer.roomId));
+  const sharedMeetings = (await Promise.all(pointers.map(async (pointer) => {
+    const meeting = await getRecallMeeting(pointer.ownerUserId, pointer.meetingId);
+    return meeting ? meetingView(meeting) : undefined;
+  }))).flatMap((meeting) => meeting ? [meeting] : []);
+  const known = new Set(personal.meetings.map((meeting) => meeting.id));
+  return {
+    ...personal,
+    rooms: visibleRooms.map(meetingRoomView),
+    meetings: [...sharedMeetings.filter((meeting) => !known.has(meeting.id)), ...personal.meetings],
+  };
+}
+
 function meetingRoomPolicyInput(value: unknown, fallback?: MeetingRoomPolicy): MeetingRoomPolicy | undefined {
   if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value))) return undefined;
   const body = (value ?? {}) as Record<string, unknown>;
@@ -1569,30 +1616,35 @@ export function registerSdkApi(app: Hono): void {
     const organizationId = (c.req.query("organizationId") ?? "").trim();
     if (organizationId) {
       if (!(await meetingWorkspaceAccessForRequest(c, organizationId))) return apiError(c, 404, "workspace_not_found", "Workspace not found or you are not a member.");
-      const rooms = await listMeetingRooms(organizationId, 100);
-      const visibleRooms = [] as MeetingRoomRecord[];
-      for (const room of rooms) if (await meetingRoomAccessForRequest(c, room)) visibleRooms.push(room);
-      const visibleRoomIds = new Set(visibleRooms.map((room) => room.id));
-      const pointers = (await listWorkspaceMeetingPointers(organizationId, 100)).filter((pointer) => visibleRoomIds.has(pointer.roomId));
-      const meetings = (await Promise.all(pointers.map(async (pointer) => {
-        const meeting = await getRecallMeeting(pointer.ownerUserId, pointer.meetingId);
-        return meeting ? meetingView(meeting) : undefined;
-      }))).filter(Boolean);
-      return c.json({ rooms: visibleRooms.map(meetingRoomView), preparations: [], meetings, contacts: [] });
+      return c.json(await meetingWorkspaceView(c, owner, organizationId));
     }
-    const [preparations, records, contacts] = await Promise.all([
-      listCalendarMeetingPreparations(owner.userId, 20), listRecallMeetings(owner.userId, 20), listMeetingContacts(owner.userId, 50),
-    ]);
-    const prepared = await Promise.all(preparations.map(async (item) => {
-      const trigger = await getTriggerEvent(item.sourceTriggerEventId);
-      return {
-        ...item,
-        brief: trigger?.userId === owner.userId && trigger.status === "completed" ? trigger.result?.slice(0, 12_000) : undefined,
-        briefStatus: trigger?.userId === owner.userId ? trigger.status : undefined,
-        createdAt: new Date(item.createdAt).toISOString(), updatedAt: new Date(item.updatedAt).toISOString(),
-      };
-    }));
-    return c.json({ preparations: prepared, meetings: records.map(meetingView), contacts: contacts.map((contact) => ({ ...contact, userId: undefined, followUpAt: contact.followUpAt ? new Date(contact.followUpAt).toISOString() : undefined, createdAt: new Date(contact.createdAt).toISOString(), updatedAt: new Date(contact.updatedAt).toISOString() })) });
+    return c.json(await meetingWorkspaceView(c, owner));
+  });
+
+  app.get("/v1/meetings/stream", async (c) => {
+    const owner = sdkUser(c)!;
+    const organizationId = (c.req.query("organizationId") ?? "").trim();
+    if (organizationId && !(await meetingWorkspaceAccessForRequest(c, organizationId))) return apiError(c, 404, "workspace_not_found", "Workspace not found or you are not a member.");
+    return streamSSE(c, async (stream) => {
+      let previous = "";
+      for (let attempt = 0; attempt < 900 && !c.req.raw.signal.aborted; attempt += 1) {
+        try {
+          const workspace = await meetingWorkspaceView(c, owner, organizationId);
+          const serialized = JSON.stringify(workspace);
+          if (serialized !== previous) {
+            previous = serialized;
+            await stream.writeSSE({ event: "snapshot", data: serialized });
+          } else {
+            await stream.writeSSE({ event: "keepalive", data: String(Date.now()) });
+          }
+        } catch (error) {
+          logger.warn({ errorType: error instanceof Error ? error.name : "UnknownError", userId: owner.userId, organizationId: organizationId || undefined }, "Meeting stream snapshot failed");
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ code: "meeting_stream_unavailable", message: "Meeting updates are temporarily unavailable." }) });
+          return;
+        }
+        await stream.sleep(1000);
+      }
+    });
   });
 
   app.delete("/v1/meetings/contacts/:contactId", async (c) => {

@@ -161,15 +161,15 @@ class RecallSettings:
             raise RecallConfigurationError("meeting_models_invalid", ("RECALL_STT_MODEL", "VOICE_TTS_MODEL"))
         return cls(
             secret, deepgram, turn_url, commit_url, authorize_url, visual_frame_url, realtime_secret, stt,
-            max(0.5, min(float(os.getenv("VOICE_STT_EOT_THRESHOLD", "0.65")), 0.9)),
-            max(500, min(int(os.getenv("VOICE_STT_EOT_TIMEOUT_MS", "800")), 60_000)),
+            max(0.5, min(float(os.getenv("RECALL_STT_EOT_THRESHOLD", "0.55")), 0.9)),
+            max(500, min(int(os.getenv("RECALL_STT_EOT_TIMEOUT_MS", "500")), 60_000)),
             max(100, min(int(os.getenv("RECALL_NOVA_ENDPOINTING_MS", "500")), 2_000)),
             max(1_000, min(int(os.getenv("RECALL_NOVA_UTTERANCE_END_MS", "1000")), 5_000)),
             tts,
             max(60, min(int(os.getenv("RECALL_MAX_MEETING_SECONDS", "7200")), 14_400)),
             max(1, min(int(os.getenv("RECALL_MAX_ACTIVE_MEETINGS", "4")), 20)),
             max(1, min(int(os.getenv("RECALL_COPILOT_MIN_INTERVAL_SECONDS", "4")), 120)),
-            max(4_000, min(int(os.getenv("RECALL_TURN_START_BUDGET_MS", os.getenv("VOICE_TURN_START_BUDGET_MS", "10000"))), 20_000)),
+            max(4_000, min(int(os.getenv("RECALL_TURN_START_BUDGET_MS", "6000")), 20_000)),
             os.getenv("RECALL_TURN_FALLBACK_ENABLED", "true").strip().lower() != "false",
         )
 

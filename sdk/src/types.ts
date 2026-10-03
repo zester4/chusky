@@ -203,7 +203,21 @@ export interface MeetingContact {
   updatedAt: string;
   [key: string]: unknown;
 }
-export interface MeetingsResponse { preparations: MeetingPreparation[]; meetings: MeetingRecord[]; contacts: MeetingContact[]; }
+export interface MeetingRoom {
+  id: string;
+  organizationId: string;
+  teamId?: string;
+  projectId?: string;
+  name: string;
+  description?: string;
+  policy?: Record<string, unknown>;
+  meetingCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  [key: string]: unknown;
+}
+export interface MeetingsResponse { rooms: MeetingRoom[]; preparations: MeetingPreparation[]; meetings: MeetingRecord[]; contacts: MeetingContact[]; }
+export type MeetingStreamEvent = { type: "snapshot"; workspace: MeetingsResponse } | { type: "keepalive" } | { type: "error"; code?: string; message: string };
 export interface MeetingProfile {
   enabled: boolean;
   representativeName: string;
