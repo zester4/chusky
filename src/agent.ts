@@ -2207,6 +2207,41 @@ export async function runAgent(
     if (sharedScope && isSharedChannelToolDenied(name)) return false;
     return (!allow || allow.has(name)) && !deny.has(name);
   });
+  // ToolRouter sessions can expose a large meta-tool surface without
+  // including every exact provider action in session.tools(). A durable worker
+  // with an explicit provider fence must still receive the exact callable
+  // schema; otherwise the model can satisfy the fence only in prose and the
+  // worker will correctly block for missing provider progress. Resolve only
+  // the already-granted exact slugs, never a model-selected or broad catalog
+  // of actions. The normal dispatch path still enforces account scope,
+  // argument validation, approval, and provider receipts.
+  if (sessionObj && allow?.size && fullComposioTools.length > 80 && typeof composio?.tools?.getRawComposioToolBySlug === "function") {
+    const present = new Set(availableTools.map((tool) => toolName(tool)));
+    for (const slug of allow) {
+      if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug) || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_") || present.has(slug) || deny.has(slug)) continue;
+      try {
+        const raw = await abortable(composio.tools.getRawComposioToolBySlug(slug), signal);
+        const rawRecord = raw && typeof raw === "object" ? raw as Record<string, any> : undefined;
+        const rawFunction = rawRecord?.function && typeof rawRecord.function === "object" ? rawRecord.function as Record<string, any> : undefined;
+        const returnedSlug = String(rawRecord?.slug ?? rawRecord?.toolSlug ?? rawRecord?.tool_slug ?? rawFunction?.name ?? "").trim().toUpperCase();
+        const parameters = rawRecord?.inputParameters ?? rawRecord?.input_parameters ?? rawFunction?.parameters;
+        if (returnedSlug !== slug || !parameters || typeof parameters !== "object" || Array.isArray(parameters)) continue;
+        const exactTool = {
+          type: "function",
+          function: {
+            name: slug,
+            description: String(rawRecord?.description ?? rawRecord?.name ?? rawFunction?.description ?? slug).slice(0, 1_000),
+            parameters,
+          },
+        };
+        registerComposioToolMetadata(exactTool);
+        availableTools.push(addAccountSelector(exactTool));
+        present.add(slug);
+      } catch (error) {
+        logger.debug({ err: error, tool: slug }, "Could not resolve an explicitly granted Composio action schema");
+      }
+    }
+  }
   const composioToolPresentations = collectComposioToolPresentations(fullComposioTools);
   const structuredArtifactRequest = typeof userMessage === "string"
     && /\b(?:pdf|playbook|report|document|presentation|spreadsheet|artifact|chart|graph)\b/i.test(userMessage)
