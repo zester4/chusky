@@ -940,6 +940,15 @@ export interface MissionEventRecord {
   metadata?: Record<string, string | number | boolean>;
 }
 
+export interface MissionCheckpointRecord {
+  id: string;
+  checkpoint: string;
+  nextAction?: string;
+  at: number;
+  kind: "checkpoint" | "wait";
+  stepId?: string;
+}
+
 /** Encrypted, owner-scoped A2A task notification configuration. */
 export interface MissionA2APushNotificationConfig {
   id: string;
@@ -964,7 +973,7 @@ export interface MissionRecord {
   rootTaskId?: string;
   checkpoint?: string;
   nextAction?: string;
-  waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number };
+  waiting?: { kind: "timer" | "provider_event" | "approval" | "human_input"; runAt?: number; key?: string; stepId?: string; provider?: string; providerEventId?: string; expiresAt?: number; parkedAt?: number };
   budget: MissionBudget;
   /** Owner-saved upper bounds for bounded worker budget adjustments. */
   budgetCeiling?: Partial<MissionBudget>;
@@ -982,6 +991,8 @@ export interface MissionRecord {
   updatedAt: number;
   startedAt?: number;
   completedAt?: number;
+  /** Bounded immutable recovery frontiers; checkpoint is only the latest pointer. */
+  checkpointHistory?: MissionCheckpointRecord[];
   events: MissionEventRecord[];
   evidence?: MissionEvidenceRecord[];
   verification?: MissionVerification;
@@ -5871,6 +5882,16 @@ function normalizeMission(mission: MissionRecord): MissionRecord {
     consumedSlices: Math.max(0, Number(mission.consumedSlices) || 0),
     toolCalls: Math.max(0, Number(mission.toolCalls) || 0),
     cost: Math.max(0, Number(mission.cost) || 0),
+    ...(Array.isArray(mission.checkpointHistory) ? {
+      checkpointHistory: mission.checkpointHistory.filter((item): item is MissionCheckpointRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionCheckpointRecord).id === "string" && typeof (item as MissionCheckpointRecord).checkpoint === "string" && Number.isFinite((item as MissionCheckpointRecord).at)).slice(-200).map((item) => ({
+        id: item.id.slice(0, 160),
+        checkpoint: item.checkpoint.slice(0, 8000),
+        ...(typeof item.nextAction === "string" ? { nextAction: item.nextAction.slice(0, 2000) } : {}),
+        at: Number(item.at),
+        kind: item.kind === "wait" ? "wait" as const : "checkpoint" as const,
+        ...(typeof item.stepId === "string" ? { stepId: item.stepId.slice(0, 160) } : {}),
+      })),
+    } : {}),
     activeStepIds: Array.isArray(mission.activeStepIds) ? mission.activeStepIds.filter((id): id is string => typeof id === "string").slice(0, MAX_MISSION_PLAN_STEPS) : undefined,
     events: (mission.events ?? []).slice(-500).map((event) => ({ ...event, message: String(event.message ?? "").slice(0, 1000) })),
     evidence: Array.isArray(mission.evidence) ? mission.evidence.filter((item): item is MissionEvidenceRecord => Boolean(item) && typeof item === "object" && typeof (item as MissionEvidenceRecord).id === "string").slice(-100) : [],
@@ -6310,7 +6331,8 @@ function deriveTrustedInternalMissionEvidence(mission: MissionRecord): MissionEv
   const timerResume = events.map((event, index) => ({ event, index })).find(({ event }) => event.type === "resumed" && typeof event.metadata?.timerRunAt === "number");
   if (timerResume) {
     const elapsedMs = typeof timerResume.event.metadata?.elapsedMs === "number" ? timerResume.event.metadata.elapsedMs : undefined;
-    evidence.push(make("timer_wait", elapsedMs !== undefined && elapsedMs >= 60_000
+    const measuredFromParkedAt = typeof timerResume.event.metadata?.timerParkedAt === "number";
+    evidence.push(make("timer_wait", measuredFromParkedAt && elapsedMs !== undefined && elapsedMs >= 60_000
       ? `A 60-second durable timer wait resumed on the same mission after ${Math.floor(elapsedMs / 1000)} seconds elapsed.`
       : "A durable timer wait resumed on the same mission from its persisted runAt."));
     if (checkpointIndexes.some((index) => index < timerResume.index)) evidence.push(make("pre_wait_checkpoint", "A pre-wait durable checkpoint is persisted before the timer resume."));
@@ -6461,6 +6483,7 @@ export function missionProof(mission: MissionRecord): Record<string, unknown> {
     status: mission.status,
     nextAction: mission.nextAction,
     checkpoint: mission.checkpoint,
+    checkpointHistory: (mission.checkpointHistory ?? []).map((item) => ({ ...item })),
     budget: { ...mission.budget, consumedSteps: mission.consumedSteps, toolCalls: mission.toolCalls, cost: mission.cost },
     timing: { ...mission.timing, activeMs: missionActiveMs(mission), remainingExecutionSeconds: missionBudgetPreflight(mission, { steps: 0 }).remaining.durationSeconds },
     verification: mission.verification,
@@ -6643,8 +6666,24 @@ export async function listMissionOwnerIds(): Promise<number[]> {
 export async function resumeMissionFromTimer(userId: number, id: string, runAt: number): Promise<MissionRecord | undefined> {
   return mutateMission(userId, id, (mission) => {
     if (mission.status !== "waiting" || mission.waiting?.kind !== "timer" || mission.waiting.runAt !== runAt) return undefined;
-    if (Date.now() < runAt) return undefined;
-    const resumedAt = Date.now();
+    const now = Date.now();
+    if (now < runAt) return undefined;
+    const resumedAt = now;
+    // Measure the time the mission was actually parked. `runAt` is the
+    // scheduler deadline, not the beginning of the wait; using it alone
+    // reports scheduler lateness and can undercount a real durable wait.
+    // Older records have no parkedAt, so fall back to the persisted waiting
+    // event and only then to runAt without claiming a stronger proof.
+    const parkedAt = typeof mission.waiting.parkedAt === "number"
+      ? mission.waiting.parkedAt
+      : [...mission.events].reverse().find((event) => event.type === "waiting" && event.metadata?.timerRunAt === runAt)?.metadata?.timerParkedAt;
+    // A valid wait stores parkedAt before its future runAt. If an old or
+    // malformed record has a deadline in the past, never use that deadline to
+    // inflate the measured wait; the persisted park time is the authoritative
+    // start of the interval.
+    const measuredStart = typeof parkedAt === "number" ? parkedAt : runAt;
+    const elapsedMs = Math.max(0, resumedAt - measuredStart);
+    const scheduledDelayMs = Math.max(0, runAt - measuredStart);
     return {
       status: "running",
       waiting: undefined,
@@ -6654,7 +6693,13 @@ export async function resumeMissionFromTimer(userId: number, id: string, runAt: 
       // generic sentence made the worker fall back to the original step
       // objective and repeat CHUCK_TASK_WAIT.
       nextAction: mission.nextAction ?? "Continue from the saved timer checkpoint.",
-      events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, resumedAt, mission.waiting.stepId, { timerRunAt: runAt, elapsedMs: Math.max(0, resumedAt - runAt) })],
+      events: [...mission.events, missionEvent("resumed", `Timer wait reached ${new Date(runAt).toISOString()}.`, resumedAt, mission.waiting.stepId, {
+        timerRunAt: runAt,
+        ...(typeof parkedAt === "number" ? { timerParkedAt: parkedAt } : {}),
+        elapsedMs,
+        scheduledDelayMs,
+        overdueMs: Math.max(0, resumedAt - runAt),
+      })],
     };
   });
 }
@@ -6714,6 +6759,22 @@ export async function resumeMissionFromApproval(userId: number, id: string, appr
   });
 }
 
+function appendMissionCheckpoint(mission: MissionRecord, checkpoint: string | undefined, nextAction: string | undefined, kind: MissionCheckpointRecord["kind"], stepId?: string, at = Date.now()): MissionCheckpointRecord[] | undefined {
+  if (checkpoint === undefined) return mission.checkpointHistory;
+  const normalizedCheckpoint = checkpoint.slice(0, 8000);
+  const normalizedNextAction = nextAction?.slice(0, 2000);
+  const previous = mission.checkpointHistory?.at(-1);
+  if (previous?.checkpoint === normalizedCheckpoint && previous.nextAction === normalizedNextAction && previous.kind === kind && previous.stepId === stepId) return mission.checkpointHistory;
+  return [...(mission.checkpointHistory ?? []), {
+    id: `mcp_${randomUUID()}`,
+    checkpoint: normalizedCheckpoint,
+    ...(normalizedNextAction ? { nextAction: normalizedNextAction } : {}),
+    at,
+    kind,
+    ...(stepId ? { stepId: stepId.slice(0, 160) } : {}),
+  }].slice(-200);
+}
+
 export async function waitMission(userId: number, id: string, waiting: MissionRecord["waiting"], checkpoint?: string, nextAction?: string): Promise<MissionRecord | undefined> {
   const initial = await getMission(userId, id);
   if (!initial) return undefined;
@@ -6732,11 +6793,25 @@ export async function waitMission(userId: number, id: string, waiting: MissionRe
     // it before the exact bounded extension can be reviewed.
     const recoverableBlocked = mission.status === "blocked" && mission.error === "Mission duration budget would be exceeded.";
     if (mission.status !== "running" && !recoverableBlocked) return undefined;
+    const now = Date.now();
     const message = nextAction ?? "Mission is waiting for an external event.";
+    const persistedWaiting = waiting?.kind === "timer" && typeof waiting.runAt === "number"
+      ? { ...waiting, parkedAt: now }
+      : waiting;
     const event = waiting?.kind === "approval" && typeof waiting.key === "string" && waiting.key.length > 0
-      ? missionEvent("approval_waiting", message, Date.now(), waiting.stepId, { approvalId: waiting.key })
-      : missionEvent("waiting", message, Date.now(), waiting?.stepId);
-    return { status: "waiting", waiting, error: undefined, checkpoint: checkpoint ?? mission.checkpoint, nextAction: message, events: [...mission.events, event] };
+      ? missionEvent("approval_waiting", message, now, waiting.stepId, { approvalId: waiting.key })
+      : waiting?.kind === "timer" && typeof waiting.runAt === "number"
+        ? missionEvent("waiting", message, now, waiting.stepId, { timerRunAt: waiting.runAt, timerParkedAt: now })
+        : missionEvent("waiting", message, now, waiting?.stepId);
+    return {
+      status: "waiting",
+      waiting: persistedWaiting,
+      error: undefined,
+      checkpoint: checkpoint ?? mission.checkpoint,
+      nextAction: message,
+      ...(checkpoint !== undefined ? { checkpointHistory: appendMissionCheckpoint(mission, checkpoint, message, "wait", waiting?.stepId, now) } : {}),
+      events: [...mission.events, event],
+    };
   });
 }
 
@@ -6754,7 +6829,12 @@ export async function resumeMissionFromProviderEvent(userId: number, id: string,
 }
 
 export async function checkpointMission(userId: number, id: string, checkpoint: string, nextAction?: string): Promise<MissionRecord | undefined> {
-  return mutateMission(userId, id, (mission) => mission.status !== "running" ? undefined : { checkpoint: checkpoint.slice(0, 8000), nextAction: nextAction?.slice(0, 2000), events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")] });
+  return mutateMission(userId, id, (mission) => mission.status !== "running" ? undefined : {
+    checkpoint: checkpoint.slice(0, 8000),
+    nextAction: nextAction?.slice(0, 2000),
+    checkpointHistory: appendMissionCheckpoint(mission, checkpoint, nextAction, "checkpoint", mission.currentStepId),
+    events: [...mission.events, missionEvent("checkpointed", nextAction ?? "Mission checkpoint saved.")],
+  });
 }
 
 export async function recordMissionSlice(userId: number, id: string, input: { checkpoint?: string; nextAction?: string; toolCalls?: number; cost?: number; blockedReason?: string }): Promise<MissionRecord | undefined> {
@@ -6779,7 +6859,19 @@ export async function recordMissionSlice(userId: number, id: string, input: { ch
     const nextAction = blocked
       ? budgetExceeded ? "Increase the mission budget or revise the objective before resuming." : input.nextAction?.slice(0, 2000) ?? mission.nextAction
       : input.nextAction?.slice(0, 2000) ?? mission.nextAction;
-    return { status: blocked ? "blocked" : "running", checkpoint: input.checkpoint?.slice(0, 8000) ?? mission.checkpoint, nextAction, error: blockedReason, consumedSteps, consumedSlices, toolCalls, cost, events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)] };
+    const checkpoint = input.checkpoint?.slice(0, 8000) ?? mission.checkpoint;
+    return {
+      status: blocked ? "blocked" : "running",
+      checkpoint,
+      ...(input.checkpoint !== undefined ? { checkpointHistory: appendMissionCheckpoint(mission, checkpoint, nextAction, "checkpoint", mission.currentStepId, now) } : {}),
+      nextAction,
+      error: blockedReason,
+      consumedSteps,
+      consumedSlices,
+      toolCalls,
+      cost,
+      events: [...mission.events, missionEvent(budgetExceeded ? "budget_exhausted" : blocked ? "blocked" : "checkpointed", blockedReason ?? input.nextAction ?? "Mission slice completed.", now)],
+    };
   });
   if (saved?.status === "blocked" && saved.error === "Mission duration budget would be exceeded.") return await extendMissionDurationIfEligible(userId, id) ?? saved;
   // `mutateMission` returns undefined when a concurrent terminal transition

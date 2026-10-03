@@ -85,6 +85,39 @@ test("proof timer resume cannot bypass the saved future deadline", async () => w
   assert.equal((await resumeMissionFromTimer(mission.userId, mission.id, runAt))?.status, "running");
 }));
 
+test("proof timer metadata measures the persisted parked wait, not only scheduler lateness", async () => withClock(async (clock) => {
+  const mission = await createMission(980010, { title: "Timer metadata", objective: "Measure the durable wait", definitionOfDone: "The timer measurement is authoritative", steps: [{ id: "wait", title: "Wait", objective: "Wait for the timer" }] });
+  await startMission(mission.userId, mission.id);
+  const parkedAt = clock.now;
+  const runAt = parkedAt + 60000;
+  await waitMission(mission.userId, mission.id, { kind: "timer", runAt, stepId: "wait" }, "Saved", "Continue after deadline");
+  clock.advance(90000);
+  const resumed = await resumeMissionFromTimer(mission.userId, mission.id, runAt);
+  const event = resumed?.events.at(-1);
+  assert.equal(event?.type, "resumed");
+  assert.equal(event?.metadata?.timerParkedAt, parkedAt);
+  assert.equal(event?.metadata?.timerRunAt, runAt);
+  assert.equal(event?.metadata?.elapsedMs, 90000);
+  assert.equal(event?.metadata?.scheduledDelayMs, 60000);
+  assert.equal(event?.metadata?.overdueMs, 30000);
+}));
+
+test("proof preserves checkpoint history when a timer wait replaces the active pointer", async () => withClock(async (clock) => {
+  const mission = await createMission(980011, { title: "Checkpoint history", objective: "Retain every recovery frontier", definitionOfDone: "Every checkpoint remains inspectable", steps: [{ id: "wait", title: "Wait", objective: "Wait and continue" }] });
+  await startMission(mission.userId, mission.id);
+  await checkpointMission(mission.userId, mission.id, "Baseline", "Enter the wait");
+  const runAt = clock.now + 60000;
+  await waitMission(mission.userId, mission.id, { kind: "timer", runAt, stepId: "wait" }, "Before wait", "Continue after the wait");
+  clock.advance(60000);
+  await resumeMissionFromTimer(mission.userId, mission.id, runAt);
+  await checkpointMission(mission.userId, mission.id, "After wait", "Finish the step");
+  await recordMissionSlice(mission.userId, mission.id, { checkpoint: "Worker frontier", nextAction: "Complete the step." });
+  const current = await getMission(mission.userId, mission.id);
+  assert.equal(current?.checkpoint, "Worker frontier");
+  assert.deepEqual(current?.checkpointHistory?.map((item) => item.checkpoint), ["Baseline", "Before wait", "After wait", "Worker frontier"]);
+  assert.deepEqual(current?.checkpointHistory?.map((item) => item.kind), ["checkpoint", "wait", "checkpoint", "checkpoint"]);
+}));
+
 test("proof provider replay uses exact provider and event identity", async () => {
   const mission = await createMission(980007, { title: "Event", objective: "Match exact event", definitionOfDone: "Exact event received", steps: [{ id: "event", title: "Event", objective: "Wait for event" }] });
   await startMission(mission.userId, mission.id);
