@@ -224,6 +224,65 @@ test("mission provider allowlists resolve an exact schema when the session expos
   }
 });
 
+test("mission provider allowlists resolve an exact schema from a small meta-tool session", async () => {
+  const userId = 831238;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const previous = { jevMode: config.jevMode, jevSurfaces: config.jevSurfaces };
+  const originalFetch = globalThis.fetch;
+  const requests: Array<Record<string, any>> = [];
+  const directSchema = {
+    type: "object",
+    properties: { user_id: { type: "string" }, max_results: { type: "integer" } },
+    required: ["user_id"],
+    additionalProperties: false,
+  };
+  const sessionTools = Array.from({ length: 4 }, (_, index) => ({ type: "function", function: { name: `COMPOSIO_META_${index}`, parameters: { type: "object" } } }));
+  const session = {
+    sessionId: "mission-small-meta-session",
+    tools: async () => sessionTools,
+    execute: async () => ({ successful: true, data: { resultSizeEstimate: 1 } }),
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [{ id: "ca_gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }) },
+    tools: {
+      getRawComposioToolBySlug: async (slug: string) => ({ slug, name: "Fetch emails", toolkit: { slug: "gmail" }, inputParameters: directSchema }),
+    },
+  } });
+  config.jevMode = "off";
+  config.jevSurfaces = new Set();
+  let modelResponse = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      requests.push(body);
+      return modelResponse++ === 0
+        ? toolResponse("GMAIL_FETCH_EMAILS", JSON.stringify({ user_id: "me", max_results: 3 }))
+        : chatResponse({ role: "assistant", content: "read complete" });
+    }
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await runAgent(userId, "Execute the exact allowlisted Gmail read.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+      ephemeral: true,
+      toolAllow: ["GMAIL_FETCH_EMAILS"],
+      taskId: "task_mission_small_meta_schema",
+      missionId: "mis_mission_small_meta_schema",
+      missionStepId: "step-gmail",
+    });
+    assert.equal(result.text, "read complete");
+    assert.deepEqual(result.toolsSucceeded, ["GMAIL_FETCH_EMAILS"]);
+    const visible = requests[0]?.tools?.map((tool: any) => tool.function.name) ?? [];
+    assert.ok(visible.includes("GMAIL_FETCH_EMAILS"), "the exact raw allowlisted provider schema must be visible for small meta-tool sessions too");
+  } finally {
+    globalThis.fetch = originalFetch;
+    Object.assign(config, previous);
+  }
+});
+
 test("interactive mission start hands execution to the durable worker before another model round", async () => {
   const userId = 831235;
   await initStore({ memoryOnly: true });

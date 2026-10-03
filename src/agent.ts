@@ -2215,12 +2215,12 @@ export async function runAgent(
   // the already-granted exact slugs, never a model-selected or broad catalog
   // of actions. The normal dispatch path still enforces account scope,
   // argument validation, approval, and provider receipts.
-  if (sessionObj && allow?.size && fullComposioTools.length > 80 && typeof composio?.tools?.getRawComposioToolBySlug === "function") {
+  if (sessionObj && allow?.size && typeof composio?.tools?.getRawComposioToolBySlug === "function") {
     const present = new Set(availableTools.map((tool) => toolName(tool)));
     for (const slug of allow) {
       if (!/^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/.test(slug) || slug.startsWith("CHUCK_") || slug.startsWith("COMPOSIO_") || slug.startsWith("MCP_") || present.has(slug) || deny.has(slug)) continue;
       try {
-        const raw = await abortable(composio.tools.getRawComposioToolBySlug(slug), signal);
+        const raw = await abortable(composio.tools.getRawComposioToolBySlug.call(composio.tools, slug), signal);
         const rawRecord = raw && typeof raw === "object" ? raw as Record<string, any> : undefined;
         const rawFunction = rawRecord?.function && typeof rawRecord.function === "object" ? rawRecord.function as Record<string, any> : undefined;
         const returnedSlug = String(rawRecord?.slug ?? rawRecord?.toolSlug ?? rawRecord?.tool_slug ?? rawFunction?.name ?? "").trim().toUpperCase();
