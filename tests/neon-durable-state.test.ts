@@ -78,10 +78,14 @@ test("Neon durable session domains write atomically and permit versioned partial
   const documents = new Map(DURABLE_SESSION_DOMAINS.map((domain) => [domain, { domain }] as const));
   await state.writeSessionDomains(42, documents);
   assert.equal(pool.client.calls[0]?.text, "BEGIN");
+  assert.equal(pool.client.calls[1]?.text, "SELECT pg_advisory_xact_lock($1::bigint)");
+  assert.deepEqual(pool.client.calls[1]?.values, [42]);
   assert.equal(pool.client.calls.filter((call) => call.text.includes("INSERT INTO chusky_session_domain")).length, 5);
+  assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 1);
   assert.equal(pool.client.calls.at(-1)?.text, "COMMIT");
   assert.equal(pool.client.released, true);
   assert.deepEqual([...await state.writeSessionDomains(42, new Map([["conversation", { changed: true }]] as const), [], new Map([["conversation", 1]]))], [["conversation", 1]]);
+  assert.equal(pool.client.calls.filter((call) => call.text.includes("pg_advisory_xact_lock")).length, 2);
   const compareAndSwap = pool.client.calls.at(-2)!;
   assert.match(compareAndSwap.text, /chusky_session_domain\.version = \$4/);
   assert.match(compareAndSwap.text, /RETURNING version/);
