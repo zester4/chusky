@@ -19,8 +19,12 @@ class FakeClient {
 class FakePool {
   readonly client = new FakeClient();
   reads: unknown[] = [];
+  failRead = false;
   ended = false;
-  async query(_text: string, _values?: unknown[]) { return { rows: this.reads as never[] }; }
+  async query(_text: string, _values?: unknown[]) {
+    if (this.failRead) throw new Error("database unavailable");
+    return { rows: this.reads as never[] };
+  }
   async connect() { return this.client; }
   async end() { this.ended = true; }
 }
@@ -54,6 +58,24 @@ test("Neon durable session-domain failures roll back and release the connection"
   await assert.rejects(() => state.writeSessionDomains(42, documents), /database unavailable/);
   assert.ok(pool.client.calls.some((call) => call.text === "ROLLBACK"));
   assert.equal(pool.client.released, true);
+});
+
+test("Neon health verifies reachability with a lightweight query", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  const health = await state.healthStatus();
+  assert.deepEqual(pool.reads, []);
+  assert.equal(health.reachable, true);
+  assert.deepEqual(health, { enabled: true, reachable: true });
+});
+
+test("Neon health reports unavailable state without leaking database errors", async () => {
+  const pool = new FakePool();
+  pool.failRead = true;
+  const state = new NeonDurableState(pool as never);
+  const health = await state.healthStatus();
+  assert.equal(health.reachable, false);
+  assert.deepEqual(health, { enabled: true, reachable: false });
 });
 
 test("session split leaves no high-growth payload in the Redis core and restores it exactly", () => {

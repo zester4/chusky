@@ -5,7 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
-import { createNeonDurableState, type NeonDurableState } from "./neonDurableState.js";
+import { createNeonDurableState, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
 import { joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
@@ -1600,6 +1600,7 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  getDurableStateHealth(): Promise<DurableStateStatus>;
   getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
   saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
   appendTregReceipt(receipt: TregCallReceipt): Promise<void>;
@@ -1909,6 +1910,10 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   constructor(private r: Redis, private readonly durableState?: NeonDurableState) {}
+
+  getDurableStateHealth(): Promise<DurableStateStatus> {
+    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
+  }
   /** Avoid a Redis EXISTS call before every idle recovery pass after startup. */
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
@@ -3310,6 +3315,7 @@ class MemoryBackend implements Backend {
     const session = this.sessions.get(userId);
     return session ? structuredClone(session) : fresh();
   }
+  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
   async getTregSpend(userId: number, dayKey: string) {
     const snapshot = this.tregSpend.get(`${userId}:${dayKey}`);
@@ -4515,6 +4521,11 @@ export async function saveSession(uid: number, s: UserSession): Promise<void> {
   compactSessionPersistence(s);
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+/** Aggregate health facts for the optional Neon session-domain repository. */
+export async function durableStateStatus(): Promise<DurableStateStatus> {
+  return backend.getDurableStateHealth();
 }
 
 export interface TregOAuthStateRecord {

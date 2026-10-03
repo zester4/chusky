@@ -10,6 +10,13 @@ export interface DurableSessionDocument {
   updatedAt: number;
 }
 
+/** Safe operational facts for health checks. Payloads and user IDs never leave
+ * the repository through this shape. */
+export interface DurableStateStatus {
+  enabled: boolean;
+  reachable: boolean;
+}
+
 interface Queryable {
   query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: Row[] }>;
 }
@@ -52,6 +59,16 @@ function toDocument(row: SessionRow): DurableSessionDocument {
  */
 export class NeonDurableState {
   constructor(private readonly database: TransactionPool) {}
+
+  /** Verify database reachability with a lightweight, non-data-bearing query. */
+  async healthStatus(): Promise<DurableStateStatus> {
+    try {
+      await this.database.query("SELECT 1");
+      return { enabled: true, reachable: true };
+    } catch {
+      return { enabled: true, reachable: false };
+    }
+  }
 
   async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
     assertUserId(userId);
