@@ -25,6 +25,7 @@
     "durable-state:migrate": "tsx src/migrate-durable-state.ts",
     "durable-state:live-smoke": "tsx scripts/durable-state-live-smoke.ts",
     "durable-state:backfill": "tsx scripts/backfill-durable-session-domains.ts",
+    "durable-memory:migrate": "tsx src/migrate-durable-memory.ts",
     "doctor": "tsx src/cli.ts doctor",
     "setup:bland-tool": "tsx scripts/setup-bland-consult-tool.ts",
     "treg:live-smoke": "tsx scripts/treg-live-smoke.ts",

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { getSession, saveSession } from "../store.js";
+import { getSession, saveSession, searchMemories, updateMemory as updateStoredMemory, upsertMemoryAndContext, forgetMemory as forgetStoredMemory } from "../store.js";
+import { durableMemoryConfigured } from "./durable.js";
 import { UpstashKnowledgeStore } from "../lib/knowledge/vector.js";
 import {
   type MemoryCategory,
@@ -37,6 +38,11 @@ export class MemoryRouter {
       reviewAt?: number;
     }
   ): Promise<MemoryRecord> {
+    if (durableMemoryConfigured()) {
+      const kind = (["preference", "relationship", "fact", "objective", "open_loop"] as string[]).includes(input.category) ? input.category : "memory";
+      const saved = await upsertMemoryAndContext(userId, { category: input.category as never, key: input.key, value: input.value, source: input.source ?? "user_explicit", confidence: input.confidence ?? 1, sensitivity: input.sensitivity === "normal" ? "normal" : "sensitive", projectId: input.projectId, personKey: input.personKey, reviewAt: input.reviewAt, expiresAt: input.expiresAt }, { scope: input.projectId ? "project" : "user", ...(input.projectId ? { scopeId: input.projectId } : {}), kind: kind as never, key: input.key, value: input.value, source: input.source ?? "user_explicit", sourceRef: "pending", sensitivity: input.sensitivity === "normal" ? "normal" : "sensitive", confidence: input.confidence ?? 1, ...(input.reviewAt ? { reviewAt: input.reviewAt } : {}), ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}) });
+      return { ...saved.memory as unknown as MemoryRecord, ownerId: userId, status: "active", createdAt: saved.memory.createdAt, updatedAt: saved.memory.updatedAt };
+    }
     const session = await getSession(userId);
     const memories: MemoryRecord[] = (session.memories as unknown as MemoryRecord[]) ?? [];
     const now = Date.now();
@@ -105,6 +111,11 @@ export class MemoryRouter {
     workerName: CapabilityWorkerName,
     options?: MemoryQueryOptions
   ): Promise<MemoryRecord[]> {
+    if (durableMemoryConfigured()) {
+      const allowedCategories = CAPABILITY_MEMORY_ACCESS_MATRIX[workerName] ?? [];
+      const results = (await Promise.all(allowedCategories.map((category) => searchMemories(userId, options?.query, { category: category as never, projectId: options?.projectId, personKey: options?.personKey, sensitivity: "normal", limit: options?.limit ?? 5 })))).flat();
+      return results.filter((item, index, all) => all.findIndex((candidate) => candidate.id === item.id) === index).slice(0, Math.max(1, Math.min(20, options?.limit ?? 5))).map((item) => ({ ...item as unknown as MemoryRecord, ownerId: userId, status: item.status === "superseded" ? "superseded" : "active" }));
+    }
     const session = await getSession(userId);
     const memories: MemoryRecord[] = (session.memories as unknown as MemoryRecord[]) ?? [];
     const allowedCategories = CAPABILITY_MEMORY_ACCESS_MATRIX[workerName] ?? [];
@@ -158,6 +169,11 @@ export class MemoryRouter {
     newValue: string,
     updates?: Partial<Omit<MemoryRecord, "id" | "ownerId" | "createdAt" | "status">>
   ): Promise<MemoryRecord | null> {
+    if (durableMemoryConfigured()) {
+      const updatePatch = { value: newValue, ...(updates ?? {}) };
+      const updated = await updateStoredMemory(userId, { id: keyOrId, key: keyOrId }, updatePatch as never);
+      return updated ? { ...updated as unknown as MemoryRecord, ownerId: userId, status: "active" } : null;
+    }
     const session = await getSession(userId);
     const memories: MemoryRecord[] = (session.memories as unknown as MemoryRecord[]) ?? [];
     const now = Date.now();
@@ -199,6 +215,7 @@ export class MemoryRouter {
    * Explicitly remove a memory record by marking its status as deleted.
    */
   async forgetMemory(userId: number, keyOrId: string): Promise<boolean> {
+    if (durableMemoryConfigured()) return forgetStoredMemory(userId, keyOrId);
     const session = await getSession(userId);
     const memories: MemoryRecord[] = (session.memories as unknown as MemoryRecord[]) ?? [];
 

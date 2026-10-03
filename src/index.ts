@@ -241,12 +241,14 @@ import { videoDownloadUrl, videoPollingUrl, type VideoStatusResponse } from "./v
 import { processSendblueEvent, processSendblueWorkflow } from "./sendblueWorkflow.js";
 import { posthog } from "./posthog.js";
 import { recoverAllMissions } from "./missionRecovery.js";
+import { drainMemoryVectorOutbox } from "./memory/durable.js";
 
 async function main(): Promise<void> {
   await initStore();
   if (config.betterAuthEnabled) await initAuth();
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
+  let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
   let shuttingDown = false;
@@ -258,6 +260,10 @@ async function main(): Promise<void> {
     void recoverAllMissions(enqueueTaskWorkflow).catch((error) => logger.warn({ error }, "Mission recovery sweep failed"));
   }, 120_000);
   if (typeof missionRecovery === "object" && "unref" in missionRecovery) missionRecovery.unref();
+  if (config.durableMemoryEnabled) {
+    memoryProjectionRecovery = setInterval(() => { void drainMemoryVectorOutbox(50).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryProjectionError" }, "Memory Vector projection sweep failed")); }, 60_000);
+    if (typeof memoryProjectionRecovery === "object" && "unref" in memoryProjectionRecovery) memoryProjectionRecovery.unref();
+  }
   // Webhook updates are dispatched in the background, so initialize grammY
   // before the HTTP server can accept one. Without this, handleUpdate throws
   // because bot.me has not been loaded yet.
@@ -370,6 +376,7 @@ async function main(): Promise<void> {
     channelGateway?.stopRecovery();
     if (sdkWebhookRecovery) clearInterval(sdkWebhookRecovery);
     if (missionRecovery) clearInterval(missionRecovery);
+    if (memoryProjectionRecovery) clearInterval(memoryProjectionRecovery);
     if (telegramWebhookRecovery) clearInterval(telegramWebhookRecovery);
     // Stop accepting HTTP work first. During a PM2 cluster reload, the ready
     // replacement worker is already serving this port before this worker gets

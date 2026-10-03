@@ -55,6 +55,7 @@ import type { TaskWaitRequest } from "./types.js";
 import { createTaskWaitRequest } from "./taskWait.js";
 import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
+import { getMemoryBrief, durableMemoryConfigured, saveMemoryEdge, saveMemoryEntity } from "./memory/durable.js";
 import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, stripSupervisorOwnedMissionStepTools, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
@@ -1433,7 +1434,25 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       });
       return { ...saved.memory, contextNodeId: saved.context.id, contextIndexed: true, autonomyDecision: memoryDecision.disposition };
     }
-    case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
+    case "CHUCK_SEARCH_MEMORY": return searchMemories(userId, args.query ? String(args.query) : undefined, { category: args.category as any, organizationId: args.organizationId ? text(args.organizationId) : undefined, projectId: args.projectId ? text(args.projectId) : undefined, personKey: args.personKey ? text(args.personKey) : undefined, limit: args.limit === undefined ? undefined : Number(args.limit) });
+    case "CHUCK_MEMORY_BRIEF": {
+      const scopes: Array<{ kind: "personal" | "organization" | "team" | "project" | "client" | "meeting"; externalId: string }> = [{ kind: "personal", externalId: String(userId) }];
+      if (args.organizationId) scopes.push({ kind: "organization", externalId: text(args.organizationId) });
+      if (args.teamId) scopes.push({ kind: "team", externalId: text(args.teamId) });
+      if (args.projectId) scopes.push({ kind: "project", externalId: text(args.projectId) });
+      if (args.clientId) scopes.push({ kind: "client", externalId: text(args.clientId) });
+      if (args.meetingId) scopes.push({ kind: "meeting", externalId: text(args.meetingId) });
+      if (!durableMemoryConfigured()) return { durableMemoryConfigured: false, message: "Durable memory is not enabled; use CHUCK_SEARCH_MEMORY for the legacy bounded memory projection." };
+      return getMemoryBrief({ ownerUserId: userId, purpose: text(args.purpose) as never, query: text(args.query, 500), scopes, includeSensitive: args.includeSensitive === true, limit: args.limit === undefined ? 12 : Number(args.limit) });
+    }
+    case "CHUCK_MEMORY_LINK": {
+      if (!durableMemoryConfigured()) throw new Error("Durable memory is not enabled");
+      const scope = text(args.scope) as "personal" | "organization" | "team" | "project" | "client" | "meeting";
+      const scopeId = text(args.scopeId);
+      const from = await saveMemoryEntity({ ownerUserId: userId, type: text(args.fromType) as never, canonicalName: text(args.fromName) });
+      const to = await saveMemoryEntity({ ownerUserId: userId, type: text(args.toType) as never, canonicalName: text(args.toName) });
+      return saveMemoryEdge({ ownerUserId: userId, scope: { kind: scope, externalId: scopeId }, fromEntityId: from.id, relation: text(args.relation), toEntityId: to.id, confidence: args.confidence === undefined ? undefined : Number(args.confidence) });
+    }
     case "CHUCK_UPDATE_MEMORY": {
       if (!args.id && !args.key) throw new Error("CHUCK_UPDATE_MEMORY requires id or key");
       const updated = await updateMemory(userId, { id: args.id ? text(args.id) : undefined, key: args.key ? text(args.key) : undefined, category: args.category as any }, {
