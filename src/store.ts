@@ -13,6 +13,7 @@ import { recordFailure, recordVectorFailure } from "./monitoring.js";
 import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channels/contracts.js";
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
+import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, putR2Object, r2Configured, signR2Download } from "./lib/storage/r2.js";
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
@@ -1257,6 +1258,7 @@ export interface MemoryFact {
   status?: "active" | "superseded" | "deleted";
   supersedesId?: string;
   projectId?: string;
+  organizationId?: string;
   personKey?: string;
   reviewAt?: number;
   expiresAt?: number;
@@ -4328,6 +4330,7 @@ function normalizeMemory(memory: Partial<MemoryFact>): MemoryFact {
     status: memory.status === "superseded" || memory.status === "deleted" ? memory.status : "active",
     supersedesId: typeof memory.supersedesId === "string" ? memory.supersedesId : undefined,
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    organizationId: typeof memory.organizationId === "string" ? memory.organizationId.trim() || undefined : undefined,
     personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
     reviewAt: typeof memory.reviewAt === "number" ? memory.reviewAt : undefined,
     expiresAt: typeof memory.expiresAt === "number" ? memory.expiresAt : undefined,
@@ -7962,13 +7965,20 @@ export async function upsertMemory(uid: number, memory: Omit<MemoryFact, "id" | 
     confidence: Math.max(0, Math.min(1, memory.confidence)),
     source: memory.source || "user",
     sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    status: "active",
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    organizationId: typeof memory.organizationId === "string" ? memory.organizationId.trim() || undefined : undefined,
     personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
     reviewAt: Number.isFinite(memory.reviewAt) ? memory.reviewAt : undefined,
     expiresAt: Number.isFinite(memory.expiresAt) ? memory.expiresAt : undefined,
     createdAt: existing?.createdAt ?? memory.createdAt ?? now,
     updatedAt: now,
   };
+  if (durableMemoryConfigured()) {
+    const entity = value.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: value.personKey }) : value.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: value.projectId }) : undefined;
+    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: value.organizationId ? "organization" : value.projectId ? "project" : "personal", externalId: value.organizationId ?? value.projectId ?? String(uid) }, category: value.category as never, key: value.key, value: value.value, confidence: value.confidence, sensitivity: value.sensitivity, source: { type: value.source, ref: value.id }, entityId: entity?.id, reviewAt: value.reviewAt, expiresAt: value.expiresAt, id: value.id });
+    value.id = persisted.id;
+  }
   s.memories = [...s.memories.filter((m) => m.id !== value.id && !(m.category === value.category && m.key === value.key)), value].slice(-200);
   await saveSession(uid, s);
   if (vectorConfigured()) {
@@ -8006,7 +8016,9 @@ export async function upsertMemoryAndContext(
     confidence: Math.max(0, Math.min(1, memory.confidence)),
     source: memory.source || "user",
     sensitivity: memory.sensitivity === "sensitive" ? "sensitive" : "normal",
+    status: "active",
     projectId: typeof memory.projectId === "string" ? memory.projectId.trim() || undefined : undefined,
+    organizationId: typeof memory.organizationId === "string" ? memory.organizationId.trim() || undefined : undefined,
     personKey: typeof memory.personKey === "string" ? memory.personKey.trim() || undefined : undefined,
     reviewAt: Number.isFinite(memory.reviewAt) ? memory.reviewAt : undefined,
     expiresAt: Number.isFinite(memory.expiresAt) ? memory.expiresAt : undefined,
@@ -8046,6 +8058,12 @@ export async function upsertMemoryAndContext(
   session.contextNodes = previousContext
     ? (session.contextNodes ?? []).map((item) => item.id === previousContext.id ? savedContext : item)
     : [savedContext, ...(session.contextNodes ?? [])].slice(0, 1000);
+  if (durableMemoryConfigured()) {
+    const entity = savedMemory.personKey ? await saveMemoryEntity({ ownerUserId: uid, type: "person", canonicalName: savedMemory.personKey }) : savedMemory.projectId ? await saveMemoryEntity({ ownerUserId: uid, type: "project", canonicalName: savedMemory.projectId }) : undefined;
+    const persisted = await saveDurableMemory({ ownerUserId: uid, scope: { kind: savedMemory.organizationId ? "organization" : savedMemory.projectId ? "project" : "personal", externalId: savedMemory.organizationId ?? savedMemory.projectId ?? String(uid) }, category: savedMemory.category as never, key: savedMemory.key, value: savedMemory.value, confidence: savedMemory.confidence, sensitivity: savedMemory.sensitivity, source: { type: savedMemory.source, ref: savedMemory.id }, entityId: entity?.id, reviewAt: savedMemory.reviewAt, expiresAt: savedMemory.expiresAt, id: savedMemory.id, metadata: { contextNodeId: savedContext.id } });
+    savedMemory.id = persisted.id;
+    savedContext.sourceRef = persisted.id;
+  }
   await saveSession(uid, session);
 
   if (vectorConfigured()) {
@@ -8057,7 +8075,7 @@ export async function upsertMemoryAndContext(
   return { memory: savedMemory, context: savedContext };
 }
 
-export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
+export async function updateMemory(uid: number, target: { id?: string; key?: string; category?: MemoryFact["category"] }, patch: Partial<Pick<MemoryFact, "category" | "key" | "value" | "confidence" | "source" | "sensitivity" | "projectId" | "organizationId" | "personKey" | "reviewAt" | "expiresAt">>): Promise<MemoryFact | undefined> {
   const session = await getSession(uid);
   const existing = session.memories.find((memory) => target.id ? memory.id === target.id : memory.key === target.key && (!target.category || memory.category === target.category));
   if (!existing) return undefined;
@@ -8074,8 +8092,8 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
     ? updated.category as ContextNodeRecord["kind"]
     : "memory";
   return (await upsertMemoryAndContext(uid, updated, {
-    scope: updated.projectId ? "project" : "user",
-    ...(updated.projectId ? { scopeId: updated.projectId } : {}),
+    scope: updated.organizationId ? "organization" : updated.projectId ? "project" : "user",
+    ...(updated.organizationId ? { scopeId: updated.organizationId } : updated.projectId ? { scopeId: updated.projectId } : {}),
     kind,
     key: updated.key,
     value: updated.value,
@@ -8088,11 +8106,16 @@ export async function updateMemory(uid: number, target: { id?: string; key?: str
   })).memory;
 }
 
-export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; personKey?: string; sensitivity?: MemoryFact["sensitivity"]; limit?: number } = {}): Promise<MemoryFact[]> {
+export async function searchMemories(uid: number, query?: string, options: { category?: MemoryFact["category"]; projectId?: string; organizationId?: string; personKey?: string; sensitivity?: MemoryFact["sensitivity"]; limit?: number } = {}): Promise<MemoryFact[]> {
   const now = Date.now();
-  const memories = (await getSession(uid)).memories.filter((m) => m.status !== "deleted" && (!m.expiresAt || m.expiresAt > now) && (!m.reviewAt || m.reviewAt > now))
+  if (durableMemoryConfigured()) {
+    const durable = await searchDurableMemory({ ownerUserId: uid, scopes: [{ kind: "personal", externalId: String(uid) }, ...(options.organizationId ? [{ kind: "organization" as const, externalId: options.organizationId }] : []), ...(options.projectId ? [{ kind: "project" as const, externalId: options.projectId }] : [])], query, category: options.category as never, limit: options.limit, includeSensitive: options.sensitivity !== "normal" });
+    if (durable.length) return durable.map((memory) => ({ id: memory.id, category: memory.category as MemoryFact["category"], key: memory.key, value: memory.value, confidence: memory.confidence, source: memory.source?.type ?? "durable", sensitivity: memory.sensitivity, status: memory.status === "needs_review" ? "active" : memory.status, ...(memory.scope.kind === "project" ? { projectId: memory.scope.externalId } : {}), ...(memory.scope.kind === "organization" ? { organizationId: memory.scope.externalId } : {}), ...(memory.reviewAt ? { reviewAt: memory.reviewAt } : {}), ...(memory.validUntil ? { expiresAt: memory.validUntil } : {}), createdAt: memory.createdAt, updatedAt: memory.updatedAt }));
+  }
+  const memories = (await getSession(uid)).memories.filter((m) => (m.status === undefined || m.status === "active") && (!m.expiresAt || m.expiresAt > now) && (!m.reviewAt || m.reviewAt > now))
     .filter((m) => !options.category || m.category === options.category)
     .filter((m) => !options.projectId || m.projectId === options.projectId)
+    .filter((m) => !options.organizationId || m.organizationId === options.organizationId)
     .filter((m) => !options.sensitivity || m.sensitivity === options.sensitivity)
     .filter((m) => !options.personKey || m.personKey === options.personKey);
   const limit = Math.max(1, Math.min(options.limit ?? 8, 20));
@@ -8152,11 +8175,12 @@ export async function getMemoryByKey(uid: number, key: string): Promise<MemoryFa
 }
 
 export async function forgetMemory(uid: number, key: string): Promise<boolean> {
+  const durableRemoved = durableMemoryConfigured() ? await forgetDurableMemory({ ownerUserId: uid, keyOrId: key }) : false;
   const s = await getSession(uid);
   const before = s.memories.length;
   const removed = s.memories.filter((m) => m.key === key || m.id === key);
   s.memories = s.memories.filter((m) => m.key !== key && m.id !== key);
-  if (s.memories.length === before) return false;
+  if (s.memories.length === before) return durableRemoved;
   const removedIds = new Set(removed.map((memory) => memory.id));
   s.contextNodes = (s.contextNodes ?? []).filter((node) => !node.sourceRef || !removedIds.has(node.sourceRef));
   await saveSession(uid, s);

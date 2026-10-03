@@ -56,6 +56,7 @@ const CORE_TOOLS = new Set([
   "CHUCK_TOOL_RECOVERY",
   "CHUCK_INTEGRATION_HEALTH",
   "CHUCK_CONTEXT_SEARCH",
+  "CHUCK_MEMORY_BRIEF",
   "CHUCK_AUTONOMY_STATUS",
   "CHUCK_TASK_WAIT",
   // The owner and scheduled attention worker must be able to inspect the
