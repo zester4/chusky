@@ -34,6 +34,7 @@ test("channel approval resumes preserve shared privacy boundaries", () => {
   assert.equal(sharedOptions.ownerPrivateRun, undefined);
   assert.match(sharedOptions.instructions ?? "", /shared sendblue group/i);
   assert.ok(sharedOptions.toolDeny?.includes("CHUCK_SEARCH_MEMORY"));
+  assert.ok(sharedOptions.toolDeny?.includes("CHUCK_MEMORY_LINK"));
   for (const privateOnly of SHARED_CHANNEL_TOOL_DENY) {
     assert.ok(sharedOptions.toolDeny?.includes(privateOnly), `${privateOnly} must be denied in a shared channel`);
   }

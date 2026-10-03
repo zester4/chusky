@@ -10,9 +10,11 @@ Chusky memory has three deliberately different layers:
 
 ## Enablement
 
-Set `DURABLE_MEMORY_ENABLED=true` and configure either
-`DURABLE_MEMORY_DATABASE_URL` or the existing `BETTER_AUTH_DATABASE_URL`. Run
-the schema migration against the direct Neon connection:
+For runtime access, set `DURABLE_MEMORY_ENABLED=true` and configure either
+`DURABLE_MEMORY_DATABASE_URL` or the existing `BETTER_AUTH_DATABASE_URL`. For
+schema migration, configure a direct (non-pooler) connection in
+`DURABLE_MEMORY_MIGRATION_DATABASE_URL`, `DURABLE_STATE_MIGRATION_DATABASE_URL`,
+or `BETTER_AUTH_MIGRATION_DATABASE_URL`:
 
 ```sh
 npm run durable-memory:migrate

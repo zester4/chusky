@@ -5,6 +5,8 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { recordFailure, recordVectorFailure } from "./monitoring.js";
@@ -33,6 +35,8 @@ import type { TregCallReceipt, TregSpendSnapshot } from "./treg/types.js";
 import type { LinkOAuthStateRecord, LinkSpendRequestRecord, LinkWalletRecord } from "./link/types.js";
 
 export interface Message {
+  /** Stable per-message identity used for idempotent durable history writes. */
+  id?: string;
   role: "user" | "assistant";
   content: string;
   createdAt?: number;
@@ -67,6 +71,7 @@ function compactPersistedMessage(value: unknown, maxChars = PERSISTED_MESSAGE_MA
   const item = value as Partial<Message>;
   if ((item.role !== "user" && item.role !== "assistant") || typeof item.content !== "string") return undefined;
   return {
+    ...(typeof item.id === "string" && /^[A-Za-z0-9:_-]{1,180}$/.test(item.id) ? { id: item.id } : {}),
     role: item.role,
     content: boundPersistedText(item.content, maxChars),
     ...(typeof item.createdAt === "number" && Number.isFinite(item.createdAt) && item.createdAt >= 0 ? { createdAt: item.createdAt } : {}),
@@ -670,6 +675,10 @@ export interface SdkRunImage {
 
 export interface SdkRunRecord {
   id: string;
+  /** Internal optimistic-concurrency token for the durable SDK run row. */
+  durableVersion?: number;
+  /** Internal content marker avoids rewriting unchanged run rows on session saves. */
+  durablePayloadHash?: string;
   /** Set only for runs submitted through a project key; used for company-level status reporting. */
   companyProjectId?: string;
   /** Trusted organization scope for connected intelligence credentials. */
@@ -1600,6 +1609,13 @@ export interface ChannelInboundEventRecord {
 interface Backend {
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
+  readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
+  getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined>;
+  listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]>;
+  deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void>;
+  deleteSdkRunsForThread(userId: number, threadId: string): Promise<void>;
+  getDurableStateHealth(): Promise<DurableStateStatus>;
+  getDurableStorageMetrics(): Promise<Record<string, number>>;
   getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
   saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
   appendTregReceipt(receipt: TregCallReceipt): Promise<void>;
@@ -1908,10 +1924,26 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
-  constructor(private r: Redis) {}
+  private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false) {}
+
+  getDurableStateHealth(): Promise<DurableStateStatus> {
+    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
+  }
+  async getDurableStorageMetrics(): Promise<Record<string, number>> {
+    const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
+    const attempts = redisDomainCacheHits + redisDomainCacheMisses;
+    return { ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
+  }
+  async readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined> {
+    return this.durableState?.readConversationBefore(userId, before, limit);
+  }
   /** Avoid a Redis EXISTS call before every idle recovery pass after startup. */
   private pendingOutboxIndexesReady = false;
   private sk = (id: number) => `chuck:session:${id}`;
+  private sessionDomainsKey = (id: number) => `chuck:session-domains:${id}`;
+  private readonly sessionDomainCacheTtlSeconds = 5 * 60;
+  private readonly maxSessionDomainCacheBytes = 512 * 1024;
   // Redis hash tags keep every key touched by one project's Lua transaction in the same cluster slot.
   private companyPrefix = (projectId: string) => `chuck:sdk:company:{${companyProjectDigest(projectId)}}`;
   private companyRunsDataKey = (projectId: string) => `${this.companyPrefix(projectId)}:runs:data`;
@@ -1985,21 +2017,186 @@ class RedisBackend implements Backend {
   private channelDebounceKey = (id: string) => `chuck:channel:debounce:${createHash("sha256").update(id).digest("hex")}`;
 
   async getSession(userId: number): Promise<UserSession> {
+    this.durableStorageMetrics.redisSessionCommands += 1;
     const raw = await this.r.get(this.sk(userId));
+    if (raw) this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(raw, "utf8");
     if (raw) {
-      try { const session = JSON.parse(raw) as UserSession; session.approvals = await this.listApprovals(userId, 20); return session; } catch { /* fallthrough */ }
+      try {
+        let session = JSON.parse(raw) as UserSession;
+        const migrated = sessionUsesNeonDomains(session);
+        if (migrated) {
+          if (!this.durableState) throw new Error("This session has migrated to Neon durable state, but DURABLE_STATE_ENABLED is not configured.");
+          const documents = await this.readSessionDomains(userId);
+          const hadProfileDomain = documents.has("profile");
+          if (!hadProfileDomain) documents.set("profile", { domain: "profile", payload: durableProfilePayload(session), version: 0, updatedAt: Date.now() });
+          const conversation = documents.get("conversation")?.payload as { history?: Message[] } | undefined;
+          if (Array.isArray(conversation?.history) && conversation.history.length) {
+            const legacyHistory = conversation.history.map((message, index) => ({
+              ...message,
+              id: message.id ?? `legacy_${createHash("sha256").update(`${userId}:${index}:${message.role}:${message.createdAt ?? index}:${message.sourceId ?? ""}:${message.content}`).digest("hex").slice(0, 48)}`,
+            }));
+            await this.durableState.appendConversationMessages(userId, legacyHistory.flatMap((message, index) => {
+              const compacted = compactPersistedMessage(message);
+              return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now() + index, ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
+            }));
+            session.history = legacyHistory.slice(-HOT_CONVERSATION_MESSAGES);
+          } else if (!session.history.length) {
+            session.history = (await this.durableState.readRecentConversation(userId, HOT_CONVERSATION_MESSAGES)).map((message) => ({ ...message }));
+          }
+          const payloads = new Map([...documents].map(([domain, document]) => [domain, document.payload] as const));
+          if (conversation?.history) payloads.set("conversation", { ...conversation, history: undefined });
+          session = joinSessionDomains(session, payloads);
+          const metadata = session as UserSession & DurableSessionMetadata;
+          metadata.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
+          metadata.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
+          if (!hadProfileDomain) metadata.durableDomainHashes = { ...metadata.durableDomainHashes, profile: "profile-needs-backfill" };
+          if (Array.isArray(conversation?.history) && conversation.history.length) metadata.durableDomainHashes = { ...metadata.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
+        }
+        session.approvals = await this.listApprovals(userId, 20);
+        return session;
+      } catch (error) {
+        // A migrated session must never silently fall back to an empty or stale
+        // Redis core document. Legacy malformed records retain prior behavior.
+        if (raw.includes("\"durableSessionFormat\"")) throw error;
+      }
+    }
+    if (this.durableState && userId !== 0) {
+      const documents = await this.readSessionDomains(userId);
+      if (documents.size) {
+        // Redis contains only the hot session cache. On expiry, reconstruct
+        // durable domains and the recent conversation window from Neon.
+        const recovered = fresh();
+        const hadProfileDomain = documents.has("profile");
+        if (!hadProfileDomain) documents.set("profile", { domain: "profile", payload: durableProfilePayload(recovered), version: 0, updatedAt: Date.now() });
+        const payloads = new Map([...documents].map(([domain, document]) => [domain, document.payload] as const));
+        const conversation = payloads.get("conversation") as { history?: Message[] } | undefined;
+        if (Array.isArray(conversation?.history) && conversation.history.length) {
+          const migrated = conversation.history.map((message, index) => ({
+            ...message,
+            id: message.id ?? `legacy_${createHash("sha256").update(`${userId}:${index}:${message.role}:${message.createdAt ?? index}:${message.sourceId ?? ""}:${message.content}`).digest("hex").slice(0, 48)}`,
+          }));
+          await this.durableState.appendConversationMessages(userId, migrated.flatMap((message, index) => {
+            const compacted = compactPersistedMessage(message);
+            return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now() + index, ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
+          }));
+          recovered.history = migrated.slice(-HOT_CONVERSATION_MESSAGES);
+          payloads.set("conversation", { ...conversation, history: undefined });
+        } else {
+          recovered.history = (await this.durableState.readRecentConversation(userId, HOT_CONVERSATION_MESSAGES)).map((message) => ({ ...message }));
+        }
+        const session = joinSessionDomains(recovered, payloads) as UserSession & DurableSessionMetadata;
+        session.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
+        session.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
+        if (!hadProfileDomain) session.durableDomainHashes = { ...session.durableDomainHashes, profile: "profile-needs-backfill" };
+        if (Array.isArray(conversation?.history) && conversation.history.length) session.durableDomainHashes = { ...session.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
+        session.approvals = await this.listApprovals(userId, 20);
+        return session;
+      }
     }
     const session = fresh(); session.approvals = await this.listApprovals(userId, 20); return session;
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
+    let persisted = s;
+    if (this.durableState && userId !== 0) {
+      const withMessageIds = { ...s, history: (s.history ?? []).map((message) => ({ ...message, id: message.id ?? (message.sourceId ? `msg_${createHash("sha256").update(message.sourceId).digest("hex").slice(0, 48)}` : `msg_${randomUUID()}`) })) } as UserSession & DurableSessionMetadata;
+      // Keep generated identities on the caller's object too: a handler may
+      // save the same in-memory session more than once during one request.
+      s.history = withMessageIds.history;
+      const priorHead = withMessageIds.durableConversationHeadId;
+      const priorHeadIndex = priorHead ? withMessageIds.history.findIndex((message) => message.id === priorHead) : -1;
+      const pendingMessages = withMessageIds.history.slice(priorHeadIndex >= 0 ? priorHeadIndex + 1 : 0).flatMap((message) => {
+        const compacted = compactPersistedMessage(message);
+        return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now(), ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
+      });
+      if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
+      const { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
+      const metadata = withMessageIds as UserSession & DurableSessionMetadata;
+      const oldHashes = metadata.durableDomainHashes ?? {};
+      const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
+      const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
+      (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
+      // Neon commits all domains before Redis points at them. If this fails,
+      // the old Redis session remains canonical and can be retried safely.
+      const changedSdkRuns = this.durableSdkRunsEnabled ? sdkRuns.filter(({ run }) => run.durablePayloadHash !== durableSdkRunHash(run)) : sdkRuns;
+      const writtenVersions = await this.durableState.writeSessionDomains(userId, changedDomains, changedSdkRuns.map(({ threadId, run }) => ({ threadId, runId: run.id, payload: run, expectedVersion: run.durableVersion })), expectedVersions);
+      for (const { run } of changedSdkRuns) {
+        run.durableVersion = (run.durableVersion ?? 0) + 1;
+        run.durablePayloadHash = durableSdkRunHash(run);
+      }
+      const nextVersions = { ...(metadata.durableDomainVersions ?? {}), ...Object.fromEntries(writtenVersions) };
+      const nextHashes = { ...oldHashes, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, durableDomainHash(payload)])) };
+      const nextHeadId = withMessageIds.history.at(-1)?.id;
+      Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableConversationHeadId: nextHeadId });
+      Object.assign(s as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableConversationHeadId: nextHeadId });
+      await this.writeSessionDomainCache(userId, domains, nextVersions);
+      persisted = core;
+    }
     // User 0 is the SDK control plane (projects, hashes, and admin audit), not a conversation.
     // It must survive the normal chat-session TTL just like durable tasks and CLI devices.
-    if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(s)); return; }
+    if (userId === 0) { await this.r.set(this.sk(userId), JSON.stringify(persisted)); return; }
     // Approval records live in their own short-lived keyspace. Keep an empty
     // legacy field for old readers without copying approval payloads into the
     // hot session blob on every unrelated write.
-    await this.r.setex(this.sk(userId), config.sessionTtl, JSON.stringify({ ...s, approvals: [] }));
+    const encoded = JSON.stringify({ ...persisted, approvals: [] });
+    this.durableStorageMetrics.redisSessionCommands += 1;
+    this.durableStorageMetrics.redisSessionBytesWritten += Buffer.byteLength(encoded, "utf8");
+    this.durableStorageMetrics.redisSessionCoreBytes = Buffer.byteLength(encoded, "utf8");
+    await this.r.setex(this.sk(userId), config.sessionTtl, encoded);
+  }
+
+  private async readSessionDomains(userId: number): Promise<Map<DurableSessionDomain, DurableSessionDocument>> {
+    const key = this.sessionDomainsKey(userId);
+    this.durableStorageMetrics.redisSessionCommands += 1;
+    const cached = await this.r.get(key);
+    if (cached) {
+      this.durableStorageMetrics.redisSessionBytesRead += Buffer.byteLength(cached, "utf8");
+      this.durableStorageMetrics.redisDomainCacheHits += 1;
+      try {
+        const decoded = JSON.parse(cached) as { documents?: Array<[DurableSessionDocument["domain"], DurableSessionDocument]> };
+        if (Array.isArray(decoded.documents) && decoded.documents.length === 5 && decoded.documents.every(([domain, document]) => domain === document.domain && Number.isSafeInteger(document.version) && document.version > 0)) {
+          return new Map(decoded.documents);
+        }
+      } catch { /* A corrupt cache is disposable; Neon remains authoritative. */ }
+    }
+    this.durableStorageMetrics.redisDomainCacheMisses += 1;
+    const documents = await this.durableState!.readSessionDomains(userId);
+    if (documents.size === 5) await this.writeSessionDomainCache(userId, new Map([...documents].map(([domain, document]) => [domain, document.payload] as const)), Object.fromEntries([...documents].map(([domain, document]) => [domain, document.version])));
+    return documents;
+  }
+
+  private async writeSessionDomainCache(userId: number, payloads: ReadonlyMap<DurableSessionDomain, unknown>, versions: Partial<Record<DurableSessionDomain, number>>): Promise<void> {
+    const documents = [...payloads].flatMap(([domain, payload]) => Number.isSafeInteger(versions[domain]) ? [[domain, { domain, payload, version: versions[domain]!, updatedAt: Date.now() }] as const] : []);
+    if (documents.length !== 5) return;
+    const encoded = JSON.stringify({ documents });
+    if (Buffer.byteLength(encoded, "utf8") > this.maxSessionDomainCacheBytes) return;
+    // Never let a delayed writer replace a cache populated from newer Neon
+    // versions. Version comparison and SETEX are one Redis operation.
+    const script = `local incoming=cjson.decode(ARGV[2]); local currentRaw=redis.call('get',KEYS[1]); if currentRaw then local current=cjson.decode(currentRaw); local versions={}; for _,d in ipairs(current.documents) do versions[d[1]]=d[2].version end; for _,d in ipairs(incoming.documents) do if versions[d[1]] and d[2].version < versions[d[1]] then return 0 end end end; redis.call('setex',KEYS[1],ARGV[1],ARGV[2]); return 1`;
+    this.durableStorageMetrics.redisSessionCommands += 1;
+    this.durableStorageMetrics.redisSessionBytesWritten += Buffer.byteLength(encoded, "utf8");
+    this.durableStorageMetrics.redisDomainCacheBytes = Buffer.byteLength(encoded, "utf8");
+    await this.r.eval(script, 1, this.sessionDomainsKey(userId), this.sessionDomainCacheTtlSeconds, encoded);
+  }
+
+  async getSdkRun(userId: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {
+    const durable = this.durableSdkRunsEnabled ? await this.durableState?.readSdkRun(userId, threadId, runId) : undefined;
+    if (durable) return durable.payload as SdkRunRecord;
+    return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((run) => run.id === runId);
+  }
+
+  async listSdkRuns(userId: number, threadId: string): Promise<SdkRunRecord[]> {
+    if (!this.durableState || !this.durableSdkRunsEnabled) return (await this.getSession(userId)).sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? [];
+    const durable = await this.durableState.listSdkRuns(userId, threadId, 200);
+    return durable.map((record) => record.payload as SdkRunRecord);
+  }
+
+  async deleteSdkRun(userId: number, threadId: string, runId: string): Promise<void> {
+    if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRun(userId, threadId, runId);
+  }
+
+  async deleteSdkRunsForThread(userId: number, threadId: string): Promise<void> {
+    if (this.durableSdkRunsEnabled) await this.durableState?.deleteSdkRunsForThread(userId, threadId);
   }
 
   async getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined> {
@@ -3288,7 +3485,28 @@ class MemoryBackend implements Backend {
     const session = this.sessions.get(userId);
     return session ? structuredClone(session) : fresh();
   }
+  async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
+  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
+  async getDurableStorageMetrics(): Promise<Record<string, number>> { return { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
+  async getSdkRun(userId: number, threadId: string, runId: string) {
+    const session = this.sessions.get(userId);
+    const run = session?.sdkThreads?.find((thread) => thread.id === threadId)?.runs.find((item) => item.id === runId);
+    return run ? structuredClone(run) : undefined;
+  }
+  async listSdkRuns(userId: number, threadId: string) {
+    return structuredClone(this.sessions.get(userId)?.sdkThreads?.find((thread) => thread.id === threadId)?.runs ?? []);
+  }
+  async deleteSdkRun(userId: number, threadId: string, runId: string) {
+    const session = this.sessions.get(userId);
+    const thread = session?.sdkThreads?.find((item) => item.id === threadId);
+    if (thread) thread.runs = thread.runs.filter((run) => run.id !== runId);
+  }
+  async deleteSdkRunsForThread(userId: number, threadId: string) {
+    const session = this.sessions.get(userId);
+    const thread = session?.sdkThreads?.find((item) => item.id === threadId);
+    if (thread) thread.runs = [];
+  }
   async getTregSpend(userId: number, dayKey: string) {
     const snapshot = this.tregSpend.get(`${userId}:${dayKey}`);
     return snapshot ? structuredClone(snapshot) : undefined;
@@ -4045,6 +4263,19 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
     recordFailure("redis_failure", error, { phase: "startup", reason: "missing_url" });
     throw error;
   }
+  // An explicitly enabled canonical store must never degrade to an unrelated
+  // memory backend because of a typo or unavailable Postgres connection.
+  const durableState = !options.memoryOnly && config.durableStateEnabled
+    ? await createNeonDurableState(config.durableStateDatabaseUrl)
+    : undefined;
+  if (!options.memoryOnly && config.durableStateEnabled && !durableState) {
+    throw new Error("DURABLE_STATE_DATABASE_URL is required when DURABLE_STATE_ENABLED=true.");
+  }
+  if (!options.memoryOnly && config.durableStateSdkRunsEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_SDK_RUNS_ENABLED=true.");
+  }
+  if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
+  if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4061,7 +4292,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       });
       await r.connect();
       await r.ping();
-      backend = new RedisBackend(r);
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled);
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
@@ -4482,10 +4713,69 @@ export async function getSession(uid: number): Promise<UserSession> {
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
+type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableConversationHeadId?: string };
+
+function durableDomainHash(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function durableProfilePayload(session: UserSession): unknown {
+  return splitSessionDomains(session).domains.get("profile");
+}
+
+/** Load per-run records only for SDK operations that actually need run state. */
+/** Explicit older-history reads use Neon pagination; ordinary turns use the bounded hot window. */
+export async function readConversationHistoryBefore(uid: number, before: { createdAt: number; id: string }, limit = 50): Promise<DurableConversationMessage[] | undefined> {
+  if (!Number.isSafeInteger(uid) || uid <= 0) return undefined;
+  const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(100, limit)) : 50;
+  return backend.readConversationBefore(uid, before, boundedLimit);
+}
+
+export async function getSessionWithSdkRuns(uid: number, threadId?: string): Promise<UserSession> {
+  const session = await getSession(uid);
+  for (const thread of session.sdkThreads ?? []) {
+    if (threadId && thread.id !== threadId) continue;
+    const runs = new Map(thread.runs.map((run) => [run.id, run]));
+    for (const run of await backend.listSdkRuns(uid, thread.id)) runs.set(run.id, run);
+    thread.runs = [...runs.values()].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+  }
+  return session;
+}
+
+export async function getSdkRun(uid: number, threadId: string, runId: string): Promise<SdkRunRecord | undefined> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) return undefined;
+  return backend.getSdkRun(uid, threadId, runId);
+}
+
+export async function listSdkRuns(uid: number, threadId: string): Promise<SdkRunRecord[]> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) return [];
+  return backend.listSdkRuns(uid, threadId);
+}
+
+export async function deleteSdkRun(uid: number, threadId: string, runId: string): Promise<void> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) throw new Error("SDK run identity is invalid.");
+  await backend.deleteSdkRun(uid, threadId, runId);
+}
+
+export async function deleteSdkRunsForThread(uid: number, threadId: string): Promise<void> {
+  if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId)) throw new Error("SDK thread identity is invalid.");
+  await backend.deleteSdkRunsForThread(uid, threadId);
+}
+
 export async function saveSession(uid: number, s: UserSession): Promise<void> {
   compactSessionPersistence(s);
   s.updatedAt = Date.now();
   return backend.saveSession(uid, s);
+}
+
+/** Aggregate health facts for the optional Neon session-domain repository. */
+export async function durableStateStatus(): Promise<DurableStateStatus> {
+  return backend.getDurableStateHealth();
+}
+
+/** Aggregate storage telemetry for protected diagnostics; excludes user IDs and payloads. */
+export async function durableStorageMetrics(): Promise<Record<string, number>> {
+  return backend.getDurableStorageMetrics();
 }
 
 export interface TregOAuthStateRecord {
@@ -4593,7 +4883,7 @@ export async function releaseTregSpendLock(userId: number, dayKey: string, token
  * short; callers should keep the mutator CPU-only and never perform provider
  * I/O while holding it.
  */
-export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>): Promise<T> {
+export async function mutateSession<T>(uid: number, mutator: (session: UserSession) => T | Promise<T>, options: { sdkThreadId?: string; allSdkRuns?: boolean } = {}): Promise<T> {
   const token = randomUUID();
   const key = `session-mutate:${uid}`;
   let acquired = false;
@@ -4603,7 +4893,7 @@ export async function mutateSession<T>(uid: number, mutator: (session: UserSessi
   }
   if (!acquired) throw new Error("Session mutation is busy; retry shortly.");
   try {
-    const session = await getSession(uid);
+    const session = options.allSdkRuns ? await getSessionWithSdkRuns(uid) : options.sdkThreadId ? await getSessionWithSdkRuns(uid, options.sdkThreadId) : await getSession(uid);
     const result = await mutator(session);
     await saveSession(uid, session);
     return result;
@@ -4756,6 +5046,7 @@ function appendSessionHistory(session: UserSession, messages: Message[]): void {
   const stamped = messages.flatMap((message) => {
     const compacted = compactPersistedMessage({
       ...message,
+      id: message.id ?? (message.sourceId ? `msg_${createHash("sha256").update(message.sourceId).digest("hex").slice(0, 48)}` : `msg_${randomUUID()}`),
       createdAt: typeof message.createdAt === "number" && Number.isFinite(message.createdAt) && message.createdAt >= 0 ? message.createdAt : Date.now(),
     });
     return compacted ? [compacted] : [];
@@ -4791,7 +5082,7 @@ export function appendSdkRunHistoryToSession(session: UserSession, threadId: str
 /** One-time import of completed first-party dashboard runs written before account history was canonical. */
 export async function backfillSdkPrivateRunHistory(userId: number): Promise<void> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return;
-  if ((await getSession(userId)).sdkPrivateHistoryBackfilled) return;
+  if ((await getSessionWithSdkRuns(userId)).sdkPrivateHistoryBackfilled) return;
 
   await mutateSession(userId, (session) => {
     if (session.sdkPrivateHistoryBackfilled) return;
@@ -4820,13 +5111,13 @@ export async function backfillSdkPrivateRunHistory(userId: number): Promise<void
       }
     }
     session.sdkPrivateHistoryBackfilled = true;
-  });
+  }, { allSdkRuns: true });
 }
 
 /** Merge only private web conversation context into its explicitly linked Telegram owner. */
 export async function mergeLinkedWebSession(sourceUserId: number, telegramUserId: number): Promise<void> {
   if (!Number.isSafeInteger(sourceUserId) || sourceUserId <= 0 || !Number.isSafeInteger(telegramUserId) || telegramUserId <= 0 || sourceUserId === telegramUserId) return;
-  const source = await getSession(sourceUserId);
+  const source = await getSessionWithSdkRuns(sourceUserId);
   const existingTarget = await getSession(telegramUserId);
   if (existingTarget.linkedWebSessionImports?.some((item) => item.sourceUserId === sourceUserId && item.sourceUpdatedAt === source.updatedAt)) return;
   let importedMemories: MemoryFact[] = [];

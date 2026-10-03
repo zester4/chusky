@@ -646,6 +646,14 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   // Use Neon's direct (non-pooler) URL only for explicit schema migrations.
   betterAuthMigrationDatabaseUrl: optional("BETTER_AUTH_MIGRATION_DATABASE_URL", ""),
   betterAuthDatabasePath: optional("BETTER_AUTH_DATABASE", "./data/better-auth.sqlite"),
+  // Opt-in canonical durable documents for high-growth Chusky session state.
+  // Keep this separate from Better Auth so application-state rollout and auth
+  // migrations can be operated, observed, and rolled back independently.
+  durableStateEnabled: optional("DURABLE_STATE_ENABLED", "false") === "true",
+  durableStateDatabaseUrl: optional("DURABLE_STATE_DATABASE_URL", ""),
+  durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
+  // Per-run SDK records require migration 0002; cut over independently after it is applied.
+  durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
   // Durable memory uses the same Neon database as Better Auth by default. A
   // separate URL is supported for staged migrations and isolated testing.
   durableMemoryEnabled: optional("DURABLE_MEMORY_ENABLED", "false") === "true",

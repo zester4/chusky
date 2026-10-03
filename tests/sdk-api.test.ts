@@ -46,6 +46,22 @@ test("onboarding website research rejects unsafe URLs before agent execution", a
   assert.equal((await response.json() as { error?: { code?: string } }).error?.code, "unsafe_website_url");
 });
 
+test("older account history requires a valid cursor and durable history backend", async () => {
+  const headers = { Authorization: "Bearer sdk-test-key", "X-Chusky-User-Id": "history-pagination-owner" };
+  const invalid = await app().fetch(new Request("http://local/v1/account/history?before=not-a-cursor", { headers }));
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json() as { error?: { code?: string } }).error?.code, "invalid_history_cursor");
+
+  const cursor = Buffer.from(JSON.stringify({ createdAt: 1_700_000_000_000, id: "msg_history_page_1" }), "utf8").toString("base64url");
+  const unavailable = await app().fetch(new Request(`http://local/v1/account/history?before=${cursor}&limit=10`, { headers }));
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json() as { error?: { code?: string } }).error?.code, "durable_history_unavailable");
+
+  const invalidLimit = await app().fetch(new Request(`http://local/v1/account/history?before=${cursor}&limit=101`, { headers }));
+  assert.equal(invalidLimit.status, 400);
+  assert.equal((await invalidLimit.json() as { error?: { code?: string } }).error?.code, "invalid_history_limit");
+});
+
 test("account overview exposes durable mission approvals without an active chat run", async () => {
   const externalUserId = "mission-approval-feed-owner";
   const ownerId = Number.parseInt(createHash("sha256").update(`sdk:root:${externalUserId}`).digest("hex").slice(0, 12), 16);

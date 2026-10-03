@@ -12,7 +12,7 @@ import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -738,7 +738,7 @@ function approvalView(approval: { id: string; status: string; toolSlug: string; 
 
 function threadView(thread: SdkThreadRecord) { return { id: thread.id, externalId: thread.externalId, metadata: thread.metadata, createdAt: new Date(thread.createdAt).toISOString(), updatedAt: new Date(thread.updatedAt).toISOString() }; }
 function runView(threadId: string, run: SdkRunRecord) {
-  const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, ...visible } = run;
+  const { agentInstructions: _privateInstructions, companyProjectId: _privateCompanyProjectId, organizationId: _organizationId, ownerPrivateRun: _privateOwnerRun, durableVersion: _durableVersion, durablePayloadHash: _durablePayloadHash, ...visible } = run;
   return { ...visible, threadId, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() };
 }
 
@@ -764,8 +764,12 @@ async function persistSdkRunSnapshot(
     const otherEvents = orderedEvents.filter((item) => item.type !== "run.tool_activity" && item.type !== "run.subagent_activity").slice(-200);
     const events = [...activityEvents, ...subagentEvents, ...otherEvents].sort((left, right) => left.at - right.at);
     const previousStatus = stored.status;
+    const durableVersion = stored.durableVersion;
     const preserveCancellation = stored.status === "cancelled" && run.status !== "cancelled";
     Object.assign(stored, run, { events });
+    // This token belongs to the row version read inside the lock, not the
+    // potentially stale run snapshot held by the long-running request.
+    stored.durableVersion = durableVersion;
     if (preserveCancellation) {
       stored.status = "cancelled";
       stored.approvalId = undefined;
@@ -782,7 +786,7 @@ async function persistSdkRunSnapshot(
     run.status = stored.status;
     thread.updatedAt = Math.max(thread.updatedAt, run.updatedAt);
     return stored;
-  });
+  }, { sdkThreadId: threadId });
   if (persistedRun) await persistSdkCompanyRun(persistedRun);
 }
 
@@ -975,6 +979,22 @@ async function resolveRunInput(session: Awaited<ReturnType<typeof getSession>>, 
 }
 
 type AccountHistoryMessage = { role: "user" | "assistant"; content: string; createdAt?: number };
+type ConversationHistoryCursor = { createdAt: number; id: string };
+
+function encodeConversationHistoryCursor(cursor: ConversationHistoryCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeConversationHistoryCursor(value: string): ConversationHistoryCursor | undefined {
+  if (value.length > 512 || !/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<ConversationHistoryCursor>;
+    if (!Number.isSafeInteger(parsed.createdAt) || Number(parsed.createdAt) < 0 || typeof parsed.id !== "string" || !/^[A-Za-z0-9:_-]{1,180}$/.test(parsed.id)) return undefined;
+    return { createdAt: Number(parsed.createdAt), id: parsed.id };
+  } catch {
+    return undefined;
+  }
+}
 
 function dashboardRequest(c: any): boolean {
   return Boolean(c.get("webAuthUserId"));
@@ -1468,8 +1488,27 @@ export function registerSdkApi(app: Hono): void {
   });
 
   app.get("/v1/account/history", async (c) => {
-    const session = await getSession(sdkUser(c)!.userId);
-    return c.json({ data: accountHistoryView(session) });
+    const userId = sdkUser(c)!.userId;
+    const beforeValue = c.req.query("before");
+    if (beforeValue !== undefined) {
+      const before = decodeConversationHistoryCursor(beforeValue);
+      if (!before) return apiError(c, 400, "invalid_history_cursor", "before must be a valid conversation history cursor.");
+      const limitValue = c.req.query("limit");
+      const limit = limitValue === undefined ? 50 : Number(limitValue);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) return apiError(c, 400, "invalid_history_limit", "limit must be an integer from 1 to 100.");
+      const messages = await readConversationHistoryBefore(userId, before, limit);
+      if (!messages) return apiError(c, 503, "durable_history_unavailable", "Older conversation history is unavailable because durable Neon history is not enabled.");
+      const data = messages.map(({ id, role, content, createdAt }) => ({ id, role, content, createdAt }));
+      const oldest = messages[0];
+      return c.json({ data, ...(messages.length === limit && oldest ? { nextCursor: encodeConversationHistoryCursor({ createdAt: oldest.createdAt, id: oldest.id }) } : {}) });
+    }
+    const session = await getSession(userId);
+    const data = accountHistoryView(session);
+    const oldestHotMessage = session.history[0];
+    const nextCursor = oldestHotMessage?.id && Number.isSafeInteger(oldestHotMessage.createdAt)
+      ? encodeConversationHistoryCursor({ createdAt: oldestHotMessage.createdAt!, id: oldestHotMessage.id })
+      : undefined;
+    return c.json({ data, ...(nextCursor ? { nextCursor } : {}) });
   });
 
   app.get("/v1/account/voice-options", async (c) => {
@@ -2386,7 +2425,7 @@ export function registerSdkApi(app: Hono): void {
     const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); return thread ? c.json(threadView(thread)) : apiError(c, 404, "not_found", "Thread not found.");
   });
   app.patch("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { title?: unknown; archived?: unknown }; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); if (body.title !== undefined) { const title = String(body.title).trim(); if (title.length > 120) return apiError(c, 400, "invalid_title", "Conversation title must be 120 characters or fewer."); if (title) thread.metadata.title = title; else delete thread.metadata.title; } if (body.archived !== undefined) { if (typeof body.archived !== "boolean") return apiError(c, 400, "invalid_archived", "archived must be a boolean."); thread.metadata.archived = body.archived; } thread.updatedAt = Date.now(); await saveSession(owner.userId, session); return c.json(threadView(thread)); });
-  app.delete("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const index = session.sdkThreads!.findIndex((item) => item.id === c.req.param("threadId")); if (index < 0) return apiError(c, 404, "not_found", "Thread not found."); const thread = session.sdkThreads![index]; if (thread.runs.some((run) => run.status === "running")) return apiError(c, 409, "thread_active", "A conversation with a running request cannot be deleted."); session.sdkThreads!.splice(index, 1); await saveSession(owner.userId, session); return c.body(null, 204); });
+  app.delete("/v1/threads/:threadId", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const index = session.sdkThreads!.findIndex((item) => item.id === c.req.param("threadId")); if (index < 0) return apiError(c, 404, "not_found", "Thread not found."); const thread = session.sdkThreads![index]; if (thread.runs.some((run) => run.status === "running" || run.status === "queued")) return apiError(c, 409, "thread_active", "A conversation with a running request cannot be deleted."); session.sdkThreads!.splice(index, 1); await saveSession(owner.userId, session); await deleteSdkRunsForThread(owner.userId, thread.id); return c.body(null, 204); });
   app.post("/v1/threads/:threadId/runs", async (c) => {
     const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as RunBody;
     const policyError = validateRunPolicy(body); if (policyError) return apiError(c, 400, "invalid_run_policy", policyError);
@@ -2425,7 +2464,7 @@ export function registerSdkApi(app: Hono): void {
         task = await createTask(owner.userId, { title: (resolved.input || "SDK agent run").slice(0, 120), objective: resolved.input || "Process the verified attachments.", runAt: Date.now(), maxAttempts: 10, sdkRunId: run.id, sdkThreadId: thread.id, sdkInput: resolved.input, sdkAttachments: resolved.attachments, sdkModel: body.model ?? session.model, sdkTools: body.tools ? { allow: body.tools.allow, deny: body.tools.deny, requireApproval: body.tools.requireApproval } : undefined, sdkBudget: body.budget, sdkStartedAt: Date.now(), sdkSkills: body.skills, sdkInstructions: companyPolicy.agent?.instructions, sdkOrganizationId: body.organizationId, sdkOwnerPrivateRun: run.ownerPrivateRun, quotaReservationId });
         const workflowRunId = await enqueueTaskWithClaim(owner.userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer);
         if (!workflowRunId) throw new Error("A task enqueue is already in progress; retry the request shortly."); run.taskId = task.id; run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; const response = runView(thread.id, run); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); await notifyWebhooks(owner.userId, session.sdkWebhooks!, "run.queued", { threadId: thread.id, runId: run.id, taskId: task.id, status: run.status }); return c.json(response, 202);
-      } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
+      } catch (error) { if (task!) await cancelTask(owner.userId, task.id); if (quotaReservationId) await releaseExecutionQuota(owner.userId, quotaReservationId).catch(() => undefined); thread.runs = thread.runs.filter((item) => item.id !== run.id); await saveSession(owner.userId, session); await deleteSdkRun(owner.userId, thread.id, run.id); return apiError(c, 503, "run_enqueue_failed", error instanceof Error ? error.message : "The durable run could not be queued."); }
     }
     try { const result = await runAgent(owner.userId, resolved.message, thread.history, body.model ?? session.model, undefined, c.req.raw.signal, undefined, undefined, undefined, await sdkAgentOptions(body, run.id, thread.id, companyPolicy.agent?.instructions, dashboardRequest(c))); run.status = "completed"; run.output = result.text; run.artifacts = sdkRunArtifacts(result.generatedFiles); run.images = sdkRunImages(result.generatedImages); run.cost = result.cost; session.totalCost = (session.totalCost ?? 0) + (result.cost ?? 0); run.events.push(event("run.completed")); appendSdkRunHistoryToSession(session, thread.id, run.id, [
       { role: "user", content: `${resolved.input || "Attached file(s)"}${resolved.attachments.length ? `\n[Attachments: ${resolved.attachments.map((file) => file.name).join(", ")}]` : ""}`, createdAt: run.createdAt },
@@ -2518,12 +2557,12 @@ export function registerSdkApi(app: Hono): void {
     }, cancel: () => { clientDisconnected = true; } });
     return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
   });
-  app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
-  app.get("/v1/threads/:threadId/runs/:runId", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); return thread && run ? c.json(runView(thread.id, run)) : apiError(c, 404, "not_found", "Run not found."); });
-   app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => { const thread = (await getSession(sdkUser(c)!.userId)).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); const cursor = Number(c.req.query("after") ?? 0) || 0; return thread && run ? c.json({ data: run.events.filter((item) => item.at > cursor) }) : apiError(c, 404, "not_found", "Run not found."); });
-   app.get("/v1/threads/:threadId/runs/:runId/trace", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); const trace = await getAgentRun(owner.userId, run.id); if (!trace) return c.json({ runId: run.id, data: [], state: undefined }); const includeState = c.req.query("include_state") === "true"; return c.json({ runId: run.id, status: trace.status, version: trace.version, createdAt: new Date(trace.createdAt).toISOString(), updatedAt: new Date(trace.updatedAt).toISOString(), events: trace.events, ...(includeState ? { state: trace.state } : {}) }); });
+  app.get("/v1/threads/:threadId/runs", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); if (!thread) return apiError(c, 404, "not_found", "Thread not found."); const result = page(thread.runs, c.req.query("cursor"), c.req.query("limit")); return c.json({ data: result.data.map((run) => runView(thread.id, run)), ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}) }); });
+  app.get("/v1/threads/:threadId/runs/:runId", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); return thread && run ? c.json(runView(thread.id, run)) : apiError(c, 404, "not_found", "Run not found."); });
+   app.get("/v1/threads/:threadId/runs/:runId/events", async (c) => { const thread = (await getSessionWithSdkRuns(sdkUser(c)!.userId, c.req.param("threadId"))).sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); const cursor = Number(c.req.query("after") ?? 0) || 0; return thread && run ? c.json({ data: run.events.filter((item) => item.at > cursor) }) : apiError(c, 404, "not_found", "Run not found."); });
+   app.get("/v1/threads/:threadId/runs/:runId/trace", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); const trace = await getAgentRun(owner.userId, run.id); if (!trace) return c.json({ runId: run.id, data: [], state: undefined }); const includeState = c.req.query("include_state") === "true"; return c.json({ runId: run.id, status: trace.status, version: trace.version, createdAt: new Date(trace.createdAt).toISOString(), updatedAt: new Date(trace.updatedAt).toISOString(), events: trace.events, ...(includeState ? { state: trace.state } : {}) }); });
   app.post("/v1/threads/:threadId/runs/:runId/resume", async (c) => {
-    const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const prior = thread?.runs.find((item) => item.id === c.req.param("runId"));
+    const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const prior = thread?.runs.find((item) => item.id === c.req.param("runId"));
     if (!thread || !prior) return apiError(c, 404, "not_found", "Run not found.");
     if (!["failed", "cancelled", "requires_approval"].includes(prior.status)) return apiError(c, 409, "run_not_resumable", "Only failed, cancelled, or approval-paused runs can be resumed.");
     const run: SdkRunRecord = { id: `run_${randomUUID()}`, status: "running", ...(prior.companyProjectId ? { companyProjectId: prior.companyProjectId } : {}), ...(prior.organizationId ? { organizationId: prior.organizationId } : {}), ...(prior.ownerPrivateRun ? { ownerPrivateRun: true } : {}), agentId: prior.agentId, agentName: prior.agentName, agentInstructions: prior.agentInstructions, input: prior.input, model: prior.model ?? session.model, attachments: prior.attachments, metadata: prior.metadata, budget: prior.budget, tools: prior.tools, skills: prior.skills, events: [event("run.started", "Resumed from a previous run")], createdAt: Date.now(), updatedAt: Date.now() }; thread.runs.push(run);
@@ -2534,7 +2573,7 @@ export function registerSdkApi(app: Hono): void {
     catch (error) { run.status = "failed"; run.error = { code: "agent_error", message: error instanceof Error ? error.message : "Agent failed" }; run.events.push(event("run.failed", run.error.message)); }
     run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await appendReliabilitySample({ ownerId: owner.userId, operation: "sdk.run", status: run.status === "completed" ? "success" : "failure", costUsd: run.cost, latencyMs: run.updatedAt - run.createdAt, at: run.updatedAt }); await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run), 201);
   });
-  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
+  app.post("/v1/threads/:threadId/runs/:runId/cancel", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId, c.req.param("threadId")); const thread = session.sdkThreads!.find((item) => item.id === c.req.param("threadId")); const run = thread?.runs.find((item) => item.id === c.req.param("runId")); if (!thread || !run) return apiError(c, 404, "not_found", "Run not found."); if (!["queued", "running"].includes(run.status)) return apiError(c, 409, "run_not_cancellable", "Only a queued or running run can be cancelled."); if (run.taskId) await cancelTask(owner.userId, run.taskId); activeRuns.get(run.id)?.abort(); run.status = "cancelled"; run.events.push(event("run.cancelled")); run.updatedAt = Date.now(); thread.updatedAt = run.updatedAt; await saveSession(owner.userId, session); await persistSdkCompanyRun(run); return c.json(runView(thread.id, run)); });
   app.get("/v1/approvals", async (c) => { const data = (await listApprovals(sdkUser(c)!.userId, 100)).filter((item) => item.status === "pending" && item.expiresAt > Date.now()).map(approvalView); return c.json({ data }); });
   app.get("/v1/tools", async (c) => {
     const query = (c.req.query("query") ?? "").trim(); const source = c.req.query("source"); const toolkit = (c.req.query("toolkit") ?? "").toLowerCase();
@@ -2947,7 +2986,7 @@ export function registerSdkApi(app: Hono): void {
   app.post("/v1/operator/route", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const candidates = Array.isArray(body.candidates) ? body.candidates.filter((item): item is { id: string; health?: any; costMultiplier?: number; latencyMultiplier?: number } => Boolean(item) && typeof item === "object" && typeof (item as Record<string, unknown>).id === "string").slice(0, 100) : []; const route = chooseReliableRoute(candidates, { requireHealthy: body.requireHealthy === true }); return route ? c.json({ route }) : apiError(c, 409, "no_healthy_route", "No eligible route is available."); });
   app.get("/v1/runs", async (c) => { const userId = sdkUser(c)!.userId; const status = c.req.query("status"); const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 50) || 50)); const data = (await listAgentRuns(userId, limit)).filter((run) => !status || run.status === status).map((run) => ({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() })); return c.json({ data }); });
   app.get("/v1/runs/:id", async (c) => { const run = await getAgentRun(sdkUser(c)!.userId, c.req.param("id")); return run ? c.json({ ...run, createdAt: new Date(run.createdAt).toISOString(), updatedAt: new Date(run.updatedAt).toISOString() }) : apiError(c, 404, "not_found", "Agent run not found."); });
-  app.get("/v1/usage", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
+  app.get("/v1/usage", async (c) => { const owner = sdkUser(c)!; const session = await getSessionWithSdkRuns(owner.userId); const files = session.sdkFiles!; const runs = session.sdkThreads!.flatMap((thread) => thread.runs); return c.json({ messages: session.totalMessages, cost: session.totalCost, files: { count: files.length, declaredBytes: files.reduce((total, file) => total + file.size, 0), available: files.filter((file) => file.status === "available").length }, runs: { count: runs.length, active: runs.filter((run) => run.status === "running").length }, tasks: { count: (await listTasks(owner.userId)).length } }); });
   app.post("/v1/webhooks", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { url?: string }; let url: URL; try { url = new URL(String(body.url ?? "")); } catch { return apiError(c, 400, "invalid_webhook", "A valid HTTPS webhook URL is required."); } if (!isSafeWebhookUrl(url)) return apiError(c, 400, "invalid_webhook", "Webhook URLs must use public HTTPS endpoints."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const secret = `whsec_${randomBytes(24).toString("base64url")}`; const hook = { id: `wh_${randomUUID()}`, url: url.toString(), secretCiphertext: sealWebhookSecret(secret), createdAt: Date.now() }; const response = { id: hook.id, url: hook.url, secret, createdAt: new Date(hook.createdAt).toISOString() }; session.sdkWebhooks!.push(hook); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
   app.get("/v1/webhooks", async (c) => { const hooks = (await getSession(sdkUser(c)!.userId)).sdkWebhooks!.filter((item) => !item.disabledAt).map(({ secretCiphertext: _secretCiphertext, ...item }) => item); return c.json({ data: hooks }); });
   app.get("/v1/webhooks/:webhookId/deliveries", async (c) => { const owner = sdkUser(c)!; const hook = (await getSession(owner.userId)).sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); const data = (await listOutbox(undefined, 100, owner.userId)).filter((item) => item.webhook?.webhookId === hook.id).map((item) => ({ id: item.id, status: item.status, attempts: item.attempts, lastError: item.lastError, createdAt: new Date(item.createdAt).toISOString(), deliveredAt: item.deliveredAt ? new Date(item.deliveredAt).toISOString() : undefined })); return c.json({ data }); });
@@ -2967,7 +3006,7 @@ export function registerSdkApi(app: Hono): void {
     if (body.decision !== "approve" && body.decision !== "deny") return apiError(c, 400, "invalid_decision", "decision must be approve or deny.");
     if (body.decision === "deny") {
       await setApprovalStatus(owner.userId, pending.id, "denied");
-      const deniedSession = await getSession(owner.userId);
+      const deniedSession = await getSessionWithSdkRuns(owner.userId);
       const deniedThread = deniedSession.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === pending.id));
       const deniedRun = deniedThread?.runs.find((run) => run.approvalId === pending.id);
       if (deniedThread && deniedRun) {
@@ -3031,7 +3070,7 @@ export function registerSdkApi(app: Hono): void {
         // the old approval/working state even though the mission was resumed.
         // This is not mission completion: the persisted mission remains the
         // source of truth for the remaining steps and final verification.
-        const handoffSession = await getSession(owner.userId);
+        const handoffSession = await getSessionWithSdkRuns(owner.userId);
         const handoffThread = handoffSession.sdkThreads?.find((item) => item.runs.some((run) => run.approvalId === approval.id));
         const handoffRun = handoffThread?.runs.find((item) => item.approvalId === approval.id);
         let handoffView: ReturnType<typeof runView> | undefined;
@@ -3052,7 +3091,7 @@ export function registerSdkApi(app: Hono): void {
             { role: "user", content: handoffRun.input, createdAt: handoffRun.createdAt },
             { role: "assistant", content: handoffRun.output, createdAt: handoffRun.updatedAt },
           ]);
-          const latestHandoffSession = await getSession(owner.userId);
+          const latestHandoffSession = await getSessionWithSdkRuns(owner.userId, handoffThread.id);
           const latestHandoffThread = latestHandoffSession.sdkThreads?.find((item) => item.id === handoffThread.id);
           const latestHandoffRun = latestHandoffThread?.runs.find((item) => item.id === handoffRun.id);
           if (latestHandoffThread && latestHandoffRun) handoffView = runView(latestHandoffThread.id, latestHandoffRun);
@@ -3061,7 +3100,7 @@ export function registerSdkApi(app: Hono): void {
         const mission = await getMission(owner.userId, resumedMission.id) ?? resumedMission;
         return c.json({ id: approval.id, status: "approved", mission, ...(handoffView ? { run: handoffView } : {}) }, 202);
       }
-      const session = await getSession(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
+      const session = await getSessionWithSdkRuns(owner.userId); const thread = session.sdkThreads!.find((item) => item.runs.some((run) => run.approvalId === approval.id));
       if (!thread) { await setApprovalStatus(owner.userId, approval.id, "denied"); return apiError(c, 409, "run_not_found", "The run that requested this approval no longer exists."); }
       const run = thread.runs.find((item) => item.approvalId === approval.id)!;
       const approvedActivity = [...run.events].reverse().find((item) => item.type === "run.tool_activity" && item.toolSlug === approval.toolSlug && item.status === "approval_required");

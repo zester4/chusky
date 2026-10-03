@@ -1,5 +1,7 @@
 -- Durable memory is separate from the hot Redis session.  Every row is scoped
 -- to an explicit memory scope and every searchable fact retains provenance.
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS chusky_memory_scopes (
   id text PRIMARY KEY,
   owner_user_id bigint NOT NULL,
@@ -61,9 +63,28 @@ CREATE TABLE IF NOT EXISTS chusky_memory_items (
   review_at timestamptz,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (owner_user_id, scope_id, memory_key, status) DEFERRABLE INITIALLY IMMEDIATE
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- Earlier drafts used a uniqueness constraint across every status, which
+-- prevented a memory key from acquiring a second historical version. Remove
+-- that legacy constraint if this migration is being repaired in place.
+DO $$
+DECLARE constraint_name text;
+BEGIN
+  SELECT c.conname INTO constraint_name
+  FROM pg_constraint c
+  WHERE c.conrelid = 'chusky_memory_items'::regclass
+    AND c.contype = 'u'
+    AND (SELECT array_agg(a.attname::text ORDER BY a.attname::text)
+         FROM unnest(c.conkey) AS k(attnum)
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum)
+        = ARRAY['memory_key','owner_user_id','scope_id','status']::text[]
+  LIMIT 1;
+  IF constraint_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE chusky_memory_items DROP CONSTRAINT %I', constraint_name);
+  END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS chusky_memory_edges (
   id text PRIMARY KEY,
@@ -106,6 +127,9 @@ CREATE TABLE IF NOT EXISTS chusky_memory_outbox (
 
 CREATE INDEX IF NOT EXISTS chusky_memory_items_scope_idx ON chusky_memory_items(scope_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS chusky_memory_items_owner_idx ON chusky_memory_items(owner_user_id, category, status, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS chusky_memory_items_one_active_key_idx ON chusky_memory_items(owner_user_id, scope_id, memory_key) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS chusky_memory_items_review_idx ON chusky_memory_items(review_at) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS chusky_memory_edges_scope_idx ON chusky_memory_edges(scope_id, status, relation);
 CREATE INDEX IF NOT EXISTS chusky_memory_outbox_ready_idx ON chusky_memory_outbox(available_at, completed_at, claimed_at);
+
+COMMIT;

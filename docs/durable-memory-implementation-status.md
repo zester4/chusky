@@ -12,7 +12,7 @@ No external memory API was added.
 
 ### Durable Neon memory model
 
-The migration in `migrations/0008_durable_memory.sql` creates tables for:
+The migration in `migrations/0007_durable_memory.sql` creates tables for:
 
 - Explicit personal, organization, team, project, client, meeting,
   conversation, and channel scopes.
@@ -69,7 +69,7 @@ The following capabilities were added:
 - TypeScript typecheck passes.
 - Production build passes.
 - Focused memory, context, routing, and native-tool tests pass.
-- Migration filename references were updated to `0008_durable_memory.sql`.
+- Migration filename references were updated to `0007_durable_memory.sql` after combining with the durable-session migrations.
 - No external memory provider was introduced.
 
 ## Production activation checklist

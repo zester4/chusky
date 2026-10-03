@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getSession, mutateSession } from "../store.js";
+import { getSession, getSessionWithSdkRuns, mutateSession } from "../store.js";
 import type { QuotaDecision } from "./contracts.js";
 
 export interface QuotaLimits { maxCallsPerDay?: number; maxCostUsdPerDay?: number; maxConcurrent?: number; }
@@ -30,7 +30,7 @@ function snapshot(session: Awaited<ReturnType<typeof getSession>>, operation: st
 
 /** Durable, owner-scoped quota decision used before starting an external run. */
 export async function checkExecutionQuota(ownerId: number, operation: string, limits: QuotaLimits = {}, now = Date.now()): Promise<QuotaDecision> {
-  const session = await getSession(ownerId);
+  const session = operation === "sdk.run" ? await getSessionWithSdkRuns(ownerId) : await getSession(ownerId);
   const { admittedCalls, cost, concurrent } = snapshot(session, operation, now);
   const { maxCalls, maxCost, maxConcurrent } = limitsOf(limits);
   const remaining = { toolCalls: Math.max(0, maxCalls - admittedCalls), costUsd: Math.max(0, maxCost - cost), concurrent: Math.max(0, maxConcurrent - concurrent) };
@@ -57,7 +57,7 @@ export async function reserveExecutionQuota(ownerId: number, operation: string, 
     const boundedTtl = Math.max(60_000, Math.min(ttlMs, 24 * 60 * 60_000));
     session.executionReservations = [...current.reservations, { id: reservationId, operation: operation.slice(0, 100), createdAt: now, expiresAt: now + boundedTtl }].slice(-100);
     return { allowed: true, reservationId, remaining: { toolCalls: Math.max(0, remaining.toolCalls - 1), costUsd: remaining.costUsd, concurrent: Math.max(0, remaining.concurrent - 1) } };
-  });
+  }, { allSdkRuns: operation === "sdk.run" });
 }
 
 export async function releaseExecutionQuota(ownerId: number, reservationId: string): Promise<void> {

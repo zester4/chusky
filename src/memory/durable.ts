@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "../lib/knowledge/vector.js";
-import { getHotMemoryBrief, setHotMemoryBrief } from "./hotCache.js";
+import { getHotMemoryBrief, invalidateHotMemoryBriefs, setHotMemoryBrief } from "./hotCache.js";
 import type { MemoryCategory, MemoryBrief, MemoryEdge, MemoryEntity, MemoryEntityType, MemoryPurpose, MemoryScopeKind, DurableMemoryRecord } from "./types.js";
 
 const memoryPool = new Map<string, Pool>();
@@ -114,6 +114,7 @@ export async function saveDurableMemory(input: {
     const inserted = await client.query(`INSERT INTO chusky_memory_items (id,owner_user_id,scope_id,source_id,entity_id,category,memory_key,value,confidence,sensitivity,status,supersedes_id,valid_until,review_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'active',$11,$12,$13,$14) RETURNING *`, [id, input.ownerUserId, scopeId, sourceId ?? null, input.entityId ?? null, input.category, bounded(input.key, 240), bounded(input.value, 20_000), Math.max(0, Math.min(1, input.confidence ?? 1)), input.sensitivity, previousId ?? null, input.expiresAt ? new Date(input.expiresAt) : null, input.reviewAt ? new Date(input.reviewAt) : null, input.metadata ?? {}]);
     await client.query(`INSERT INTO chusky_memory_outbox (memory_id,operation) VALUES ($1,'upsert')`, [id]);
     await client.query("COMMIT");
+    await invalidateHotMemoryBriefs(input.ownerUserId);
     const row = inserted.rows[0] as Record<string, unknown>;
     return rowToMemory({ ...row, scope_kind: input.scope.kind, scope_external_id: input.scope.externalId, source_type: input.source?.type, source_ref: input.source?.ref });
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
@@ -127,6 +128,7 @@ export async function forgetDurableMemory(input: { ownerUserId: number; keyOrId:
     const result = await client.query(`UPDATE chusky_memory_items SET status='deleted',updated_at=now() WHERE owner_user_id=$1 AND status='active' AND (id=$2 OR memory_key=$2) RETURNING id`, [input.ownerUserId, bounded(input.keyOrId, 240)]);
     for (const row of result.rows as Array<{ id: string }>) await client.query(`INSERT INTO chusky_memory_outbox (memory_id,operation) VALUES ($1,'delete')`, [row.id]);
     await client.query("COMMIT");
+    await invalidateHotMemoryBriefs(input.ownerUserId);
     return Boolean(result.rowCount);
   } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
 }
