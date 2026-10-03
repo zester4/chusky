@@ -1,7 +1,7 @@
 import test, { before } from "node:test";
 import assert from "node:assert/strict";
 import { nativeTool } from "../src/nativeTools.js";
-import { claimTask, claimTaskEnqueue, createTask, getTask, initStore, renewTaskLease, updateTask } from "../src/store.js";
+import { claimTask, claimTaskEnqueue, createTask, getTask, initStore, isTaskCancellationRequested, renewTaskLease, updateTask } from "../src/store.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -41,6 +41,16 @@ test("task lifecycle rejects invalid transitions and retries recoverable tasks",
   await nativeTool(userId, "CHUCK_TASK_COMPLETE", { id: task.id, result: "Resolved" });
   await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_CANCEL", { id: task.id }), /unfinished tasks/);
   await assert.rejects(() => nativeTool(userId, "CHUCK_TASK_RETRY", { id: task.id }), /failed, blocked, or cancelled/);
+});
+
+test("task cancellation uses a dedicated worker signal and retry clears it", async () => {
+  const userId = 830008;
+  const task = await nativeTool(userId, "CHUCK_TASK_CREATE", { title: "Cancel signal", objective: "Stop a running worker" }) as { id: string };
+  assert.equal(await isTaskCancellationRequested(userId, task.id), false);
+  await nativeTool(userId, "CHUCK_TASK_CANCEL", { id: task.id });
+  assert.equal(await isTaskCancellationRequested(userId, task.id), true);
+  await nativeTool(userId, "CHUCK_TASK_RETRY", { id: task.id });
+  assert.equal(await isTaskCancellationRequested(userId, task.id), false);
 });
 
 test("a task can record a concrete blocker and recover without losing its checkpoint", async () => {
