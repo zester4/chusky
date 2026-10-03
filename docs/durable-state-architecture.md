@@ -4,11 +4,29 @@ Chusky uses three stores with deliberately different responsibilities:
 
 | Store | Canonical data | Not used for |
 | --- | --- | --- |
-| Neon Postgres | Durable structured user state: conversation context, memories, asset metadata, SDK thread metadata and (after runtime cutover) individual SDK runs; later mission definitions, evidence, and audit history | File bytes, locks, leases, or short-lived delivery coordination |
-| Redis | Task leases, cancellation signals, locks, rate limits, QStash/delivery deduplication, and cache-like operational records | Long-lived conversation blobs or large audit payloads |
-| Cloudflare R2 | Private files, images, videos, transcripts, screenshots, and large provider/model payloads | Queryable application state or authorization decisions |
+| Neon Postgres | Durable source of truth for user-owned structured state: session domains, SDK threads/runs/events, reminders, recurring jobs, task definitions/results, missions/steps/evidence/events, and object metadata | File bytes, active leases, locks, or short-lived delivery coordination |
+| Redis | Transient coordination: active task leases, cancellation signals, locks, rate limits, short-lived deduplication/queue markers, and an optional bounded recent-history cache | Canonical user-owned records or unbounded histories/audit payloads |
+| Cloudflare R2 | Private files, images, videos, transcripts, screenshots, and large tool/provider/model payloads (target: encrypted at rest and in transit) | Queryable application state or authorization decisions |
 
-The existing Cloudflare D1 vault remains scoped to the vault Worker. It is not a second application database for the Railway/Node service.
+Neon is the durable authority even while a domain is being migrated. Legacy
+Redis records are migration inputs/fallbacks only; they are not a second
+long-term source of truth. A cutover must preserve owner-scoped reads and
+transactional state changes, and must not delete the Redis copy until bounded
+backfill, read/write parity, restart recovery, and rollback evidence are all
+recorded. Redis may cache recent data only when measurements show a latency
+benefit; cache entries must be bounded and safely rebuildable from Neon.
+
+Large R2 objects must be private and use the configured encryption controls.
+Neon stores their owner, object key, content hash, size, content type,
+retention/expiry policy, and access metadata. The application must authorize
+against Neon metadata before issuing a scoped R2 operation; a guessed R2 key is
+never an authorization check. Structured memory facts remain in Neon, while
+embeddings and semantic-search indexes live in the explicitly configured
+vector store and can be rebuilt from authorized facts.
+
+The existing Cloudflare D1 vault remains scoped to the vault Worker. It is not
+a second application database for the Railway/Node service; Neon remains the
+application's relational source of truth.
 
 ## Initial Neon migration
 
@@ -65,3 +83,7 @@ durable task-worker paths hydrate runs from the per-run repository. Existing
 production enablement and real-user parity are not verified by local tests.
 Mission records/evidence/event history remain a separate future migration
 because they require their own cross-store idempotency and recovery semantics.
+The same source-of-truth rule applies to reminders, recurring jobs, task
+definitions/results, and provider-event receipts: move their durable records to
+Neon, retaining only live coordination tokens and bounded delivery markers in
+Redis.
