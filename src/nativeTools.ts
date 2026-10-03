@@ -66,6 +66,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { canonicalNativeToolSlug, validateNativeToolArguments } from "./agentTools.js";
+import { searchNativeToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
@@ -157,6 +158,8 @@ export interface NativeToolRuntime {
   organizationId?: string;
   /** Exact model-visible tool catalog and safe owner connection snapshot for read-only diagnostics. */
   toolCatalog?: unknown[];
+  /** Server-side filtered catalog used only by progressive discovery. */
+  availableToolCatalog?: unknown[];
   connectedAccounts?: Array<{ id: string; toolkit: string; status: string; alias?: string; updatedAt?: string }>;
   currentRunId?: string;
   /** Executes provider outcome checks only through an active, exact read-only tool grant. */
@@ -1127,6 +1130,12 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
   }
   validateNativeToolArguments(slug, args);
   switch (slug) {
+    case "CHUCK_FIND_TOOLS": {
+      const allowed = (runtime.availableToolCatalog ?? runtime.toolCatalog)
+        ? new Set((runtime.availableToolCatalog ?? runtime.toolCatalog)!.map((tool: any) => String(tool?.function?.name ?? "").trim().toUpperCase()).filter(Boolean))
+        : undefined;
+      return { tools: searchNativeToolManifest(text(args.query, 500), args.bundle as NativeToolBundle | undefined, args.maxResults === undefined ? 5 : Number(args.maxResults), allowed), next: "The returned tools can be called on the next agent round if they are exposed by this run." };
+    }
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_TINYFISH_SEARCH": {
       if (!config.tinyFishApiKey) throw new Error("TinyFish is not configured. Set the server-only TINYFISH_API_KEY.");

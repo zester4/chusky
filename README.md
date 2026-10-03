@@ -1461,6 +1461,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `JEV_PROVIDER` | — | `openrouter` | `openrouter` reuses `OPENROUTER_API_KEY`; `typesafe` needs `JEV_API_KEY` |
 | `JEV_SURFACES` | — | `skills,composio,treg,autonomy,browser` | Jev surfaces: skills, Composio, Treg, bounded autonomy, inspected browser next-step proposals, and opt-in `native` tool exposure |
 | `JEV_NATIVE_TOOL_ROUTING` | — | `false` | With `native` enabled, select a compact native-tool schema set in enforce mode; false preserves the existing full native catalog |
+| `NATIVE_TOOL_LOADING` | — | `full` | `full` preserves all native schemas; `bundle` sends core/matched bundles and enables progressive `CHUCK_FIND_TOOLS` discovery |
 | `JEV_NATIVE_TOOL_MAX_CANDIDATES` | — | `16` | Maximum compact native candidates considered by Jev (4-32) |
 | `JEV_NATIVE_TOOL_MIN_CONFIDENCE` | — | `0.6` | Minimum Jev confidence required before native schemas are reduced |
 | `JEV_NATIVE_TOOL_MIN_PROBABILITY` | — | `0.12` | Minimum per-tool probability for a selected native schema |

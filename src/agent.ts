@@ -202,7 +202,13 @@ interface Choice {
 
 interface ChatResponse {
   choices: Choice[];
-  usage?: { cost?: number };
+  usage?: {
+    cost?: number;
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number; [key: string]: unknown };
+  };
 }
 
 // A few OpenAI-compatible providers emit their tool call in legacy DSML text
@@ -328,7 +334,7 @@ export async function readStreamingChat(res: Response, onDelta?: (text: string) 
   let content = "";
   let emittedContent = "";
   const calls = new Map<number, ToolCall>();
-  let usage: { cost?: number } | undefined;
+  let usage: ChatResponse["usage"];
   let finishReason: Choice["finish_reason"] = null;
   const consume = async (line: string) => {
     // SSE permits an optional single space after the colon. Be tolerant of
@@ -364,7 +370,13 @@ export async function readStreamingChat(res: Response, onDelta?: (text: string) 
       existing.function.arguments += call.function?.arguments ?? "";
       calls.set(index, existing);
     }
-    if (chunk.usage) usage = { cost: chunk.usage.cost };
+    if (chunk.usage) usage = {
+      cost: typeof chunk.usage.cost === "number" ? chunk.usage.cost : undefined,
+      prompt_tokens: typeof chunk.usage.prompt_tokens === "number" ? chunk.usage.prompt_tokens : undefined,
+      completion_tokens: typeof chunk.usage.completion_tokens === "number" ? chunk.usage.completion_tokens : undefined,
+      total_tokens: typeof chunk.usage.total_tokens === "number" ? chunk.usage.total_tokens : undefined,
+      prompt_tokens_details: chunk.usage.prompt_tokens_details && typeof chunk.usage.prompt_tokens_details === "object" ? chunk.usage.prompt_tokens_details : undefined,
+    };
   };
   try {
     while (true) {
@@ -2481,7 +2493,9 @@ export async function runAgent(
     deadline: routingDeadline,
     recentContext: routingRecentContext,
     sessionId: durableRunId,
+    preserveAll: Boolean(options?.taskId || options?.missionId || options?.toolAllow?.length),
   });
+  const revealedNativeTools = new Set<string>();
   routingDeadline.dispose();
   // Project skills are trusted, versioned operating guidance. Select a small
   // relevant subset before the first model call so the agent does not have to
@@ -2603,7 +2617,8 @@ export async function runAgent(
       });
       imageComposioDirectActionGuidanceAdded = true;
     }
-    const routedTools = nativeToolRoute.tools;
+    const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
+    const routedTools = [...nativeToolRoute.tools, ...revealed].filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
       : routedTools;
@@ -2661,12 +2676,15 @@ export async function runAgent(
       }
     }
     if (response.usage?.cost) totalCost += response.usage.cost;
+    if (response.usage?.prompt_tokens || response.usage?.completion_tokens) {
+      logger.info({ model: requestModel, round, promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens, cachedTokens: response.usage.prompt_tokens_details?.cached_tokens, costUsd: response.usage.cost }, "OpenRouter token usage");
+    }
 
     const choice = response.choices[0];
     if (!choice) throw new Error("No choices in OpenRouter response");
 
     const { finish_reason, message: assistantMsg } = choice;
-    await persistRun("running", "run.model_completed", undefined, { model: requestModel, round, finishReason: finish_reason ?? "unknown", hasToolCalls: Boolean(assistantMsg.tool_calls?.length) });
+    await persistRun("running", "run.model_completed", undefined, { model: requestModel, round, finishReason: finish_reason ?? "unknown", hasToolCalls: Boolean(assistantMsg.tool_calls?.length), usage: response.usage ? { promptTokens: response.usage.prompt_tokens, completionTokens: response.usage.completion_tokens, totalTokens: response.usage.total_tokens, cachedTokens: response.usage.prompt_tokens_details?.cached_tokens, costUsd: response.usage.cost } : undefined });
     const legacyToolCalls = typeof assistantMsg.content === "string" ? parseLegacyDsmlToolCalls(assistantMsg.content) : [];
     const toolCalls = assistantMsg.tool_calls ?? legacyToolCalls;
 
@@ -3129,7 +3147,7 @@ export async function runAgent(
             if (!receipt || receipt.status !== "succeeded" || receipt.receiptVerification !== "provider_read") throw new Error("Verified provider state could not be attached to a durable external-action receipt.");
             return { receiptId: receipt.id, ...(receipt.providerId ? { providerReceiptId: receipt.providerId } : {}), verificationId: verification.id, summary: `${input.toolSlug} recovery state verified using ${verifySlug}.` };
           } : undefined;
-execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
+execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, generatedImages: generatedReferenceImages, model: requestModel, historySummary: durable.summaries.slice(-2).join("\n"), onStatus, onSubagentActivity: reportSubagentActivity, getComposioToolPresentation: (toolSlug) => composioToolPresentations.get(toolSlug), parentToolCallId: call.id, approvedApprovalId: approvedForTool ? approvedApprovalId : undefined, signal, deliveryTarget: channelContext?.deliveryTarget, meetingId: options?.meetingId, sharedConversation: channelContext?.scope === "shared" && !options?.meetingId, ownerPrivateRun, userRequest: typeof userMessage === "string" ? userMessage : undefined, taskId: options?.taskId, missionId: options?.missionId, missionTimerResumed: options?.missionTimerResumed, missionWakeCheckpoint: options?.missionWakeCheckpoint, missionWakeNextAction: options?.missionWakeNextAction, tregMaxCalls: options?.tregMaxCalls, tregMaxSpendUsd: options?.tregMaxSpendUsd, organizationId: options?.organizationId, currentRunId: durableRunId, toolCatalog: modelAvailableTools, availableToolCatalog: availableTools, connectedAccounts: connectedAccountSnapshot, ...(options?.enqueueMissionTask ? { enqueueMissionTask: options.enqueueMissionTask } : {}), ...(slug === "CHUCK_MISSION_VERIFY" ? { outcomeReadAdapter: createSessionOutcomeReadAdapter(userId, sessionObj, availableTools, allow, deny, signal) } : {}), ...(executeMissionCompensation ? { executeMissionCompensation } : {}), requestTaskWait: (request) => { taskWaitRequest = request; }, requestMissionWait: (request) => { missionWaitRequest = request; } });
           if ((slug === "CHUCK_DELEGATE_SUBAGENT" || slug === "CHUCK_HANDOFF_SUBAGENT") && execResult && typeof execResult === "object") {
             const delegation = execResult as { status?: unknown; approvalId?: unknown; proposal?: { actionName?: unknown; payload?: unknown } };
             if (delegation.status === "requires_approval" && typeof delegation.approvalId === "string" && typeof delegation.proposal?.actionName === "string") {
@@ -3405,6 +3423,14 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
       });
 
       if (!toolFailed && !toolsSucceeded.includes(slug)) toolsSucceeded.push(slug);
+
+      if (!toolFailed && slug === "CHUCK_FIND_TOOLS" && execResult && typeof execResult === "object" && !Array.isArray(execResult)) {
+        const found = (execResult as { tools?: unknown }).tools;
+        if (Array.isArray(found)) for (const item of found) {
+          const foundSlug = item && typeof item === "object" && typeof (item as { slug?: unknown }).slug === "string" ? (item as { slug: string }).slug.toUpperCase() : "";
+          if (foundSlug && availableTools.some((tool) => toolSchemaName(tool) === foundSlug)) revealedNativeTools.add(foundSlug);
+        }
+      }
 
       messages.push({
         role: "tool",

@@ -35,7 +35,7 @@ function canonicalPolicySlug(slug: string): string {
 }
 
 const PRIVATE_NATIVE_TOOLS = new Set([
-  "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
+  "CHUCK_FIND_TOOLS", "CHUCK_SEARCH_SKILLS", "CHUCK_LIST_SKILL_FILES", "CHUCK_READ_SKILL_FILE", "CHUCK_LIST_CONNECTED_ACCOUNTS",
   "CHUCK_TOOL_PREFLIGHT", "CHUCK_INTEGRATION_HEALTH", "CHUCK_ARTIFACT_QA", "CHUCK_TOOL_RECOVERY",
   // Explicitly requested owner image publishing runs in the same turn. The
   // bridge still enforces ownership, validation, and the exact action schema.
@@ -220,6 +220,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
 }
 
 const STATUSES: Record<string, string> = {
+  CHUCK_FIND_TOOLS: "🧭 I’m finding the relevant tools…",
   CHUCK_SEARCH_SKILLS: "🧭 I’m bringing in the relevant guidance…",
   CHUCK_TOOL_PREFLIGHT: "🧪 I’m checking the tool and its arguments…",
   CHUCK_INTEGRATION_HEALTH: "🔌 I’m checking the connected app status…",

@@ -218,6 +218,9 @@ export const config = {
   // Native-tool schema reduction is separately opt-in. When false, Jev does
   // not change the existing model-facing native catalog.
   jevNativeToolRouting: optional("JEV_NATIVE_TOOL_ROUTING", "false") === "true",
+  // `full` preserves the legacy all-native-schema surface. `bundle` exposes
+  // core tools plus keyword/Jev-matched bundles and progressive discovery.
+  nativeToolLoading: oneOf("NATIVE_TOOL_LOADING", "full", ["full", "bundle"] as const),
   jevNativeToolMaxCandidates: boundedInt("JEV_NATIVE_TOOL_MAX_CANDIDATES", 16, 4, 32),
   jevNativeToolMinConfidence: unitInterval("JEV_NATIVE_TOOL_MIN_CONFIDENCE", 0.6),
   jevNativeToolMinProbability: unitInterval("JEV_NATIVE_TOOL_MIN_PROBABILITY", 0.12),

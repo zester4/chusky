@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import { JevClient } from "../src/decisions/jev.js";
-import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn } from "../src/decisions/nativeToolRouter.js";
+import { computeNativeToolRoute, nativeToolManifest, routeNativeToolsForTurn, searchNativeToolManifest } from "../src/decisions/nativeToolRouter.js";
 
 const mutableConfig = config as unknown as Record<string, unknown>;
 
@@ -14,6 +14,7 @@ function withConfig(overrides: Record<string, unknown>): () => void {
 
 function tools(): any[] {
   return [
+    { type: "function", function: { name: "CHUCK_FIND_TOOLS", description: "Find hidden tools", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_TOOL_PREFLIGHT", description: "Check the next tool call before execution", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_ATTENTION_STATE", description: "Read or explicitly update durable attention state and delivery preferences", parameters: { type: "object", properties: {} } } },
     { type: "function", function: { name: "CHUCK_CREATE_PDF", description: "Create a verified PDF report", parameters: { type: "object", properties: {} } } },
@@ -42,6 +43,26 @@ test("native routing is inert when Jev native routing is disabled", async () => 
     assert.equal(route.source, "fallback");
     assert.equal(route.tools, all);
   } finally { restore(); }
+});
+
+test("bundle loading exposes core plus the matched bundle instead of the full native catalog", async () => {
+  const restore = withConfig({ nativeToolLoading: "bundle", jevNativeToolRouting: false });
+  try {
+    const route = await routeNativeToolsForTurn(tools(), "Create a PDF report");
+    const names = route.tools.map((tool: any) => tool.function.name);
+    assert.ok(names.includes("CHUCK_FIND_TOOLS"));
+    assert.ok(names.includes("CHUCK_CREATE_PDF"));
+    assert.ok(names.includes("CHUCK_TOOL_PREFLIGHT"));
+    assert.ok(!names.includes("CHUCK_BROWSER"));
+    assert.ok(route.tools.length < tools().length);
+  } finally { restore(); }
+});
+
+test("native tool discovery returns bounded searchable metadata", () => {
+  const found = searchNativeToolManifest("make a spreadsheet", undefined, 3);
+  assert.ok(found.length <= 3);
+  assert.ok(found.some((item) => item.slug.includes("SPREADSHEET")));
+  assert.ok(found.every((item) => !Object.hasOwn(item, "parameters")));
 });
 
 test("Link outcome reporting is published to native routing as a shopping write tool", () => {

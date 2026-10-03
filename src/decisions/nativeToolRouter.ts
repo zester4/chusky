@@ -48,6 +48,8 @@ export type NativeToolRoute = {
   };
 };
 
+export type NativeToolSearchResult = Pick<NativeToolDescriptor, "slug" | "description" | "bundle" | "risk">;
+
 const CORE_TOOLS = new Set([
   "CHUCK_SEARCH_SKILLS",
   "CHUCK_LIST_SKILL_FILES",
@@ -154,6 +156,30 @@ function baselineRoute(tools: ToolSchema[], reason?: string): NativeToolRoute {
   };
 }
 
+function bundleFallbackRoute(tools: ToolSchema[], query: string, reason: string): NativeToolRoute {
+  const queryWords = new Set(words(query));
+  const matchedBundles = new Set<NativeToolBundle>();
+  for (const bundle of Object.keys(BUNDLE_TERMS) as NativeToolBundle[]) {
+    if (BUNDLE_TERMS[bundle].some((term) => queryWords.has(term))) matchedBundles.add(bundle);
+  }
+  const selected = new Set<string>(nativeToolManifest.filter((item) => item.alwaysAvailable || matchedBundles.has(item.bundle)).map((item) => item.slug));
+  selected.add("CHUCK_FIND_TOOLS");
+  return { tools: modelToolsForSelection(tools, selected), source: "fallback", candidateCount: tools.filter((tool) => descriptorBySlug.has(toolName(tool))).length, selected: [...selected], fallbackReason: reason };
+}
+
+export function searchNativeToolManifest(query: string, bundle?: NativeToolBundle, limit = 5, allowed?: ReadonlySet<string>): NativeToolSearchResult[] {
+  const bounded = Math.max(1, Math.min(10, Math.floor(limit) || 5));
+  const queryText = query.trim();
+  return nativeToolManifest
+    .filter((item) => !bundle || item.bundle === bundle)
+    .filter((item) => !allowed || allowed.has(item.slug))
+    .map((item) => ({ item, score: relevance(queryText, item) }))
+    .filter((entry) => !queryText || entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.item.slug.localeCompare(b.item.slug))
+    .slice(0, bounded)
+    .map(({ item }) => ({ slug: item.slug, description: item.description, bundle: item.bundle, risk: item.risk }));
+}
+
 function candidateSet(tools: ToolSchema[], query: string): { candidates: NativeToolDescriptor[]; matched: boolean } {
   const available = tools.map((tool) => descriptorBySlug.get(toolName(tool))).filter((item): item is NativeToolDescriptor => Boolean(item));
   const scored = available
@@ -219,13 +245,18 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   signal?: AbortSignal;
   recentContext?: string;
   sessionId?: string;
+  preserveAll?: boolean;
 } = {}): Promise<NativeToolRoute> {
   const baseline = baselineRoute(tools);
+  if (config.nativeToolLoading === "bundle" && !options.preserveAll) {
+    const quick = candidateSet(tools, [query, options.recentContext].filter(Boolean).join("\n"));
+    if (!quick.matched || quick.candidates.length < 2) return bundleFallbackRoute(tools, query, "bundle_no_native_candidate_set");
+  }
   const availableNative = tools.filter((tool) => descriptorBySlug.has(toolName(tool)));
   if (!availableNative.length) return baseline;
   const routingContext = [query, options.recentContext].filter(Boolean).join("\n");
   const candidates = candidateSet(tools, routingContext);
-  if (!candidates.matched || candidates.candidates.length < 2) return { ...baseline, fallbackReason: "no_native_candidate_set" };
+  if (!candidates.matched || candidates.candidates.length < 2) return config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_no_native_candidate_set") : { ...baseline, fallbackReason: "no_native_candidate_set" };
   const client = options.client ?? jevClient();
   const state = {
     request: jevText(query, 3_000),
@@ -246,7 +277,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
   const best = ranking.ranked[0];
   if (!best || ranking.confidence < config.jevNativeToolMinConfidence || ranking.none >= ranking.confidence) {
     return {
-      ...baseline,
+      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_low_confidence_or_none") : baseline),
       candidateCount: candidates.candidates.length,
       fallbackReason: "low_confidence_or_none",
       telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
@@ -258,7 +289,7 @@ export async function computeNativeToolRoute(query: string, tools: ToolSchema[],
     .map((item) => item.id);
   if (!selected.length) {
     return {
-      ...baseline,
+      ...(config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, routingContext, "bundle_no_selected_native_tool") : baseline),
       candidateCount: candidates.candidates.length,
       fallbackReason: "no_selected_native_tool",
       telemetry: { latencyMs: ranking.latencyMs, costUsd: ranking.costUsd, ranked: ranking.ranked },
@@ -294,11 +325,13 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   recentContext?: string;
   sessionId?: string;
   deadline?: RoutingDeadline;
+  preserveAll?: boolean;
 } = {}): Promise<NativeToolRoute> {
   const baseline = baselineRoute(tools);
+  if (config.nativeToolLoading === "bundle" && !options.preserveAll && (!query.trim() || !config.jevNativeToolRouting || !jevEnabled("native"))) return bundleFallbackRoute(tools, query, "bundle_keyword_fallback");
   if (!query.trim() || !config.jevNativeToolRouting || !jevEnabled("native")) return baseline;
   const client = options.client ?? jevClient();
-  if (!client.available()) return { ...baseline, fallbackReason: "jev_unavailable" };
+  if (!client.available()) return config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, query, "bundle_jev_unavailable") : { ...baseline, fallbackReason: "jev_unavailable" };
   const mode = config.jevMode;
   const run = computeNativeToolRoute(query, tools, {
     ...options,
@@ -325,7 +358,7 @@ export async function routeNativeToolsForTurn(tools: ToolSchema[], query: string
   const { value, failure } = await awaitRoute(run, options.deadline ? options.deadline.remaining() : config.jevTurnBudgetMs);
   if (!value || value.source !== "jev") {
     log(value, false, failure ?? value?.fallbackReason ?? "fallback");
-    return { ...baseline, ...(failure ? { fallbackReason: failure } : value?.fallbackReason ? { fallbackReason: value.fallbackReason } : {}) };
+    return config.nativeToolLoading === "bundle" && !options.preserveAll ? bundleFallbackRoute(tools, query, failure ?? value?.fallbackReason ?? "bundle_fallback") : { ...baseline, ...(failure ? { fallbackReason: failure } : value?.fallbackReason ? { fallbackReason: value.fallbackReason } : {}) };
   }
   log(value, true);
   return value;
