@@ -25,7 +25,7 @@ import {
   type TaskStatus, type MissionStatus, type MissionBudget, type MissionWorkSchedule,
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
-  listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
+  listVideoJobs, getVideoJob, updateVideoJob, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
   searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff, updateBrowserHandoffResolution,
   getTregSpend, saveTregSpend, saveTregReceipt, listTregReceipts, acquireTregSpendLock, releaseTregSpendLock, saveTregOAuthState, getTregOAuthState, removeTregOAuthState,
 } from "./store.js";
@@ -60,6 +60,8 @@ import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, stripSupervisorOwnedMissionStepTools, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
+import { listImageModels } from "./imageModels.js";
+import { listVideoModels } from "./videoModels.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
@@ -1480,6 +1482,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       return { imageAssetSaved: true, asset: modelVisibleImageAsset(asset) };
     }
     case "CHUCK_SEARCH_IMAGE_ASSETS": return (await searchImageAssets(userId, args.query ? text(args.query) : undefined, args.limit === undefined ? 5 : Number(args.limit))).map(modelVisibleImageAsset);
+    case "CHUCK_LIST_IMAGE_MODELS": return listImageModels(runtime.signal);
     case "CHUCK_GET_IMAGE_ASSET": {
       const asset = await getImageAsset(userId, text(args.id));
       if (!asset) return { found: false };
@@ -1656,6 +1659,14 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const limit = args.limit === undefined ? 5 : Math.max(1, Math.min(10, Math.floor(Number(args.limit))));
       const jobs = await listVideoJobs(userId);
       return jobs.filter((job) => !id || job.id === id).slice(0, limit);
+    }
+    case "CHUCK_LIST_VIDEO_MODELS": return listVideoModels(runtime.signal);
+    case "CHUCK_VIDEO_CANCEL": {
+      const id = text(args.id);
+      const job = await getVideoJob(userId, id);
+      if (!job) throw new Error("Video job not found or not owned by you");
+      if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") return job;
+      return updateVideoJob(userId, id, { status: "cancelled", error: "Cancelled by owner" });
     }
     case "CHUCK_TASK_CREATE": return createTask(userId, { id: taskCreateIdempotencyId(userId, args, runtime), title: text(args.title), objective: text(args.objective), workspaceId: args.workspaceId ? text(args.workspaceId) : undefined });
     case "CHUCK_TASK_LIST": return listTasks(userId, taskStatuses(args.statuses));

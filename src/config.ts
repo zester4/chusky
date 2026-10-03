@@ -140,7 +140,9 @@ export const config = {
   recallTranscriptEncryptionKey: optional("RECALL_TRANSCRIPT_ENCRYPTION_KEY", ""),
   // Smooth bursty proactive meeting turns in Redis without expiring participation.
   recallCopilotMinIntervalSeconds: boundedInt("RECALL_COPILOT_MIN_INTERVAL_SECONDS", 4, 1, 120),
-  imageModel: optional("IMAGE_MODEL", "x-ai/grok-imagine-image-2.0"),
+  // `auto` selects a curated image model from live OpenRouter capabilities.
+  // Set a concrete model ID to pin generation for a deployment.
+  imageModel: optional("IMAGE_MODEL", "auto"),
   qstashToken: optional("QSTASH_TOKEN", ""),
   qstashUrl: optional("QSTASH_URL", ""),
   qstashCurrentSigningKey: optional("QSTASH_CURRENT_SIGNING_KEY", ""),
@@ -153,7 +155,8 @@ export const config = {
   videoWorkflowUrl: optional("VIDEO_WORKFLOW_URL", ""),
   reminderWorkflowUrl: optional("REMINDER_WORKFLOW_URL", ""),
   jobWorkflowUrl: optional("JOB_WORKFLOW_URL", ""),
-  videoModel: optional("VIDEO_MODEL", "bytedance/seedance-2.0-mini"),
+  // `auto` routes across the approved video families using live capabilities.
+  videoModel: optional("VIDEO_MODEL", "auto"),
 
   // Optional third-party MCP clients. The registry is server-side JSON so
   // account ownership and bearer secrets never enter model context or chat
@@ -414,14 +417,20 @@ CAPABILITIES (USE TOOLS; DO NOT ONLY DESCRIBE THEM)
 - For image work, use CHUCK_GENERATE_IMAGE with mode=edit to modify the
   current image, mode=reference_variations to create controlled variants,
   references to reuse current/generated/saved image assets, and count for a
-  deliberate set of variants. Check the active IMAGE_MODEL's capabilities
-  before sending optional aspectRatio, resolution, size, quality, outputFormat,
-  background, or seed controls; the default x-ai/grok-imagine-image-2.0 model
-  supports 1K/2K resolution, the documented aspect ratios, low/medium quality,
-  and up to three reference images. The runtime filters unsupported fields and
-  expresses composition guidance in the prompt. For video, use references for visual guidance or
+  deliberate set of variants. Leave model unset for capability-aware routing,
+  or choose a preferred model when the task clearly needs Qwen text rendering,
+  Recraft branding, Seedream product consistency, GPT Image 2 high-fidelity
+  production assets, FLUX.3 premium references/4K, Muse composition, Krea
+  exploration, or Grok fast general generation. The
+  runtime reads the live OpenRouter image catalog, filters unsupported fields,
+  enforces reference/output limits, and expresses unsupported size controls as
+  composition guidance. For video, use references for visual guidance or
   frameMode with a reference when the image must become an exact first or last
-  frame.
+  frame. For demanding video requests, use CHUCK_LIST_VIDEO_MODELS before
+  generation. The approved runtime families are Seedance, Wan, Hailuo, FLUX,
+  HeyGen, and Veo; the runtime validates duration, resolution, aspect ratio,
+  frame mode, and audio support against the live model catalog before
+  submission.
  - Choose media destination deliberately: for a standalone image request,
   leave destination unset (or use telegram) and deliver the result through the
   active channel. Do not route a standalone image through Daytona. Use

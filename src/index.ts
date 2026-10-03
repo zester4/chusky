@@ -2114,7 +2114,7 @@ async function main(): Promise<void> {
     }, { url: triggerWorkflowUrl() }));
 
     app.post("/workflows/video", serveWorkflow(async (workflow) => {
-      const payload = workflow.requestPayload as { userId: number; prompt: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string; duration?: number; aspectRatio?: string; resolution?: string; size?: string; generateAudio?: boolean; frameMode?: "reference" | "first_frame" | "last_frame"; inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }> };
+      const payload = workflow.requestPayload as { userId: number; prompt: string; model?: string; destination?: "telegram" | "daytona" | "both"; workspacePath?: string; jobId?: string; duration?: number; aspectRatio?: string; resolution?: string; size?: string; generateAudio?: boolean; frameMode?: "reference" | "first_frame" | "last_frame"; inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }> };
       try {
       const destination = payload.destination ?? "telegram";
       const workspacePath = payload.workspacePath ? safeDaytonaPath(payload.workspacePath, "workspacePath") : undefined;
@@ -2124,7 +2124,7 @@ async function main(): Promise<void> {
           method: "POST",
           headers: { Authorization: `Bearer ${config.openRouterApiKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: config.videoModel,
+            model: payload.model ?? config.videoModel,
             prompt: payload.prompt,
             ...(payload.duration !== undefined ? { duration: payload.duration } : {}),
             ...(payload.aspectRatio ? { aspect_ratio: payload.aspectRatio } : {}),
@@ -2146,6 +2146,7 @@ async function main(): Promise<void> {
       const pollingUrl = videoPollingUrl(submitted as VideoStatusResponse, String(videoId));
       for (let attempt = 0; attempt < 30; attempt++) {
         await workflow.sleep(`wait-${attempt}`, 20);
+        if (payload.jobId && (await getVideoJob(payload.userId, payload.jobId))?.status === "cancelled") return { cancelled: true };
         const status = await workflow.run(`poll-${attempt}`, async () => {
           const res = await fetch(pollingUrl, { headers: { Authorization: `Bearer ${config.openRouterApiKey}` } });
           // OpenRouter can briefly return 404 while the asynchronous job is
@@ -2174,7 +2175,7 @@ async function main(): Promise<void> {
             await bot.api.sendMessage(chatId, `📁 Video saved in Daytona at <code>${xmlEscape(saved.path)}</code>.`, { parse_mode: "HTML" });
           }
           if (payload.jobId) await updateVideoJob(payload.userId, payload.jobId, { status: "completed", resultPath: saved?.path, completedAt: Date.now() });
-          posthog?.capture({ distinctId: String(payload.userId), event: "video_generated", properties: { destination, model: config.videoModel, size_bytes: bytes.length, delivered_to_telegram: Boolean(chatId && (destination === "telegram" || destination === "both")), saved_to_daytona: Boolean(saved) } });
+          posthog?.capture({ distinctId: String(payload.userId), event: "video_generated", properties: { destination, model: payload.model ?? config.videoModel, size_bytes: bytes.length, delivered_to_telegram: Boolean(chatId && (destination === "telegram" || destination === "both")), saved_to_daytona: Boolean(saved) } });
           return { delivered: Boolean(chatId && (destination === "telegram" || destination === "both")), saved: saved ? { path: saved.path, bytes: saved.bytes } : undefined };
         }
         if (state === "failed" || state === "error" || state === "cancelled") {
