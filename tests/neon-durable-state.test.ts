@@ -39,6 +39,7 @@ class FakePool {
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
     if (this.failRead) throw new Error("database unavailable");
+    if (text.includes("INSERT INTO chusky_mission_owner_state")) return { rows: [{ owner_user_id: values?.[0] }] as never[] };
     if (text.includes("pg_get_constraintdef")) return { rows: this.schemaDefinition ? [{ definition: this.schemaDefinition }] as never[] : [] as never[] };
     if (text.includes("INSERT INTO chusky_object_metadata")) {
       const [owner, id, kind, key, status, contentType, size, sha256, encryptionVersion, expiresAt, metadata, createdAt, updatedAt] = values ?? [];
@@ -135,6 +136,32 @@ test("Neon mission repository checks both canonical mission and event tables", a
   await state.assertMissionSchema();
   assert.match(pool.calls[0]?.text ?? "", /FROM chusky_mission LIMIT 0/);
   assert.match(pool.calls[1]?.text ?? "", /FROM chusky_mission_event LIMIT 0/);
+  assert.match(pool.calls[2]?.text ?? "", /FROM chusky_mission_owner_state LIMIT 0/);
+});
+
+test("Neon mission listing uses a validated stable keyset cursor", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.listMissions(42, 250, "mis_cursor_1");
+  assert.match(pool.calls[0]?.text ?? "", /mission_id > \$2\) ORDER BY mission_id LIMIT \$3/);
+  assert.deepEqual(pool.calls[0]?.values, [42, "mis_cursor_1", 250]);
+  await assert.rejects(() => state.listMissions(42, 250, "bad-cursor"), /pagination cursor is invalid/);
+});
+
+test("mission backfill can defer embedded events until the full ordered history is copied", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.createMission(missionRecord(), []);
+  assert.equal(pool.client.calls.some((call) => call.text.includes("INSERT INTO chusky_mission_event")), false);
+});
+
+test("mission owner cutover marker accepts only verified digest metadata", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.markMissionOwnerMigrated(42, 2, 7, "a".repeat(64));
+  assert.deepEqual(pool.calls[0]?.values, [42, 2, 7, "a".repeat(64)]);
+  assert.match(pool.calls[0]?.text ?? "", /ON CONFLICT \(owner_user_id\) DO NOTHING/);
+  await assert.rejects(() => state.markMissionOwnerMigrated(42, 2, 7, "not-a-digest"), /verification metadata is invalid/);
 });
 
 test("Neon mission creation atomically stores owner record and initial event", async () => {

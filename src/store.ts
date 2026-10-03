@@ -5,7 +5,8 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
-import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
@@ -1607,6 +1608,7 @@ export interface ChannelInboundEventRecord {
 }
 
 interface Backend {
+  close(): Promise<void>;
   getSession(userId: number): Promise<UserSession>;
   saveSession(userId: number, s: UserSession): Promise<void>;
   readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined>;
@@ -1695,8 +1697,10 @@ interface Backend {
   claimTaskEnqueue(userId: number, id: string, token: string, claimMs: number): Promise<TaskRecord | undefined>;
   renewTaskLease(userId: number, id: string, leaseToken: string, leaseMs: number): Promise<TaskRecord | undefined>;
   getMissions(userId: number): Promise<MissionRecord[]>;
+  getMission(userId: number, id: string): Promise<MissionRecord | undefined>;
   saveMissions(userId: number, missions: MissionRecord[]): Promise<void>;
   createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord>;
+  migrateMissionOwnerToNeon(userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }>;
   registerMissionOwner(userId: number): Promise<void>;
   listMissionOwnerIds(): Promise<number[]>;
   compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined>;
@@ -1931,7 +1935,19 @@ function boundedAgentRun(record: AgentRunRecord): AgentRunRecord {
 // ── Redis ─────────────────────────────────────────────────────────────────────
 class RedisBackend implements Backend {
   private readonly durableStorageMetrics = { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 };
-  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false) {}
+  constructor(private r: Redis, private readonly durableState?: NeonDurableState, private readonly durableSdkRunsEnabled = false, private readonly durableStateMissionsEnabled = false) {}
+
+  private async missionOwnerUsesNeon(userId: number): Promise<boolean> {
+    return this.durableStateMissionsEnabled && Boolean(this.durableState) && await this.durableState!.isMissionOwnerMigrated(userId);
+  }
+  async close(): Promise<void> {
+    try { await this.r.quit(); }
+    finally { await this.durableState?.close(); }
+  }
+  private durableMissionRecord(mission: MissionRecord): DurableMissionRecord {
+    return { ownerUserId: mission.userId, missionId: mission.id, status: mission.status, ...(mission.idempotencyKey ? { idempotencyKey: mission.idempotencyKey } : {}), payload: mission as unknown as Record<string, unknown>, version: mission.version, createdAt: mission.createdAt, updatedAt: mission.updatedAt };
+  }
+  private missionFromDurable(record: DurableMissionRecord): MissionRecord { return normalizeMission(record.payload as unknown as MissionRecord); }
 
   getDurableStateHealth(): Promise<DurableStateStatus> {
     return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
@@ -2837,6 +2853,22 @@ class RedisBackend implements Backend {
     return undefined;
   }
   async getMissions(userId: number): Promise<MissionRecord[]> {
+    if (await this.missionOwnerUsesNeon(userId)) {
+      const records: DurableMissionRecord[] = [];
+      let afterMissionId: string | undefined;
+      for (;;) {
+        const page = await this.durableState!.listMissions(userId, 500, afterMissionId);
+        records.push(...page);
+        if (page.length < 500) break;
+        const lastId = page.at(-1)?.missionId;
+        if (!lastId || lastId === afterMissionId) throw new Error("Durable mission pagination did not advance.");
+        afterMissionId = lastId;
+      }
+      return records.map((record) => this.missionFromDurable(record));
+    }
+    return this.readRedisMissions(userId);
+  }
+  private async readRedisMissions(userId: number): Promise<MissionRecord[]> {
     const raw = await this.r.get(this.missionk(userId));
     if (!raw) return [];
     try {
@@ -2845,11 +2877,20 @@ class RedisBackend implements Backend {
       return Array.isArray(parsed) ? parsed as MissionRecord[] : [];
     } catch { return []; }
   }
+  async getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
+    if (await this.missionOwnerUsesNeon(userId)) {
+      const record = await this.durableState!.readMission(userId, id);
+      return record ? this.missionFromDurable(record) : undefined;
+    }
+    return (await this.readRedisMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
+  }
   async saveMissions(userId: number, missions: MissionRecord[]): Promise<void> {
+    if (await this.missionOwnerUsesNeon(userId)) throw new Error("Bulk mission replacement is disabled after Neon owner cutover.");
     // Mission state is durable control-plane state and must outlive chat history.
     await this.r.set(this.missionk(userId), JSON.stringify(missions.slice(-100)));
   }
   async createMissionIfAbsent(userId: number, mission: MissionRecord): Promise<MissionRecord> {
+    if (await this.missionOwnerUsesNeon(userId)) return this.missionFromDurable(await this.durableState!.createMission(this.durableMissionRecord(mission)));
     const key = this.missionk(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.r.watch(key);
@@ -2868,12 +2909,44 @@ class RedisBackend implements Backend {
     }
     throw new Error("Mission creation changed concurrently; please retry");
   }
+  async migrateMissionOwnerToNeon(userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }> {
+    if (!this.durableState) throw new Error("DURABLE_STATE_ENABLED is required for mission migration.");
+    const lockToken = randomUUID();
+    const lockKey = `mission-migration:${userId}`;
+    if (!await this.acquireKeyLock(lockKey, lockToken, 3600)) throw new Error("Another migration is already handling this mission owner.");
+    try {
+      const sourceMissions = (await this.readRedisMissions(userId)).map(normalizeMission).sort((a, b) => a.id.localeCompare(b.id));
+      const sourceEvents = new Map<string, MissionEventRecord[]>();
+      for (const mission of sourceMissions) sourceEvents.set(mission.id, await this.readRedisMissionEvents(userId, mission));
+      return await backfillMissionSnapshotToNeon(
+        userId,
+        sourceMissions,
+        sourceEvents,
+        this.durableState,
+        (mission) => this.durableMissionRecord(mission),
+        () => this.renewKeyLock(lockKey, lockToken, 3600),
+      );
+    } finally {
+      await this.releaseKeyLock(lockKey, lockToken);
+    }
+  }
   async registerMissionOwner(userId: number): Promise<void> { await this.r.sadd(this.missionOwnersKey, String(userId)); }
   async listMissionOwnerIds(): Promise<number[]> {
     const values = await this.r.smembers(this.missionOwnersKey);
-    return values.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value >= 0).sort((a, b) => a - b);
+    const redisOwners = values.map((value) => Number(value)).filter((value) => Number.isSafeInteger(value) && value >= 0);
+    const neonOwners = this.durableStateMissionsEnabled ? await this.durableState?.listMissionOwnerIds() ?? [] : [];
+    return [...new Set([...redisOwners, ...neonOwners])].sort((a, b) => a - b);
   }
   async compareAndUpdateMission(userId: number, id: string, expectedVersion: number, next: MissionRecord): Promise<MissionRecord | undefined> {
+    if (await this.missionOwnerUsesNeon(userId)) {
+      const current = await this.durableState!.readMission(userId, id);
+      if (!current || current.version !== expectedVersion) return undefined;
+      const existingEvents = Array.isArray(current.payload.events) ? current.payload.events as MissionEventRecord[] : [];
+      const known = new Set(existingEvents.map((event) => event.id));
+      const newEvents = next.events.filter((event) => !known.has(event.id)) as DurableMissionEvent[];
+      const saved = await this.durableState!.compareAndUpdateMission(userId, id, expectedVersion, this.durableMissionRecord(next), newEvents);
+      return saved ? this.missionFromDurable(saved) : undefined;
+    }
     const key = this.missionk(userId);
     for (let attempt = 0; attempt < 3; attempt++) {
       await this.r.watch(key);
@@ -2895,18 +2968,36 @@ class RedisBackend implements Backend {
   }
   async appendMissionEvents(userId: number, missionId: string, events: MissionEventRecord[]): Promise<void> {
     if (!events.length) return;
+    if (await this.missionOwnerUsesNeon(userId)) {
+      await this.durableState!.appendMissionEvents(userId, missionId, events as DurableMissionEvent[]);
+      return;
+    }
     const key = this.missionEventsKey(userId, missionId);
     await this.r.rpush(key, ...events.map((event) => JSON.stringify(event)));
     await this.r.ltrim(key, -5000, -1);
   }
   async listMissionEvents(userId: number, missionId: string, limit: number): Promise<MissionEventRecord[]> {
-    const raw = await this.r.lrange(this.missionEventsKey(userId, missionId), -Math.max(1, Math.min(5000, Math.floor(limit))), -1);
+    if (await this.missionOwnerUsesNeon(userId)) return await this.durableState!.listMissionEvents(userId, missionId, limit) as MissionEventRecord[];
+    const boundedLimit = Math.max(1, Math.min(5000, Math.floor(limit) || 1));
+    const raw = await this.r.lrange(this.missionEventsKey(userId, missionId), -boundedLimit, -1);
     return (raw ?? []).flatMap((value) => {
       try {
         const event = typeof value === "string" ? JSON.parse(value) as MissionEventRecord : value as MissionEventRecord;
         return event && typeof event.id === "string" ? [event] : [];
       } catch { return []; }
     });
+  }
+  private async readRedisMissionEvents(userId: number, mission: MissionRecord): Promise<MissionEventRecord[]> {
+    const raw = await this.r.lrange(this.missionEventsKey(userId, mission.id), -5000, -1);
+    const persisted = (raw ?? []).flatMap((value) => {
+      try {
+        const event = typeof value === "string" ? JSON.parse(value) as MissionEventRecord : value as MissionEventRecord;
+        return event && typeof event.id === "string" ? [event] : [];
+      } catch { return []; }
+    });
+    const merged = new Map(persisted.map((event) => [event.id, event]));
+    for (const event of mission.events ?? []) merged.set(event.id, event);
+    return [...merged.values()];
   }
   async getReminders(userId: number): Promise<ReminderRecord[]> {
     const raw = await this.r.get(this.reminderk(userId));
@@ -3510,6 +3601,8 @@ class MemoryBackend implements Backend {
   private approvals = new Map<string, ApprovalRecord>();
   private blandProviderCalls = new Map<string, { userId: number; callId: string; expiresAt: number }>();
 
+  async close(): Promise<void> {}
+
   async getSession(userId: number) {
     const session = this.sessions.get(userId);
     return session ? structuredClone(session) : fresh();
@@ -3999,6 +4092,7 @@ class MemoryBackend implements Backend {
     tasks[index] = next; this.tasks.set(userId, tasks); return next;
   }
   async getMissions(userId: number) { return this.missions.get(userId) ?? []; }
+  async getMission(userId: number, id: string) { return (this.missions.get(userId) ?? []).find((mission) => mission.id === id); }
   async saveMissions(userId: number, missions: MissionRecord[]) { this.missions.set(userId, missions); }
   async createMissionIfAbsent(userId: number, mission: MissionRecord) {
     this.missionOwners.add(userId);
@@ -4008,6 +4102,9 @@ class MemoryBackend implements Backend {
     this.missions.set(userId, [...missions, mission].slice(-100));
     this.missionEvents.set(`${userId}:${mission.id}`, mission.events.slice(-5000));
     return mission;
+  }
+  async migrateMissionOwnerToNeon(_userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }> {
+    throw new Error("Mission migration requires the Redis production store and configured Neon durable state.");
   }
   async registerMissionOwner(userId: number) { this.missionOwners.add(userId); }
   async listMissionOwnerIds() { return [...this.missionOwners].sort((a, b) => a - b); }
@@ -4312,9 +4409,13 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableObjectCatalogEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_OBJECT_CATALOG_ENABLED=true.");
   }
+  if (!options.memoryOnly && config.durableStateMissionsEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_MISSIONS_ENABLED=true.");
+  }
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
+  if (!options.memoryOnly && config.durableStateMissionsEnabled) await durableState!.assertMissionSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4331,7 +4432,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
       });
       await r.connect();
       await r.ping();
-      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled);
+      backend = new RedisBackend(r, durableState, config.durableStateSdkRunsEnabled, config.durableStateMissionsEnabled);
       logger.info("Store: Redis connected");
       return;
     } catch (e) {
@@ -4345,6 +4446,11 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   } else {
     logger.info("Store: using in-memory (set REDIS_URL for persistence)");
   }
+  backend = new MemoryBackend();
+}
+
+export async function closeStore(): Promise<void> {
+  await backend.close();
   backend = new MemoryBackend();
 }
 
@@ -6891,7 +6997,8 @@ export async function listMissions(userId: number, statuses?: MissionStatus[]): 
 }
 
 export async function getMission(userId: number, id: string): Promise<MissionRecord | undefined> {
-  return (await backend.getMissions(userId)).map(normalizeMission).find((mission) => mission.id === id);
+  const mission = await backend.getMission(userId, id);
+  return mission ? normalizeMission(mission) : undefined;
 }
 
 /**
@@ -7108,6 +7215,10 @@ export async function updateMissionControl(userId: number, id: string, input: { 
 /** Owners with durable mission state; used by the recovery sweeper. */
 export async function listMissionOwnerIds(): Promise<number[]> {
   return backend.listMissionOwnerIds();
+}
+
+export async function migrateMissionOwnerToNeon(userId: number): Promise<{ status: "migrated" | "already_migrated"; missionCount: number; eventCount: number }> {
+  return backend.migrateMissionOwnerToNeon(userId);
 }
 
 /** Resume the same durable task after its exact persisted timer has elapsed. */

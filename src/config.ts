@@ -654,6 +654,8 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateMigrationDatabaseUrl: optional("DURABLE_STATE_MIGRATION_DATABASE_URL", ""),
   // Per-run SDK records require migration 0002; cut over independently after it is applied.
   durableStateSdkRunsEnabled: optional("DURABLE_STATE_SDK_RUNS_ENABLED", "false") === "true",
+  // Neon is canonical per owner only after that owner's mission backfill marker exists.
+  durableStateMissionsEnabled: optional("DURABLE_STATE_MISSIONS_ENABLED", "false") === "true",
   // Opt-in Neon object catalog for verified R2 assets; requires migration 0008.
   durableObjectCatalogEnabled: optional("DURABLE_OBJECT_CATALOG_ENABLED", "false") === "true",
   // Durable memory uses the same Neon database as Better Auth by default. A

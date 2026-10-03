@@ -401,6 +401,34 @@ export class NeonDurableState {
       "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission LIMIT 0");
     await this.measuredQuery(this.database,
       "SELECT event_order, owner_user_id, mission_id, event_id, event_type, occurred_at, payload FROM chusky_mission_event LIMIT 0");
+    await this.measuredQuery(this.database,
+      "SELECT owner_user_id, mission_count, event_count, content_sha256, migrated_at FROM chusky_mission_owner_state LIMIT 0");
+  }
+
+  async isMissionOwnerMigrated(userId: number): Promise<boolean> {
+    assertUserId(userId);
+    const result = await this.measuredQuery<{ owner_user_id: string | number }>(this.database,
+      "SELECT owner_user_id FROM chusky_mission_owner_state WHERE owner_user_id = $1", [userId]);
+    return result.rows.length > 0;
+  }
+
+  /** Record cutover only after an external migration pass has verified counts and digest. */
+  async markMissionOwnerMigrated(userId: number, missionCount: number, eventCount: number, contentSha256: string): Promise<void> {
+    assertUserId(userId);
+    if (!Number.isSafeInteger(missionCount) || missionCount < 0 || !Number.isSafeInteger(eventCount) || eventCount < 0 || !/^[a-f0-9]{64}$/.test(contentSha256)) {
+      throw new Error("Mission migration verification metadata is invalid.");
+    }
+    const result = await this.measuredQuery<{ owner_user_id: string | number }>(this.database,
+      `INSERT INTO chusky_mission_owner_state (owner_user_id, mission_count, event_count, content_sha256)
+       VALUES ($1, $2, $3, $4) ON CONFLICT (owner_user_id) DO NOTHING RETURNING owner_user_id`,
+      [userId, missionCount, eventCount, contentSha256]);
+    if (result.rows.length) return;
+    const existing = await this.measuredQuery<{ mission_count: number; event_count: string | number; content_sha256: string }>(this.database,
+      "SELECT mission_count, event_count, content_sha256 FROM chusky_mission_owner_state WHERE owner_user_id = $1", [userId]);
+    const row = existing.rows[0];
+    if (!row || Number(row.mission_count) !== missionCount || Number(row.event_count) !== eventCount || row.content_sha256 !== contentSha256) {
+      throw new Error("Mission owner migration marker conflicts with previously verified data.");
+    }
   }
 
   async readMission(userId: number, missionId: string): Promise<DurableMissionRecord | undefined> {
@@ -412,12 +440,13 @@ export class NeonDurableState {
     return result.rows[0] ? toDurableMission(result.rows[0]) : undefined;
   }
 
-  async listMissions(userId: number, limit = 100): Promise<DurableMissionRecord[]> {
+  async listMissions(userId: number, limit = 100, afterMissionId?: string): Promise<DurableMissionRecord[]> {
     assertUserId(userId);
     const boundedLimit = Number.isSafeInteger(limit) ? Math.max(1, Math.min(500, limit)) : 100;
+    if (afterMissionId !== undefined && !/^mis_[A-Za-z0-9_-]{1,160}$/.test(afterMissionId)) throw new Error("Durable mission pagination cursor is invalid.");
     const result = await this.measuredQuery<MissionRow>(this.database,
-      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 ORDER BY updated_at DESC, mission_id LIMIT $2",
-      [userId, boundedLimit]);
+      "SELECT owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at FROM chusky_mission WHERE owner_user_id = $1 AND ($2::text IS NULL OR mission_id > $2) ORDER BY mission_id LIMIT $3",
+      [userId, afterMissionId ?? null, boundedLimit]);
     return result.rows.map(toDurableMission);
   }
 
@@ -427,8 +456,10 @@ export class NeonDurableState {
     return result.rows.map((row) => Number(row.owner_user_id)).filter((id) => Number.isSafeInteger(id) && id >= 0);
   }
 
-  async createMission(record: DurableMissionRecord): Promise<DurableMissionRecord> {
+  async createMission(record: DurableMissionRecord, initialEvents?: readonly DurableMissionEvent[]): Promise<DurableMissionRecord> {
     validateMissionRecord(record);
+    const events = initialEvents ?? (Array.isArray(record.payload.events) ? record.payload.events as DurableMissionEvent[] : []);
+    validateMissionEvents(events);
     const client = await this.database.connect();
     try {
       await this.measuredQuery(client, "BEGIN");
@@ -439,7 +470,7 @@ export class NeonDurableState {
          RETURNING owner_user_id, mission_id, status, idempotency_key, payload, version, created_at, updated_at`,
         [record.ownerUserId, record.missionId, record.status, record.idempotencyKey ?? null, JSON.stringify(record.payload), record.version, record.createdAt, record.updatedAt]);
       if (inserted.rows[0]) {
-        await this.insertMissionEvents(client, record.ownerUserId, record.missionId, Array.isArray(record.payload.events) ? record.payload.events as DurableMissionEvent[] : []);
+        await this.insertMissionEvents(client, record.ownerUserId, record.missionId, events);
         await this.measuredQuery(client, "COMMIT");
         return toDurableMission(inserted.rows[0]);
       }
