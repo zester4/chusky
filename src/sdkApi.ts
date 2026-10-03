@@ -59,6 +59,7 @@ import {
   type CompanyToolPolicy,
 } from "./companyPlatform.js";
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
+import { provisionMemoryScope } from "./memory/durable.js";
 import { createDepartmentHandoff, listDepartments, listDepartmentSpaces, provisionDepartment } from "./departments.js";
 import { getOutcomePackage, listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
 import { completeMissionStepAndAdvance, finalizeMissionCloseout, MissionEnqueueError, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload } from "./missionScheduler.js";
@@ -711,7 +712,7 @@ function meetingRoomPolicyInput(value: unknown, fallback?: MeetingRoomPolicy): M
 }
 function memoryView(memory: {
   id: string; category: string; key: string; value: string; confidence: number; source?: string;
-  sensitivity: string; projectId?: string; personKey?: string; createdAt: number; updatedAt: number;
+  sensitivity: string; projectId?: string; organizationId?: string; personKey?: string; createdAt: number; updatedAt: number;
   reviewAt?: number; expiresAt?: number;
 }) {
   return {
@@ -723,6 +724,7 @@ function memoryView(memory: {
     source: memory.source,
     sensitivity: memory.sensitivity,
     projectId: memory.projectId,
+    organizationId: memory.organizationId,
     personKey: memory.personKey,
     reviewAt: memory.reviewAt ? new Date(memory.reviewAt).toISOString() : undefined,
     expiresAt: memory.expiresAt ? new Date(memory.expiresAt).toISOString() : undefined,
@@ -2652,7 +2654,19 @@ export function registerSdkApi(app: Hono): void {
       : await searchMemories(sdkUser(c)!.userId, c.req.query("query"), { limit: 20 });
     return c.json({ data: data.map(memoryView) });
   });
-  app.post("/v1/memory", async (c) => { const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const categories = new Set(["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"]); const category = String(body.category ?? "fact"); const key = String(body.key ?? "").trim(); const value = String(body.value ?? "").trim(); const sensitivity = body.sensitivity; if (!categories.has(category) || !key || !value || key.length > 200 || value.length > 20_000 || (sensitivity !== "normal" && sensitivity !== "sensitive")) return apiError(c, 400, "invalid_memory", "category, key, value, and sensitivity (normal or sensitive) are required."); try { const owner = sdkUser(c)!; const source = String(body.source ?? "web_dashboard"); const confidence = Number(body.confidence ?? 1); const saved = await upsertMemoryAndContext(owner.userId, { category: category as any, key, value, confidence, source, sensitivity, projectId: typeof body.projectId === "string" ? body.projectId : undefined, personKey: typeof body.personKey === "string" ? body.personKey : undefined, reviewAt: typeof body.reviewAt === "number" ? body.reviewAt : undefined, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : undefined }, { scope: typeof body.projectId === "string" ? "project" : "user", ...(typeof body.projectId === "string" ? { scopeId: body.projectId } : {}), kind: (["preference", "relationship", "fact", "decision", "objective", "open_loop"].includes(category) ? category : "memory") as never, key, value, source, sourceRef: "pending", sensitivity, confidence, ...(typeof body.reviewAt === "number" ? { reviewAt: body.reviewAt } : {}), ...(typeof body.expiresAt === "number" ? { expiresAt: body.expiresAt } : {}) }); return c.json({ ...memoryView(saved.memory), contextNodeId: saved.context.id }, 201); } catch (error) { return apiError(c, 400, "memory_save_failed", error instanceof Error ? error.message : "Memory could not be saved."); } });
+  app.post("/v1/memory/scopes/:organizationId/enable", async (c) => {
+    const owner = sdkUser(c)!;
+    const organizationId = c.req.param("organizationId");
+    const access = await organizationAccessForRequest(c, organizationId);
+    if (!access) return apiError(c, 403, "organization_access_required", "A verified organization membership is required.");
+    try {
+      const scopeId = await provisionMemoryScope({ ownerUserId: owner.userId, kind: "organization", externalId: organizationId, permissions: ["read", "write"] });
+      return c.json({ scopeId, organizationId, role: access.role });
+    } catch (error) {
+      return apiError(c, 503, "durable_memory_unavailable", error instanceof Error ? error.message : "Durable memory is unavailable.");
+    }
+  });
+  app.post("/v1/memory", async (c) => { const body = await c.req.json().catch(() => ({})) as Record<string, unknown>; const categories = new Set(["profile", "personal", "preference", "business", "relationship", "project", "procedural", "episodic", "document", "negative", "fact", "instruction", "asset"]); const category = String(body.category ?? "fact"); const key = String(body.key ?? "").trim(); const value = String(body.value ?? "").trim(); const sensitivity = body.sensitivity; if (!categories.has(category) || !key || !value || key.length > 200 || value.length > 20_000 || (sensitivity !== "normal" && sensitivity !== "sensitive")) return apiError(c, 400, "invalid_memory", "category, key, value, and sensitivity (normal or sensitive) are required."); try { const owner = sdkUser(c)!; const organizationId = typeof body.organizationId === "string" ? body.organizationId.trim() : undefined; if (organizationId && !(await organizationAccessForRequest(c, organizationId))) return apiError(c, 403, "organization_access_required", "A verified organization membership is required."); const source = String(body.source ?? "web_dashboard"); const confidence = Number(body.confidence ?? 1); const saved = await upsertMemoryAndContext(owner.userId, { category: category as any, key, value, confidence, source, sensitivity, organizationId, projectId: typeof body.projectId === "string" ? body.projectId : undefined, personKey: typeof body.personKey === "string" ? body.personKey : undefined, reviewAt: typeof body.reviewAt === "number" ? body.reviewAt : undefined, expiresAt: typeof body.expiresAt === "number" ? body.expiresAt : undefined }, { scope: organizationId ? "organization" : typeof body.projectId === "string" ? "project" : "user", ...(organizationId ? { scopeId: organizationId } : typeof body.projectId === "string" ? { scopeId: body.projectId } : {}), kind: (["preference", "relationship", "fact", "decision", "objective", "open_loop"].includes(category) ? category : "memory") as never, key, value, source, sourceRef: "pending", sensitivity, confidence, ...(typeof body.reviewAt === "number" ? { reviewAt: body.reviewAt } : {}), ...(typeof body.expiresAt === "number" ? { expiresAt: body.expiresAt } : {}) }); return c.json({ ...memoryView(saved.memory), contextNodeId: saved.context.id }, 201); } catch (error) { return apiError(c, 400, "memory_save_failed", error instanceof Error ? error.message : "Memory could not be saved."); } });
   app.delete("/v1/memory/:id", async (c) => { const removed = await forgetMemory(sdkUser(c)!.userId, decodeURIComponent(c.req.param("id"))); return removed ? c.body(null, 204) : apiError(c, 404, "memory_not_found", "Memory not found."); });
   app.get("/v1/tasks", async (c) => c.json({ data: await listTasks(sdkUser(c)!.userId) }));
   app.post("/v1/tasks/:taskId/retry", async (c) => { const userId = sdkUser(c)!.userId; const task = await retryTask(userId, c.req.param("taskId")); if (!task) return apiError(c, 409, "task_not_retryable", "Only failed, blocked, or cancelled tasks can be retried."); try { const workflowRunId = await enqueueTaskWithClaim(userId, task.id, task.runAt ?? Date.now(), sdkTaskWorkflowEnqueuer); if (!workflowRunId) return apiError(c, 409, "task_enqueue_in_progress", "This task is already being queued."); const updated = await getTask(userId, task.id); return c.json(updated ?? task); } catch (error) { return apiError(c, 503, "task_enqueue_failed", error instanceof Error ? error.message : "Task could not be queued."); } });

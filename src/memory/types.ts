@@ -1,14 +1,75 @@
 export type MemoryCategory =
   | "profile"      // Preferences, timezone, writing style
+  | "personal"     // Private owner facts
+  | "preference"   // Explicit choices and defaults
   | "relationship" // People, companies, sensitivities, interaction history
   | "business"     // Company facts, brand rules, operating preferences
   | "project"      // Goals, decisions, deadlines, open loops
   | "episodic"     // Meaningful completed events
   | "procedural"   // Approved workflows and playbooks
   | "negative"     // Do-not rules and anti-patterns
+  | "document"     // Facts grounded in a source document
+  | "fact"         // General durable fact
+  | "instruction"  // Explicit owner instruction
   | "asset";       // References to saved images, logos, documents, media
 
 export type MemoryStatus = "active" | "superseded" | "deleted";
+
+export type MemoryScopeKind = "personal" | "organization" | "team" | "project" | "client" | "meeting" | "conversation" | "channel";
+export type MemoryEntityType = "person" | "organization" | "team" | "project" | "client" | "product" | "tool" | "meeting";
+export type MemoryPurpose = "personal" | "execution" | "meeting" | "sales" | "support" | "reporting" | "handoff";
+
+/** Canonical durable representation. Redis and Vector contain projections of this record. */
+export interface DurableMemoryRecord {
+  id: string;
+  ownerUserId: number;
+  scope: { id: string; kind: MemoryScopeKind; externalId: string };
+  category: MemoryCategory;
+  key: string;
+  value: string;
+  confidence: number;
+  sensitivity: "normal" | "sensitive";
+  status: MemoryStatus | "needs_review";
+  source?: { id: string; type: string; ref?: string };
+  entityId?: string;
+  supersedesId?: string;
+  validFrom: number;
+  validUntil?: number;
+  reviewAt?: number;
+  createdAt: number;
+  updatedAt: number;
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface MemoryEntity {
+  id: string;
+  ownerUserId: number;
+  type: MemoryEntityType;
+  canonicalName: string;
+  aliases: string[];
+  metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface MemoryEdge {
+  id: string;
+  scopeId: string;
+  fromEntityId: string;
+  relation: string;
+  toEntityId: string;
+  confidence: number;
+  status: "active" | "superseded" | "deleted";
+  sourceId?: string;
+}
+
+export interface MemoryBrief {
+  purpose: MemoryPurpose;
+  scopeIds: string[];
+  profile: string;
+  memories: DurableMemoryRecord[];
+  entities: MemoryEntity[];
+  edges: MemoryEdge[];
+  sourceIds: string[];
+}
 
 export interface MemoryRecord {
   id: string;
