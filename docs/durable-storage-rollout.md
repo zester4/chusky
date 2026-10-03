@@ -28,9 +28,9 @@ Updated: 2026-10-03
 | Store SDK runs as per-run Neon rows | With `DURABLE_STATE_SDK_RUNS_ENABLED=true`, API, CLI, quota, and task-worker paths hydrate runs from owner/thread-scoped rows. Session writes transactionally import embedded legacy runs and store only thread metadata in the `sdk` domain. Migrations 0002, 0003, and 0005 are applied to the configured Neon database. The live smoke confirmed one run row, zero embedded run entries, cache-expiry recovery, and cleanup without logging payloads. | Local code against configured live Neon/Redis passed; deployed-service canary and real-user parity are not verified. The flag remains default-off. |
 | Store missions, steps, evidence, and event history in Neon | Mission records remain in Redis; mission events have a separate Redis list. Reminders, jobs, and task definitions/results also need durable Neon ownership. | Not implemented. |
 | Measure Redis commands, bytes, key sizes, cache hit ratio, and Neon query latency | Added process-local aggregates for session Redis commands/bytes, core/cache sizes, domain-cache hit ratio, Neon query count/errors/latency, message counts/byte estimates, and domain sizes through `durableStorageMetrics()`. | Local instrumentation only; it is not yet exported to a multi-instance collector/dashboard and does not cover every Redis command family. Required before broader cutover. |
-| Archive large transcripts, tool outputs, files, images, and videos to R2 | Existing SDK uploads and image assets already use R2. Transcript/tool-output migration, Neon metadata, encryption/retention manifests, and authorization checks are not implemented here. | Partial existing capability; requested archival path not implemented. |
+| Archive large transcripts, tool outputs, files, images, and videos to R2 | Existing SDK uploads and image assets already use R2. Migration 0008 and owner-scoped Neon object metadata create/get/finalize primitives now provide the first catalog foundation; see the [R2 audit](r2-storage-audit.md). Existing asset flows do not yet write the catalog. Retained Recall transcripts and agent run/tool traces remain in Redis; encrypted archive and retention workers are not implemented. | Foundation implemented locally; consumers, live migration, and production verification remain. |
 | Add retention and safe archival jobs | Existing domain-specific TTLs/limits remain; no general Neon/R2 retention or archival worker was added. | Not implemented. |
-| Full CI and production verification | Current run: typecheck, 1,281 tests (1,277 pass, 0 fail, 4 skipped), app build, SDK build, SDK tests (25 pass), and `git diff --check` passed. Live configured Neon+Redis smoke also passed and cleaned its isolated data. | Local checks passed on Windows/Node 25; CI uses Ubuntu/Node 22 and installs FFmpeg, so hosted CI and deployed-service verification remain outstanding. |
+| Full CI and production verification | Current local run: typecheck, 1,286 tests (1,282 pass, 0 fail, 4 skipped), app build, SDK build, SDK tests (25 pass), and `git diff --check` passed. Live configured Neon+Redis smoke also passed and cleaned its isolated data. | Local checks passed on Windows/Node 25; CI uses Ubuntu/Node 22 and installs FFmpeg, so hosted CI and deployed-service verification remain outstanding. |
 
 ## Operational safeguards
 
@@ -66,9 +66,11 @@ Updated: 2026-10-03
    recurring jobs, and task definitions/results to Neon while retaining only
    active coordination in Redis. Keep each domain opt-in until its schema,
    backfill, parity, restart, and rollback checks pass.
-5. Add owner-scoped Neon object metadata and encrypted R2 archival for large
-   transcripts/tool outputs/files/media, followed by bounded retention and
-   recovery jobs. Never log or fetch full payloads for routine verification.
+5. Follow [the R2 storage audit](r2-storage-audit.md): wire existing asset
+   writes into the Neon object catalog, then add encrypted R2 archival for
+   retained transcript segments first and eligible large run/tool payloads;
+   add bounded retention and orphan-recovery jobs. Never log or fetch full
+   payloads for routine verification.
 6. Add Redis command/byte/key-size metrics by bounded operation family. Use
    measurements to decide whether a small recent-history cache is worthwhile;
    cache entries are never canonical data.

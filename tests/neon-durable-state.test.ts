@@ -11,6 +11,11 @@ class FakeClient {
   async query(text: string, values?: unknown[]) {
     this.calls.push({ text, values });
     if (this.failOnInsert && text.includes("INSERT INTO chusky_session_domain")) throw new Error("database unavailable");
+    if (text.includes("UPDATE chusky_object_metadata")) return { rows: [{ object_id: String(values?.[1]) }] as never[] };
+    if (text.includes("INSERT INTO chusky_object_metadata")) {
+      const [owner, id, kind, key, status, contentType, size, sha256, encryptionVersion, expiresAt, metadata, createdAt, updatedAt] = values ?? [];
+      return { rows: [{ owner_user_id: owner, object_id: id, object_kind: kind, object_key: key, lifecycle_status: status, content_type: contentType, size_bytes: size, sha256, encryption_version: encryptionVersion, retention_expires_at: expiresAt ? new Date(Number(expiresAt)) : null, metadata: JSON.parse(String(metadata)), created_at: new Date(Number(createdAt)), updated_at: new Date(Number(updatedAt)) }] as never[] };
+    }
     return { rows: text.includes("INSERT INTO chusky_sdk_run") ? [{ run_id: "run_1" }] as never[] : text.includes("INSERT INTO chusky_session_domain") ? [{ version: 1 }] as never[] : text.includes("INSERT INTO chusky_conversation_message") ? [{ message_id: "msg_1" }] as never[] : [] as never[] };
   }
   release() { this.released = true; }
@@ -27,6 +32,11 @@ class FakePool {
     this.calls.push({ text, values });
     if (this.failRead) throw new Error("database unavailable");
     if (text.includes("pg_get_constraintdef")) return { rows: this.schemaDefinition ? [{ definition: this.schemaDefinition }] as never[] : [] as never[] };
+    if (text.includes("INSERT INTO chusky_object_metadata")) {
+      const [owner, id, kind, key, status, contentType, size, sha256, encryptionVersion, expiresAt, metadata, createdAt, updatedAt] = values ?? [];
+      return { rows: [{ owner_user_id: owner, object_id: id, object_kind: kind, object_key: key, lifecycle_status: status, content_type: contentType, size_bytes: size, sha256, encryption_version: encryptionVersion, retention_expires_at: expiresAt ? new Date(Number(expiresAt)) : null, metadata: JSON.parse(String(metadata)), created_at: new Date(Number(createdAt)), updated_at: new Date(Number(updatedAt)) }] as never[] };
+    }
+    if (text.includes("UPDATE chusky_object_metadata")) return { rows: [{ object_id: String(values?.[1]) }] as never[] };
     return { rows: this.reads as never[] };
   }
   async connect() { return this.client; }
@@ -98,6 +108,34 @@ test("Neon health reports unavailable state without leaking database errors", as
   const health = await state.healthStatus();
   assert.equal(health.reachable, false);
   assert.deepEqual(health, { enabled: true, reachable: false });
+});
+
+test("Neon object metadata is owner-scoped, idempotently created, and finalized only from pending state", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  const now = Date.now();
+  const pending = {
+    ownerUserId: 42, objectId: "obj_test_1", kind: "transcript_segment" as const,
+    objectKey: "archive/42/meeting/segment.bin", status: "pending" as const,
+    contentType: "application/octet-stream", sizeBytes: 128,
+    encryptionVersion: "aes256gcm-v1", retentionExpiresAt: now + 60_000,
+    metadata: { meetingId: "mtg_1" }, createdAt: now, updatedAt: now,
+  };
+  const created = await state.createObjectMetadata(pending);
+  assert.equal(created.objectId, pending.objectId);
+  assert.equal(created.ownerUserId, 42);
+  assert.match(pool.calls[0]?.text ?? "", /ON CONFLICT \(owner_user_id, object_id\) DO NOTHING/);
+  assert.deepEqual(pool.calls[0]?.values?.slice(0, 5), [42, "obj_test_1", "transcript_segment", "archive/42/meeting/segment.bin", "pending"]);
+
+  assert.equal(await state.markObjectAvailable(42, "obj_test_1", 128, "a".repeat(64), "aes256gcm-v1"), true);
+  assert.match(pool.calls[1]?.text ?? "", /owner_user_id = \$1 AND object_id = \$2 AND lifecycle_status = 'pending'/);
+  assert.deepEqual(pool.calls[1]?.values, [42, "obj_test_1", 128, "a".repeat(64), "aes256gcm-v1"]);
+
+  await state.getObjectMetadata(43, "obj_test_1");
+  assert.deepEqual(pool.calls.at(-1)?.values, [43, "obj_test_1"]);
+  assert.match(pool.calls.at(-1)?.text ?? "", /WHERE owner_user_id = \$1 AND object_id = \$2/);
+  await assert.rejects(() => state.createObjectMetadata({ ...pending, objectId: "obj_bad_key", objectKey: "archive/43/foreign.bin" }), /not owner-scoped/);
+  await assert.rejects(() => state.markObjectAvailable(42, "obj_test_1", 128, "not-a-hash"), /verification is invalid/);
 });
 
 test("durable session startup rejects a schema without the profile domain migration", async () => {

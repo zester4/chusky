@@ -36,6 +36,26 @@ export interface DurableConversationMessage {
   sourceId?: string;
 }
 
+export type DurableObjectKind = "image" | "file" | "transcript_segment" | "agent_run_archive" | "temporary_media" | "other";
+export type DurableObjectStatus = "pending" | "available" | "deleting" | "deleted" | "failed";
+
+/** Metadata only; object bytes and public download URLs never belong in Neon. */
+export interface DurableObjectMetadata {
+  ownerUserId: number;
+  objectId: string;
+  kind: DurableObjectKind;
+  objectKey: string;
+  status: DurableObjectStatus;
+  contentType: string;
+  sizeBytes: number;
+  sha256?: string;
+  encryptionVersion?: string;
+  retentionExpiresAt?: number;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface DurableStateMetrics {
   queryCount: number;
   queryErrors: number;
@@ -86,6 +106,50 @@ function assertSdkRunIdentity(threadId: string, runId: string): void {
   if (!/^(?:thr|cli_thread)_[A-Za-z0-9_-]{1,120}$/.test(threadId) || !/^run_[A-Za-z0-9_-]{1,120}$/.test(runId)) {
     throw new Error("Durable SDK run identity is invalid.");
   }
+}
+
+const OBJECT_KINDS = new Set<DurableObjectKind>(["image", "file", "transcript_segment", "agent_run_archive", "temporary_media", "other"]);
+
+function validateObjectMetadata(record: DurableObjectMetadata): void {
+  assertUserId(record.ownerUserId);
+  if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(record.objectId)) throw new Error("Durable object ID is invalid.");
+  if (!OBJECT_KINDS.has(record.kind)) throw new Error("Durable object kind is invalid.");
+  if (typeof record.objectKey !== "string" || record.objectKey.length > 512 || record.objectKey.startsWith("/")
+    || record.objectKey.split("/").some((part) => !part || part === "." || part === "..")
+    || !new RegExp(`(?:^|/)${record.ownerUserId}(?:/|$)`).test(record.objectKey)
+    || !/^[A-Za-z0-9_./-]+$/.test(record.objectKey)) throw new Error("Durable object key is invalid or not owner-scoped.");
+  if (!(record.status === "pending" || record.status === "available" || record.status === "deleting" || record.status === "deleted" || record.status === "failed")) throw new Error("Durable object status is invalid.");
+  if (typeof record.contentType !== "string" || record.contentType.length < 1 || record.contentType.length > 160 || /[\r\n\0]/.test(record.contentType)) throw new Error("Durable object content type is invalid.");
+  if (!Number.isSafeInteger(record.sizeBytes) || record.sizeBytes < 0) throw new Error("Durable object size is invalid.");
+  if (record.sha256 !== undefined && !/^[a-f0-9]{64}$/.test(record.sha256)) throw new Error("Durable object checksum is invalid.");
+  if (record.status === "available" && !record.sha256) throw new Error("Available durable objects require a verified SHA-256 checksum.");
+  if (record.encryptionVersion !== undefined && (record.encryptionVersion.length > 80 || !/^[A-Za-z0-9._-]+$/.test(record.encryptionVersion))) throw new Error("Durable object encryption version is invalid.");
+  if (record.retentionExpiresAt !== undefined && (!Number.isSafeInteger(record.retentionExpiresAt) || record.retentionExpiresAt <= 0)) throw new Error("Durable object expiry is invalid.");
+  if (!Number.isSafeInteger(record.createdAt) || record.createdAt <= 0 || !Number.isSafeInteger(record.updatedAt) || record.updatedAt <= 0) throw new Error("Durable object timestamps are invalid.");
+  const encodedMetadata = JSON.stringify(record.metadata ?? {});
+  if (record.metadata !== undefined && (typeof record.metadata !== "object" || Array.isArray(record.metadata)) || Buffer.byteLength(encodedMetadata, "utf8") > 16_384) throw new Error("Durable object metadata is invalid or too large.");
+}
+
+function durableObjectFromRow(row: Record<string, unknown>): DurableObjectMetadata {
+  const ownerUserId = Number(row.owner_user_id);
+  const asMillis = (value: unknown): number | undefined => value instanceof Date ? value.getTime() : typeof value === "string" || typeof value === "number" ? new Date(value).getTime() : undefined;
+  const record: DurableObjectMetadata = {
+    ownerUserId,
+    objectId: String(row.object_id ?? ""),
+    kind: String(row.object_kind ?? "") as DurableObjectKind,
+    objectKey: String(row.object_key ?? ""),
+    status: String(row.lifecycle_status ?? "") as DurableObjectStatus,
+    contentType: String(row.content_type ?? ""),
+    sizeBytes: Number(row.size_bytes),
+    ...(typeof row.sha256 === "string" ? { sha256: row.sha256 } : {}),
+    ...(typeof row.encryption_version === "string" ? { encryptionVersion: row.encryption_version } : {}),
+    ...(asMillis(row.retention_expires_at) ? { retentionExpiresAt: asMillis(row.retention_expires_at) } : {}),
+    metadata: row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? row.metadata as Record<string, unknown> : {},
+    createdAt: asMillis(row.created_at) ?? 0,
+    updatedAt: asMillis(row.updated_at) ?? 0,
+  };
+  validateObjectMetadata(record);
+  return record;
 }
 
 function toSdkRun(row: SdkRunRow): DurableSdkRun {
@@ -157,6 +221,57 @@ export class NeonDurableState {
     } catch {
       return { enabled: true, reachable: false };
     }
+  }
+
+  /** Insert a pending object record idempotently. Reuse is allowed only for the exact same immutable intent. */
+  async createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {
+    validateObjectMetadata(record);
+    if (record.status !== "pending" && record.status !== "available") throw new Error("New durable objects must be pending or already verified available.");
+    const inserted = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `INSERT INTO chusky_object_metadata
+       (owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256, encryption_version, retention_expires_at, metadata, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10::bigint IS NULL THEN NULL ELSE to_timestamp($10 / 1000.0) END, $11::jsonb, to_timestamp($12 / 1000.0), to_timestamp($13 / 1000.0))
+       ON CONFLICT (owner_user_id, object_id) DO NOTHING
+       RETURNING owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256, encryption_version, retention_expires_at, metadata, created_at, updated_at`,
+      [record.ownerUserId, record.objectId, record.kind, record.objectKey, record.status, record.contentType, record.sizeBytes, record.sha256 ?? null, record.encryptionVersion ?? null, record.retentionExpiresAt ?? null, JSON.stringify(record.metadata ?? {}), record.createdAt, record.updatedAt],
+    );
+    if (inserted.rows[0]) return durableObjectFromRow(inserted.rows[0]);
+    const existing = await this.getObjectMetadata(record.ownerUserId, record.objectId);
+    if (!existing || existing.kind !== record.kind || existing.objectKey !== record.objectKey || existing.contentType !== record.contentType
+      || existing.sizeBytes !== record.sizeBytes || existing.retentionExpiresAt !== record.retentionExpiresAt
+      || existing.encryptionVersion !== record.encryptionVersion || (record.sha256 !== undefined && existing.sha256 !== record.sha256)
+      || JSON.stringify(existing.metadata ?? {}) !== JSON.stringify(record.metadata ?? {})) {
+      throw new Error("Durable object ID conflict; reload the existing object before retrying.");
+    }
+    return existing;
+  }
+
+  /** Owner-scoped lookup; callers must authorize against this record before touching R2. */
+  async getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId)) throw new Error("Durable object ID is invalid.");
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256, encryption_version, retention_expires_at, metadata, created_at, updated_at
+       FROM chusky_object_metadata WHERE owner_user_id = $1 AND object_id = $2`,
+      [userId, objectId],
+    );
+    return result.rows[0] ? durableObjectFromRow(result.rows[0]) : undefined;
+  }
+
+  /** Finalize an upload only when it still matches the pending owner-scoped intent. */
+  async markObjectAvailable(userId: number, objectId: string, sizeBytes: number, sha256: string, encryptionVersion?: string): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId) || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Durable object verification is invalid.");
+    if (encryptionVersion !== undefined && (encryptionVersion.length > 80 || !/^[A-Za-z0-9._-]+$/.test(encryptionVersion))) throw new Error("Durable object encryption version is invalid.");
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'available', size_bytes = $3, sha256 = $4, encryption_version = $5, updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status = 'pending' AND size_bytes = $3
+       RETURNING object_id`,
+      [userId, objectId, sizeBytes, sha256, encryptionVersion ?? null],
+    );
+    if (result.rows.length) return true;
+    const existing = await this.getObjectMetadata(userId, objectId);
+    return existing?.status === "available" && existing.sizeBytes === sizeBytes && existing.sha256 === sha256 && existing.encryptionVersion === encryptionVersion;
   }
 
   /** Fail startup before enabling the durable conversation/domain schema. */
