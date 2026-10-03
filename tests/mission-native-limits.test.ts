@@ -51,7 +51,7 @@ test("mission start accepts its published objective and step text limits", async
   assert.throws(() => validateNativeToolArguments("CHUCK_MISSION_START", { ...args, objective: "O".repeat(8001) }), /objective.*8000/);
 });
 
-test("mission step tool fences are published and reject supervisor-owned tools", async () => {
+test("mission step tool fences are published and strip supervisor-owned tools from model plans", async () => {
   const args = {
     title: "Scoped mission",
     objective: "Run one bounded provider action.",
@@ -59,10 +59,36 @@ test("mission step tool fences are published and reject supervisor-owned tools",
     steps: [{ title: "Send", objective: "Send the message", allowedTools: ["GMAIL_SEND_EMAIL"] }],
   };
   validateNativeToolArguments("CHUCK_MISSION_START", args);
-  await assert.rejects(() => nativeTool(951104, "CHUCK_MISSION_START", {
+  const returned = await nativeTool(951104, "CHUCK_MISSION_START", {
     ...args,
     steps: [{ ...args.steps[0], allowedTools: ["CHUCK_MISSION_STEP_COMPLETE"] }],
-  }), /invalid or supervisor-owned allowed tool/i);
+  }, { enqueueMissionTask: async () => "workflow-supervisor-tool-strip" }) as { steps: Array<{ allowedTools?: string[] }> };
+  assert.deepEqual(returned.steps[0]?.allowedTools, []);
+});
+
+test("native-only three-step mission starts when the model repeats supervisor controls in every fence", async () => {
+  const supervisorTools = [
+    "CHUCK_TASK_WAIT",
+    "CHUCK_MISSION_GET",
+    "CHUCK_MISSION_CHECKPOINT",
+    "CHUCK_MISSION_STEP_COMPLETE",
+    "CHUCK_MISSION_EVIDENCE",
+    "CHUCK_MISSION_VERIFY",
+    "CHUCK_MISSION_COMPLETE",
+  ];
+  const returned = await nativeTool(951105, "CHUCK_MISSION_START", {
+    title: "Native-only mission reliability test",
+    objective: "Complete a durable three-step internal lifecycle test.",
+    definitionOfDone: "All three steps complete after one durable wait and persisted evidence.",
+    verificationMode: "legacy",
+    steps: [1, 2, 3].map((number) => ({
+      title: `Step ${number}`,
+      objective: `Complete internal step ${number}.`,
+      allowedTools: supervisorTools,
+    })),
+  }, { enqueueMissionTask: async () => "workflow-native-three-step-strip" }) as { steps: Array<{ allowedTools?: string[] }> };
+  assert.equal(returned.steps.length, 3);
+  for (const step of returned.steps) assert.deepEqual(step.allowedTools, []);
 });
 
 test("mission block accepts verbose recovery diagnostics and persists a bounded reason", async () => {

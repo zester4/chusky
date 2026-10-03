@@ -56,7 +56,7 @@ import type { AutonomyLinks, AutonomyMode } from "./autonomy/types.js";
 import { contextPrompt, selectContext, upsertContextNode } from "./contextGraph.js";
 import { createDepartmentHandoff } from "./departments.js";
 import { listOutcomePackages, planOutcome } from "./outcomes/catalog.js";
-import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
+import { completeMissionStepAndAdvance, finalizeMissionCloseout, reconcileMissionExecution, recordMissionEvidenceAndCloseout, replanMissionAndSchedule, rescheduleQueuedMissionTasks, stripSupervisorOwnedMissionStepTools, resumeMissionAndSchedule, validateMissionStepsPayload, type MissionTaskEnqueuer } from "./missionScheduler.js";
 import { getAutonomySnapshot } from "./autonomy/queue.js";
 import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
@@ -1682,7 +1682,8 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     }
     case "CHUCK_MISSION_START": {
       if (Number(args.maxAutomaticExtensions ?? 0) > 0 && !runtime.approvedApprovalId) throw new Error("Automatic mission extensions require owner approval of the initial allowance.");
-      const invalidSteps = validateMissionStepsPayload(args.steps);
+      const missionSteps = stripSupervisorOwnedMissionStepTools(args.steps);
+      const invalidSteps = validateMissionStepsPayload(missionSteps);
       if (invalidSteps) throw new Error(invalidSteps);
       const mission = await createMission(userId, {
         title: missionText(args.title, "title", 240),
@@ -1701,7 +1702,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
           cadenceSeconds: Number(schedule.cadenceSeconds),
           };
         })() : undefined,
-        steps: Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
+        steps: Array.isArray(missionSteps) ? missionSteps.map((step: Record<string, unknown>) => ({
           id: typeof step.id === "string" ? step.id : undefined,
           title: missionText(step.title, "step title", 240),
           objective: missionText(step.objective, "step objective", 4000),
@@ -1991,9 +1992,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_OUTCOME_LIST": return listOutcomePackages();
     case "CHUCK_OUTCOME_PLAN": return planOutcome(text(args.slug), args.input && typeof args.input === "object" ? args.input as Record<string, unknown> : {});
     case "CHUCK_MISSION_REPLAN": {
-      const invalidSteps = validateMissionStepsPayload(args.steps, { requireNonEmpty: true });
+      const missionSteps = stripSupervisorOwnedMissionStepTools(args.steps);
+      const invalidSteps = validateMissionStepsPayload(missionSteps, { requireNonEmpty: true });
       if (invalidSteps) throw new Error(invalidSteps);
-      const steps = Array.isArray(args.steps) ? args.steps.map((step: Record<string, unknown>) => ({
+      const steps = Array.isArray(missionSteps) ? missionSteps.map((step: Record<string, unknown>) => ({
         id: typeof step.id === "string" ? text(step.id, 160) : undefined,
         title: text(step.title, 240),
         objective: text(step.objective, 4000),

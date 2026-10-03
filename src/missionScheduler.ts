@@ -19,6 +19,21 @@ import {
 } from "./store.js";
 import { enqueueTaskWithClaim } from "./taskEnqueue.js";
 
+const MISSION_STEP_RESERVED_TOOL_PATTERN = /^CHUCK_MISSION_|^CHUCK_TASK_|^COMPOSIO_(?:EXECUTE_TOOL|MULTI_EXECUTE_TOOL)$/;
+
+/** Strip supervisor controls from model-generated step fences before validation. */
+export function stripSupervisorOwnedMissionStepTools(raw: unknown): unknown {
+  if (!Array.isArray(raw)) return raw;
+  return raw.map((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const step = { ...(value as Record<string, unknown>) };
+    if (Array.isArray(step.allowedTools)) {
+      step.allowedTools = step.allowedTools.filter((tool) => !(typeof tool === "string" && MISSION_STEP_RESERVED_TOOL_PATTERN.test(tool)));
+    }
+    return step;
+  });
+}
+
 /** Enqueue one durable task through the caller's workflow provider. */
 export type MissionTaskEnqueuer = (userId: number, taskId: string, runAt: number) => Promise<string>;
 
