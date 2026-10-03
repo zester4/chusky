@@ -6401,8 +6401,14 @@ async function appendMissionEvidence(userId: number, id: string, evidence: Missi
   const clean = evidence.slice(0, 20).map((item) => ({ ...item, id: item.id || `evidence_${randomUUID()}`, summary: String(item.summary ?? "").slice(0, 2000), verified: trusted && item.verified === true, ...(trusted && item.verified === true ? { verifiedBy: "system" as const, verifiedAt: Date.now() } : { verifiedBy: "agent" as const }), ...(item.source ? { source: item.source.slice(0, 500) } : {}), ...(item.ref ? { ref: item.ref.slice(0, 500) } : {}), ...(item.hash ? { hash: item.hash.slice(0, 200) } : {}) }));
   return mutateMission(userId, id, (mission) => {
     if (["completed", "cancelled"].includes(mission.status)) return undefined;
-    const steps = mission.steps.map((step) => step.id === stepId ? { ...step, evidence: [...(step.evidence ?? []), ...clean].slice(-50) } : step);
-    return { steps, evidence: [...(mission.evidence ?? []), ...clean].slice(-100), events: [...mission.events, missionEvent("checkpointed", `${clean.length} evidence record(s) added${stepId ? ` to step ${stepId}` : ""}.`)] };
+    const existingIds = new Set([
+      ...(mission.evidence ?? []).map((item) => item.id),
+      ...mission.steps.flatMap((step) => (step.evidence ?? []).map((item) => item.id)),
+    ]);
+    const fresh = clean.filter((item) => !existingIds.has(item.id));
+    if (!fresh.length) return mission;
+    const steps = mission.steps.map((step) => step.id === stepId ? { ...step, evidence: [...(step.evidence ?? []), ...fresh].slice(-50) } : step);
+    return { steps, evidence: [...(mission.evidence ?? []), ...fresh].slice(-100), events: [...mission.events, missionEvent("checkpointed", `${fresh.length} evidence record(s) added${stepId ? ` to step ${stepId}` : ""}.`)] };
   });
 }
 

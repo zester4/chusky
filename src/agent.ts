@@ -29,7 +29,7 @@ import { config } from "./config.js";
 import { getTriggerTypeBySlug, getTriggerTypeByToken, listTriggerToolkits as listCatalogueToolkits, listTriggerTypesForToolkit, requiredTriggerConfigFields, triggerTypeForAgent, type TriggerCatalogueItem, type TriggerToolkit } from "./triggerCatalog.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { logger } from "./logger.js";
-import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
+import { createApproval, createVideoJob, getAgentRun, getApproval, getImageAsset, getSession, recordTrustedMissionEvidence, saveAgentRun, saveImageAsset, saveSession, searchMemories, setApprovalStatus, setComposioSessionId, updateVideoJob } from "./store.js";
 import type { AgentRunRecord, Message } from "./store.js";
 import { nativeTool, type MissionWaitRequest, type NativeToolRuntime } from "./nativeTools.js";
 import { MissionDurationApprovalRequiredError } from "./missionApproval.js";
@@ -95,7 +95,7 @@ const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 function providerReceiptId(value: unknown): string | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  for (const key of ["id", "message_id", "messageId", "event_id", "eventId", "issueKey", "issue_key", "provider_id", "providerId"]) {
+  for (const key of ["id", "message_id", "messageId", "event_id", "eventId", "issueKey", "issue_key", "provider_id", "providerId", "logId", "log_id"]) {
     const candidate = record[key];
     if (typeof candidate === "string" && candidate.trim() && candidate.length <= 240) return candidate.trim();
   }
@@ -3287,6 +3287,19 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
           providerRejected = true;
           toolFailed = true;
         }
+        const directProviderTool = !slug.startsWith("CHUCK_") && !slug.startsWith("COMPOSIO_") && !slug.startsWith("MCP_");
+        if (directProviderTool && execResult && typeof execResult === "object" && !Array.isArray(execResult)) {
+          const providerResult = execResult as Record<string, unknown>;
+          if (providerResult.successful === false || providerResult.success === false || providerResult.error != null) {
+            providerRejected = true;
+            toolFailed = true;
+          }
+        }
+        // Direct connected-app actions return a provider log/receipt even when
+        // they are not external writes. Capture that receipt immediately at
+        // the trusted execution boundary; model-authored evidence remains
+        // untrusted and cannot satisfy strict verification.
+        if (!toolFailed && directProviderTool && !toolReceiptId) toolReceiptId = providerReceiptId(execResult);
         if (result.length > MAX_TOOL_RESULT_CHARS) result = `${result.slice(0, MAX_TOOL_RESULT_CHARS)}\n[Tool output truncated by Chusky]`;
         toolResultsByCallId.set(call.id, result);
         if (externalClaim?.state === "new") {
@@ -3303,6 +3316,18 @@ execResult = await nativeTool(userId, slug, executionArgs, { ...imageRuntime, ge
             toolReceiptId = providerReceiptId(execResult) ?? externalClaim.receipt?.providerId ?? externalClaim.receipt?.id;
             await finishExternalAction(userId, externalClaim.logicalActionId, result, toolReceiptId, trustedProviderActions);
           }
+        }
+        if (!toolFailed && directProviderTool && options?.missionId && options?.missionStepId && toolReceiptId) {
+          const evidenceId = `evidence_receipt_${externalArgumentsHash({ missionId: options.missionId, stepId: options.missionStepId, toolSlug: slug, receiptId: toolReceiptId })}`;
+          await recordTrustedMissionEvidence(userId, options.missionId, [{
+            id: evidenceId,
+            kind: "tool_receipt",
+            summary: `${slug} completed successfully in the durable mission worker.`,
+            source: `composio:${slug}`,
+            ref: toolReceiptId,
+            verified: true,
+            verifiedBy: "system",
+          }], options.missionStepId);
         }
         if (approvedForTool) await setApprovalStatus(userId, approvedApprovalId!, "consumed");
       } catch (e) {

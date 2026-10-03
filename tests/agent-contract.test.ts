@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { addRecallMeeting, claimAgentUpgrade, getApproval, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, updateMeetingRepresentativeProfile } from "../src/store.js";
+import { addRecallMeeting, claimAgentUpgrade, completeMissionStep, createMission, finalizeMissionIfReady, getApproval, getMission, getSession, initStore, listAgentRuns, listMissions, listTasks, saveSession, startMission, updateMeetingRepresentativeProfile } from "../src/store.js";
 import { appendPreviewLinks, cleanModelText, invalidateSession, listConnectedAccounts, openRouterAttemptTimeoutMs, orChat, parseLegacyDsmlToolCalls, parseToolArguments, readStreamingChat, runAgent, ApprovalRequiredError, setAgentDependenciesForTests, triggerAutonomyInstructions } from "../src/agent.js";
 import { formatAgentUpgradeNotice, loadAgentUpgrade } from "../src/upgradeNotice.js";
 import { config } from "../src/config.js";
@@ -280,6 +280,74 @@ test("mission provider allowlists resolve an exact schema from a small meta-tool
   } finally {
     globalThis.fetch = originalFetch;
     Object.assign(config, previous);
+  }
+});
+
+test("durable mission provider receipts become system-trusted evidence", async () => {
+  const userId = 831239;
+  await initStore({ memoryOnly: true });
+  invalidateSession(userId);
+  const originalFetch = globalThis.fetch;
+  const directSchema = {
+    type: "object",
+    properties: { user_id: { type: "string" }, max_results: { type: "integer" } },
+    required: ["user_id"],
+    additionalProperties: false,
+  };
+  const session = {
+    sessionId: "mission-trusted-receipt-session",
+    tools: async () => [{ type: "function", function: { name: "GMAIL_FETCH_EMAILS", parameters: directSchema } }],
+    execute: async () => ({ successful: true, data: { messages: [] }, logId: "provider-log-trusted-1" }),
+  };
+  setAgentDependenciesForTests({ composio: {
+    create: async () => session,
+    connectedAccounts: { list: async () => ({ items: [{ id: "ca_gmail", toolkit: { slug: "gmail" }, status: "ACTIVE" }] }) },
+    tools: { getRawComposioToolBySlug: async () => ({ slug: "GMAIL_FETCH_EMAILS", name: "Fetch emails", toolkit: { slug: "gmail" }, inputParameters: directSchema }) },
+  } });
+  let modelResponse = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/models/")) return new Response(JSON.stringify({ data: { architecture: { input_modalities: ["text"] }, supported_parameters: { tools: true } } }), { status: 200 });
+    if (url.includes("/chat/completions")) return modelResponse++ === 0
+      ? toolResponse("GMAIL_FETCH_EMAILS", JSON.stringify({ user_id: "me", max_results: 3 }))
+      : chatResponse({ role: "assistant", content: "trusted receipt read complete" });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const created = await createMission(userId, {
+      title: "Trusted provider receipt regression",
+      objective: "Read the owner's inbox once.",
+      definitionOfDone: "The read-only provider action has a trusted receipt.",
+      idempotencyKey: "trusted-provider-receipt-regression",
+      verificationMode: "strict",
+      requiredEvidence: ["kind:tool_receipt"],
+      steps: [{ id: "read", title: "Read inbox", objective: "Fetch a bounded inbox view.", allowedTools: ["GMAIL_FETCH_EMAILS"], evidenceRequired: ["kind:tool_receipt"] }],
+    });
+    const started = await startMission(userId, created.id);
+    assert.ok(started);
+    const result = await runAgent(userId, "Read the owner's Gmail inbox.", [], "test/model", undefined, undefined, undefined, undefined, undefined, {
+      ephemeral: true,
+      toolAllow: ["GMAIL_FETCH_EMAILS"],
+      taskId: "task_trusted_receipt_regression",
+      missionId: created.id,
+      missionStepId: "read",
+    });
+    assert.deepEqual(result.toolsSucceeded, ["GMAIL_FETCH_EMAILS"]);
+    const afterAgent = await getMission(userId, created.id);
+    const receipt = afterAgent?.evidence.find((item) => item.kind === "tool_receipt");
+    assert.ok(receipt, "the worker must persist provider receipt evidence");
+    assert.equal(receipt?.verified, true);
+    assert.equal(receipt?.verifiedBy, "system");
+    assert.equal(receipt?.ref, "provider-log-trusted-1");
+    assert.equal(receipt?.source, "composio:GMAIL_FETCH_EMAILS");
+    const completedStep = await completeMissionStep(userId, created.id, "read", "Read completed with the server receipt.");
+    assert.ok(completedStep);
+    const finalized = await finalizeMissionIfReady(userId, created.id, { blockOnUnresolved: true });
+    assert.equal(finalized?.status, "completed");
+    assert.equal(finalized?.verification?.verified, true);
+    assert.deepEqual(finalized?.verification?.unresolved, []);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 
