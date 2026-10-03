@@ -1,11 +1,11 @@
 {
-  "id": "release-4.38.0",
-  "version": "4.38.0",
+  "id": "release-4.39.0",
+  "version": "4.39.0",
   "title": "Chusky has been upgraded",
   "bullets": [
-    "After an owner approves a mission action or bounded extension, the same durable worker continues automatically from its saved checkpoint until the mission completes or reaches a real blocker.",
-    "Durable task wakes now preserve the queued task state across early wake-ups and lease races, sleeping and retrying the same task instead of silently ending the workflow.",
-    "Approval handoffs and mission status remain explicit: the approval turn can finish while the mission stays active and reports its final persisted verification result separately."
+    "Added provider-neutral browser challenge states that distinguish detection, provider solving, unverified clearance, owner handoff, verification, expiry, and blocking.",
+    "E2B handoffs now persist the browser provider, challenge type, and resolution state while preserving legacy owner-scoped sessions and same-origin verification.",
+    "The contract is ready for opt-in Browserbase or Browser Use Cloud adapters without weakening Chusky's authorization, account isolation, or post-challenge verification boundary."
   ],
-  "createdAt": "2026-10-01T21:13:41.798Z"
+  "createdAt": "2026-10-03T03:50:28.085Z"
 }

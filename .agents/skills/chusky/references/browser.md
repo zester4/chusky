@@ -74,6 +74,16 @@ because a user asks to connect a website account.
    “continue”, inspect the retained page at the observed HTTPS origin before resuming. A vault login handoff is bound to the exact saved credential even if the site redirected to its identity provider. Never export
    cookies, credentials, or a permanent VNC endpoint.
 
+Challenge resolution is provider-neutral and durable. A handoff records the
+retained browser provider, challenge type, and resolution state separately from
+the user-visible handoff status. States distinguish `detected`, `solving`,
+`solved_unverified`, `handoff_required`, `verified`, `expired`, and `blocked`.
+E2B currently uses `handoff_required` plus owner completion and same-origin
+verification. A future Browserbase or Browser Use Cloud adapter may report
+provider solving events, but a provider's “solved” signal is never treated as
+verified access until Chusky re-inspects the live page and confirms the bound
+origin and expected result.
+
 ## Transparent browser identity (optional)
 
 When `WEB_BOT_AUTH_ENABLED=true`, the service publishes a signed, public-only

@@ -127,6 +127,11 @@ export const AGENT_UPGRADE_PRESETS = {
     "Vault login now follows a bounded multi-step form state machine; CAPTCHA, 2FA, passkeys, SSO, and other human-only challenges preserve the same E2B session for a short-lived private handoff and verified resume.",
     "Routine browsing stays autonomous; private-origin checks, session leases, credential isolation, and exact approval or block rules for uploads, sensitive actions, and account changes remain enforced.",
   ],
+  browserChallengeResolution: [
+    "Added provider-neutral browser challenge states that distinguish detection, provider solving, unverified clearance, owner handoff, verification, expiry, and blocking.",
+    "E2B handoffs now persist the browser provider, challenge type, and resolution state while preserving legacy owner-scoped sessions and same-origin verification.",
+    "The contract is ready for opt-in Browserbase or Browser Use Cloud adapters without weakening Chusky's authorization, account isolation, or post-challenge verification boundary.",
+  ],
   webBotAuth: [
     "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
     "Request signing remains off during Cloudflare review; after approval, private signing keys stay in server configuration and the trusted browser process, never in page JavaScript, model context, tool arguments, browser history, or logs.",

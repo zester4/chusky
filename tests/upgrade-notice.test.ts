@@ -215,11 +215,11 @@ test("loads and writes the release manifest", async () => {
   }
 });
 
-test("current upgrade manifest announces automatic mission continuation", async () => {
+test("current upgrade manifest announces browser challenge resolution", async () => {
   const notice = await loadAgentUpgrade(path.resolve(process.cwd(), "agent-upgrade.json"));
-  assert.equal(notice?.id, "release-4.38.0");
-  assert.equal(notice?.version, "4.38.0");
-  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("missionContinuity"));
+  assert.equal(notice?.id, "release-4.39.0");
+  assert.equal(notice?.version, "4.39.0");
+  assert.deepEqual(notice?.bullets, getAgentUpgradePreset("browserChallengeResolution"));
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {
@@ -245,6 +245,14 @@ test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {
   assert.match(bullets[0], /upload, download, recording/);
   assert.match(bullets[1], /multi-step form state machine/);
   assert.match(bullets[2], /approval or block rules/);
+});
+
+test("browser challenge resolution preset distinguishes solving from verification", () => {
+  const bullets = getAgentUpgradePreset("browserChallengeResolution");
+  assert.equal(bullets.length, 3);
+  assert.match(bullets[0]!, /detection.*provider solving.*verification/i);
+  assert.match(bullets[1]!, /challenge type.*resolution state/i);
+  assert.match(bullets[2]!, /Browserbase.*Browser Use Cloud/i);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

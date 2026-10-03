@@ -22,6 +22,7 @@ import { normalizeMeetingMission, type MeetingMission } from "./meetings/mission
 import { isBlandVoiceId, isFluxTtsVoice, normalizeLiveVoicePreferences, type FluxTtsVoiceId, type LiveVoicePreferences, type LiveVoiceProvider } from "./voiceSettings.js";
 import type { EncryptedCredential } from "./vault/crypto.js";
 import type { BrowserAuditRecord, BrowserHandoffRecord, BrowserPlaybookRecord } from "./vault/browserOps.js";
+import { normalizeChallengeProvider, normalizeChallengeType, type BrowserChallengeState } from "./vault/challengeResolution.js";
 import type { E2BBrowserFileRecord, E2BBrowserRecord } from "./lib/e2b/types.js";
 import type { AutonomyContextSnapshot, AutonomyLinks, AutonomyMode, AutonomousRunRecord, JobOccurrenceRecord } from "./autonomy/types.js";
 import type { CompensationRecord, ExecutionReservation, OutcomeVerification, ProviderProof, ReliabilitySample, ReliabilityTraceEvent } from "./reliability/contracts.js";
@@ -4420,7 +4421,10 @@ export async function getSession(uid: number): Promise<UserSession> {
   s.linkWallet = linkWallet;
   const browserHandoffs = Array.isArray(s.browserHandoffs) ? s.browserHandoffs.filter((item): item is BrowserHandoffRecord => {
     if (!item || typeof item !== "object" || item.userId !== uid || typeof item.id !== "string" || !/^bh_[A-Za-z0-9_-]{1,120}$/.test(item.id) || typeof item.workspaceId !== "string" || !item.workspaceId || typeof item.reason !== "string" || !["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"].includes(item.reason) || typeof item.status !== "string" || !["waiting", "awaiting_verification", "completed", "expired", "cancelled"].includes(item.status) || !Number.isFinite(item.createdAt) || !Number.isFinite(item.expiresAt)) return false;
-    if (item.status === "waiting" && item.expiresAt <= now) item.status = "expired";
+    item.provider = normalizeChallengeProvider(item.provider);
+    item.challengeType = normalizeChallengeType(item.challengeType ?? item.reason);
+    if (typeof item.resolutionState !== "string" || !["detected", "solving", "solved_unverified", "verified", "handoff_required", "expired", "blocked"].includes(item.resolutionState)) item.resolutionState = item.status === "completed" ? "verified" : item.status === "expired" ? "expired" : "handoff_required";
+    if (item.status === "waiting" && item.expiresAt <= now) { item.status = "expired"; item.resolutionState = "expired"; }
     if (typeof item.credentialId === "string" && item.credentialId.length > 200) return false;
     return true;
   }).slice(-20) : [];
@@ -7538,6 +7542,8 @@ export async function updateBrowserHandoff(uid: number, id: string, status: Brow
   if (!record) return undefined;
   if (record.status === "expired" || record.status === "cancelled" || record.status === "completed") return record;
   record.status = status;
+  if (status === "completed") record.resolutionState = "verified";
+  if (status === "expired") record.resolutionState = "expired";
   if (completedAt) record.completedAt = completedAt;
   await saveBrowserHandoff(uid, record);
   return record;
@@ -7790,6 +7796,14 @@ export async function searchMemories(uid: number, query?: string, options: { cat
     } catch (error) { recordVectorFailure(error, { phase: "memory_search", errorClass: "vector_query" }); logger.warn({ err: error, userId: uid }, "Semantic memory search unavailable; using structured search"); }
   }
   return [...ranked.values()].sort((a, b) => b.score - a.score || b.memory.updatedAt - a.memory.updatedAt).slice(0, limit).map((item) => item.memory);
+}
+
+export async function updateBrowserHandoffResolution(uid: number, id: string, resolutionState: BrowserChallengeState): Promise<BrowserHandoffRecord | undefined> {
+  const record = await getBrowserHandoff(uid, id);
+  if (!record || ["expired", "cancelled", "completed"].includes(record.status)) return record;
+  record.resolutionState = resolutionState;
+  await saveBrowserHandoff(uid, record);
+  return record;
 }
 
 /** Read one active memory by its exact owner-scoped key without invoking semantic search. */

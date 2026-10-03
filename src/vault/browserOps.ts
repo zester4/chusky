@@ -1,4 +1,5 @@
 import type { VaultAction } from "./policy.js";
+import type { BrowserChallengeProvider, BrowserChallengeState, BrowserChallengeType } from "./challengeResolution.js";
 
 export type BrowserRecipeStep = {
   role: "textbox" | "button" | "link" | "checkbox" | "combobox" | "any";
@@ -88,6 +89,9 @@ export type BrowserHandoffRecord = {
   /** Private reference used to resume the exact vaulted identity after an SSO handoff. */
   credentialId?: string;
   reason: BrowserHandoffReason;
+  provider?: BrowserChallengeProvider;
+  challengeType?: BrowserChallengeType;
+  resolutionState?: BrowserChallengeState;
   status: "waiting" | "awaiting_verification" | "completed" | "expired" | "cancelled";
   createdAt: number;
   expiresAt: number;

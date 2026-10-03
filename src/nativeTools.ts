@@ -26,7 +26,7 @@ import {
   type JobRecord, type ReminderRecord, type ScheduledWorkerBinding, type ReminderDeliveryTarget,
   listPhoneCalls, saveImageAsset, searchImageAssets, getImageAsset, forgetImageAsset,
   listVideoJobs, listHandoffRecords, saveHandoffRecord, listCalendarMeetingPreparations,
-  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff,
+  searchRecallMeetingTranscripts, deleteRecallMeetingTranscript, saveBrowserPlaybook, findBrowserPlaybook, listBrowserPlaybooks, removeBrowserPlaybook, addBrowserAudit, listBrowserAudit, saveBrowserHandoff, getBrowserHandoff, listBrowserHandoffs, updateBrowserHandoff, updateBrowserHandoffResolution,
   getTregSpend, saveTregSpend, saveTregReceipt, listTregReceipts, acquireTregSpendLock, releaseTregSpendLock, saveTregOAuthState, getTregOAuthState, removeTregOAuthState,
 } from "./store.js";
 import { daytonaEngine } from "./lib/daytona/index.js";
@@ -46,6 +46,7 @@ import { abortable, throwIfAborted } from "./cancellation.js";
 import { beginVaultSetup, browserSessionHealth, listVault, logoutVault, normaliseVaultOrigin, normaliseVaultService, recordVaultSession, vaultStatus } from "./vault/vault.js";
 import { loginWithVault } from "./vault/broker.js";
 import { classifyBrowserIntent, createBrowserOperationPlan, normalizeBrowserAlias, normalizeBrowserOrigin, normalizePlaybook, verifyBrowserResult, type BrowserHandoffReason, type BrowserPlaybookRecord } from "./vault/browserOps.js";
+import { normalizeChallengeProvider, normalizeChallengeType, transitionChallengeState } from "./vault/challengeResolution.js";
 import { cancelShopping, listSavedShoppingSites, listShopping, pauseShopping, removeSavedShoppingSite, resumeShopping, saveShoppingSitePreference, selectShoppingRetailer, startShopping, updateShopping } from "./shopping/shopping.js";
 import { cancelAutomaticCalendarMeetingJoins, getRecallMeetingForUser, joinRecallMeeting, joinPreparedCalendarMeeting, leaveRecallMeeting, listRecallMeetingsForUser, lookupRecallMeetingContext, ownerExplicitlyRequestedTranscriptRetention, prepareRecallMeetingMission } from "./meetings/service.js";
 import { hasMeetingMissionInput } from "./meetings/mission.js";
@@ -392,6 +393,9 @@ async function createBrowserHandoffRecord(userId: number, input: { reason?: unkn
     ...(origin ? { origin } : {}),
     ...(credentialId ? { credentialId } : {}),
     reason,
+    provider: "e2b",
+    challengeType: normalizeChallengeType(reason),
+    resolutionState: "handoff_required",
     status: "waiting",
     createdAt: Date.now(),
     expiresAt: handoff.expiresAt,
@@ -1041,6 +1045,7 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
   if (handoff.origin && currentOrigin !== handoff.origin) throw new Error("The retained browser is outside the website origin bound to this handoff");
   const challenge = observed.challenge && typeof observed.challenge === "object" ? observed.challenge as { detected?: unknown } : undefined;
   if (observed.needsUserInteraction === true || challenge?.detected === true) {
+    if (handoff.resolutionState !== "handoff_required") await updateBrowserHandoffResolution(userId, id, "handoff_required");
     return { id, status: "awaiting_verification", needsUserInteraction: true, ...(typeof observed.title === "string" ? { title: observed.title } : {}), next: "The challenge is still present. Complete it in the retained private browser, then resume again." };
   }
 
@@ -1052,10 +1057,12 @@ async function resumeBrowserHandoff(userId: number, id: string, ownerPrivateRun:
     const saved = matches.length === 1 ? matches[0] : undefined;
     if (!saved?.session) throw new Error("The retained browser is no longer linked to a pending vault login");
     const session = await recordVaultSession(userId, { credentialId: saved.id, service: saved.service, accountAlias: saved.accountAlias, origin: saved.origin, workspaceId: saved.session.workspaceId, status: "authenticated", lastAuthenticatedAt: Date.now(), lastUsedAt: Date.now() });
+    await updateBrowserHandoffResolution(userId, id, transitionChallengeState(handoff.resolutionState ?? "handoff_required", "verification_passed"));
     await updateBrowserHandoff(userId, id, "completed", Date.now());
     await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", service: saved.service, origin: saved.origin, status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
     return { id, status: "completed", handoffCompleted: true, session: { id: session.id, workspaceId: session.workspaceId, status: session.status, origin: session.origin } };
   }
+  await updateBrowserHandoffResolution(userId, id, transitionChallengeState(handoff.resolutionState ?? "handoff_required", "verification_passed"));
   await updateBrowserHandoff(userId, id, "completed", Date.now());
   await addBrowserAudit(userId, { id: `ba_${randomUUID()}`, userId, event: "handoff_completed", ...(handoff.origin ? { origin: handoff.origin } : {}), status: "succeeded", summary: "Private browser handoff resumed automatically after same-origin challenge clearance", createdAt: Date.now() });
   return { id, status: "completed", handoffCompleted: true };
@@ -2268,7 +2275,7 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
     case "CHUCK_BROWSER_HANDOFF_STATUS": {
       const id = args.id ? text(args.id) : undefined;
       const records = id ? [await getBrowserHandoff(userId, id)] : await listBrowserHandoffs(userId, args.limit === undefined ? 10 : Number(args.limit));
-      const visible = records.filter((record): record is NonNullable<typeof record> => Boolean(record)).map((record) => ({ id: record.id, workspaceId: record.workspaceId, ...(record.service ? { service: record.service } : {}), ...(record.origin ? { origin: record.origin } : {}), reason: record.reason, status: record.status, createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.completedAt ? { completedAt: record.completedAt } : {}) }));
+      const visible = records.filter((record): record is NonNullable<typeof record> => Boolean(record)).map((record) => ({ id: record.id, workspaceId: record.workspaceId, ...(record.service ? { service: record.service } : {}), ...(record.origin ? { origin: record.origin } : {}), reason: record.reason, provider: normalizeChallengeProvider(record.provider), challengeType: normalizeChallengeType(record.challengeType ?? record.reason), resolutionState: record.resolutionState ?? (record.status === "completed" ? "verified" : record.status === "expired" ? "expired" : "handoff_required"), status: record.status, createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.completedAt ? { completedAt: record.completedAt } : {}) }));
       return id ? visible[0] ?? { id, status: "not_found" } : visible;
     }
     case "CHUCK_BROWSER_HANDOFF_COMPLETE": {
