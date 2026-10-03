@@ -328,6 +328,22 @@ export class NeonDurableState {
     return result.rows[0] ? durableObjectFromRow(result.rows[0]) : undefined;
   }
 
+  /** Bounded cleanup scan; only explicitly expired catalog rows are eligible. */
+  async listExpiredObjectMetadata(nowMs: number, limit = 100): Promise<DurableObjectMetadata[]> {
+    if (!Number.isSafeInteger(nowMs) || nowMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("Durable object cleanup query bounds are invalid.");
+    }
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256, encryption_version, retention_expires_at, metadata, created_at, updated_at
+       FROM chusky_object_metadata
+       WHERE retention_expires_at <= to_timestamp($1 / 1000.0) AND lifecycle_status IN ('pending','available','deleting','failed')
+       ORDER BY retention_expires_at, owner_user_id, object_id
+       LIMIT $2`,
+      [nowMs, limit],
+    );
+    return result.rows.map(durableObjectFromRow);
+  }
+
   /** Finalize an upload only when it still matches the pending owner-scoped intent. */
   async markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string, encryptionVersion?: string): Promise<boolean> {
     assertUserId(userId);
@@ -357,6 +373,23 @@ export class NeonDurableState {
     if (result.rows.length) return true;
     const existing = await this.getObjectMetadata(userId, objectId);
     return existing?.status === "deleted";
+  }
+
+  /** Claim expiry deletion only while the persisted deadline is still due. */
+  async markExpiredObjectDeleting(userId: number, objectId: string, nowMs: number): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId) || !Number.isSafeInteger(nowMs) || nowMs <= 0) {
+      throw new Error("Expired object deletion claim is invalid.");
+    }
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'deleting', updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2
+         AND retention_expires_at <= to_timestamp($3 / 1000.0)
+         AND lifecycle_status IN ('pending','available','failed','deleting')
+       RETURNING object_id`,
+      [userId, objectId, nowMs],
+    );
+    return result.rows.length > 0;
   }
 
   /** Mark deletion only after R2 confirms the delete request succeeded. */

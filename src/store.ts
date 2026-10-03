@@ -18,6 +18,7 @@ import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMe
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, inspectR2Object, putR2Object, r2Configured, readR2ObjectBounded, signR2Download } from "./lib/storage/r2.js";
 import { deleteDurableImageAsset, durableImageObjectId, isAuthorizedDurableImage, registerDurableImageAsset } from "./durableImageCatalog.js";
+import { sweepExpiredR2Objects } from "./r2Retention.js";
 import type { ShoppingRun, ShoppingSite } from "./shopping/types.js";
 import type { CompanyAgentProfile, CompanyPolicy } from "./companyPlatform.js";
 import type { RecallChatCommand } from "./meetings/recall.js";
@@ -1620,9 +1621,11 @@ interface Backend {
   getDurableStateHealth(): Promise<DurableStateStatus>;
   getDurableStorageMetrics(): Promise<Record<string, number>>;
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined>;
+  listExpiredObjectMetadata(nowMs: number, limit: number): Promise<DurableObjectMetadata[]>;
   createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata>;
   markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean>;
   markObjectDeleting(userId: number, objectId: string): Promise<boolean>;
+  markExpiredObjectDeleting(userId: number, objectId: string, nowMs: number): Promise<boolean>;
   markObjectDeleted(userId: number, objectId: string): Promise<boolean>;
   markObjectFailed(userId: number, objectId: string): Promise<boolean>;
   getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
@@ -1961,6 +1964,10 @@ class RedisBackend implements Backend {
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
     return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
   }
+  listExpiredObjectMetadata(nowMs: number, limit: number): Promise<DurableObjectMetadata[]> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.listExpiredObjectMetadata(nowMs, limit);
+  }
   createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
     return this.durableState.createObjectMetadata(record);
@@ -1972,6 +1979,10 @@ class RedisBackend implements Backend {
   markObjectDeleting(userId: number, objectId: string): Promise<boolean> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
     return this.durableState.markObjectDeleting(userId, objectId);
+  }
+  markExpiredObjectDeleting(userId: number, objectId: string, nowMs: number): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markExpiredObjectDeleting(userId, objectId, nowMs);
   }
   markObjectDeleted(userId: number, objectId: string): Promise<boolean> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
@@ -3612,9 +3623,11 @@ class MemoryBackend implements Backend {
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
   async getDurableStorageMetrics(): Promise<Record<string, number>> { return { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
+  async listExpiredObjectMetadata(_nowMs: number, _limit: number): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
   async createObjectMetadata(_record: DurableObjectMetadata): Promise<DurableObjectMetadata> { throw new Error("Neon object catalog is unavailable."); }
   async markObjectAvailable(_userId: number, _objectId: string, _expectedUploadKey: string, _finalObjectKey: string, _sizeBytes: number, _sha256: string): Promise<boolean> { return false; }
   async markObjectDeleting(_userId: number, _objectId: string): Promise<boolean> { return false; }
+  async markExpiredObjectDeleting(_userId: number, _objectId: string, _nowMs: number): Promise<boolean> { return false; }
   async markObjectDeleted(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async markObjectFailed(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
@@ -4927,6 +4940,20 @@ export async function durableStorageMetrics(): Promise<Record<string, number>> {
 export async function getDurableObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return undefined;
   return backend.getObjectMetadata(userId, objectId);
+}
+
+export async function listExpiredDurableObjectMetadata(nowMs: number, limit = 100): Promise<DurableObjectMetadata[]> {
+  return backend.listExpiredObjectMetadata(nowMs, limit);
+}
+
+/** Bounded dry-run by default; apply deletes only explicitly expired catalog objects. */
+export async function runR2RetentionSweep(options: { nowMs?: number; limit?: number; apply?: boolean } = {}) {
+  return sweepExpiredR2Objects({
+    listExpired: (nowMs, limit) => backend.listExpiredObjectMetadata(nowMs, limit),
+    markDeleting: (userId, objectId, nowMs) => backend.markExpiredObjectDeleting(userId, objectId, nowMs),
+    deleteObject: deleteR2Object,
+    markDeleted: (userId, objectId) => backend.markObjectDeleted(userId, objectId),
+  }, options);
 }
 
 export async function createDurableObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {

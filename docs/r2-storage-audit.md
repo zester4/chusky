@@ -113,3 +113,12 @@ asset flows do not all write the catalog. Encrypted transcript/run-trace
 archival, retention/orphan-cleanup workers, complete inventory/backfill
 tooling, production migration, and a live R2 canary remain outstanding. No
 lifecycle expiry rules are configured for user object prefixes.
+
+The bounded `npm run r2:retention` utility now scans only Neon catalog rows
+whose explicit `retention_expires_at` is due. It is read-only by default. The
+apply mode requires both `--apply` and `--confirm-expired-objects`, atomically
+rechecks the deadline while setting a Neon deletion tombstone, deletes only the
+cataloged owner-scoped R2 key, then confirms the tombstone. It does not list or
+delete bucket prefixes. This is an operator-run primitive, not an automated
+schedule; production inventory, retry monitoring, cron wiring, and a live
+synthetic canary remain outstanding.

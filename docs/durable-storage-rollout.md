@@ -29,8 +29,8 @@ Updated: 2026-10-03
 | Store missions, steps, evidence, and event history in Neon | Migrations 0009-0010 define owner-scoped mission/event rows and per-owner cutover markers. The local runtime can route marked owners through version-CAS mission writes and transactional event inserts; unmarked owners stay on Redis. `npm run durable-missions:backfill` defaults to count-only read mode and only applies after `--apply --confirm-quiesced`; it verifies complete mission/event read-backs before writing the marker. | Focused backfill/repository tests and the full local suite pass. No production backfill or deployed verification was run. All writers and workers must be stopped before apply; Redis copies are preserved. Keep the mission flag enabled after cutover because disabling it after Neon writes would expose stale Redis data. Reminders, recurring jobs, and task definitions/results still need durable Neon ownership. |
 | Measure Redis commands, bytes, key sizes, cache hit ratio, and Neon query latency | Added process-local aggregates for session Redis commands/bytes, core/cache sizes, domain-cache hit ratio, Neon query count/errors/latency, message counts/byte estimates, and domain sizes through `durableStorageMetrics()`. | Local instrumentation only; it is not yet exported to a multi-instance collector/dashboard and does not cover every Redis command family. Required before broader cutover. |
 | Archive large transcripts, tool outputs, files, images, and videos to R2 | Migration 0008 and owner-scoped Neon metadata now back an opt-in SDK upload path: presigned uploads land in staging, bounded bytes are hashed and promoted to unique final keys, and Neon atomically records the winning key before download authorization. See the [R2 audit](r2-storage-audit.md). Other image/attachment flows, retained Recall transcripts, and agent run/tool traces are not fully catalogued or archived; encryption and retention/orphan workers are not implemented. | One guarded SDK file path is implemented locally; remaining consumers, backfill, cleanup, live migration, and production verification remain. |
-| Add retention and safe archival jobs | Existing domain-specific TTLs/limits remain; no general Neon/R2 retention or archival worker was added. | Not implemented. |
-| Full CI and production verification | Current local run after mission-backfill changes: 1,306 tests (1,302 pass, 0 fail, 4 skipped); typecheck, app/SDK builds, SDK tests (25 pass), and `git diff --check` passed. Earlier live configured Neon+Redis session smoke evidence is recorded above. | Local checks passed on Windows/Node 25; CI uses Ubuntu/Node 22 and installs FFmpeg, so hosted CI and deployed-service verification remain outstanding. This mission change was not applied to Neon or deployed. |
+| Add retention and safe archival jobs | `npm run r2:retention` is a bounded operator-run cleanup primitive over explicitly expired Neon object-catalog rows. Dry-run is default; apply requires two explicit flags, rechecks expiry in the Neon tombstone update, and deletes only the cataloged owner-scoped R2 key. | Local unit/store coverage is being added. No automated schedule, production inventory, retry monitoring, R2 archival for retained transcripts/traces, or live canary yet. |
+| Full CI and production verification | Current Windows local run: 1,324 tests (1,320 pass, 0 fail, 4 skipped); typecheck and app build pass. Earlier SDK build/tests (25 pass) and live configured Neon+Redis session smoke evidence are recorded above. | The exact hosted CI workflow still needs Ubuntu/Node 22 plus FFmpeg. Deployed-service verification remains outstanding; this retention runner was not applied to live objects or deployed. |
 
 ## Operational safeguards
 
@@ -71,10 +71,12 @@ Updated: 2026-10-03
    recurring jobs, and task definitions/results still need Neon ownership.
    Keep each domain opt-in until schema, backfill, parity, restart, and rollback
    checks pass.
-5. Follow [the R2 storage audit](r2-storage-audit.md): wire existing asset
-   writes into the Neon object catalog, then add encrypted R2 archival for
-   retained transcript segments first and eligible large run/tool payloads;
-   add bounded retention and orphan-recovery jobs. Never log or fetch full
+5. Follow [the R2 storage audit](r2-storage-audit.md): complete inventory and
+   backfill for existing images/files, wire every attachment flow into the
+   Neon catalog, then add encrypted R2 archival for retained transcript
+   segments and eligible large run/tool payloads. Turn the guarded manual
+   retention primitive into a monitored scheduled job only after dry-run
+   inventory and deletion retry/restart checks. Never log or fetch full
    payloads for routine verification.
 6. Add Redis command/byte/key-size metrics by bounded operation family. Use
    measurements to decide whether a small recent-history cache is worthwhile;

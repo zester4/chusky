@@ -251,6 +251,23 @@ test("Neon object deletion is a retryable owner-scoped tombstone transition", as
   assert.match(pool.calls[2]?.text ?? "", /lifecycle_status IN \('pending','available'\)/);
   assert.match(pool.calls[2]?.text ?? "", /lifecycle_status = 'failed'/);
   assert.deepEqual(pool.calls[2]?.values, [42, "obj_upload_2"]);
+
+  assert.equal(await state.markExpiredObjectDeleting(42, "obj_expired", Date.now()), true);
+  assert.match(pool.calls[3]?.text ?? "", /retention_expires_at <= to_timestamp\(\$3 \/ 1000\.0\)/);
+  assert.match(pool.calls[3]?.text ?? "", /lifecycle_status IN \('pending','available','failed','deleting'\)/);
+  assert.deepEqual(pool.calls[3]?.values?.slice(0, 2), [42, "obj_expired"]);
+  await assert.rejects(() => state.markExpiredObjectDeleting(42, "obj_bad", Number.NaN), /claim is invalid/);
+});
+
+test("Neon expired-object inventory is bounded, ordered, and status-filtered", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+  await state.listExpiredObjectMetadata(Date.now(), 20);
+  assert.match(pool.calls[0]?.text ?? "", /retention_expires_at <= to_timestamp\(\$1 \/ 1000\.0\)/);
+  assert.match(pool.calls[0]?.text ?? "", /lifecycle_status IN \('pending','available','deleting','failed'\)/);
+  assert.match(pool.calls[0]?.text ?? "", /ORDER BY retention_expires_at, owner_user_id, object_id\s+LIMIT \$2/);
+  assert.deepEqual(pool.calls[0]?.values?.slice(1), [20]);
+  await assert.rejects(() => state.listExpiredObjectMetadata(Date.now(), 501), /query bounds are invalid/);
 });
 
 test("object catalog startup assertion fails closed when migration 0008 is absent", async () => {
