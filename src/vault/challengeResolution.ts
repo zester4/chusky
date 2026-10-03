@@ -1,5 +1,5 @@
-/** Provider-neutral state for browser challenges. */
-export const BROWSER_CHALLENGE_PROVIDERS = ["e2b", "browserbase", "browser_use_cloud", "owner"] as const;
+/** E2B-backed state for browser challenges and owner handoff. */
+export const BROWSER_CHALLENGE_PROVIDERS = ["e2b", "owner"] as const;
 export type BrowserChallengeProvider = typeof BROWSER_CHALLENGE_PROVIDERS[number];
 
 export const BROWSER_CHALLENGE_TYPES = ["captcha", "two_factor", "age_verification", "site_challenge", "login", "user_requested"] as const;

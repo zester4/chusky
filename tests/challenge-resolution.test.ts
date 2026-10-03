@@ -4,7 +4,7 @@ import { initialChallengeResolution, normalizeChallengeProvider, normalizeChalle
 
 test("challenge resolution defaults E2B to an owner handoff", () => {
   assert.deepEqual(initialChallengeResolution("e2b"), { provider: "e2b", state: "handoff_required", automatic: false, requiresOwner: true });
-  assert.deepEqual(initialChallengeResolution("browserbase", true), { provider: "browserbase", state: "detected", automatic: true, requiresOwner: false });
+  assert.deepEqual(initialChallengeResolution("owner"), { provider: "owner", state: "handoff_required", automatic: false, requiresOwner: true });
 });
 
 test("provider challenge transitions never treat detection as verification", () => {

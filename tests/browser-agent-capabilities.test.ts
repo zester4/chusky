@@ -5,7 +5,6 @@ import { extractBrowserSchema } from "../src/lib/e2b/extraction.js";
 import { classifyBrowserRecovery } from "../src/lib/e2b/recovery.js";
 import { browserTraceEvent, redactBrowserTrace } from "../src/lib/e2b/trace.js";
 import { BrowserSessionPool } from "../src/lib/browser-runtime/pool.js";
-import { registerBrowserRuntime, createBrowserRuntime, listBrowserRuntimeProviders } from "../src/lib/browser-runtime/registry.js";
 import { rankBrowserTargets } from "../src/lib/e2b/vision.js";
 import { browserBenchmarkCases } from "../benchmarks/browser-cases.js";
 
@@ -48,13 +47,6 @@ test("browser session pools enforce owner-scoped concurrency and release safely"
   assert.equal(pool.activeFor(8), 0);
   lease.release(); lease.release();
   assert.equal(pool.activeFor(7), 0);
-});
-
-test("runtime registry supports provider-independent adapters", () => {
-  const runtime = { provider: "fake", observe: async () => ({ provider: "fake", nodes: [], capturedAt: 1 }), act: async () => ({}), extract: async () => ({}), run: async () => ({}) } as any;
-  registerBrowserRuntime("fake", () => runtime);
-  assert.ok(listBrowserRuntimeProviders().includes("fake"));
-  assert.equal(createBrowserRuntime("fake"), runtime);
 });
 
 test("benchmark manifest covers the requested browser reliability surfaces", () => {
