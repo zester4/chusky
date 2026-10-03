@@ -5,7 +5,7 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
-import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
 import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
@@ -796,7 +796,7 @@ export interface SdkThreadRecord {
   createdAt: number;
   updatedAt: number;
 }
-export interface SdkFileRecord { id: string; key: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
+export interface SdkFileRecord { id: string; key: string; /** Temporary owner-scoped key used only by an expiring signed upload URL. */ uploadKey?: string; name: string; contentType: string; size: number; status: "pending" | "available" | "rejected"; createdAt: number; }
 export type ArtifactType = "website" | "report" | "docx" | "presentation" | "pdf" | "spreadsheet" | "image" | "video" | "zip" | "project";
 export interface ArtifactRecord { id: string; userId: number; sandboxId: string; name: string; type: ArtifactType; path: string; contentType: string; size: number; status: "available"; createdAt: number; updatedAt: number; }
 
@@ -1616,6 +1616,12 @@ interface Backend {
   deleteSdkRunsForThread(userId: number, threadId: string): Promise<void>;
   getDurableStateHealth(): Promise<DurableStateStatus>;
   getDurableStorageMetrics(): Promise<Record<string, number>>;
+  getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined>;
+  createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata>;
+  markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean>;
+  markObjectDeleting(userId: number, objectId: string): Promise<boolean>;
+  markObjectDeleted(userId: number, objectId: string): Promise<boolean>;
+  markObjectFailed(userId: number, objectId: string): Promise<boolean>;
   getTregSpend(userId: number, dayKey: string): Promise<TregSpendSnapshot | undefined>;
   saveTregSpend(snapshot: TregSpendSnapshot): Promise<void>;
   appendTregReceipt(receipt: TregCallReceipt): Promise<void>;
@@ -1934,6 +1940,29 @@ class RedisBackend implements Backend {
     const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
     const attempts = redisDomainCacheHits + redisDomainCacheMisses;
     return { ...redis, redisDomainCacheHits, redisDomainCacheMisses, redisDomainCacheHitRatio: attempts ? redisDomainCacheHits / attempts : 0, ...(this.durableState?.getMetrics() ?? {}) };
+  }
+  getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
+    return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
+  }
+  createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.createObjectMetadata(record);
+  }
+  markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markObjectAvailable(userId, objectId, expectedUploadKey, finalObjectKey, sizeBytes, sha256);
+  }
+  markObjectDeleting(userId: number, objectId: string): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markObjectDeleting(userId, objectId);
+  }
+  markObjectDeleted(userId: number, objectId: string): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markObjectDeleted(userId, objectId);
+  }
+  markObjectFailed(userId: number, objectId: string): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markObjectFailed(userId, objectId);
   }
   async readConversationBefore(userId: number, before: { createdAt: number; id: string }, limit: number): Promise<DurableConversationMessage[] | undefined> {
     return this.durableState?.readConversationBefore(userId, before, limit);
@@ -3488,6 +3517,12 @@ class MemoryBackend implements Backend {
   async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
   async getDurableStorageMetrics(): Promise<Record<string, number>> { return { redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
+  async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
+  async createObjectMetadata(_record: DurableObjectMetadata): Promise<DurableObjectMetadata> { throw new Error("Neon object catalog is unavailable."); }
+  async markObjectAvailable(_userId: number, _objectId: string, _expectedUploadKey: string, _finalObjectKey: string, _sizeBytes: number, _sha256: string): Promise<boolean> { return false; }
+  async markObjectDeleting(_userId: number, _objectId: string): Promise<boolean> { return false; }
+  async markObjectDeleted(_userId: number, _objectId: string): Promise<boolean> { return false; }
+  async markObjectFailed(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async saveSession(userId: number, s: UserSession) { this.sessions.set(userId, structuredClone(s)); }
   async getSdkRun(userId: number, threadId: string, runId: string) {
     const session = this.sessions.get(userId);
@@ -4274,8 +4309,12 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_SDK_RUNS_ENABLED=true.");
   }
+  if (!options.memoryOnly && config.durableObjectCatalogEnabled && !config.durableStateEnabled) {
+    throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_OBJECT_CATALOG_ENABLED=true.");
+  }
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
+  if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
   if (config.redisUrl && !options.memoryOnly) {
     try {
       const r = new Redis(config.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
@@ -4776,6 +4815,31 @@ export async function durableStateStatus(): Promise<DurableStateStatus> {
 /** Aggregate storage telemetry for protected diagnostics; excludes user IDs and payloads. */
 export async function durableStorageMetrics(): Promise<Record<string, number>> {
   return backend.getDurableStorageMetrics();
+}
+
+export async function getDurableObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
+  if (!Number.isSafeInteger(userId) || userId <= 0) return undefined;
+  return backend.getObjectMetadata(userId, objectId);
+}
+
+export async function createDurableObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {
+  return backend.createObjectMetadata(record);
+}
+
+export async function markDurableObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean> {
+  return backend.markObjectAvailable(userId, objectId, expectedUploadKey, finalObjectKey, sizeBytes, sha256);
+}
+
+export async function markDurableObjectDeleting(userId: number, objectId: string): Promise<boolean> {
+  return backend.markObjectDeleting(userId, objectId);
+}
+
+export async function markDurableObjectDeleted(userId: number, objectId: string): Promise<boolean> {
+  return backend.markObjectDeleted(userId, objectId);
+}
+
+export async function markDurableObjectFailed(userId: number, objectId: string): Promise<boolean> {
+  return backend.markObjectFailed(userId, objectId);
 }
 
 export interface TregOAuthStateRecord {

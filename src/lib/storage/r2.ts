@@ -2,6 +2,13 @@ import { PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectComm
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../../config.js";
 
+export class R2ObjectTooLargeError extends Error {
+  constructor() {
+    super("R2 object exceeds the configured read limit");
+    this.name = "R2ObjectTooLargeError";
+  }
+}
+
 function client(): S3Client {
   if (!config.r2AccountId || !config.r2AccessKeyId || !config.r2SecretAccessKey || !config.r2Bucket) throw new Error("R2 storage is not configured");
   return new S3Client({ region: "auto", endpoint: `https://${config.r2AccountId}.r2.cloudflarestorage.com`, credentials: { accessKeyId: config.r2AccessKeyId, secretAccessKey: config.r2SecretAccessKey } });
@@ -18,6 +25,26 @@ export async function readR2Object(key: string): Promise<Buffer> {
   const result = await client().send(new GetObjectCommand({ Bucket: config.r2Bucket, Key: key }));
   if (!result.Body) throw new Error("R2 object has no body");
   return Buffer.from(await result.Body.transformToByteArray());
+}
+/** Read an object with a hard memory bound when the caller handles untrusted uploads. */
+export async function readR2ObjectBounded(key: string, maxBytes: number): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("R2 read limit is invalid");
+  const result = await client().send(new GetObjectCommand({ Bucket: config.r2Bucket, Key: key }));
+  if (!result.Body) throw new Error("R2 object has no body");
+  return collectR2BodyBounded(result.Body as AsyncIterable<Uint8Array>, maxBytes);
+}
+
+export async function collectR2BodyBounded(body: AsyncIterable<Uint8Array>, maxBytes: number): Promise<Buffer> {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("R2 read limit is invalid");
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  for await (const chunk of body) {
+    const bytes = Buffer.from(chunk);
+    totalBytes += bytes.byteLength;
+    if (totalBytes > maxBytes) throw new R2ObjectTooLargeError();
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
 export async function deleteR2Object(key: string): Promise<void> { await client().send(new DeleteObjectCommand({ Bucket: config.r2Bucket, Key: key })); }
 export async function putR2Object(key: string, body: Uint8Array, contentType: string): Promise<void> {

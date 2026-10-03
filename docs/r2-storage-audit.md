@@ -88,10 +88,27 @@ verified rollback path.
 
 ## Current status
 
-The first foundation slice is implemented locally: migration
-`0008_neon_object_metadata.sql` adds the owner-scoped metadata table and indexes;
-`NeonDurableState` has validated create/get/finalize primitives, with focused
-tests for owner scoping and pending-to-available transitions. Existing image
-and file flows do not yet write this catalog. Encrypted large-content archival,
-transcript/run-trace migration, retention/orphan-cleanup workers, live R2 canary,
-and production migration remain outstanding.
+The metadata foundation and the first integrated path are implemented on the
+`codex/neon-durable-state` branch: migration `0008_neon_object_metadata.sql`
+adds the owner-scoped catalog, and the SDK file upload/complete/download/delete
+routes can use it behind `DURABLE_OBJECT_CATALOG_ENABLED`. The flag requires
+`DURABLE_STATE_ENABLED` and fails startup if the object catalog migration is
+missing. Completed uploads are hashed after the R2 size/type checks; deletion
+persists a tombstone before deleting bytes so an interrupted delete can be
+retried. Existing records are not automatically backfilled, so do not enable
+the flag for production until a controlled backfill has populated metadata for
+the existing SDK files. With the flag on, presigned uploads write only to a
+temporary staging key; completion streams within the configured size limit,
+hashes the bytes, copies them to a unique final key, then atomically changes
+the Neon row from pending staging key to available final key. A still-valid
+upload URL therefore cannot overwrite the object later authorized for download.
+Concurrent completions use distinct final keys; only the first matching
+pending-to-available Neon transition wins, and losing copies are cleaned up
+best-effort. Staging cleanup can still leave an orphan if the process crashes,
+so an expiry/orphan sweeper is required before broad rollout.
+
+This is not the R2 phase completion: other image/file and attachment flows do
+not yet write the catalog. Encrypted transcript/run-trace archival,
+retention/orphan-cleanup workers, inventory/backfill tooling, production
+migration, and a live R2 canary remain outstanding. No lifecycle expiry rules
+are configured for user object prefixes.

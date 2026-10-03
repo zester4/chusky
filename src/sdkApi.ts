@@ -4,15 +4,17 @@ import { streamSSE } from "hono/streaming";
 import { Readable } from "node:stream";
 import { cors } from "hono/cors";
 import { config } from "./config.js";
+import type { DurableObjectMetadata } from "./neonDurableState.js";
+import { promoteSdkFileUpload } from "./sdkFilePromotion.js";
 import { getAuth } from "./auth.js";
 import { ApprovalRequiredError, createTrigger, createUserOutcomeReadAdapter, deleteTrigger, disconnectConnectedAccount, executeExactComposioAction, fetchModels, getConnectionUrl, getToolkitStatesPage, listConnectedAccounts, listMeetingComposioCapabilities, listTriggers, listAvailableTriggerToolkits, listAvailableTriggerTypes, runAgent, searchTools, setTriggerState, updateTriggerInstructions, transcribeAudio, queueVideoWorkflow, type AgentToolActivity } from "./agent.js";
 import type { SubagentActivityUpdate } from "./subagents/contracts.js";
-import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, signR2Download, signR2Upload } from "./lib/storage/r2.js";
+import { deleteR2Object, inspectR2Object, r2Configured, readR2Object, readR2ObjectBounded, signR2Download, signR2Upload, putR2Object } from "./lib/storage/r2.js";
 import { isSafeWebhookUrl, sealWebhookSecret } from "./lib/webhooks.js";
 import { enqueueA2APushNotification, enqueueSdkWebhook } from "./lib/webhookOutbox.js";
 import { extractMediaText, indexExtractedDocument } from "./lib/knowledge/ingest.js";
 import { vectorConfigured } from "./lib/knowledge/vector.js";
-import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule } from "./store.js";
+import { acquireUserLock, addRecallMeeting, appendMessages, appendCompanyAuditEvent, canSpend, cancelMission, cancelMissionTasks, cancelTask, checkRateLimit, claimApproval, completeCompanyRunSummary, createMeetingRoom, createMission, createTask, createWebTelegramLinkCode, createDurableObjectMetadata, getDurableObjectMetadata, markDurableObjectAvailable, markDurableObjectDeleting, markDurableObjectDeleted, markDurableObjectFailed, deleteMeetingContact, deleteMeetingRoom, deleteSdkRun, deleteSdkRunsForThread, findCompanyBrandingByDomain, getApproval, getAgentRun, getCalendarMeetingPreparation, getCompanyBranding, getDaytonaWorkspace, getImageAsset, getMeetingRepresentativeProfile, getMeetingRoom, getMission, getOutbox, getRecallMeeting, getSession, getSessionWithSdkRuns, getTask, getTelegramUserIdForWebAuth, getTriggerEvent, isDurableStore, listApprovals, listAgentRuns, listCalendarMeetingPreparations, listTriggerEvents, listChannelIdentities, listCliDevices, listMeetingContacts, listPhoneCalls, listMeetingRooms, listRecallMeetings, listWorkspaceMeetingPointers, listJobs, listOutbox, listReminders, listTasks, listMissions, listMissionEvents, listHandoffRecords, getHandoffRecord, listVideoJobs, getVideoJob, listCompanyAuditEvents, listCompanyRunSummaries, listCompanyUsagePeriods, listProviderProofs, readConversationHistoryBefore, saveProviderProof, missionProof, pauseMission, resumeMissionFromProviderEvent, setMissionUpdateNotifier, startMission, updateMission, updateMissionControl, updateTask, updateMeetingRoom, updateOutbox, updateVideoJob, registerImageAsset, releaseUserLock, renewUserLock, retryTask, saveCompanyBranding, saveCompanyRunSummary, saveHandoffRecord, saveSession, setApprovalStatus, setLiveVoicePreference, setModel, setVoiceReplies, updateMeetingRepresentativeProfile, getReminder, updateReminder, getJob, updateJob, readScratchpad, writeScratchpad, clearScratchpad, searchMemories, getMemoryByKey, upsertMemoryAndContext, forgetMemory, revokeCliDeviceHash, recordMissionEvidence, verifyMission, repairMission, type CompanyBranding, type CompanyRunSummary, type MeetingRoomPolicy, type MeetingRoomRecord, type SdkProjectRecord, type SdkRunArtifact, type SdkRunImage, type SdkRunRecord, type SdkThreadRecord, type MissionA2APushNotificationConfig, type MissionBudget, type MissionWorkSchedule, type SdkFileRecord } from "./store.js";
 import { monitoringSnapshot } from "./monitoring.js";
 import { triggerTypeForAgent } from "./triggerCatalog.js";
 import { recordTrustedMissionEvidence } from "./store.js";
@@ -891,6 +893,32 @@ export function browserFileDownloadResponse(file: import("./lib/e2b/types.js").E
     "Cache-Control": "private, no-store",
     "X-Content-Type-Options": "nosniff",
   } });
+}
+
+function sdkFileObjectId(fileId: string): string | undefined {
+  return /^file_[A-Za-z0-9_-]{1,120}$/.test(fileId) ? `obj_${fileId.slice("file_".length)}` : undefined;
+}
+
+function publicSdkFile(file: SdkFileRecord): Omit<SdkFileRecord, "uploadKey"> {
+  const { uploadKey: _uploadKey, ...publicFile } = file;
+  return publicFile;
+}
+
+function sdkFileObjectMetadata(ownerUserId: number, file: SdkFileRecord): DurableObjectMetadata {
+  const objectId = sdkFileObjectId(file.id);
+  if (!objectId) throw new Error("SDK file identity is invalid.");
+  return {
+    ownerUserId,
+    objectId,
+    kind: file.contentType.startsWith("image/") ? "image" : "file",
+    objectKey: file.uploadKey ?? file.key,
+    status: "pending",
+    contentType: file.contentType,
+    sizeBytes: file.size,
+    metadata: { source: "sdk_upload", fileId: file.id },
+    createdAt: file.createdAt,
+    updatedAt: file.createdAt,
+  };
 }
 function validateRunPolicy(body: RunBody): string | undefined {
   const durations = new Set(["5m", "30m", "1h", "3h", "6h", "3d", "1w"]);
@@ -2993,10 +3021,167 @@ export function registerSdkApi(app: Hono): void {
   app.patch("/v1/webhooks/:webhookId", async (c) => { const owner = sdkUser(c)!; const enabled = (await c.req.json().catch(() => ({})) as { enabled?: unknown }).enabled; if (typeof enabled !== "boolean") return apiError(c, 400, "invalid_webhook_state", "enabled must be a boolean."); const session = await getSession(owner.userId); const hook = session.sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); hook.disabledAt = enabled ? undefined : Date.now(); await saveSession(owner.userId, session); return c.json({ id: hook.id, url: hook.url, enabled, createdAt: new Date(hook.createdAt).toISOString() }); });
   app.post("/v1/webhooks/:webhookId/deliveries/:deliveryId/retry", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const hook = session.sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); const record = (await listOutbox(undefined, 100, owner.userId)).find((item) => item.id === c.req.param("deliveryId") && item.webhook?.webhookId === hook.id); if (!record) return apiError(c, 404, "not_found", "Webhook delivery not found."); if (record.status !== "failed") return apiError(c, 409, "delivery_not_retryable", record.status === "ambiguous" ? "The receiver may have accepted this event. Verify its state before creating a new event; ambiguous events cannot be replayed through this endpoint." : "Only definitively failed webhook deliveries can be retried."); const updated = await updateOutbox(record.id, { status: "queued", attempts: 0, lastError: undefined, leaseToken: undefined, leaseExpiresAt: undefined }); return c.json(updated ? { id: updated.id, status: updated.status, attempts: updated.attempts } : { id: record.id, status: "queued", attempts: 0 }); });
   app.delete("/v1/webhooks/:webhookId", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const hook = session.sdkWebhooks!.find((item) => item.id === c.req.param("webhookId")); if (!hook) return apiError(c, 404, "not_found", "Webhook not found."); hook.disabledAt = Date.now(); await saveSession(owner.userId, session); return c.body(null, 204); });
-  app.post("/v1/files", async (c) => { const owner = sdkUser(c)!; const body = await c.req.json().catch(() => ({})) as { name?: string; contentType?: string; size?: number }; const name = String(body.name ?? "").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120); const contentType = String(body.contentType ?? "").toLowerCase(); const size = Number(body.size); const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "audio/mpeg", "audio/ogg", "audio/wav", "video/mp4", "video/webm"]); if (!name || !allowed.has(contentType) || !Number.isFinite(size) || size < 1 || size > config.sdkMaxFileBytes) return apiError(c, 400, "invalid_file", "File name, type, or size is invalid."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); const session = await getSession(owner.userId); const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex"); const prior = idempotency(c, session, fingerprint); if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request."); if (prior.replay) return c.json(prior.replay, 201); const file = { id: `file_${randomUUID()}`, key: `sdk/${owner.userId}/${randomUUID()}-${name}`, name, contentType, size, status: "pending" as const, createdAt: Date.now() }; const expiresAt = new Date(Date.now() + 300_000).toISOString(); const response = { ...file, uploadUrl: await signR2Upload(file.key, file.contentType), expiresAt }; session.sdkFiles!.push(file); if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() }; await saveSession(owner.userId, session); return c.json(response, 201); });
- app.post("/v1/files/:fileId/complete", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const file = session.sdkFiles!.find((item) => item.id === c.req.param("fileId")); if (!file) return apiError(c, 404, "not_found", "File not found."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "Storage is not configured."); try { const remote = await inspectR2Object(file.key); if (remote.size !== file.size || remote.contentType !== file.contentType) { file.status = "rejected"; await saveSession(owner.userId, session); return apiError(c, 409, "file_verification_failed", "R2 object size or content type did not match the upload intent."); } file.status = "available"; await saveSession(owner.userId, session); if (["image/jpeg", "image/png", "image/webp"].includes(file.contentType)) { try { await registerImageAsset(owner.userId, { name: file.name, purpose: "Image uploaded through the Chusky dashboard", description: file.name, tags: ["dashboard", "uploaded-image"], contentType: file.contentType as "image/jpeg" | "image/png" | "image/webp", r2Key: file.key, size: file.size }); } catch (error) { logger.warn({ err: error, userId: owner.userId, fileId: file.id }, "Could not register SDK image asset"); } } if (vectorConfigured() && (file.contentType.startsWith("image/") || file.contentType === "text/plain" || file.contentType === "text/markdown" || file.contentType === "application/pdf" || file.contentType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) { try { const bytes = await readR2Object(file.key); const extracted = file.contentType === "text/plain" || file.contentType === "text/markdown" ? bytes.toString("utf8") : await extractMediaText(bytes, file.name, file.contentType, session.model); await indexExtractedDocument({ userId: String(owner.userId), documentId: file.id, filename: file.name, contentType: file.contentType, text: extracted, sourceType: "sdk_upload" }); } catch (error) { logger.warn({ err: error, userId: owner.userId, fileId: file.id }, "Could not index SDK file"); } } return c.json(file); } catch { return apiError(c, 409, "file_not_uploaded", "The upload is not available in R2 yet."); } });
-  app.get("/v1/files/:fileId", async (c) => { const owner = sdkUser(c)!; const file = (await getSession(owner.userId)).sdkFiles!.find((item) => item.id === c.req.param("fileId")); if (!file) return apiError(c, 404, "not_found", "File not found."); if (file.status !== "available") return apiError(c, 409, "file_not_available", "Only a verified upload can be downloaded."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); return c.json({ ...file, downloadUrl: await signR2Download(file.key), expiresAt: new Date(Date.now() + 300_000).toISOString() }); });
-  app.delete("/v1/files/:fileId", async (c) => { const owner = sdkUser(c)!; const session = await getSession(owner.userId); const index = session.sdkFiles!.findIndex((item) => item.id === c.req.param("fileId")); if (index < 0) return apiError(c, 404, "not_found", "File not found."); if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured."); await deleteR2Object(session.sdkFiles![index].key); session.sdkFiles!.splice(index, 1); await saveSession(owner.userId, session); return c.body(null, 204); });
+  app.post("/v1/files", async (c) => {
+    const owner = sdkUser(c)!;
+    const body = await c.req.json().catch(() => ({})) as { name?: string; contentType?: string; size?: number };
+    const name = String(body.name ?? "").replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+    const contentType = String(body.contentType ?? "").toLowerCase();
+    const size = Number(body.size);
+    const allowed = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf", "text/plain", "text/markdown", "application/zip", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "audio/mpeg", "audio/ogg", "audio/wav", "video/mp4", "video/webm"]);
+    if (!name || !allowed.has(contentType) || !Number.isFinite(size) || size < 1 || size > config.sdkMaxFileBytes) return apiError(c, 400, "invalid_file", "File name, type, or size is invalid.");
+    if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured.");
+    const session = await getSession(owner.userId);
+    const fingerprint = createHash("sha256").update(`POST:${c.req.path}:${JSON.stringify(body)}`).digest("hex");
+    const prior = idempotency(c, session, fingerprint);
+    if (prior.mismatch) return apiError(c, 409, "idempotency_mismatch", "Idempotency-Key was reused with a different request.");
+    if (prior.replay) return c.json(prior.replay, 201);
+    const fileId = `file_${randomUUID()}`;
+    const file: SdkFileRecord = {
+      id: fileId,
+      key: `sdk/${owner.userId}/${randomUUID()}-${name}`,
+      ...(config.durableObjectCatalogEnabled ? { uploadKey: `sdk/${owner.userId}/.staging/${fileId}-${randomUUID()}` } : {}),
+      name,
+      contentType,
+      size,
+      status: "pending",
+      createdAt: Date.now(),
+    };
+    const expiresAt = new Date(Date.now() + 300_000).toISOString();
+    let uploadUrl: string;
+    try {
+      uploadUrl = await signR2Upload(file.uploadKey ?? file.key, file.contentType);
+      if (config.durableObjectCatalogEnabled) await createDurableObjectMetadata(sdkFileObjectMetadata(owner.userId, file));
+    } catch {
+      return apiError(c, 503, config.durableObjectCatalogEnabled ? "object_catalog_unavailable" : "storage_unavailable", "A durable R2 upload intent could not be prepared.");
+    }
+    const response = { ...publicSdkFile(file), uploadUrl, expiresAt };
+    session.sdkFiles!.push(file);
+    if (prior.key) session.sdkIdempotency![prior.key] = { fingerprint, response, createdAt: Date.now() };
+    await saveSession(owner.userId, session);
+    return c.json(response, 201);
+  });
+
+  app.post("/v1/files/:fileId/complete", async (c) => {
+    const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const file = session.sdkFiles!.find((item) => item.id === c.req.param("fileId"));
+    if (!file) return apiError(c, 404, "not_found", "File not found.");
+    if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "Storage is not configured.");
+    const objectId = sdkFileObjectId(file.id);
+    if (config.durableObjectCatalogEnabled) {
+      if (!objectId) return apiError(c, 409, "file_metadata_invalid", "The upload metadata is invalid.");
+      try {
+        const record = await getDurableObjectMetadata(owner.userId, objectId);
+        if (!record || record.contentType !== file.contentType || record.sizeBytes !== file.size || record.status === "deleting" || record.status === "deleted") {
+          return apiError(c, 409, "file_metadata_unavailable", "The owner-scoped durable upload record is missing or does not match this file.");
+        }
+        if (record.status === "available") {
+          if (!record.sha256 || record.metadata?.fileId !== file.id) return apiError(c, 409, "file_metadata_unavailable", "The completed upload record does not match this file.");
+          file.key = record.objectKey;
+          file.status = "available";
+          await saveSession(owner.userId, session);
+          return c.json(publicSdkFile(file));
+        }
+        if (record.objectKey !== file.uploadKey) return apiError(c, 409, "file_metadata_unavailable", "The pending upload record does not match the staging key.");
+      } catch {
+        return apiError(c, 503, "object_catalog_unavailable", "The durable upload record could not be checked.");
+      }
+    }
+    const uploadKey = file.uploadKey ?? file.key;
+    if (config.durableObjectCatalogEnabled && objectId) {
+      try {
+        const promotion = await promoteSdkFileUpload({ ownerUserId: owner.userId, objectId, uploadKey, contentType: file.contentType, expectedSize: file.size, maxBytes: config.sdkMaxFileBytes, safeName: file.name }, {
+          inspect: inspectR2Object,
+          readBounded: readR2ObjectBounded,
+          put: putR2Object,
+          remove: deleteR2Object,
+          finalize: markDurableObjectAvailable,
+          get: getDurableObjectMetadata,
+        });
+        if (promotion.status === "not_uploaded") return apiError(c, 409, "file_not_uploaded", "The upload is not available in R2 yet.");
+        if (promotion.status === "verification_failed") {
+          await markDurableObjectFailed(owner.userId, objectId);
+          file.status = "rejected";
+          await saveSession(owner.userId, session);
+          return apiError(c, 409, "file_verification_failed", "R2 object size, content type, or bytes did not match the upload intent.");
+        }
+        if (promotion.status === "conflict") return apiError(c, 409, "file_metadata_conflict", "The durable upload record could not be finalized; retry completion after checking the file state.");
+        file.key = promotion.objectKey;
+      } catch {
+        return apiError(c, 503, "object_catalog_unavailable", "The verified upload could not be committed to durable metadata.");
+      }
+    } else {
+      let remote: Awaited<ReturnType<typeof inspectR2Object>>;
+      try { remote = await inspectR2Object(file.key); }
+      catch { return apiError(c, 409, "file_not_uploaded", "The upload is not available in R2 yet."); }
+      if (remote.size !== file.size || remote.contentType !== file.contentType) {
+        file.status = "rejected";
+        await saveSession(owner.userId, session);
+        return apiError(c, 409, "file_verification_failed", "R2 object size or content type did not match the upload intent.");
+      }
+    }
+    file.status = "available";
+    await saveSession(owner.userId, session);
+    if (["image/jpeg", "image/png", "image/webp"].includes(file.contentType)) {
+      try { await registerImageAsset(owner.userId, { name: file.name, purpose: "Image uploaded through the Chusky dashboard", description: file.name, tags: ["dashboard", "uploaded-image"], contentType: file.contentType as "image/jpeg" | "image/png" | "image/webp", r2Key: file.key, size: file.size }); }
+      catch (error) { logger.warn({ err: error, userId: owner.userId, fileId: file.id }, "Could not register SDK image asset"); }
+    }
+    if (vectorConfigured() && (file.contentType.startsWith("image/") || file.contentType === "text/plain" || file.contentType === "text/markdown" || file.contentType === "application/pdf" || file.contentType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")) {
+      try { const bytes = await readR2Object(file.key); const extracted = file.contentType === "text/plain" || file.contentType === "text/markdown" ? bytes.toString("utf8") : await extractMediaText(bytes, file.name, file.contentType, session.model); await indexExtractedDocument({ userId: String(owner.userId), documentId: file.id, filename: file.name, contentType: file.contentType, text: extracted, sourceType: "sdk_upload" }); }
+      catch (error) { logger.warn({ err: error, userId: owner.userId, fileId: file.id }, "Could not index SDK file"); }
+    }
+    return c.json(publicSdkFile(file));
+  });
+
+  app.get("/v1/files/:fileId", async (c) => {
+    const owner = sdkUser(c)!;
+    const file = (await getSession(owner.userId)).sdkFiles!.find((item) => item.id === c.req.param("fileId"));
+    if (!file) return apiError(c, 404, "not_found", "File not found.");
+    if (file.status !== "available") return apiError(c, 409, "file_not_available", "Only a verified upload can be downloaded.");
+    if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured.");
+    if (config.durableObjectCatalogEnabled) {
+      const objectId = sdkFileObjectId(file.id);
+      if (!objectId) return apiError(c, 409, "file_metadata_invalid", "The upload metadata is invalid.");
+      try {
+        const record = await getDurableObjectMetadata(owner.userId, objectId);
+        if (!record || record.status !== "available" || record.objectKey !== file.key || record.contentType !== file.contentType || record.sizeBytes !== file.size) return apiError(c, 409, "file_metadata_unavailable", "The durable upload record is missing or does not authorize this file.");
+      } catch { return apiError(c, 503, "object_catalog_unavailable", "The durable upload record could not be checked."); }
+    }
+    return c.json({ ...publicSdkFile(file), downloadUrl: await signR2Download(file.key), expiresAt: new Date(Date.now() + 300_000).toISOString() });
+  });
+
+  app.delete("/v1/files/:fileId", async (c) => {
+    const owner = sdkUser(c)!;
+    const session = await getSession(owner.userId);
+    const index = session.sdkFiles!.findIndex((item) => item.id === c.req.param("fileId"));
+    if (index < 0) return apiError(c, 404, "not_found", "File not found.");
+    if (!r2Configured()) return apiError(c, 503, "storage_unavailable", "R2 storage is not configured.");
+    const file = session.sdkFiles![index]!;
+    if (config.durableObjectCatalogEnabled) {
+      const objectId = sdkFileObjectId(file.id);
+      if (!objectId) return apiError(c, 409, "file_metadata_invalid", "The upload metadata is invalid.");
+      try {
+        const record = await getDurableObjectMetadata(owner.userId, objectId);
+        const expectedKey = record?.status === "pending" ? file.uploadKey ?? file.key : file.key;
+        if (!record || record.objectKey !== expectedKey) return apiError(c, 409, "file_metadata_unavailable", "The durable upload record is missing or does not authorize this file.");
+        if (record.status === "deleted") {
+          session.sdkFiles!.splice(index, 1);
+          await saveSession(owner.userId, session);
+          return c.body(null, 204);
+        }
+        if (!await markDurableObjectDeleting(owner.userId, objectId)) return apiError(c, 409, "file_delete_conflict", "The durable upload could not enter its deletion state.");
+        await deleteR2Object(file.key);
+        if (!await markDurableObjectDeleted(owner.userId, objectId)) return apiError(c, 503, "object_catalog_unavailable", "The R2 object was deleted, but durable deletion confirmation is pending; retry this delete.");
+      } catch {
+        return apiError(c, 503, "object_catalog_unavailable", "The file deletion could not be safely completed; retry after checking its durable state.");
+      }
+    } else {
+      await deleteR2Object(file.key);
+    }
+    session.sdkFiles!.splice(index, 1);
+    await saveSession(owner.userId, session);
+    return c.body(null, 204);
+  });
   app.get("/v1/tasks/:taskId", async (c) => { const task = await getTask(sdkUser(c)!.userId, c.req.param("taskId")); return task ? c.json(task) : apiError(c, 404, "not_found", "Task not found."); });
   app.get("/v1/approvals/:approvalId", async (c) => { const approval = await getApproval(sdkUser(c)!.userId, c.req.param("approvalId")); return approval ? c.json(approvalView(approval)) : apiError(c, 404, "not_found", "Approval not found."); });
   app.post("/v1/approvals/:approvalId", async (c) => {

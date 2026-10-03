@@ -127,15 +127,45 @@ test("Neon object metadata is owner-scoped, idempotently created, and finalized 
   assert.match(pool.calls[0]?.text ?? "", /ON CONFLICT \(owner_user_id, object_id\) DO NOTHING/);
   assert.deepEqual(pool.calls[0]?.values?.slice(0, 5), [42, "obj_test_1", "transcript_segment", "archive/42/meeting/segment.bin", "pending"]);
 
-  assert.equal(await state.markObjectAvailable(42, "obj_test_1", 128, "a".repeat(64), "aes256gcm-v1"), true);
-  assert.match(pool.calls[1]?.text ?? "", /owner_user_id = \$1 AND object_id = \$2 AND lifecycle_status = 'pending'/);
-  assert.deepEqual(pool.calls[1]?.values, [42, "obj_test_1", 128, "a".repeat(64), "aes256gcm-v1"]);
+  assert.equal(await state.markObjectAvailable(42, "obj_test_1", "archive/42/staging/segment.bin", "archive/42/final/segment.bin", 128, "a".repeat(64), "aes256gcm-v1"), true);
+  assert.match(pool.calls[1]?.text ?? "", /lifecycle_status = 'available', object_key = \$4/);
+  assert.match(pool.calls[1]?.text ?? "", /lifecycle_status = 'pending' AND object_key = \$3/);
+  assert.deepEqual(pool.calls[1]?.values, [42, "obj_test_1", "archive/42/staging/segment.bin", "archive/42/final/segment.bin", 128, "a".repeat(64), "aes256gcm-v1"]);
 
   await state.getObjectMetadata(43, "obj_test_1");
   assert.deepEqual(pool.calls.at(-1)?.values, [43, "obj_test_1"]);
   assert.match(pool.calls.at(-1)?.text ?? "", /WHERE owner_user_id = \$1 AND object_id = \$2/);
   await assert.rejects(() => state.createObjectMetadata({ ...pending, objectId: "obj_bad_key", objectKey: "archive/43/foreign.bin" }), /not owner-scoped/);
-  await assert.rejects(() => state.markObjectAvailable(42, "obj_test_1", 128, "not-a-hash"), /verification is invalid/);
+  await assert.rejects(() => state.markObjectAvailable(42, "obj_test_1", "archive/42/staging/segment.bin", "archive/42/final/segment.bin", 128, "not-a-hash"), /verification is invalid/);
+  await assert.rejects(() => state.markObjectAvailable(42, "obj_test_1", "archive/43/staging/segment.bin", "archive/42/final/segment.bin", 128, "a".repeat(64)), /verification is invalid/);
+});
+
+test("Neon object deletion is a retryable owner-scoped tombstone transition", async () => {
+  const pool = new FakePool();
+  const state = new NeonDurableState(pool as never);
+
+  assert.equal(await state.markObjectDeleting(42, "obj_test_1"), true);
+  assert.match(pool.calls[0]?.text ?? "", /lifecycle_status = 'deleting'/);
+  assert.match(pool.calls[0]?.text ?? "", /owner_user_id = \$1 AND object_id = \$2 AND lifecycle_status IN \('pending','available','failed','deleting'\)/);
+  assert.deepEqual(pool.calls[0]?.values, [42, "obj_test_1"]);
+
+  assert.equal(await state.markObjectDeleted(42, "obj_test_1"), true);
+  assert.match(pool.calls[1]?.text ?? "", /lifecycle_status = 'deleting'/);
+  assert.match(pool.calls[1]?.text ?? "", /lifecycle_status = 'deleted'/);
+  assert.deepEqual(pool.calls[1]?.values, [42, "obj_test_1"]);
+
+  assert.equal(await state.markObjectFailed(42, "obj_upload_2"), true);
+  assert.match(pool.calls[2]?.text ?? "", /lifecycle_status IN \('pending','available'\)/);
+  assert.match(pool.calls[2]?.text ?? "", /lifecycle_status = 'failed'/);
+  assert.deepEqual(pool.calls[2]?.values, [42, "obj_upload_2"]);
+});
+
+test("object catalog startup assertion fails closed when migration 0008 is absent", async () => {
+  const pool = new FakePool();
+  pool.failRead = true;
+  const state = new NeonDurableState(pool as never);
+  await assert.rejects(() => state.assertObjectMetadataSchema(), /database unavailable/);
+  assert.match(pool.calls[0]?.text ?? "", /FROM chusky_object_metadata LIMIT 0/);
 });
 
 test("durable session startup rejects a schema without the profile domain migration", async () => {

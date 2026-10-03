@@ -130,6 +130,13 @@ function validateObjectMetadata(record: DurableObjectMetadata): void {
   if (record.metadata !== undefined && (typeof record.metadata !== "object" || Array.isArray(record.metadata)) || Buffer.byteLength(encodedMetadata, "utf8") > 16_384) throw new Error("Durable object metadata is invalid or too large.");
 }
 
+function isOwnerScopedObjectKey(userId: number, objectKey: string): boolean {
+  return typeof objectKey === "string" && objectKey.length <= 512 && !objectKey.startsWith("/")
+    && objectKey.split("/").every((part) => Boolean(part) && part !== "." && part !== "..")
+    && new RegExp(`(?:^|/)${userId}(?:/|$)`).test(objectKey)
+    && /^[A-Za-z0-9_./-]+$/.test(objectKey);
+}
+
 function durableObjectFromRow(row: Record<string, unknown>): DurableObjectMetadata {
   const ownerUserId = Number(row.owner_user_id);
   const asMillis = (value: unknown): number | undefined => value instanceof Date ? value.getTime() : typeof value === "string" || typeof value === "number" ? new Date(value).getTime() : undefined;
@@ -259,19 +266,70 @@ export class NeonDurableState {
   }
 
   /** Finalize an upload only when it still matches the pending owner-scoped intent. */
-  async markObjectAvailable(userId: number, objectId: string, sizeBytes: number, sha256: string, encryptionVersion?: string): Promise<boolean> {
+  async markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string, encryptionVersion?: string): Promise<boolean> {
     assertUserId(userId);
-    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId) || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Durable object verification is invalid.");
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId) || !isOwnerScopedObjectKey(userId, expectedUploadKey) || !isOwnerScopedObjectKey(userId, finalObjectKey) || expectedUploadKey === finalObjectKey || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0 || !/^[a-f0-9]{64}$/.test(sha256)) throw new Error("Durable object verification is invalid.");
     if (encryptionVersion !== undefined && (encryptionVersion.length > 80 || !/^[A-Za-z0-9._-]+$/.test(encryptionVersion))) throw new Error("Durable object encryption version is invalid.");
     const result = await this.measuredQuery<{ object_id: string }>(this.database,
-      `UPDATE chusky_object_metadata SET lifecycle_status = 'available', size_bytes = $3, sha256 = $4, encryption_version = $5, updated_at = now()
-       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status = 'pending' AND size_bytes = $3
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'available', object_key = $4, size_bytes = $5, sha256 = $6, encryption_version = $7, updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status = 'pending' AND object_key = $3 AND size_bytes = $5
        RETURNING object_id`,
-      [userId, objectId, sizeBytes, sha256, encryptionVersion ?? null],
+      [userId, objectId, expectedUploadKey, finalObjectKey, sizeBytes, sha256, encryptionVersion ?? null],
     );
     if (result.rows.length) return true;
     const existing = await this.getObjectMetadata(userId, objectId);
     return existing?.status === "available" && existing.sizeBytes === sizeBytes && existing.sha256 === sha256 && existing.encryptionVersion === encryptionVersion;
+  }
+
+  /** Start deletion before touching R2 so a retry can safely finish an interrupted delete. */
+  async markObjectDeleting(userId: number, objectId: string): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId)) throw new Error("Durable object ID is invalid.");
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'deleting', updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status IN ('pending','available','failed','deleting')
+       RETURNING object_id`,
+      [userId, objectId],
+    );
+    if (result.rows.length) return true;
+    const existing = await this.getObjectMetadata(userId, objectId);
+    return existing?.status === "deleted";
+  }
+
+  /** Mark deletion only after R2 confirms the delete request succeeded. */
+  async markObjectDeleted(userId: number, objectId: string): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId)) throw new Error("Durable object ID is invalid.");
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'deleted', updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status = 'deleting'
+       RETURNING object_id`,
+      [userId, objectId],
+    );
+    if (result.rows.length) return true;
+    const existing = await this.getObjectMetadata(userId, objectId);
+    return existing?.status === "deleted";
+  }
+
+  /** Quarantine an upload that failed content verification, including a later read-back. */
+  async markObjectFailed(userId: number, objectId: string): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId)) throw new Error("Durable object ID is invalid.");
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'failed', updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status IN ('pending','available')
+       RETURNING object_id`,
+      [userId, objectId],
+    );
+    if (result.rows.length) return true;
+    const existing = await this.getObjectMetadata(userId, objectId);
+    return existing?.status === "failed";
+  }
+
+  /** Fail startup when the opt-in object catalog is enabled without migration 0008. */
+  async assertObjectMetadataSchema(): Promise<void> {
+    await this.measuredQuery(this.database,
+      "SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256 FROM chusky_object_metadata LIMIT 0");
   }
 
   /** Fail startup before enabling the durable conversation/domain schema. */
