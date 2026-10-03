@@ -5,9 +5,11 @@ import { runAgent, invalidateSession, setAgentDependenciesForTests } from "../sr
 import { createMission, getMission, getTask, initStore, listTasks, startMission, updateTask, type TaskRecord } from "../src/store.js";
 import { reconcileMissionExecution } from "../src/missionScheduler.js";
 import { executeDurableTask } from "../src/taskRunner.js";
+import { executeTaskSlice } from "../src/taskSlice.js";
 import { captureMissionSliceState, missionWorkerToolAllowlist } from "../src/missionWorker.js";
 import { settleMissionSlice } from "../src/missionSlice.js";
 import { MissionFakeQStash } from "./helpers/missionKernelHarness.js";
+import { nativeTool } from "../src/nativeTools.js";
 
 before(async () => { await initStore({ memoryOnly: true }); });
 
@@ -90,4 +92,42 @@ test("a prose-only real agent is not promoted to mission completion", async () =
   } });
   assert.equal(execution.task?.status, "queued");
   assert.notEqual((await getMission(userId, created.id))?.status, "completed");
+});
+
+test("a durable evidence turn receives one lifecycle nudge and closes the active step", async () => {
+  const userId = 981003;
+  const queue = new MissionFakeQStash();
+  const created = await createMission(userId, { title: "Lifecycle nudge", objective: "Persist and close one internal unit", definitionOfDone: "The internal unit is complete", steps: [{ id: "unit", title: "Unit", objective: "Persist the unit evidence and complete it" }] });
+  await startMission(userId, created.id);
+  await reconcileMissionExecution(userId, created.id, queue.enqueue);
+  const task = (await listTasks(userId)).find((candidate) => candidate.missionId === created.id && candidate.status === "queued");
+  assert.ok(task);
+  let calls = 0;
+  const fakeRunAgent = (async (userIdFromRun: number, ...args: unknown[]) => {
+    const options = args.at(-1) as { taskId?: string; missionId?: string };
+    const runtime = { taskId: options.taskId, missionId: options.missionId, enqueueMissionTask: queue.enqueue };
+    calls += 1;
+    if (calls === 1) {
+      await nativeTool(userIdFromRun, "CHUCK_MISSION_EVIDENCE", { id: created.id, stepId: "unit", evidence: [{ kind: "assertion", summary: "The internal unit was persisted.", verified: false }] }, runtime);
+      return { text: "Evidence persisted.", toolsUsed: ["CHUCK_MISSION_EVIDENCE"], toolsSucceeded: ["CHUCK_MISSION_EVIDENCE"], toolOutcomes: [{ callId: "evidence-1", toolSlug: "CHUCK_MISSION_EVIDENCE", status: "succeeded" as const, dispatched: true }] };
+    }
+    await nativeTool(userIdFromRun, "CHUCK_MISSION_STEP_COMPLETE", { id: created.id, stepId: "unit", result: "The persisted internal unit is complete." }, runtime);
+    return { text: "The step is complete.", toolsUsed: ["CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_STEP_COMPLETE"], toolOutcomes: [{ callId: "complete-1", toolSlug: "CHUCK_MISSION_STEP_COMPLETE", status: "succeeded" as const, dispatched: true }] };
+  }) as unknown as typeof runAgent;
+  const execution = await executeDurableTask({ userId, taskId: task.id }, {
+    workerId: "lifecycle-nudge-worker",
+    execute: (claimed, signal) => executeTaskSlice(claimed, signal, {
+      attempt: 0,
+      sdkTaskMessage: async () => "",
+      sdkTaskSkillInstructions: async () => undefined,
+      sdkDurationSeconds: () => undefined,
+      withUserLock: async (_ownerId, _signal, work) => work(),
+      sendMessage: async () => undefined,
+      runAgent: fakeRunAgent,
+      enqueueMissionTask: queue.enqueue,
+    }),
+  });
+  assert.equal(execution.claimed, true);
+  assert.equal(calls, 2, "The worker should allow one bounded lifecycle closeout turn.");
+  assert.equal((await getMission(userId, created.id))?.status, "completed");
 });

@@ -10,7 +10,7 @@ import { requestMissionDurationApproval } from "./missionApproval.js";
 import { enqueueTaskWorkflow } from "./triggerWorkflow.js";
 import { executeScheduledMeetingFollowUp } from "./meetings/outcome.js";
 import { decideAutonomyStep } from "./autonomy/decisionLoop.js";
-import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionPostWakeNextAction, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist } from "./missionWorker.js";
 import { missionToolCallCount, settleMissionSlice } from "./missionSlice.js";
 import { persistSdkCompanyRun, sdkRunArtifacts } from "./sdkApi.js";
 import type { TaskRecord } from "./store.js";
@@ -292,6 +292,17 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
           toolsSucceeded: [...result.toolsSucceeded, ...recovery.toolsSucceeded],
           toolOutcomes: [...(result.toolOutcomes ?? []), ...(recovery.toolOutcomes ?? [])],
           cost: (result.cost ?? 0) + (recovery.cost ?? 0),
+        };
+      }
+      if (mission && missionNeedsLifecycleCloseoutNudge(result)) {
+        const closeoutPrompt = `${prompt}\n\nMANDATORY LIFECYCLE CLOSEOUT: This slice already persisted durable mission progress, but it did not terminate the active step. Inspect the persisted mission state now. If the active step objective and its evidence are genuinely satisfied, call CHUCK_MISSION_STEP_COMPLETE exactly once for that active step. If they are not satisfied, persist the exact next action with CHUCK_MISSION_CHECKPOINT, CHUCK_TASK_WAIT, CHUCK_MISSION_WAIT_EVENT, CHUCK_MISSION_BLOCK, or CHUCK_MISSION_PAUSE. Do not return prose alone, do not repeat a provider action, and do not claim completion without the required trusted evidence.`;
+        const closeout = await executeAgentTurn(closeoutPrompt);
+        result = {
+          ...closeout,
+          toolsUsed: [...result.toolsUsed, ...closeout.toolsUsed],
+          toolsSucceeded: [...result.toolsSucceeded, ...closeout.toolsSucceeded],
+          toolOutcomes: [...(result.toolOutcomes ?? []), ...(closeout.toolOutcomes ?? [])],
+          cost: (result.cost ?? 0) + (closeout.cost ?? 0),
         };
       }
     }

@@ -132,6 +132,36 @@ export function missionWakeNeedsRecovery(
 }
 
 /**
+ * A model can persist evidence or a checkpoint and then stop at prose. That
+ * is durable progress, but it is not a terminating step transition. Give the
+ * same worker one bounded lifecycle-only follow-up so a weak model cannot
+ * strand a running mission after useful work is already persisted.
+ */
+export function missionNeedsLifecycleCloseoutNudge(result: {
+  toolsUsed: string[];
+  toolsSucceeded?: string[];
+  taskWait?: unknown;
+  missionWait?: unknown;
+}): boolean {
+  if (result.taskWait || result.missionWait) return false;
+  const succeeded = new Set(result.toolsSucceeded ?? []);
+  const persistedProgress = [
+    "CHUCK_MISSION_CHECKPOINT",
+    "CHUCK_MISSION_EVIDENCE",
+    "CHUCK_MISSION_VERIFY",
+  ].some((tool) => succeeded.has(tool));
+  const terminalOrWait = [
+    "CHUCK_MISSION_STEP_COMPLETE",
+    "CHUCK_MISSION_COMPLETE",
+    "CHUCK_MISSION_BLOCK",
+    "CHUCK_MISSION_PAUSE",
+    "CHUCK_MISSION_WAIT_EVENT",
+    "CHUCK_TASK_WAIT",
+  ].some((tool) => succeeded.has(tool));
+  return persistedProgress && !terminalOrWait;
+}
+
+/**
  * A supervisor may resume a timer-waiting mission before its durable worker
  * claims the task. Keep the wake marker visible to that worker so it receives
  * post-wake instructions instead of treating the resumed mission as a fresh

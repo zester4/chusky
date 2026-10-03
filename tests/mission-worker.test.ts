@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
+import { boundedMissionHistory, captureMissionSliceState, missionHasTimerWakeContinuation, missionNeedsLifecycleCloseoutNudge, missionNoProgressNextAction, missionPostWakeNextAction, missionSliceHasPersistedProgress, missionStepInstruction, missionWakeNeedsRecovery, missionWorkerToolAllowlist, MISSION_WORKER_CONTROL_TOOLS } from "../src/missionWorker.js";
 
 test("bounded mission history keeps only a recent bounded text frontier", () => {
   const history = Array.from({ length: 12 }, (_, index) => ({ role: index % 2 ? "assistant" as const : "user" as const, content: `message-${index}-${"x".repeat(900)}` }));
@@ -108,6 +108,13 @@ test("only a zero-tool timer wake receives an automatic recovery turn", () => {
   assert.equal(missionWakeNeedsRecovery(true, { toolsUsed: ["GOOGLESHEETS_VALUES_GET"] }), false);
   assert.equal(missionWakeNeedsRecovery(false, { toolsUsed: [] }), false);
   assert.equal(missionWakeNeedsRecovery(true, { toolsUsed: [], taskWait: {} }), false);
+});
+
+test("durable evidence without step completion requests one bounded lifecycle closeout", () => {
+  assert.equal(missionNeedsLifecycleCloseoutNudge({ toolsUsed: ["CHUCK_MISSION_EVIDENCE"], toolsSucceeded: ["CHUCK_MISSION_EVIDENCE"] }), true);
+  assert.equal(missionNeedsLifecycleCloseoutNudge({ toolsUsed: ["CHUCK_MISSION_CHECKPOINT"], toolsSucceeded: ["CHUCK_MISSION_CHECKPOINT"], taskWait: { runAt: Date.now() } }), false);
+  assert.equal(missionNeedsLifecycleCloseoutNudge({ toolsUsed: ["CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_STEP_COMPLETE"], toolsSucceeded: ["CHUCK_MISSION_EVIDENCE", "CHUCK_MISSION_STEP_COMPLETE"] }), false);
+  assert.equal(missionNeedsLifecycleCloseoutNudge({ toolsUsed: ["CHUCK_MISSION_EVIDENCE"], toolsSucceeded: [] }), false);
 });
 
 test("a later checkpoint consumes the timer wake marker", () => {
