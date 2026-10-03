@@ -1,4 +1,4 @@
-import test, { before } from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { executeTaskSlice, type TaskSliceContext } from "../src/taskSlice.js";
 import { executeDurableTask } from "../src/taskRunner.js";
@@ -9,8 +9,20 @@ import { resumeMissionTaskAfterApproval } from "../src/missionApproval.js";
 import { ApprovalRequiredError } from "../src/agent.js";
 import type { TaskWaitRequest, MissionWaitRequest } from "../src/types.js";
 import { MissionFakeClock, MissionFakeQStash } from "./helpers/missionKernelHarness.js";
+import { config } from "../src/config.js";
 
-before(async () => { await initStore({ memoryOnly: true }); });
+const originalJevMode = config.jevMode;
+
+before(async () => {
+  // This proof harness owns the model and provider fakes. Do not open a real
+  // Jev socket before the fake-clock suites; an idle live socket can outlive
+  // the first test and emit after the later clock teardown. Jev request
+  // cancellation is covered independently by injected-client routing tests.
+  config.jevMode = "off";
+  await initStore({ memoryOnly: true });
+});
+
+after(() => { config.jevMode = originalJevMode; });
 
 function context(queue: MissionFakeQStash, agent: NonNullable<TaskSliceContext["runAgent"]>): TaskSliceContext {
   return {

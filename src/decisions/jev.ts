@@ -412,7 +412,15 @@ export function createRoutingDeadline(budgetMs = config.jevTurnBudgetMs, parent?
     at,
     signal: controller.signal,
     remaining: () => Math.max(0, at - now()),
-    dispose: () => { clearTimeout(timer); parent?.removeEventListener("abort", onParentAbort); },
+    // Disposing a deadline must also cancel any request that is still in
+    // flight. A race can resolve its fallback just before the deadline timer
+    // fires; clearing the timer alone would leave the fetch/socket alive
+    // after the caller has already settled the turn.
+    dispose: () => {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onParentAbort);
+      if (!controller.signal.aborted) controller.abort();
+    },
   };
 }
 

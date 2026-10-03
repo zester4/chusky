@@ -128,6 +128,27 @@ Do not create another mission, sheet, or duplicate rows.`, [...tools(), ...missi
   } finally { restore(); }
 });
 
+test("native-only mission reliability prompts retain creation despite stale mission history", async () => {
+  const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
+  try {
+    const missionTools = ["CHUCK_MISSION_START", "CHUCK_MISSION_LIST", "CHUCK_MISSION_GET", "CHUCK_MISSION_RESUME", "CHUCK_MISSION_VERIFY", "CHUCK_MISSION_COMPLETE"]
+      .map((name) => ({ type: "function", function: { name, description: `${name.replaceAll("_", " ")} durable mission control`, parameters: { type: "object", properties: {} } } }));
+    const query = `No, I made an upgrade so run it again:
+
+Run a strict native-only durable mission with exactly 3 sequential steps. Use no external providers, browser, Composio, or web tools.
+
+Required evidence: mission ID and 3-step structure, a persisted pre-wait checkpoint, a real CHUCK_TASK_WAIT of at least 60 seconds, persisted post-wait checkpoint, and all 3 steps completed.`;
+    const route = await computeNativeToolRoute(query, [...tools(), ...missionTools], {
+      recentContext: "The previous mission mis_previous is blocked and must not be duplicated.",
+      client: new JevClient({ apiKey: "k", fetchImpl: chooseRequestedTool("CHUCK_MISSION_START") }),
+    });
+    const names = route.tools.map((tool: any) => tool.function.name);
+    assert.equal(route.source, "jev");
+    assert.ok(names.includes("CHUCK_MISSION_START"), "the explicit fresh mission request must retain creation");
+    for (const name of missionTools.map((tool) => tool.function.name)) assert.ok(names.includes(name), `${name} must remain callable for the new mission`);
+  } finally { restore(); }
+});
+
 test("existing-task recovery exposes task lifecycle controls and suppresses task creation", async () => {
   const restore = withConfig({ jevMode: "enforce", jevSurfaces: new Set(["native"]), jevNativeToolRouting: true, jevNativeToolMaxCandidates: 12, jevNativeToolMinConfidence: 0.5, jevNativeToolMinProbability: 0.1 });
   try {

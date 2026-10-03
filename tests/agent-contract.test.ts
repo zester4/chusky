@@ -1053,7 +1053,7 @@ test("private voice turns keep the Chusky context but skip Composio setup and du
       preferred_min_throughput: { p50: 50 },
       sort: { by: "latency", partition: "none" },
     });
-    assert.equal(requestBody?.max_tokens, 192);
+    assert.equal(requestBody?.max_tokens, config.voiceMaxTokens);
     assert.deepEqual(requestBody?.models, ["test/model", "google/gemini-2.5-flash"]);
     assert.equal((await listAgentRuns(userId)).length, 0);
     await assert.rejects(

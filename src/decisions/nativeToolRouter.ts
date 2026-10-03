@@ -177,7 +177,10 @@ function modelToolsForSelection(tools: ToolSchema[], selected: Set<string>): Too
 
 function requestsLifecycleCreation(query: string, family: "mission" | "task"): boolean {
   const slug = family === "mission" ? "CHUCK_MISSION_START" : "CHUCK_TASK_CREATE";
-  const modifiers = "a|an|one|single|new|fresh|real|strict(?:-verification)?|verification|durable|autonomous|reliability|smoke|test|bounded|another";
+  // Keep this bounded and explicit: the current request must be able to
+  // override stale IDs in recent context, including qualification commonly
+  // used by reliability prompts such as "native-only" and "three-step".
+  const modifiers = "a|an|one|single|new|fresh|real|strict(?:[-\\s]verification)?|verification|durable|autonomous|reliability|smoke|test|bounded|another|native(?:[-\\s]only)?|provider(?:[-\\s]free)?|three[-\\s]step";
   const pattern = new RegExp(`\\b(?:(?:start|create|launch|begin|run)\\s+(?:(?:${modifiers})[\\s-]+){0,8}${family}s?|(?:call|use|execute)\\s+${slug})\\b`, "gi");
   for (const match of query.matchAll(pattern)) {
     const before = query.slice(0, match.index);
