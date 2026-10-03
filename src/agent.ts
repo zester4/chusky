@@ -42,7 +42,9 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { buildTemporalContext, type TemporalContext } from "./temporal.js";
 import { daytonaEngine, safeDaytonaPath, DaytonaInputError } from "./lib/daytona/index.js";
 import { normalizeVideoDestination, resolveVideoWorkspacePath, type VideoDestination } from "./video.js";
-import { imageModelAcceptsExactSize, isGrokImagineImageModel, isMuseImageModel, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
+import { listVideoModels, resolveVideoRequest } from "./videoModels.js";
+import { imageModelAcceptsExactSize, normalizeImageAspectRatio, normalizeImageCount, normalizeImageOutputFormat, normalizeImageQuality, normalizeImageResolution, resolveImageWorkspacePath } from "./image.js";
+import { resolveImageModel } from "./imageModels.js";
 import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
@@ -2894,6 +2896,7 @@ export async function runAgent(
           const references = await resolveImageReferences(userId, args.references, mode === "edit" && !args.references ? ["current:0"] : undefined, imageRuntime.currentImages, generatedReferenceImages);
           const images = await generateImages(String(args.prompt ?? ""), normalizeImageCount(args.count), {
             inputReferences: references,
+            preferredModel: typeof args.model === "string" ? args.model : undefined,
             aspectRatio: normalizeImageAspectRatio(args.aspectRatio),
             resolution: normalizeImageResolution(args.resolution),
             // Muse and Grok do not accept exact pixel sizes. Do not run the
@@ -3015,6 +3018,7 @@ export async function runAgent(
           const imageRuntime = currentImageRuntime(userMessage);
           const references = await resolveImageReferences(userId, args.references, undefined, imageRuntime.currentImages, generatedReferenceImages);
           execResult = await queueVideoWorkflow(userId, String(args.prompt ?? ""), destination, workspacePath, {
+            preferredModel: args.model ? String(args.model) : undefined,
             duration: args.duration === undefined ? undefined : videoInteger(args.duration, "duration", 1, 30),
             aspectRatio: args.aspectRatio ? String(args.aspectRatio) : undefined,
             resolution: args.resolution ? String(args.resolution) : undefined,
@@ -3985,6 +3989,7 @@ export interface GeneratedImage {
 }
 
 export interface ImageGenerationOptions {
+  preferredModel?: string;
   inputReferences?: Array<{ type: "image_url"; image_url: { url: string } }>;
   aspectRatio?: string;
   resolution?: string;
@@ -4005,47 +4010,37 @@ function providerPrompt(prompt: string, options: ImageGenerationOptions): string
   return guidance.length ? `${prompt}\n\nComposition guidance: ${guidance.join(" ")}` : prompt;
 }
 
-const GROK_ASPECT_RATIOS = new Set(["auto", "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9", "1:2", "2:1"]);
-
-function supportedGrokReferenceCount(references: ImageGenerationOptions["inputReferences"]): number {
-  const count = references?.length ?? 0;
-  if (count > 3) throw new Error("x-ai/grok-imagine-image-2.0 supports at most 3 input reference images");
-  return count;
-}
-
 export async function generateImages(prompt: string, count = 1, options: ImageGenerationOptions = {}, signal?: AbortSignal): Promise<GeneratedImage[]> {
   const normalizedCount = normalizeImageCount(count);
-  const model = config.imageModel.trim();
-  const museModel = isMuseImageModel(model);
-  const grokModel = isGrokImagineImageModel(model);
-  const constrainedModel = museModel || grokModel;
-
-  // OpenRouter exposes image controls per model/provider. Muse currently
-  // advertises no generic controls, so sending `quality` (or even `n`) makes
-  // Meta reject the request. For Muse, emulate count with independent single
-  // image requests and only send the prompt plus reference images.
-  const requestCount = constrainedModel ? normalizedCount : 1;
-  const requestBodies = Array.from({ length: requestCount }, () => {
-    const body: Record<string, unknown> = { model, prompt: constrainedModel ? providerPrompt(prompt, options) : prompt };
-    if (options.inputReferences?.length) {
-      if (grokModel) supportedGrokReferenceCount(options.inputReferences);
-      body.input_references = options.inputReferences;
-    }
-    if (grokModel) {
-      if (options.aspectRatio && GROK_ASPECT_RATIOS.has(options.aspectRatio)) body.aspect_ratio = options.aspectRatio;
-      if (options.resolution === "1K" || options.resolution === "2K") body.resolution = options.resolution;
-      if (options.quality === "low" || options.quality === "medium") body.quality = options.quality;
-      else if (options.quality === "high") body.quality = "medium";
-    } else if (!museModel) {
-      if (normalizedCount > 1) body.n = normalizedCount;
-      if (options.aspectRatio) body.aspect_ratio = options.aspectRatio;
-      if (options.resolution) body.resolution = options.resolution;
-      if (options.size) body.size = options.size;
-      if (options.quality) body.quality = options.quality;
-      if (options.outputFormat) body.output_format = options.outputFormat;
-      if (options.background) body.background = options.background;
-      if (options.seed !== undefined) body.seed = options.seed;
-    }
+  const modelInfo = await resolveImageModel(prompt, {
+    preferredModel: options.preferredModel ?? config.imageModel,
+    references: options.inputReferences?.length,
+    count: normalizedCount,
+    resolution: options.resolution,
+    outputFormat: options.outputFormat,
+    signal,
+  });
+  const model = modelInfo.id;
+  const references = options.inputReferences?.length ?? 0;
+  if (references > modelInfo.maxReferences) {
+    throw new Error(`${modelInfo.name} supports at most ${modelInfo.maxReferences} reference image${modelInfo.maxReferences === 1 ? "" : "s"}; received ${references}`);
+  }
+  const supports = (parameter: string) => modelInfo.parameters.has(parameter);
+  const supportsValue = (parameter: string, value: string) => !modelInfo.parameterValues?.[parameter] || modelInfo.parameterValues[parameter]!.includes(value);
+  const requestCount = supports("n") ? Math.ceil(normalizedCount / Math.max(1, modelInfo.maxOutputs)) : normalizedCount;
+  const requestBodies = Array.from({ length: requestCount }, (_, requestIndex) => {
+    const batchCount = supports("n") ? Math.min(modelInfo.maxOutputs, normalizedCount - (requestIndex * modelInfo.maxOutputs)) : 1;
+    const body: Record<string, unknown> = { model, prompt: providerPrompt(prompt, options) };
+    if (references && supports("input_references")) body.input_references = options.inputReferences;
+    if (supports("n") && batchCount > 1) body.n = batchCount;
+    if (options.aspectRatio && supports("aspect_ratio") && modelInfo.aspectRatios.includes(options.aspectRatio)) body.aspect_ratio = options.aspectRatio;
+    if (options.resolution && supports("resolution") && modelInfo.resolutions.includes(options.resolution)) body.resolution = options.resolution;
+    const quality = options.quality === "high" && modelInfo.id === "x-ai/grok-imagine-image-2.0" ? "medium" : options.quality;
+    if (quality && supports("quality") && supportsValue("quality", quality)) body.quality = quality;
+    if (options.outputFormat && supports("output_format") && supportsValue("output_format", options.outputFormat)) body.output_format = options.outputFormat;
+    if (options.background && supports("background") && supportsValue("background", options.background)) body.background = options.background;
+    if (options.seed !== undefined && supports("seed")) body.seed = options.seed;
+    if (options.outputFormat === "webp" && !supports("output_format")) body.prompt = providerPrompt(prompt, { ...options, outputFormat: undefined });
     return body;
   });
 
@@ -4075,6 +4070,7 @@ export async function generateImage(prompt: string): Promise<GeneratedImage> {
 export type MediaDestination = VideoDestination;
 
 export interface VideoGenerationOptions {
+  preferredModel?: string;
   duration?: number;
   aspectRatio?: string;
   resolution?: string;
@@ -4088,13 +4084,14 @@ export async function queueVideoWorkflow(userId: number, prompt: string, destina
   if (!config.qstashToken || !config.videoWorkflowUrl) {
     throw new Error("Video workflows are not configured. Set QSTASH_TOKEN and VIDEO_WORKFLOW_URL.");
   }
+  const resolved = await resolveVideoRequest(prompt, { ...options, preferredModel: options.preferredModel ?? config.videoModel });
   const resolvedPath = destination === "daytona" || destination === "both"
     ? (workspacePath ? safeDaytonaPath(workspacePath, "workspacePath") : `generated/videos/${randomUUID()}.mp4`)
     : undefined;
   const job = await createVideoJob({ userId, prompt, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) });
   const client = new WorkflowClient({ token: config.qstashToken, baseUrl: config.qstashUrl || undefined });
   try {
-    const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath, jobId: job.id, ...options } });
+    const result = await client.trigger({ url: config.videoWorkflowUrl, body: { userId, prompt, destination, workspacePath: resolvedPath, jobId: job.id, model: resolved.model.id, duration: resolved.duration, aspectRatio: resolved.aspectRatio, resolution: resolved.resolution, size: resolved.size, generateAudio: resolved.generateAudio, frameMode: resolved.frameMode, inputReferences: options.inputReferences } });
     await updateVideoJob(userId, job.id, { workflowRunId: result.workflowRunId, status: "running" });
     return { started: true, jobId: job.id, workflowId: result.workflowRunId, destination, ...(resolvedPath ? { workspacePath: resolvedPath } : {}) };
   } catch (error) {
