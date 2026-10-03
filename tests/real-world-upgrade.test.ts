@@ -116,6 +116,26 @@ test("native lifecycle checkpoints satisfy step-local internal evidence without 
   assert.ok(completed.steps?.[0]?.evidence?.some((item) => item.kind === "before_after" && item.verifiedBy === "system"));
 });
 
+test("prose step requirements accept the server-derived internal checkpoint proof", async () => {
+  const userId = 972009;
+  const mission = await createMission(userId, {
+    title: "Prose checkpoint evidence",
+    objective: "Persist and complete an internal pre-wait checkpoint.",
+    definitionOfDone: "The checkpoint step completes from server-observed lifecycle state.",
+    steps: [{
+      id: "checkpoint",
+      title: "Persist pre-wait checkpoint",
+      objective: "Save the checkpoint before waiting.",
+      evidenceRequired: ["Server-derived internal before_after checkpoint proof for the persisted pre-wait checkpoint (mission ID, step count, trusted runtime ISO timestamp). No provider receipt."],
+    }],
+  });
+  const started = await startMission(userId, mission.id);
+  await checkpointMission(userId, mission.id, "mission ID=mis_internal, step count=1, trusted runtime ISO timestamp=2026-10-03T00:00:00.000Z", "Complete the persisted pre-wait checkpoint.");
+  const completed = await nativeTool(userId, "CHUCK_MISSION_STEP_COMPLETE", { id: mission.id, stepId: started!.currentStepId, result: "The server-observed checkpoint is complete." }) as { status?: string };
+  assert.equal(completed.status, "completed");
+  assert.equal((await getMission(userId, mission.id))?.steps[0]?.status, "completed");
+});
+
 test("mission creation and replanning reject supervisor-owned step tools at the store boundary", async () => {
   const userId = 972007;
   await assert.rejects(() => createMission(userId, {

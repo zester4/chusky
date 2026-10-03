@@ -6306,6 +6306,16 @@ function evidenceSatisfiesRequirement(item: MissionEvidenceRecord, requirement: 
   if (typed) return item.kind === typed;
   const kindAlias = requirement.toLowerCase().trim();
   if (["source", "tool_receipt", "artifact", "assertion", "before_after", "human_confirmation"].includes(kindAlias)) return item.kind === kindAlias;
+  // Mission authors may describe an internal lifecycle proof in prose instead
+  // of using the compact kind alias. Only a server-verified before/after
+  // record may satisfy this fallback; provider receipts, artifacts, sources,
+  // and human confirmations still require their original trusted sources.
+  if (item.kind === "before_after" && item.verifiedBy === "system") {
+    const normalized = requirement.toLowerCase().replace(/[_-]+/g, " ");
+    const summary = item.summary.toLowerCase();
+    const internalLifecycle = /(server derived|server observed|internal|checkpoint|timer|wait|step)/.test(normalized);
+    if (internalLifecycle && ["before after", "checkpoint", "persisted", "pre wait", "post wait", "timer", "wait", "step"].some((term) => normalized.includes(term) && summary.includes(term))) return true;
+  }
   return item.summary.toLowerCase().includes(requirement.toLowerCase());
 }
 
@@ -6319,7 +6329,7 @@ export function missingMissionEvidenceRequirements(requirements: string[] | unde
  * model-authored text to masquerade as a provider receipt or human assertion.
  */
 function deriveTrustedInternalStepEvidence(mission: MissionRecord, step: MissionStepRecord): MissionEvidenceRecord[] {
-  const checkpoints = (mission.checkpointHistory ?? []).filter((checkpoint) => checkpoint.stepId === step.id);
+  const checkpoints = (mission.checkpointHistory ?? []).filter((checkpoint) => checkpoint.stepId === step.id || (checkpoint.stepId === undefined && mission.currentStepId === step.id));
   if (!checkpoints.length) return [];
   const checkpoint = checkpoints.at(-1)!;
   const title = step.title.toLowerCase();
