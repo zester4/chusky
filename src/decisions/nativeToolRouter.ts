@@ -51,6 +51,7 @@ export type NativeToolRoute = {
 export type NativeToolSearchResult = Pick<NativeToolDescriptor, "slug" | "description" | "bundle" | "risk">;
 
 const CORE_TOOLS = new Set([
+  "CHUCK_FIND_TOOLS",
   "CHUCK_SEARCH_SKILLS",
   "CHUCK_LIST_SKILL_FILES",
   "CHUCK_READ_SKILL_FILE",
