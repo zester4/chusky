@@ -24,7 +24,23 @@ test("model context compaction keeps system prompts and a complete recent tool e
   assert.ok(recentCall);
   assert.ok(recentResult);
   assert.ok(String(recentResult?.content).includes("tool output compacted"));
-  assert.ok(String(recentResult?.content).length < 9_000);
+  assert.ok(String(recentResult?.content).length < 4_000);
+});
+
+test("large retained tool exchanges are bounded without dropping the latest exchange", () => {
+  const messages: ApiMessage[] = [
+    { role: "system", content: "kernel" },
+    { role: "user", content: "Find the latest customer status and prepare the next action." },
+    ...Array.from({ length: 5 }, (_, index) => [
+      { role: "assistant" as const, content: `Calling provider ${index}`, tool_calls: [{ id: `call_${index}`, type: "function" as const, function: { name: "COMPOSIO_EXECUTE_TOOL", arguments: "{}" } }] },
+      { role: "tool" as const, tool_call_id: `call_${index}`, content: "provider payload ".repeat(2_000) },
+    ]).flat(),
+  ];
+  const compacted = compactModelMessages(messages);
+  const chars = compacted.reduce((total, message) => total + (typeof message.content === "string" ? message.content.length : 0), 0);
+  assert.ok(chars < 32_000);
+  assert.ok(compacted.some((message) => message.role === "tool" && message.tool_call_id === "call_4"));
+  assert.ok(compacted.some((message) => message.role === "system" && String(message.content).includes("Full tool results remain available")));
 });
 
 test("small model contexts remain unchanged apart from no-op copying", () => {
