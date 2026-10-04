@@ -17,6 +17,7 @@ export interface DurableSessionDocument {
 export interface DurableStateStatus {
   enabled: boolean;
   reachable: boolean;
+  schemaReady: boolean;
 }
 
 export interface DurableSdkRun {
@@ -295,9 +296,14 @@ export class NeonDurableState {
   async healthStatus(): Promise<DurableStateStatus> {
     try {
       await this.measuredQuery(this.database, "SELECT 1");
-      return { enabled: true, reachable: true };
     } catch {
-      return { enabled: true, reachable: false };
+      return { enabled: true, reachable: false, schemaReady: false };
+    }
+    try {
+      await this.assertSessionSchema();
+      return { enabled: true, reachable: true, schemaReady: true };
+    } catch {
+      return { enabled: true, reachable: true, schemaReady: false };
     }
   }
 

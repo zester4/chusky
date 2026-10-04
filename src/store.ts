@@ -1994,7 +1994,7 @@ class RedisBackend implements Backend {
   private missionFromDurable(record: DurableMissionRecord): MissionRecord { return normalizeMission(record.payload as unknown as MissionRecord); }
 
   getDurableStateHealth(): Promise<DurableStateStatus> {
-    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false });
+    return this.durableState?.healthStatus() ?? Promise.resolve({ enabled: false, reachable: false, schemaReady: false });
   }
   async getDurableStorageMetrics(): Promise<Record<string, number>> {
     const { redisDomainCacheHits, redisDomainCacheMisses, ...redis } = this.durableStorageMetrics;
@@ -3755,7 +3755,7 @@ class MemoryBackend implements Backend {
     return session ? structuredClone(session) : fresh();
   }
   async readConversationBefore(_userId: number, _before: { createdAt: number; id: string }, _limit: number): Promise<DurableConversationMessage[] | undefined> { return undefined; }
-  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
+  async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false, schemaReady: false }; }
   async getDurableStorageMetrics(): Promise<Record<string, number>> { return { ...new RedisCommandMetrics().flatten(), redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
   async listRecallTranscriptObjects(_userId: number, _meetingHash: string, _includeUnavailable: boolean): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
