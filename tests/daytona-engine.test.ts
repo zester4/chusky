@@ -41,7 +41,7 @@ function fakeSandbox(id: string, state = "started") {
     archive: async () => { sandbox.state = "archived"; },
     delete: async () => { sandbox.state = "destroyed"; sandboxes.delete(id); },
     process: {
-      executeCommand: async (command: string) => { if (sandbox.commandError) throw sandbox.commandError; return { exitCode: sandbox.commandExitCode ?? 0, result: sandbox.commandResult ?? `ran:${command}` }; },
+      executeCommand: async (command: string) => { if (sandbox.commandError) throw sandbox.commandError; if (command.includes("git status --porcelain")) return { exitCode: 0, result: sandbox.customized ? " M src/App.tsx" : "" }; return { exitCode: sandbox.commandExitCode ?? 0, result: sandbox.commandResult ?? `ran:${command}` }; },
       createPty: async ({ id: ptyId, onData }: any) => { ptyOutputs.set(ptyId, onData); onData(new TextEncoder().encode("$ ")); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       connectPty: async (ptyId: string, { onData }: any) => { ptyOutputs.set(ptyId, onData); return { sessionId: ptyId, isConnected: () => true, waitForConnection: async () => undefined, sendInput: async (input: string) => onData(new TextEncoder().encode(`ran:${input}`)), disconnect: async () => undefined }; },
       listPtySessions: async () => [...ptyOutputs.keys()].map((ptyId) => ({ id: ptyId, active: true })),
@@ -520,14 +520,17 @@ test("recovers read-only Computer Use status after a dead transport connection",
 
 test("app projects create an isolated branch, verify before preview, retain evidence, and stop cleanly", async () => {
   const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820015) as any;
   const scaffolded = await e.app(820015, { action: "scaffold", id: "client-portal", framework: "vite-react" }) as any;
   assert.equal(scaffolded.status, "scaffolded");
   assert.equal(scaffolded.path, "workspace/apps/client-portal");
   assert.equal(scaffolded.branch, "chusky/client-portal");
+  assert.match(scaffolded.output, /foundation, not a finished deliverable/);
+  sandbox.customized = true;
   const verified = await e.app(820015, { action: "verify", id: "client-portal" }) as any;
   assert.equal(verified.status, "verified");
   assert.equal(verified.verification.status, "passed");
-  assert.deepEqual(verified.verification.checks.map((check: any) => check.name), ["typecheck", "lint", "test", "build"]);
+  assert.deepEqual(verified.verification.checks.map((check: any) => check.name), ["typecheck", "lint", "test", "build", "ui-contract"]);
   const running = await e.app(820015, { action: "start", id: "client-portal", expiresInSeconds: 120 }) as any;
   assert.equal(running.status, "running");
   assert.equal(running.verification.checks.at(-1).name, "health");
@@ -540,7 +543,9 @@ test("app projects create an isolated branch, verify before preview, retain evid
   const originalBrowser = e2bBrowserEngine.browser;
   e2bBrowserEngine.browser = async (_userId, args) => args.action === "open"
     ? { opened: "https://preview.test/signed/5173" }
-    : { __browserScreenshot: true, mediaType: "image/jpeg", base64: "preview", sizeBytes: 7 };
+    : args.action === "snapshot"
+      ? { accessibility: { children: [{ role: "main" }, { role: "heading" }, { role: "link" }] } }
+      : { __browserScreenshot: true, mediaType: "image/jpeg", base64: "preview", sizeBytes: 7 };
   try {
     const screenshot = await e.app(820015, { action: "visual", id: "client-portal" }) as any;
     assert.equal(screenshot.__browserScreenshot, true);
@@ -1057,6 +1062,35 @@ test("fits a full-bleed background image behind readable slide text", async () =
   }) as any;
   assert.equal(result.generated, true);
   assert.equal(result.slideCount, 2);
+});
+
+test("app previews refuse an untouched scaffold", async () => {
+  const e = engine();
+  await e.app(820027, { action: "scaffold", id: "untouched-app", framework: "vite-react" });
+  await assert.rejects(() => e.app(820027, { action: "start", id: "untouched-app" }), /Customize the scaffold before starting a preview/);
+  const status = await e.app(820027, { action: "status", id: "untouched-app" }) as any;
+  assert.equal(status.customization.status, "pending");
+});
+
+test("preserves the source aspect ratio for contained presentation images", async () => {
+  const e = engine();
+  const sandbox = await e.getOrCreateWorkspace(820026) as any;
+  const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+  let uploadedPresentation: Buffer | undefined;
+  sandbox.fs.downloadFile = async (path: string) => {
+    assert.equal(path, "workspace/hero.png");
+    return onePixelPng;
+  };
+  sandbox.fs.uploadFile = async (contents: Buffer) => { uploadedPresentation = Buffer.from(contents); };
+  const result = await e.createPresentation(820026, {
+    title: "Aspect ratio integrity",
+    slides: [{ title: "Image proof", imagePaths: ["workspace/hero.png"], imageFit: "contain" }],
+  }) as any;
+  assert.equal(result.generated, true);
+  const archive = await JSZip.loadAsync(uploadedPresentation!);
+  const xml = await archive.file("ppt/slides/slide2.xml")!.async("text");
+  const imageExtent = xml.match(/<p:pic>[\s\S]*?<a:ext cx="(\d+)" cy="(\d+)"/)?.slice(1).map(Number);
+  assert.deepEqual(imageExtent, [4206240, 4206240]);
 });
 
 test("rejects an overlapping table and chart in a generated presentation", async () => {
