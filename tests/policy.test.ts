@@ -34,7 +34,7 @@ test("allows ordinary reversible provider writes without an approval prompt", ()
 });
 
 test("does not gate read-only tools", () => {
-  for (const slug of ["GITHUB_GET_REPOSITORY", "GMAIL_LIST_MESSAGES", "NOTION_SEARCH_PAGES", "COMPOSIO_SEARCH_TOOL"]) {
+  for (const slug of ["GITHUB_GET_REPOSITORY", "GMAIL_LIST_MESSAGES", "NOTION_SEARCH_PAGES", "COMPOSIO_SEARCH_TOOLS"]) {
     assert.equal(isRiskyToolSlug(slug), false, slug);
   }
 });
@@ -221,7 +221,7 @@ test("provider metadata classifies dynamic Composio tools before heuristic fallb
 });
 
 test("renders human tool progress", () => {
-  assert.match(humanToolStatus("COMPOSIO_SEARCH_TOOL"), /I’m finding/);
+  assert.match(humanToolStatus("COMPOSIO_SEARCH_TOOLS"), /I’m finding/);
   assert.match(humanToolStatus("GITHUB_CREATE_ISSUE"), /I’m using Github to create issue/);
   assert.equal(humanToolStatus("CHUCK_GENERATE_IMAGE"), "🎨 I’m creating your image…");
   assert.equal(humanToolStatus("CHUCK_DAYTONA_WORKSPACE"), "🖥️ I’m opening my private computer workspace…");

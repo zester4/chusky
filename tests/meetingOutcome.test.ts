@@ -267,7 +267,7 @@ test("meeting outcome creates a bounded post-meeting owner review package", () =
 test("Notion page creation is selected only from one exact owner-granted create-page action", () => {
   assert.equal(selectMeetingNotionCreateTool(["NOTION_CREATE_PAGE"]), "NOTION_CREATE_PAGE");
   assert.equal(selectMeetingNotionCreateTool(["NOTION_CREATE_PAGE", "NOTION_CREATE_DATABASE_PAGE"]), undefined);
-  assert.equal(selectMeetingNotionCreateTool(["COMPOSIO_SEARCH_TOOL", "NOTION_SEARCH_PAGES"]), undefined);
+  assert.equal(selectMeetingNotionCreateTool(["COMPOSIO_SEARCH_TOOLS", "NOTION_SEARCH_PAGES"]), undefined);
   assert.equal(selectMeetingNotionCreateTool([]), undefined);
 });
 

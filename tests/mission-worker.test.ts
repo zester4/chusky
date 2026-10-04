@@ -76,7 +76,6 @@ test("worker instructions name one executable step and its recovery action", () 
 test("derived mission tools are preload hints and include the live Composio search tool", () => {
   const hints = deriveMissionToolHints("Check Stripe invoices and reply to customer tickets");
   assert.ok(hints.includes("COMPOSIO_SEARCH_TOOLS"));
-  assert.ok(!hints.includes("COMPOSIO_SEARCH_TOOL"));
   assert.deepEqual(missionWorkerToolAllowlist(undefined), undefined, "hints must not become an authorization fence");
 });
 
