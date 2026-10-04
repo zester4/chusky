@@ -668,6 +668,8 @@ Always use Markdown. Be proactive without taking unapproved risky actions.`
   durableStateMissionsEnabled: optional("DURABLE_STATE_MISSIONS_ENABLED", "false") === "true",
   // Opt-in Neon object catalog for verified R2 assets; requires migration 0008.
   durableObjectCatalogEnabled: optional("DURABLE_OBJECT_CATALOG_ENABLED", "false") === "true",
+  // Archive only explicitly retained Recall segments; requires the Neon object catalog, R2, and transcript encryption key.
+  durableRecallTranscriptArchiveEnabled: optional("DURABLE_RECALL_TRANSCRIPT_ARCHIVE_ENABLED", "false") === "true",
   // Durable memory uses the same Neon database as Better Auth by default. A
   // separate URL is supported for staged migrations and isolated testing.
   durableMemoryEnabled: optional("DURABLE_MEMORY_ENABLED", "false") === "true",

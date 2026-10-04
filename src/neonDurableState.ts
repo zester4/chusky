@@ -336,6 +336,69 @@ export class NeonDurableState {
     return result.rows[0] ? durableObjectFromRow(result.rows[0]) : undefined;
   }
 
+  /** Bounded indexed lookup for one owner's immutable encrypted Recall segments. */
+  async listRecallTranscriptObjects(userId: number, meetingHash: string, includeUnavailable = false): Promise<DurableObjectMetadata[]> {
+    assertUserId(userId);
+    if (!/^[a-f0-9]{64}$/.test(meetingHash)) throw new Error("Recall transcript meeting identity is invalid.");
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256, encryption_version, retention_expires_at, metadata, created_at, updated_at
+       FROM chusky_object_metadata
+       WHERE owner_user_id = $1 AND object_kind = 'transcript_segment' AND metadata->>'meetingHash' = $2
+         AND lifecycle_status ${includeUnavailable ? "IN ('pending','available','deleting','failed')" : "= 'available'"}
+       ORDER BY object_id
+       LIMIT 8001`,
+      [userId, meetingHash],
+    );
+    return result.rows.map(durableObjectFromRow);
+  }
+
+  /** Extend or shorten expiry for one exact owner+meeting scope, never for arbitrary catalog metadata. */
+  async updateRecallTranscriptObjectExpiry(userId: number, meetingHash: string, expiresAt: number): Promise<void> {
+    assertUserId(userId);
+    if (!/^[a-f0-9]{64}$/.test(meetingHash) || !Number.isSafeInteger(expiresAt) || expiresAt <= 0) {
+      throw new Error("Recall transcript archive expiry is invalid.");
+    }
+    await this.measuredQuery(this.database,
+      `UPDATE chusky_object_metadata
+       SET retention_expires_at = to_timestamp($3 / 1000.0), updated_at = now()
+       WHERE owner_user_id = $1 AND object_kind = 'transcript_segment' AND metadata->>'meetingHash' = $2
+         AND lifecycle_status IN ('pending','available','failed')`,
+      [userId, meetingHash, expiresAt],
+    );
+  }
+
+  async markRecallTranscriptArchiveTruncated(userId: number, meetingHash: string): Promise<void> {
+    assertUserId(userId);
+    if (!/^[a-f0-9]{64}$/.test(meetingHash)) throw new Error("Recall transcript meeting identity is invalid.");
+    await this.measuredQuery(this.database,
+      `UPDATE chusky_object_metadata SET metadata = metadata || '{"truncated":true}'::jsonb, updated_at = now()
+       WHERE owner_user_id = $1 AND object_kind = 'transcript_segment' AND metadata->>'meetingHash' = $2
+         AND lifecycle_status IN ('pending','available','failed')`,
+      [userId, meetingHash],
+    );
+  }
+
+  /** Promote a verified immutable R2 object without changing its cataloged key. */
+  async markObjectAvailableAtKey(userId: number, objectId: string, objectKey: string, sizeBytes: number, sha256: string, encryptionVersion: string): Promise<boolean> {
+    assertUserId(userId);
+    if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId) || !isOwnerScopedObjectKey(userId, objectKey)
+      || !Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || !/^[a-f0-9]{64}$/.test(sha256)
+      || encryptionVersion.length > 80 || !/^[A-Za-z0-9._-]+$/.test(encryptionVersion)) {
+      throw new Error("Durable object verification is invalid.");
+    }
+    const result = await this.measuredQuery<{ object_id: string }>(this.database,
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'available', size_bytes = $4, sha256 = $5, updated_at = now()
+       WHERE owner_user_id = $1 AND object_id = $2 AND object_key = $3 AND lifecycle_status = 'pending'
+         AND size_bytes = 0 AND encryption_version = $6
+       RETURNING object_id`,
+      [userId, objectId, objectKey, sizeBytes, sha256, encryptionVersion],
+    );
+    if (result.rows.length) return true;
+    const existing = await this.getObjectMetadata(userId, objectId);
+    return existing?.status === "available" && existing.objectKey === objectKey && existing.sizeBytes === sizeBytes
+      && existing.sha256 === sha256 && existing.encryptionVersion === encryptionVersion;
+  }
+
   /** Bounded cleanup scan; only explicitly expired catalog rows are eligible. */
   async listExpiredObjectMetadata(nowMs: number, limit = 100): Promise<DurableObjectMetadata[]> {
     if (!Number.isSafeInteger(nowMs) || nowMs <= 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
@@ -373,7 +436,7 @@ export class NeonDurableState {
     assertUserId(userId);
     if (!/^obj_[A-Za-z0-9_-]{1,120}$/.test(objectId)) throw new Error("Durable object ID is invalid.");
     const result = await this.measuredQuery<{ object_id: string }>(this.database,
-      `UPDATE chusky_object_metadata SET lifecycle_status = 'deleting', updated_at = now()
+      `UPDATE chusky_object_metadata SET lifecycle_status = 'deleting', retention_expires_at = now(), updated_at = now()
        WHERE owner_user_id = $1 AND object_id = $2 AND lifecycle_status IN ('pending','available','failed','deleting')
        RETURNING object_id`,
       [userId, objectId],
@@ -518,6 +581,12 @@ export class NeonDurableState {
   async assertObjectMetadataSchema(): Promise<void> {
     await this.measuredQuery(this.database,
       "SELECT owner_user_id, object_id, object_kind, object_key, lifecycle_status, content_type, size_bytes, sha256 FROM chusky_object_metadata LIMIT 0");
+  }
+
+  async assertRecallTranscriptArchiveSchema(): Promise<void> {
+    const result = await this.measuredQuery<{ index_name: string | null }>(this.database,
+      "SELECT to_regclass('public.chusky_object_metadata_transcript_meeting_idx')::text AS index_name");
+    if (!result.rows[0]?.index_name) throw new Error("Recall transcript archive index migration is missing.");
   }
 
   /** Fail startup when the opt-in mission repository schema is not installed. */

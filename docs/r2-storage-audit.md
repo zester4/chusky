@@ -88,6 +88,21 @@ verified rollback path.
 
 ## Current status
 
+Explicitly retained Recall transcript segments now have an opt-in archival path
+on `codex/neon-durable-state`. Migration `0012_recall_transcript_archive_index.sql`
+adds an owner/meeting/object lookup index. The path uploads the existing
+AES-GCM ciphertext as immutable owner-scoped R2 objects, records only bounded
+metadata/checksum/expiry in Neon, verifies R2 read-back before marking an object
+available, merges cache and archive with size/count limits, and tombstones
+catalog rows before deletion. It is gated by
+`DURABLE_RECALL_TRANSCRIPT_ARCHIVE_ENABLED` (default `false`) and requires the
+durable-state catalog, R2, and a stable transcript encryption key. The additive
+`0012` migration was applied to the configured local migration database and
+the runtime URL's index was verified; the feature flag remains off. Focused
+tests cover idempotency, pending-write recovery, owner-scoped deletion, expiry,
+truncation, and checksum failure. This does not yet include a live synthetic
+R2 canary or a scheduled cleanup/recovery worker.
+
 The metadata foundation and the first integrated path are implemented on the
 `codex/neon-durable-state` branch: migration `0008_neon_object_metadata.sql`
 adds the owner-scoped catalog, and the SDK file upload/complete/download/delete
@@ -109,10 +124,12 @@ so an expiry/orphan sweeper is required before broad rollout.
 
 This is not the R2 phase completion: the image integration is opt-in and does
 not backfill existing images; channel/Telegram document attachments and other
-asset flows do not all write the catalog. Encrypted transcript/run-trace
-archival, retention/orphan-cleanup workers, complete inventory/backfill
-tooling, production migration, and a live R2 canary remain outstanding. No
-lifecycle expiry rules are configured for user object prefixes.
+asset flows do not all write the catalog. Retained Recall transcript archival
+is now implemented but remains opt-in and has not had a live R2 canary;
+agent-run/tool-trace archival, retention/orphan-cleanup workers, complete
+inventory/backfill tooling, production rollout verification, and safe retry
+monitoring remain outstanding. No lifecycle expiry rules are configured for
+user object prefixes.
 
 The bounded `npm run r2:retention` utility now scans only Neon catalog rows
 whose explicit `retention_expires_at` is due. It is read-only by default. The
