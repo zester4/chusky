@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { backfillDurableSessionSnapshot } from "../src/durableSessionBackfill.js";
 import { DURABLE_SESSION_DOMAINS, type DurableSessionDocument } from "../src/neonDurableState.js";
-import { sessionUsesNeonDomains } from "../src/sessionDomains.js";
+import { sessionUsesNeonDomains, splitSessionDomains } from "../src/sessionDomains.js";
 import type { UserSession } from "../src/store.js";
 
 function session(): UserSession {
@@ -10,6 +10,7 @@ function session(): UserSession {
     model: "test/model", totalMessages: 4, totalCost: 0, createdAt: 100, updatedAt: 200,
     history: [{ role: "user", content: "keep this", createdAt: 150 }],
     summaries: ["older context"], memories: [], imageAssets: [], sdkFiles: [], artifacts: [], sdkThreads: [],
+    approvals: [{ id: "approval_1", status: "pending", tool: "SAFE_TOOL", arguments: { value: "retain" } }],
   } as unknown as UserSession;
 }
 
@@ -57,6 +58,7 @@ test("session backfill writes domains then promotes only the exact Redis snapsho
   assert.equal(sessionUsesNeonDomains(promoted as UserSession), true);
   assert.deepEqual(promoted.history.map((message: { content: string }) => message.content), ["keep this"]);
   assert.deepEqual(promoted.summaries, []);
+  assert.deepEqual(promoted.approvals, []);
 });
 
 test("session backfill leaves Redis untouched when a live save wins the snapshot race", async () => {
@@ -77,6 +79,22 @@ test("session backfill skips pre-existing divergent or partial Neon domains", as
   assert.equal(result, "neon_conflict");
   assert.equal(fixture.writes, 0);
   assert.equal(fixture.redisValue, "legacy");
+});
+
+test("session backfill repairs missing conversation rows when matching domains survived an interrupted attempt", async () => {
+  const snapshot = session();
+  const raw = JSON.stringify(snapshot);
+  const { domains } = splitSessionDomains({ ...snapshot, history: [{ ...snapshot.history[0], id: "legacy_message" }] } as UserSession);
+  const existing = new Map<string, DurableSessionDocument>([...domains].map(([domain, payload]) => [domain, { domain, payload, version: 1, updatedAt: 1 } as DurableSessionDocument]));
+  const fixture = harness({ initial: existing });
+
+  const result = await backfillDurableSessionSnapshot(820005, raw, fixture.dependencies);
+
+  assert.equal(result, "migrated");
+  assert.equal(fixture.writes, 0);
+  assert.equal(fixture.appended.length, 1);
+  assert.equal((fixture.appended[0]?.[0] as { content: string }).content, "keep this");
+  assert.equal(sessionUsesNeonDomains(JSON.parse(fixture.redisValue) as UserSession), true);
 });
 
 test("session backfill rejects owner zero and recognizes an already-promoted snapshot", async () => {

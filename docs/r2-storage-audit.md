@@ -134,11 +134,12 @@ so an expiry/orphan sweeper is required before broad rollout.
 This is not the R2 phase completion: the image integration is opt-in and does
 not backfill existing images; channel/Telegram document attachments and other
 asset flows do not all write the catalog. Retained Recall transcript archival
-is now implemented but remains opt-in and has not had a live R2 canary;
-agent-run/tool-trace archival, retention/orphan-cleanup workers, complete
-inventory/backfill tooling, production rollout verification, and safe retry
-monitoring remain outstanding. No lifecycle expiry rules are configured for
-user object prefixes.
+is now implemented and remains opt-in. Its synthetic live canary passed against
+the configured local R2/Neon/Redis services and confirmed cleanup; deployed
+service configuration and real-user archival remain unverified. Agent-run/tool-
+trace archival, retention/orphan-cleanup workers, complete inventory/backfill
+tooling, production rollout verification, and safe retry monitoring remain
+outstanding. No lifecycle expiry rules are configured for user object prefixes.
 
 The bounded `npm run r2:retention` utility now scans only Neon catalog rows
 whose explicit `retention_expires_at` is due. It is read-only by default. The

@@ -40,7 +40,6 @@ export async function backfillDurableSessionSnapshot(userId: number, raw: string
   if (existing.size) {
     if (!domainsMatch(existing, domains)) return "neon_conflict";
   } else {
-    await dependencies.state.appendConversationMessages(userId, withIds.history.map(({ id, role, content, createdAt, sourceId }) => ({ id: id!, role, content, createdAt: createdAt ?? Date.now(), ...(sourceId ? { sourceId } : {}) })));
     try {
       await dependencies.state.writeSessionDomains(userId, domains, [], new Map(DURABLE_SESSION_DOMAINS.map((domain) => [domain, undefined])));
     } catch (error) {
@@ -50,10 +49,17 @@ export async function backfillDurableSessionSnapshot(userId: number, raw: string
     }
   }
 
+  // History is a separate append-only table. Always retry the idempotent
+  // append, including when a previous attempt wrote domains but stopped
+  // before history or Redis promotion.
+  await dependencies.state.appendConversationMessages(userId, withIds.history.map(({ id, role, content, createdAt, sourceId }) => ({ id: id!, role, content, createdAt: createdAt ?? Date.now(), ...(sourceId ? { sourceId } : {}) })));
+
   const coreRecord = core as UserSession & Record<string, unknown>;
   coreRecord.history = withIds.history.slice(-HOT_CONVERSATION_MESSAGES);
   coreRecord.durableConversationHeadId = withIds.history.at(-1)?.id;
   coreRecord.durableSessionFormat = DURABLE_SESSION_FORMAT;
+  // Active approvals are canonical in their separate owner-scoped Redis keys;
+  // discard only the legacy embedded cache so stale approvals are not revived.
   const replacement = JSON.stringify({ ...coreRecord, approvals: [] });
   return await dependencies.compareAndSetRedisSession(userId, raw, replacement) ? "migrated" : "redis_changed";
 }

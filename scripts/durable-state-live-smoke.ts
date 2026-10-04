@@ -1,8 +1,9 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import dotenv from "dotenv";
 import Redis from "ioredis";
 import { Pool } from "pg";
+import { reserveDurableSmokeScope } from "../src/durableSmokeGuard.js";
 
 dotenv.config({ path: process.env.CHUSKY_ENV_FILE ?? resolve(process.cwd(), ".env") });
 
@@ -22,13 +23,44 @@ const userId = 8_000_000_000_000_000 + randomInt(0, 1_000_000);
 const marker = `durable-state-smoke-${randomInt(1_000_000, 9_999_999)}`;
 const threadId = `thr_smoke_${randomInt(1_000_000, 9_999_999)}`;
 const runId = `run_smoke_${randomInt(1_000_000, 9_999_999)}`;
+const sessionKey = `chuck:session:${userId}`;
+const domainsKey = `chuck:session-domains:${userId}`;
+const reservationKey = `chuck:durable-state-live-smoke:${userId}`;
+const reservationToken = randomUUID();
 const pool = new Pool({ connectionString: databaseUrl, max: 1, connectionTimeoutMillis: 10_000 });
 const redis = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 1, connectTimeout: 10_000 });
 
 async function main(): Promise<void> {
   let runError: unknown;
   let stage = "initialize-store";
+  let releaseSmokeScope: (() => Promise<void>) | undefined;
   try {
+    stage = "reserve-synthetic-scope";
+    releaseSmokeScope = await reserveDurableSmokeScope(userId, reservationToken, {
+      async hasNeonRows(ownerId) {
+        const result = await pool.query<{ present: boolean }>(
+          "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
+          [ownerId],
+        );
+        return result.rows[0]?.present === true;
+      },
+      async hasRedisSessionKeys() {
+        return (await redis.exists(sessionKey, domainsKey)) > 0;
+      },
+      async acquireReservation(_ownerId, token) {
+        return await redis.set(reservationKey, token, "EX", 600, "NX") === "OK";
+      },
+      async releaseReservation(_ownerId, token) {
+        await redis.eval(
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+          1,
+          reservationKey,
+          token,
+        );
+      },
+    });
+
+    stage = "initialize-store";
     const store = await import("../src/store.js");
     await store.initStore();
     stage = "load-session";
@@ -125,23 +157,30 @@ async function main(): Promise<void> {
     runError = error;
     console.error(JSON.stringify({ liveSmokeFailureStage: stage }));
   } finally {
-    // The smoke uses a synthetic, high-range owner ID and removes only its own
-    // test rows and Redis session, including after a partially successful write.
-    const cleanup = await Promise.allSettled([
+    // Only delete rows after the unused synthetic owner scope was checked and
+    // reserved. A collision or failed reservation must never enter cleanup.
+    const cleanup = releaseSmokeScope ? await Promise.allSettled([
       pool.query("DELETE FROM public.chusky_session_domain WHERE user_id = $1", [userId]),
       pool.query("DELETE FROM public.chusky_sdk_run WHERE user_id = $1", [userId]),
       pool.query("DELETE FROM public.chusky_conversation_message WHERE user_id = $1", [userId]),
-      redis.del(`chuck:session:${userId}`, `chuck:session-domains:${userId}`),
-    ]);
-    const leftovers = await pool.query<{ present: boolean }>(
+      redis.del(sessionKey, domainsKey),
+    ]) : [];
+    const reservationRelease = releaseSmokeScope
+      ? await Promise.allSettled([releaseSmokeScope()])
+      : [];
+    const leftovers = releaseSmokeScope ? await pool.query<{ present: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM public.chusky_session_domain WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_sdk_run WHERE user_id = $1) OR EXISTS (SELECT 1 FROM public.chusky_conversation_message WHERE user_id = $1) AS present",
       [userId],
-    ).catch((error: unknown) => { throw error; });
+    ) : undefined;
     await Promise.allSettled([pool.end(), redis.quit()]);
-    if (cleanup.some((result) => result.status === "rejected") || leftovers.rows[0]?.present) {
+    if (releaseSmokeScope && (cleanup.some((result) => result.status === "rejected")
+      || reservationRelease.some((result) => result.status === "rejected")
+      || leftovers?.rows[0]?.present)) {
       throw new Error("The live smoke could not confirm cleanup of its isolated test records.");
     }
-    console.log(JSON.stringify({ isolatedTestDataCleaned: true, redisSessionKeysRemoved: cleanup[3]?.status === "fulfilled" ? cleanup[3].value : 0 }));
+    console.log(JSON.stringify(releaseSmokeScope
+      ? { isolatedTestDataCleaned: true, redisSessionKeysRemoved: cleanup[3]?.status === "fulfilled" ? cleanup[3].value : 0 }
+      : { syntheticScopeCleanupSkipped: true }));
   }
   if (runError) throw runError;
 }
