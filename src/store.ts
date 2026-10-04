@@ -7031,7 +7031,7 @@ export async function replanMission(userId: number, id: string, rawSteps: Array<
       if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string")) throw new Error(`Mission step ${stepId} has invalid dependencies`);
       const allowedTools = normalizeMissionStepAllowedTools(step.allowedTools, `Replanned mission step ${stepId}`);
       const toolHints = allowedTools === undefined ? deriveMissionToolHints(step.objective) : undefined;
-      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, allowedTools, toolHints };
+      return { ...previous, id: stepId, title: step.title.trim(), objective: step.objective.trim(), status: "pending" as const, dependsOn: [...new Set(dependencies.map((dependency) => dependency.trim()))], taskId: previous?.taskId, attempts: previous?.attempts ?? 0, retryLimit: Math.max(0, Math.min(20, Math.floor(step.retryLimit ?? previous?.retryLimit ?? 2))), updatedAt: now, result: previous?.result, ...(allowedTools !== undefined ? { allowedTools } : {}), ...(toolHints !== undefined ? { toolHints } : {}) };
     });
     const completedIds = new Set(mission.steps.filter((step) => step.status === "completed").map((step) => step.id));
     const removedCompletedIds = [...completedIds].filter((stepId) => !steps.some((step) => step.id === stepId && step.status === "completed"));
