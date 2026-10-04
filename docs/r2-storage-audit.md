@@ -100,8 +100,17 @@ durable-state catalog, R2, and a stable transcript encryption key. The additive
 `0012` migration was applied to the configured local migration database and
 the runtime URL's index was verified; the feature flag remains off. Focused
 tests cover idempotency, pending-write recovery, owner-scoped deletion, expiry,
-truncation, and checksum failure. This does not yet include a live synthetic
-R2 canary or a scheduled cleanup/recovery worker.
+truncation, and checksum failure. A separate synthetic-only live canary is
+available as `npm run r2:live-smoke -- --apply --confirm-synthetic-r2-canary`.
+It requires durable Neon state, the object
+catalog, Redis, and R2 to be explicitly configured. It creates a generated
+high-range owner and unique object key, verifies object size/type and bounded
+checksum read-back, checks owner-scoped metadata and persisted expiry, then
+tombstones and deletes only that exact object. Unit tests cover successful
+cleanup, read-back failure, and metadata identity mismatch. The live canary has
+passed against the configured local R2/Neon/Redis services and confirmed
+cleanup. It does not verify deployed-service configuration or real-user data;
+there is still no scheduled cleanup/recovery worker.
 
 The metadata foundation and the first integrated path are implemented on the
 `codex/neon-durable-state` branch: migration `0008_neon_object_metadata.sql`
@@ -137,5 +146,5 @@ apply mode requires both `--apply` and `--confirm-expired-objects`, atomically
 rechecks the deadline while setting a Neon deletion tombstone, deletes only the
 cataloged owner-scoped R2 key, then confirms the tombstone. It does not list or
 delete bucket prefixes. This is an operator-run primitive, not an automated
-schedule; production inventory, retry monitoring, cron wiring, and a live
-synthetic canary remain outstanding.
+schedule; production inventory, retry monitoring, and cron wiring remain
+outstanding.

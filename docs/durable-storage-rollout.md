@@ -28,9 +28,9 @@ Updated: 2026-10-04
 | Store SDK runs as per-run Neon rows | With `DURABLE_STATE_SDK_RUNS_ENABLED=true`, API, CLI, quota, and task-worker paths hydrate runs from owner/thread-scoped rows. Session writes transactionally import embedded legacy runs and store only thread metadata in the `sdk` domain. Migrations 0002, 0003, and 0005 are applied to the configured Neon database. The live smoke confirmed one run row, zero embedded run entries, cache-expiry recovery, and cleanup without logging payloads. | Local code against configured live Neon/Redis passed; deployed-service canary and real-user parity are not verified. The flag remains default-off. |
 | Store missions, steps, evidence, and event history in Neon | Migrations 0009-0010 define owner-scoped mission/event rows and per-owner cutover markers. The local runtime can route marked owners through version-CAS mission writes and transactional event inserts; unmarked owners stay on Redis. `npm run durable-missions:backfill` defaults to count-only read mode and only applies after `--apply --confirm-quiesced`; it verifies complete mission/event read-backs before writing the marker. | Focused backfill/repository tests and the full local suite pass. No production backfill or deployed verification was run. All writers and workers must be stopped before apply; Redis copies are preserved. Keep the mission flag enabled after cutover because disabling it after Neon writes would expose stale Redis data. Reminders, recurring jobs, and task definitions/results still need durable Neon ownership. |
 | Measure Redis commands, bytes, key sizes, cache hit ratio, and Neon query latency | Added process-local Redis command instrumentation by bounded key family and a root-only `GET /v1/admin/storage/metrics` endpoint. With `DURABLE_STORAGE_METRICS_ENABLED=true`, aggregate family samples are transactionally persisted to Neon migration 0011 every 60 seconds and combined with live process counters by the endpoint. Shutdown and store reinitialization attempt a final flush. | The exporter is implemented but opt-in; production enablement and multi-replica observation are not verified. A hard process crash can lose up to one flush interval of in-memory samples. Byte and maximum-value figures are payload estimates (not RESP wire bytes or Redis `MEMORY USAGE`), and unclassified key families appear as `other`; compare estimates with provider billing and Redis-native measurements before using them for capacity decisions. |
-| Archive large transcripts, tool outputs, files, images, and videos to R2 | Migration 0008 and owner-scoped Neon metadata back an opt-in SDK upload path. Migration 0012 adds the owner/meeting lookup index for explicitly retained Recall transcripts. Retained transcript segments now archive existing encrypted bytes to immutable owner-scoped R2 objects, verify the checksum/read-back before marking metadata available, and merge with the bounded Redis cache on read. See the [R2 audit](r2-storage-audit.md). Agent run/tool traces and several image/attachment flows are not fully catalogued or archived. | Focused archive/store tests and typecheck pass. Migration 0012 was applied to the configured local migration database and verified through the runtime URL. The archive flag remains off; no live R2 canary, automated retry/retention worker, complete inventory/backfill, or production verification has been done. |
-| Add retention and safe archival jobs | `npm run r2:retention` is a bounded operator-run cleanup primitive over explicitly expired Neon object-catalog rows. Dry-run is default; apply requires two explicit flags, rechecks expiry in the Neon tombstone update, and deletes only the cataloged owner-scoped R2 key. | Local unit/store coverage is being added. No automated schedule, production inventory, retry monitoring, R2 archival for retained transcripts/traces, or live canary yet. |
-| Full CI and production verification | Current Windows local run: 1,343 tests (1,339 pass, 0 fail, 4 skipped); typecheck, app build, SDK build, and 25 SDK tests pass. Configured Neon+Redis session smoke evidence is recorded above. | The exact hosted CI workflow still needs Ubuntu/Node 22 plus FFmpeg. Deployed-service verification remains outstanding; this retention runner was not applied to live objects or deployed. |
+| Archive large transcripts, tool outputs, files, images, and videos to R2 | Migration 0008 and owner-scoped Neon metadata back an opt-in SDK upload path. Migration 0012 adds the owner/meeting lookup index for explicitly retained Recall transcripts. Retained transcript segments archive existing encrypted bytes to immutable owner-scoped R2 objects, verify checksum/read-back before marking metadata available, and merge with the bounded Redis cache on read. See the [R2 audit](r2-storage-audit.md). Agent run/tool traces and several image/attachment flows are not fully catalogued or archived. | Focused archive/store tests and typecheck pass. Migration 0012 was applied to the configured local migration database and verified through the runtime URL. A synthetic live canary against the configured R2/Neon/Redis services passed and cleaned up its generated object and row; this does not verify the deployed service or real-user archival. The archive flag remains off. Automated retry/retention, complete inventory/backfill, and production feature verification remain outstanding. |
+| Add retention and safe archival jobs | `npm run r2:retention` is a bounded operator-run cleanup primitive over explicitly expired Neon object-catalog rows. Dry-run is default; apply requires two explicit flags, rechecks expiry in the Neon tombstone update, and deletes only the cataloged owner-scoped R2 key. `npm run r2:live-smoke` is a separate synthetic-only canary requiring two confirmation flags and both durable-storage feature flags; it verifies R2 HEAD and bounded checksum read-back, Neon owner denial and expiry metadata, then tombstones and removes only its generated object. | Unit tests cover successful canary cleanup, checksum-failure cleanup, and refusal to touch mismatched metadata. The synthetic live canary passed and confirmed cleanup. No automated retention schedule, production inventory, or retry monitoring exists. |
+| Full CI and production verification | Full local verification: 1,370 tests (1,366 pass, 0 fail, 4 skipped), typecheck, app build, SDK build, and 25 SDK tests pass. The hosted workflow runs on `main` pushes and pull requests, not feature-branch pushes. | The current feature tip has no hosted check run; a pull request is required to execute Ubuntu/Node 22 plus FFmpeg CI. Deployed-service feature verification remains outstanding; retention has not been applied to live catalog objects. |
 
 ## Operational safeguards
 
@@ -88,13 +88,18 @@ Using the configured local `.env` without printing connection values:
 
 This is local-process verification against the configured Neon/Redis URLs, not
 proof that Railway's deployed process uses those same URLs or feature flags.
-There is still no live R2 object canary, and the zero-record mission/retention
-dry runs do not prove those paths against populated production data.
+The synthetic R2 canary ran successfully against the configured local
+R2/Neon/Redis services and cleaned up its generated object and metadata row.
+This does not prove that the deployed service uses the same configuration or
+that real-user archival works. The zero-record mission/retention dry runs do
+not prove those paths against populated production data. Hosted CI has not run
+for the current feature-branch tip because the workflow is pull-request/main-triggered.
 
 ## Next implementation slices
 
-1. Run the exact CI command sequence on a recursive-submodule checkout in
-   Ubuntu/Node 22 (CI also installs FFmpeg).
+1. Open/update a pull request for the current feature tip to run the exact CI
+   command sequence on a recursive-submodule checkout in Ubuntu/Node 22 (CI
+   also installs FFmpeg).
 2. Verify the deployed Chusky service's Neon health and observe actual user
    session-domain writes by aggregate domain/count/timestamp only.
 3. Keep the guarded backfill in dry-run until stable reads/writes are observed;
@@ -109,7 +114,9 @@ dry runs do not prove those paths against populated production data.
    recurring jobs, and task definitions/results still need Neon ownership.
    Keep each domain opt-in until schema, backfill, parity, restart, and rollback
    checks pass.
-5. Follow [the R2 storage audit](r2-storage-audit.md): complete inventory and
+5. Run `npm run r2:live-smoke -- --apply --confirm-synthetic-r2-canary` only
+   with explicit durable Neon, object-catalog, Redis, and R2 configuration;
+   then follow [the R2 storage audit](r2-storage-audit.md): complete inventory and
    backfill for existing images/files, wire every attachment flow into the
    Neon catalog, then add encrypted R2 archival for retained transcript
    segments and eligible large run/tool payloads. Turn the guarded manual
