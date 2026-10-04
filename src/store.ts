@@ -2277,8 +2277,8 @@ class RedisBackend implements Backend {
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
       let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
-      const oldHashes = metadata.durableDomainHashes ?? {};
-      const oldSnapshots = metadata.durableDomainSnapshots;
+      let oldHashes = metadata.durableDomainHashes ?? {};
+      let oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
       const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
       (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
@@ -2291,6 +2291,52 @@ class RedisBackend implements Backend {
       // retry a stale payload against a refreshed version.
       let writtenVersions: Map<DurableSessionDomain, number>;
       let writeExpectedVersions = expectedVersions;
+      // A caller loads its session before entering this save lease. Another
+      // writer may therefore have committed while this caller waited for the
+      // lease. Reconcile once under the lease before attempting the CAS so the
+      // common stale-snapshot case does not consume the conflict retry budget.
+      if (changedDomains.size) {
+        const latest = await this.durableState.readSessionDomains(userId);
+        const latestPayloads = new Map<DurableSessionDomain, unknown>(
+          [...domains].map(([domain, payload]) => [domain, latest.get(domain)?.payload ?? payload]),
+        );
+        let refreshed = false;
+        for (const [domain, desired] of changedDomains) {
+          const current = latest.get(domain);
+          const expected = writeExpectedVersions.get(domain);
+          if (!current) {
+            if (expected !== undefined) throw new Error(`Durable session domain disappeared during a concurrent write: ${domain}.`);
+            continue;
+          }
+          if (current.version === expected) continue;
+          if (!oldSnapshots || !Object.hasOwn(oldSnapshots, domain)) {
+            throw new Error(`Durable session domain cannot be safely merged without its loaded baseline: ${domain}.`);
+          }
+          const merged = mergeDurableSessionDomain(oldSnapshots[domain], current.payload, desired, domain);
+          changedDomains.set(domain, merged);
+          latestPayloads.set(domain, merged);
+          domains.set(domain, merged);
+          writeExpectedVersions.set(domain, current.version);
+          refreshed = true;
+        }
+        if (refreshed) {
+          const latestVersions = Object.fromEntries([...latest].map(([domain, document]) => [domain, document.version]));
+          oldHashes = {
+            ...oldHashes,
+            ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, durableDomainHash(payload)])),
+          };
+          oldSnapshots = {
+            ...oldSnapshots,
+            ...Object.fromEntries([...latestPayloads].map(([domain, payload]) => [domain, structuredClone(payload)])),
+          };
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads), {
+            durableDomainVersions: { ...metadata.durableDomainVersions, ...latestVersions },
+            durableDomainHashes: oldHashes,
+            durableDomainSnapshots: oldSnapshots,
+          });
+          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled));
+        }
+      }
       let writeAttempts = 0;
       while (true) {
         try {

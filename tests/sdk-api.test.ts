@@ -4,7 +4,7 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import { Hono } from "hono";
 import { config } from "../src/config.js";
-import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
+import { browserFileDownloadResponse, persistSdkCompanyRun, registerSdkApi, sdkRunArtifacts, sdkRunImages, setOrganizationAccessResolverForTests, setSdkAuditWriterForTests, setSdkTaskWorkflowEnqueuerForTests, setWebAuthSessionResolverForTests } from "../src/sdkApi.js";
 import { setAgentDependenciesForTests } from "../src/agent.js";
 import { setPhoneCallLauncherForTests } from "../src/nativeTools.js";
 import { daytonaEngine } from "../src/lib/daytona/engine.js";
@@ -29,6 +29,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  setSdkAuditWriterForTests();
   setPhoneCallLauncherForTests();
   (config as { providerSmokeSigningSecret: string }).providerSmokeSigningSecret = "";
 });
@@ -44,6 +45,16 @@ test("onboarding website research rejects unsafe URLs before agent execution", a
   }));
   assert.equal(response.status, 400);
   assert.equal((await response.json() as { error?: { code?: string } }).error?.code, "unsafe_website_url");
+});
+
+test("post-response SDK audit failures do not replace a completed route response", async () => {
+  setSdkAuditWriterForTests(async () => { throw new Error("simulated Neon version conflict"); });
+
+  const response = await app().fetch(request({ metadata: { title: "Keep the successful response" } }));
+
+  assert.equal(response.status, 201);
+  assert.ok(response.headers.get("x-request-id"));
+  assert.equal(typeof (await response.json() as { id?: unknown }).id, "string");
 });
 
 test("older account history requires a valid cursor and durable history backend", async () => {

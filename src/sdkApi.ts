@@ -91,6 +91,12 @@ export function setSdkTaskWorkflowEnqueuerForTests(enqueuer?: typeof enqueueTask
 }
 
 const activeRuns = new Map<string, AbortController>();
+type SdkAuditWriter = (userId: number, action: string, requestId: string, status: number) => Promise<void>;
+let sdkAuditWriterForTests: SdkAuditWriter | undefined;
+/** Test-only seam for failures in post-response SDK audit persistence. */
+export function setSdkAuditWriterForTests(writer?: SdkAuditWriter): void {
+  sdkAuditWriterForTests = writer;
+}
 const event = (type: string, text?: string) => ({ id: `evt_${randomUUID()}`, type, at: Date.now(), ...(text ? { text: text.slice(0, 4000) } : {}) });
 const SELF_SERVICE_PROJECT_LIMIT = 10;
 const SELF_SERVICE_SCOPES = new Set<string>(SELF_SERVICE_PROJECT_SCOPES);
@@ -1389,9 +1395,17 @@ export function registerSdkApi(app: Hono): void {
     (c.set as (key: string, value: unknown) => void)("sdkOwner", owner);
     const requestId = randomUUID(); (c.set as (key: string, value: unknown) => void)("sdkRequestId", requestId); c.header("X-Request-Id", requestId); await next();
     if (c.req.method !== "GET" && c.req.method !== "HEAD") {
-      await audit(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
-      if (principal.organizationId) await companyAudit(principal.projectId, `${c.req.method} ${new URL(c.req.url).pathname}`, requestId, c.res.status);
-      else if ((c.get as (key: string) => unknown)("webAuthUserId")) await auditDashboardProjectWrite(c, requestId);
+      try {
+        await (sdkAuditWriterForTests ?? audit)(owner.userId, `${c.req.method} ${c.req.path}`, requestId, c.res.status);
+        if (principal.organizationId) await companyAudit(principal.projectId, `${c.req.method} ${new URL(c.req.url).pathname}`, requestId, c.res.status);
+        else if ((c.get as (key: string) => unknown)("webAuthUserId")) await auditDashboardProjectWrite(c, requestId);
+      } catch (error) {
+        // Audit persistence runs after the route has completed. Returning a
+        // new 500 here can cause clients to replay an already-completed
+        // write, so preserve the route response and make the audit gap
+        // visible to operators instead.
+        logger.error({ errorName: error instanceof Error ? error.name : "UnknownError", requestId, method: c.req.method, status: c.res.status }, "SDK audit persistence failed after response; preserving route response");
+      }
     }
   });
 
