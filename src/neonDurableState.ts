@@ -1,5 +1,6 @@
 import type { QueryResultRow } from "pg";
 import { createHash } from "node:crypto";
+import { REDIS_METRIC_FAMILIES, type RedisCommandFamilyMetrics, type RedisMetricFamily } from "./redisMetrics.js";
 
 export const DURABLE_SESSION_DOMAINS = ["profile", "conversation", "memories", "assets", "sdk"] as const;
 export type DurableSessionDomain = typeof DURABLE_SESSION_DOMAINS[number];
@@ -89,6 +90,12 @@ export interface DurableStateMetrics {
   largestSessionDomainBytes: number;
 }
 
+export interface StorageMetricSample extends RedisCommandFamilyMetrics {
+  family: RedisMetricFamily;
+}
+
+export type StorageMetricTotals = Record<RedisMetricFamily, RedisCommandFamilyMetrics>;
+
 interface Queryable {
   query<Row extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: Row[] }>;
 }
@@ -106,6 +113,7 @@ type SessionRow = { domain: DurableSessionDomain; payload: unknown; version: num
 type SdkRunRow = { user_id: string | number; thread_id: string; run_id: string; payload: unknown; created_at: Date; updated_at: Date; version: number };
 type MissionRow = { owner_user_id: string | number; mission_id: string; status: string; idempotency_key: string | null; payload: unknown; version: number; created_at: Date; updated_at: Date };
 const MISSION_STATUSES = new Set(["queued", "running", "waiting", "paused", "blocked", "completed", "failed", "cancelled"]);
+const REDIS_FAMILY_SET = new Set<string>(REDIS_METRIC_FAMILIES);
 
 const DOMAIN_SET = new Set<string>(DURABLE_SESSION_DOMAINS);
 
@@ -420,6 +428,90 @@ export class NeonDurableState {
     if (result.rows.length) return true;
     const existing = await this.getObjectMetadata(userId, objectId);
     return existing?.status === "failed";
+  }
+
+  /** Store one idempotent process-local batch with fixed metric-family labels only. */
+  async recordStorageMetricBatch(instanceId: string, batchId: number, observedAt: number, samples: readonly StorageMetricSample[]): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(instanceId)) throw new Error("Storage metric instance identity is invalid.");
+    if (!Number.isSafeInteger(batchId) || batchId <= 0) throw new Error("Storage metric batch identity is invalid.");
+    if (!Number.isSafeInteger(observedAt) || observedAt <= 0) throw new Error("Storage metric observation time is invalid.");
+    if (!Array.isArray(samples) || samples.length < 1 || samples.length > REDIS_METRIC_FAMILIES.length) throw new Error("Storage metric batch size is invalid.");
+    const seen = new Set<string>();
+    for (const sample of samples) {
+      if (!sample || !REDIS_FAMILY_SET.has(sample.family) || seen.has(sample.family)) throw new Error("Storage metric family is invalid or duplicated.");
+      seen.add(sample.family);
+      for (const metric of [sample.commands, sample.errors, sample.requestBytes, sample.responseBytes, sample.durationMs, sample.maxValueBytes]) {
+        if (!Number.isSafeInteger(metric) || metric < 0) throw new Error("Storage metric aggregate is invalid.");
+      }
+      if (sample.errors > sample.commands) throw new Error("Storage metric error count exceeds command count.");
+    }
+
+    const client = await this.database.connect();
+    try {
+      await this.measuredQuery(client, "BEGIN");
+      await this.measuredQuery(client,
+        `INSERT INTO chusky_storage_metric_sample
+          (instance_id, batch_id, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes)
+         SELECT $1::uuid, $2::bigint, metric.family, to_timestamp($3 / 1000.0), metric.commands, metric.errors,
+           metric.request_bytes, metric.response_bytes, metric.duration_ms, metric.max_value_bytes
+         FROM unnest($4::text[], $5::bigint[], $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[], $10::bigint[])
+           AS metric(family, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes)
+         ON CONFLICT (instance_id, batch_id, family) DO NOTHING`,
+        [instanceId, batchId, observedAt, samples.map((item) => item.family), samples.map((item) => item.commands), samples.map((item) => item.errors), samples.map((item) => item.requestBytes), samples.map((item) => item.responseBytes), samples.map((item) => item.durationMs), samples.map((item) => item.maxValueBytes)],
+      );
+      await this.measuredQuery(client, "COMMIT");
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve the original write error. */ }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Aggregate only a bounded recent window; raw process IDs are never returned. */
+  async storageMetricTotals(sinceMs: number, windowDays = 1): Promise<StorageMetricTotals> {
+    if (!Number.isSafeInteger(sinceMs) || sinceMs <= 0) throw new Error("Storage metric window start is invalid.");
+    if (!Number.isSafeInteger(windowDays) || windowDays < 1 || windowDays > 30) throw new Error("Storage metric window must be between 1 and 30 days.");
+    const empty = Object.fromEntries(REDIS_METRIC_FAMILIES.map((family) => [family, { commands: 0, errors: 0, requestBytes: 0, responseBytes: 0, durationMs: 0, maxValueBytes: 0 }])) as StorageMetricTotals;
+    const result = await this.measuredQuery<Record<string, unknown>>(this.database,
+      `SELECT family, COALESCE(SUM(commands), 0)::text AS commands, COALESCE(SUM(errors), 0)::text AS errors,
+         COALESCE(SUM(request_bytes), 0)::text AS request_bytes, COALESCE(SUM(response_bytes), 0)::text AS response_bytes,
+         COALESCE(SUM(duration_ms), 0)::text AS duration_ms, COALESCE(MAX(max_value_bytes), 0)::text AS max_value_bytes
+       FROM chusky_storage_metric_sample
+       WHERE observed_at >= GREATEST(to_timestamp($1 / 1000.0), now() - ($2::integer * interval '1 day'))
+       GROUP BY family`, [sinceMs, windowDays]);
+    const count = (value: unknown): number => {
+      const parsed = typeof value === "number" ? value : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+      if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error("Storage metric aggregate returned an invalid count.");
+      return parsed;
+    };
+    for (const row of result.rows) {
+      if (typeof row.family !== "string" || !REDIS_FAMILY_SET.has(row.family)) throw new Error("Storage metric aggregate returned an unknown family.");
+      empty[row.family as RedisMetricFamily] = {
+        commands: count(row.commands), errors: count(row.errors), requestBytes: count(row.request_bytes),
+        responseBytes: count(row.response_bytes), durationMs: count(row.duration_ms), maxValueBytes: count(row.max_value_bytes),
+      };
+    }
+    return empty;
+  }
+
+  /** Bounded retention sweep; callers repeat until fewer than `limit` rows are removed. */
+  async pruneStorageMetrics(beforeMs: number, limit = 5000): Promise<number> {
+    if (!Number.isSafeInteger(beforeMs) || beforeMs <= 0) throw new Error("Storage metric retention cutoff is invalid.");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5000) throw new Error("Storage metric prune limit is invalid.");
+    const result = await this.measuredQuery<{ family: string }>(this.database,
+      `WITH expired AS (
+         SELECT ctid FROM chusky_storage_metric_sample WHERE observed_at < to_timestamp($1 / 1000.0)
+         ORDER BY observed_at LIMIT $2
+       )
+       DELETE FROM chusky_storage_metric_sample target USING expired
+       WHERE target.ctid = expired.ctid RETURNING target.family`, [beforeMs, limit]);
+    return result.rows.length;
+  }
+
+  async assertStorageMetricsSchema(): Promise<void> {
+    await this.measuredQuery(this.database,
+      "SELECT instance_id, batch_id, family, observed_at, commands, errors, request_bytes, response_bytes, duration_ms, max_value_bytes FROM chusky_storage_metric_sample LIMIT 0");
   }
 
   /** Fail startup when the opt-in object catalog is enabled without migration 0008. */
