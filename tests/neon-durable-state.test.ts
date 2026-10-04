@@ -161,13 +161,22 @@ test("Neon session writes extract SDK runs into rows in the same transaction", a
   assert.deepEqual(calls[sdkRunInsert]?.values, [42, "thr_1", "run_1", JSON.stringify(run), 1_000, 1_000, null]);
 });
 
-test("Neon health verifies reachability with a lightweight query", async () => {
+test("Neon health verifies reachability and the core session schema", async () => {
   const pool = new FakePool();
+  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation', 'memories', 'assets', 'sdk'))";
   const state = new NeonDurableState(pool as never);
   const health = await state.healthStatus();
   assert.deepEqual(pool.reads, []);
   assert.equal(health.reachable, true);
-  assert.deepEqual(health, { enabled: true, reachable: true });
+  assert.equal(pool.calls.some((call) => call.text.includes("FROM chusky_session_domain LIMIT 0")), true);
+  assert.deepEqual(health, { enabled: true, reachable: true, schemaReady: true });
+});
+
+test("Neon health separates database reachability from missing durable schema", async () => {
+  const pool = new FakePool();
+  pool.schemaDefinition = "CHECK (domain IN ('profile', 'conversation'))";
+  const state = new NeonDurableState(pool as never);
+  assert.deepEqual(await state.healthStatus(), { enabled: true, reachable: true, schemaReady: false });
 });
 
 test("Neon health reports unavailable state without leaking database errors", async () => {
@@ -176,7 +185,7 @@ test("Neon health reports unavailable state without leaking database errors", as
   const state = new NeonDurableState(pool as never);
   const health = await state.healthStatus();
   assert.equal(health.reachable, false);
-  assert.deepEqual(health, { enabled: true, reachable: false });
+  assert.deepEqual(health, { enabled: true, reachable: false, schemaReady: false });
 });
 
 test("Neon mission repository checks both canonical mission and event tables", async () => {
