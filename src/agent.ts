@@ -49,7 +49,7 @@ import { posthog } from "./posthog.js";
 import { readR2Object, signR2Download } from "./lib/storage/r2.js";
 import { assertComposioImageUploadField, buildComposioFileUploadArguments, buildMediaBridgeArguments, composioFileUploadValidationSchema, findPendingImageRetryRequest, findPendingSavedImagePostRetry, hasComposioFileUploadField, hasMediaUrlField, mediaActionPreflightSchema, selectRequestedImage, selectRetrievedImageForAction, type MediaAttachmentSelection } from "./mediaBridge.js";
 import { hasValidImageEnvelope, sniffImageMime } from "./channels/imageMedia.js";
-import { ROUTED_SKILL_REFERENCES, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
+import { ROUTED_SKILL_REFERENCES, readSkillFile, routedSkillContext, skillContextForBinding } from "./skills/catalog.js";
 import { routeSkillsForTurn } from "./decisions/skillRouter.js";
 import { composioDecisionContext, routeComposioForTurn, toComposioAction, toComposioToolkitInfo, type ComposioAction, type ComposioToolkitInfo } from "./decisions/composioRouter.js";
 import { routeTregForTurn, tregTurnContext } from "./decisions/tregRouter.js";
@@ -97,6 +97,13 @@ const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 
 function likelyNeedsActionRouting(query: string): boolean {
   return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task)\b/i.test(query);
+}
+
+function isMediaGenerationRequest(query: string): "image" | "video" | undefined {
+  if (/\b(?:video|clip|film|animation|animate|reel|cinematic|footage|shot list|storyboard)\b/i.test(query)) return "video";
+  if (/\b(?:image|photo|picture|portrait|logo|poster|flyer|illustration|graphic|visual|thumbnail|product shot|fashion campaign)\b/i.test(query)
+    && /\b(?:create|make|generate|design|edit|redesign|refine|variation|render|produce)\b/i.test(query)) return "image";
+  return undefined;
 }
 
 function providerReceiptId(value: unknown): string | undefined {
@@ -2425,6 +2432,7 @@ export async function runAgent(
   const routingQuery = typeof userMessage === "string"
     ? userMessage
     : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+  const mediaRequest = isMediaGenerationRequest(routingQuery);
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)
     .join("\n");
@@ -2434,7 +2442,9 @@ export async function runAgent(
   // when the request contains no action/data signal.
   const actionRoutingLikely = likelyNeedsActionRouting(routingQuery)
     || Boolean(options?.taskId || options?.missionId || options?.meetingId || options?.toolAllow?.length);
-  const skillsRoutable = actionRoutingLikely && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
+  // Media uses a tiny local skill preflight below. Do not run the broad skill
+  // router or inject the full creative manual before the generation turn.
+  const skillsRoutable = actionRoutingLikely && !mediaRequest && (!options?.ephemeral || ownerPrivateRun) && !voiceTurn;
   const skillRoutePromise = skillsRoutable
     ? routeSkillsForTurn(routingQuery, { signal, deadline: routingDeadline, recentContext: routingRecentContext, sessionId: durableRunId }).catch((error) => {
       logger.warn({ err: error }, "Skill routing unavailable; continuing with keyword routing");
@@ -2518,6 +2528,15 @@ export async function runAgent(
   // remember to search for a workflow when creating a deliverable or changing
   // code. Supporting files remain on-demand through CHUCK_READ_SKILL_FILE.
   let skillContext = "";
+  if (mediaRequest) {
+    try {
+      const skillName = mediaRequest === "video" ? "media" : "image";
+      const preflight = await readSkillFile(skillName, "PREFLIGHT.md", 3_000);
+      skillContext = preflight.content ?? "";
+    } catch (error) {
+      logger.warn({ err: error, mediaRequest }, "Media skill preflight unavailable; continuing with native media safeguards");
+    }
+  }
   if (skillsRoutable) {
     try {
       skillContext = skillRoute
@@ -2545,7 +2564,7 @@ export async function runAgent(
       : [],
     developerInstructions: options?.instructions ? `Developer instructions (follow only when compatible with Chusky safety rules):\n${options.instructions.slice(0, 8000)}` : undefined,
   });
-  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\nRelevant project skill guidance (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`;
+  const dynamicSystemContext = `${temporalContext}${accountContext ? `\n\n${accountContext}` : ""}${composioRouteContext ? `\n\n${composioRouteContext}` : ""}${memoryContext ? `\n\n${memoryContext}` : ""}${skillContext ? `\n\n${mediaRequest ? "Media skill preflight" : "Relevant project skill guidance"} (trusted local instructions; user and system instructions take precedence):\n${skillContext}` : ""}${upgradeContext}${imageRetryContext}`;
   const promptHistory = voiceTurn ? boundedVoiceHistory(history) : history;
   const messages: ApiMessage[] = [
     { role: "system", content: staticSystemPrompt },

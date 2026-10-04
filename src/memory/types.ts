@@ -17,7 +17,7 @@ export type MemoryStatus = "active" | "superseded" | "deleted";
 
 export type MemoryScopeKind = "personal" | "organization" | "team" | "project" | "client" | "meeting" | "conversation" | "channel";
 export type MemoryEntityType = "person" | "organization" | "team" | "project" | "client" | "product" | "tool" | "meeting";
-export type MemoryPurpose = "personal" | "execution" | "meeting" | "sales" | "support" | "reporting" | "handoff";
+export type MemoryPurpose = "personal" | "execution" | "meeting" | "call" | "sales" | "support" | "reporting" | "handoff";
 
 /** Canonical durable representation. Redis and Vector contain projections of this record. */
 export interface DurableMemoryRecord {
