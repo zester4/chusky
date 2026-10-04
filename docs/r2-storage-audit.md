@@ -149,3 +149,20 @@ cataloged owner-scoped R2 key, then confirms the tombstone. It does not list or
 delete bucket prefixes. This is an operator-run primitive, not an automated
 schedule; production inventory, retry monitoring, and cron wiring remain
 outstanding.
+
+The owner-image catalog migration utility is `npm run r2:images:backfill`.
+It defaults to a read-only scan of Redis session owners and Neon `assets`
+domains (startup metrics publishing is suppressed for the scan). A candidate
+is accepted only when the session asset's owner ID, asset
+ID, supported image type, size, and `images/<owner>/...` key all validate; the
+R2 object's HEAD size/type must also match. Apply requires
+`--apply --confirm-r2-image-catalog-backfill --max-owners=N --max-writes=N`
+(each 1-10) and writes only additive Neon metadata after a bounded R2 read
+verifies the SHA-256. It never changes session data or deletes R2 objects.
+`--after-user-id=N` supports bounded continuation; if `writeLimitReached` is
+true, rerun from the same cursor so already-written rows are skipped and the
+same owner can continue safely. Output contains aggregate counts only. This is
+an operator primitive, not evidence of production execution; run the dry-run with
+the production runtime's Redis, Neon, and R2 credentials, review all rejected,
+conflicting, and missing-object counts, then apply small batches and verify
+catalog parity before relying on the catalog-gated reads.

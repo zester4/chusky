@@ -27,6 +27,7 @@
     "durable-state:backfill": "tsx scripts/backfill-durable-session-domains.ts",
     "durable-missions:backfill": "tsx scripts/backfill-missions-to-neon.ts",
     "r2:live-smoke": "tsx scripts/r2-live-smoke.ts",
+    "r2:images:backfill": "tsx scripts/backfill-r2-image-catalog.ts",
     "r2:retention": "tsx scripts/r2-retention-sweep.ts",
     "durable-memory:migrate": "tsx src/migrate-durable-memory.ts",
     "doctor": "tsx src/cli.ts doctor",
