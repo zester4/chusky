@@ -26,6 +26,13 @@ const downloadWaiters = [];
 const recordings = new Map();
 const signatureDirectory = process.env.CHUSKY_WEB_BOT_AUTH_DIRECTORY_URL || "";
 const signingKeyB64 = process.env.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64 || "";
+const diagnostics = { console: [], errors: [], dialogs: [], pages: [] };
+const eventLog = [];
+function recordEvent(type, data = {}) {
+  eventLog.push({ type, at: Date.now(), ...data });
+  if (eventLog.length > 200) eventLog.shift();
+}
+function boundedRecords(items, limit = 50) { return items.slice(-limit).map((item) => ({ ...item })); }
 let webBotAuthActive = Boolean(signatureDirectory && signingKeyB64);
 let webBotAuthSigner;
 
@@ -35,6 +42,10 @@ function ensurePageTracking(page) {
   page.__chuskyTracking = tracking;
   page.on("crash", () => { tracking.crashed = true; tracking.generation += 1; });
   page.on("framenavigated", () => { tracking.generation += 1; });
+  page.on("console", (message) => { diagnostics.console.push({ type: message.type(), text: clean(message.text(), 500), url: clean(page.url(), 1_000) }); if (diagnostics.console.length > 100) diagnostics.console.shift(); recordEvent("console", { level: message.type(), text: clean(message.text(), 300) }); });
+  page.on("pageerror", (error) => { diagnostics.errors.push({ type: "pageerror", message: clean(error?.message || error, 500), url: clean(page.url(), 1_000) }); if (diagnostics.errors.length > 100) diagnostics.errors.shift(); recordEvent("pageerror", { message: clean(error?.message || error, 300) }); });
+  page.on("requestfailed", (request) => { diagnostics.errors.push({ type: "requestfailed", method: request.method(), url: clean(request.url(), 1_000), failure: clean(request.failure()?.errorText || "request failed", 300) }); if (diagnostics.errors.length > 100) diagnostics.errors.shift(); recordEvent("requestfailed", { url: clean(request.url(), 500) }); });
+  page.on("dialog", (dialog) => { diagnostics.dialogs.push({ type: dialog.type(), message: clean(dialog.message(), 500), defaultValue: clean(dialog.defaultValue(), 200), url: clean(page.url(), 1_000), handled: "dismissed" }); if (diagnostics.dialogs.length > 50) diagnostics.dialogs.shift(); recordEvent("dialog", { type: dialog.type(), message: clean(dialog.message(), 300) }); void dialog.dismiss().catch(() => {}); });
   void page.evaluate(() => {
     if (window.__chuskyDomGeneration !== undefined) return;
     window.__chuskyDomGeneration = 1;
@@ -716,6 +727,25 @@ async function execute(context, pageState, request) {
   if (request.action === "tab_close") { if (context.pages().length > 1) await page.close(); page = context.pages()[0] || await context.newPage(); }
   if (request.currentUrl && (() => { try { return /^https?:$/.test(new URL(String(request.currentUrl)).protocol); } catch { return false; } })() && (!page.url() || page.url() === "about:blank")) await page.goto((await safeHttpUrl(request.currentUrl)).toString(), { waitUntil: "domcontentloaded", timeout: 45_000 });
   const action = request.action;
+  if (action === "diagnostics") { const pages = await Promise.all(context.pages().map(async (item, index) => ({ index, url: clean(item.url(), 1_000), title: clean(item.url() ? await item.title().catch(() => "") : "", 160), closed: item.isClosed() }))); return result(page, context, { diagnostics: { console: boundedRecords(diagnostics.console), errors: boundedRecords(diagnostics.errors), dialogs: boundedRecords(diagnostics.dialogs), pages }, events: boundedRecords(eventLog) }); }
+  if (action === "events") return result(page, context, { events: boundedRecords(eventLog, 100) });
+  if (action === "dialog_list") return result(page, context, { dialogs: boundedRecords(diagnostics.dialogs) });
+  if (action === "dialog_dismiss") return result(page, context, { dismissed: true, dialogs: boundedRecords(diagnostics.dialogs) });
+  if (action === "desktop_click") {
+    if (typeof request.screenshotHash !== "string" || request.visualFallback !== true) throw new Error("Desktop coordinate clicks require a fresh screenshotHash and visualFallback=true");
+    const currentShot = await page.screenshot({ type: "jpeg", quality: 75 });
+    const currentHash = createHash("sha256").update(currentShot).digest("hex").slice(0, 32);
+    if (currentHash !== request.screenshotHash) throw new Error("Visual target is stale; capture a fresh screenshot before retrying the desktop click");
+    await page.mouse.click(Number(request.x), Number(request.y), { button: request.button === "right" ? "right" : request.button === "middle" ? "middle" : "left", clickCount: request.double === true ? 2 : 1 });
+    return result(page, context, { desktopAction: "click" });
+  }
+  if (action === "desktop_type") { await page.keyboard.type(String(request.text || ""), { delay: Math.max(0, Math.min(250, Number(request.delayMs || 0))) }); return result(page, context, { desktopAction: "type" }); }
+  if (action === "desktop_press") { await page.keyboard.press(String(request.key || request.keys || "Enter")); return result(page, context, { desktopAction: "press" }); }
+  if (action === "clipboard_write") { const text = String(request.text || ""); if (text.length > 8_000) throw new Error("Clipboard text exceeds the 8 KB limit"); await page.evaluate(async (value) => { await navigator.clipboard.writeText(value); }, text); return result(page, context, { clipboard: "written", length: text.length }); }
+  if (action === "clipboard_read") { const text = await page.evaluate(async () => navigator.clipboard.readText()); return result(page, context, { clipboard: "read", text: clean(text, 8_000) }); }
+  if (action === "pdf") {
+    const id = randomUUID(); const filePath = `${DOWNLOAD_ROOT}/${id}.pdf`; const cdp = await context.newCDPSession(page); const output = await cdp.send("Page.printToPDF", { printBackground: true, preferCSSPageSize: true }); await fs.writeFile(filePath, Buffer.from(output.data, "base64")); const stat = await fs.stat(filePath); return result(page, context, { pdf: { filePath, name: `${safeFileName(await page.title().catch(() => "page")) || "page"}.pdf`, size: stat.size } });
+  }
   const mutationAction = ["click", "invoke", "fill", "select_option", "check", "uncheck", "type", "press", "form_fill", "act", "agent"].includes(action);
   const beforeAction = mutationAction ? { url: page.url(), title: await page.title().catch(() => ""), generation: await pageGeneration(page) } : undefined;
   const target = request.selector ? await resolveLocator(page, request.selector) : null;
@@ -1004,14 +1034,19 @@ async function vaultLogin(context, request) {
 async function start() {
   const browserEnv = { ...process.env, DISPLAY };
   delete browserEnv.CHUSKY_WEB_BOT_AUTH_PRIVATE_KEY_B64;
-  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: browserEnv });
+  let geolocation;
+  try { const parsed = JSON.parse(process.env.CHUSKY_BROWSER_GEOLOCATION || ""); if (Number.isFinite(parsed?.latitude) && Number.isFinite(parsed?.longitude)) geolocation = { latitude: Number(parsed.latitude), longitude: Number(parsed.longitude), ...(Number.isFinite(parsed.accuracy) ? { accuracy: Number(parsed.accuracy) } : {}) }; } catch {}
+  const context = await chromium.launchPersistentContext(PROFILE, { headless: false, acceptDownloads: true, permissions: ["clipboard-read", "clipboard-write"], locale: process.env.CHUSKY_BROWSER_LOCALE || "en-GB", timezoneId: process.env.CHUSKY_BROWSER_TIMEZONE || "Europe/London", ...(geolocation ? { geolocation } : {}), args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--no-first-run", "--no-default-browser-check"], viewport: { width: 1440, height: 900 }, env: browserEnv });
   await fs.mkdir(DOWNLOAD_ROOT, { recursive: true, mode: 0o700 });
   await fs.mkdir(RECORDING_ROOT, { recursive: true, mode: 0o700 });
   context.on("page", (page) => {
+    ensurePageTracking(page);
+    recordEvent("page_created", { url: clean(page.url(), 1_000) });
     attachDownloadListener(page);
     void interceptPageRequests(context, page);
   });
   for (const page of context.pages()) {
+    ensurePageTracking(page);
     attachDownloadListener(page);
     await interceptPageRequests(context, page);
   }

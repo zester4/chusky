@@ -235,7 +235,7 @@ test("browser frontier preset describes bounded primitives and verification boun
   assert.equal(bullets.length, 3);
   assert.match(bullets[0]!, /fresh observation.*schema-bounded extraction.*per-step trace/i);
   assert.match(bullets[1]!, /accessibility.*visual-target ranking.*concurrency limits/i);
-  assert.match(bullets[2]!, /runtime adapter contract.*explicit verification or a trusted provider receipt/i);
+  assert.match(bullets[2]!, /internal E2B runtime contract.*explicit verification or a trusted site receipt/i);
 });
 
 test("mission continuity preset documents automatic approval handoff and wake recovery", () => {
@@ -266,9 +266,9 @@ test("browser autonomy upgrade preset describes bounded Jev sequencing", () => {
 test("browser challenge resolution preset distinguishes solving from verification", () => {
   const bullets = getAgentUpgradePreset("browserChallengeResolution");
   assert.equal(bullets.length, 3);
-  assert.match(bullets[0]!, /detection.*provider solving.*verification/i);
+  assert.match(bullets[0]!, /detection.*solving.*verification/i);
   assert.match(bullets[1]!, /challenge type.*resolution state/i);
-  assert.match(bullets[2]!, /Browserbase.*Browser Use Cloud/i);
+  assert.match(bullets[2]!, /re-inspects the live E2B page/i);
 });
 
 test("X Direct Messages upgrade preset distinguishes normal DMs from encrypted XChat", () => {

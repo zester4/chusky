@@ -74,17 +74,15 @@ because a user asks to connect a website account.
    “continue”, inspect the retained page at the observed HTTPS origin before resuming. A vault login handoff is bound to the exact saved credential even if the site redirected to its identity provider. Never export
    cookies, credentials, or a permanent VNC endpoint.
 
-Challenge resolution is provider-neutral and durable. A handoff records the
-retained browser provider, challenge type, and resolution state separately from
-the user-visible handoff status. States distinguish `detected`, `solving`,
+Challenge resolution is E2B-backed and durable. A handoff records the retained
+E2B browser session, challenge type, and resolution state separately from the
+user-visible handoff status. States distinguish `detected`, `solving`,
 `solved_unverified`, `handoff_required`, `verified`, `expired`, and `blocked`.
-E2B currently uses `handoff_required` plus owner completion and same-origin
-verification. A future Browserbase or Browser Use Cloud adapter may report
-provider solving events, but a provider's “solved” signal is never treated as
-verified access until Chusky re-inspects the live page and confirms the bound
-origin and expected result.
+E2B uses `handoff_required` plus owner completion and same-origin verification.
+A challenge-completion signal is never treated as verified access until Chusky
+re-inspects the live page and confirms the bound origin and expected result.
 
-Browser form reliability is provider-neutral. `CHUCK_BROWSER` supports
+Browser form reliability is E2B-backed. `CHUCK_BROWSER` supports
 `form_plan` and `form_fill`, which inspect the live forms, match requested
 labels to current controls, and handle textboxes, native selects, custom
 comboboxes, checkboxes, radios, and submit controls without hardcoded site
@@ -97,7 +95,7 @@ visual fallback are rejected when the page no longer matches that fingerprint.
 Accessibility targeting remains the default, and a screenshot never proves a
 submission succeeded by itself.
 
-Browser outcome verification is also bounded and provider-neutral. `CHUCK_BROWSER_VERIFY`
+Browser outcome verification is also bounded and E2B-backed. `CHUCK_BROWSER_VERIFY`
 can poll fresh live state for a short period when a single-page application
 renders success asynchronously. Detectors support positive and negative URL,
 title, and page-text conditions, so a successful confirmation can be required
@@ -108,7 +106,7 @@ replaying the last write. A passed detector is evidence of the observed page
 state; it is not a provider receipt unless the site or connected provider
 itself supplies that receipt.
 
-The adaptive browser protocol adds four provider-neutral primitives:
+The adaptive E2B browser protocol adds four primitives:
 `CHUCK_BROWSER_OBSERVE` captures a fresh accessible/form observation and can
 include a guarded screenshot; `CHUCK_BROWSER_ACT` executes one semantic action;
 `CHUCK_BROWSER_EXTRACT` returns only fields requested by a bounded schema; and
@@ -119,15 +117,17 @@ challenges or approval boundaries, and an `agent` sequence is not evidence of
 business success until `CHUCK_BROWSER_VERIFY` or a trusted provider receipt
 confirms the outcome.
 
-The runtime contracts in `src/lib/browser-runtime/` are provider-neutral. E2B
-currently supplies the adapter; Browserbase, Browser Use Cloud, local
-Playwright, or another approved backend can implement the same observation,
-action, extraction, and bounded-run interface without receiving Chusky policy
-authority. Session pooling is owner-scoped and refuses concurrency above the
-configured limit. The benchmark manifest in `benchmarks/browser-cases.ts`
-covers forms, custom controls, extraction, visual fallback, tabs, frames,
-handoffs, checkpoints, and redesign recovery; live provider coverage remains a
-separate release gate.
+The runtime contracts in `src/lib/browser-runtime/` are internal E2B execution
+contracts; they are not a second browser backend. E2B owns the retained
+Playwright process, screenshots, semantic actions, extraction, bounded runs,
+and session lifecycle. It also exposes bounded desktop-style mouse/keyboard
+fallback, clipboard, dialog reporting, console/request diagnostics, PDF export,
+pause/resume, and bounded sandbox forks. Desktop fallback and forking are
+disabled while a saved authenticated website identity is active. Session
+pooling is owner-scoped and refuses concurrency above the configured limit. The benchmark manifest in
+`benchmarks/browser-cases.ts` covers forms, custom controls, extraction, visual
+fallback, tabs, frames, handoffs, checkpoints, and redesign recovery; live E2B
+coverage remains a separate release gate.
 
 ## Transparent browser identity (optional)
 

@@ -1,5 +1,5 @@
-/** Provider-neutral browser contracts. Providers implement execution; Chusky owns policy. */
-export type BrowserProvider = "e2b" | "browserbase" | "local" | "daytona" | (string & {});
+/** Internal contracts for the E2B browser execution layer. Chusky owns policy. */
+export type BrowserProvider = "e2b";
 
 export type BrowserProfile = {
   id: string;

@@ -1,7 +1,7 @@
 import type { BrowserActionStep, BrowserRuntime } from "../browser-runtime/types.js";
 import type { E2BBrowserEngine } from "./browser.js";
 
-/** Adapts the existing E2B engine to the provider-neutral browser contract. */
+/** Exposes the existing E2B engine through the internal browser execution contract. */
 export function createE2BBrowserRuntime(engine: Pick<E2BBrowserEngine, "browser">, ownerPrivateRun = true): BrowserRuntime {
   const call = (ownerId: number, args: Record<string, unknown>) => engine.browser(ownerId, args, { ownerPrivateRun });
   return {

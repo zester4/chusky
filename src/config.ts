@@ -342,6 +342,10 @@ export const config = {
   e2bEnabled: optional("E2B_ENABLED", "false") === "true",
   e2bBrowserTemplate: optional("E2B_BROWSER_TEMPLATE", "chusky-browser-playwright"),
   e2bAllowInternetAccess: optional("E2B_ALLOW_INTERNET", "true") === "true",
+  e2bAutoPause: optional("E2B_AUTO_PAUSE", "true") === "true",
+  e2bBrowserLocale: optional("E2B_BROWSER_LOCALE", "en-GB"),
+  e2bBrowserTimezone: optional("E2B_BROWSER_TIMEZONE", "Europe/London"),
+  e2bBrowserGeolocation: optional("E2B_BROWSER_GEOLOCATION", ""),
   e2bTimeoutMs: boundedInt("E2B_TIMEOUT_MS", 900_000, 60_000, 86_400_000),
   e2bRequestTimeoutMs: boundedInt("E2B_REQUEST_TIMEOUT_MS", 120_000, 5_000, 300_000),
   // Cloudflare Web Bot Auth identity; the private key is used only by the

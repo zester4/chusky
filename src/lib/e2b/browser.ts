@@ -11,6 +11,7 @@ import { E2B_BROWSER_DENY_OUT_CIDRS } from "./networkPolicy.js";
 import { deleteR2Object, putR2Object, r2Configured, readR2Object } from "../../lib/storage/r2.js";
 import { E2B_BROWSER_ACTIONS, type E2BBrowserAction, type E2BBrowserFileRecord, type E2BBrowserNode, type E2BBrowserRecord, type E2BCommandResult } from "./types.js";
 import { planFormSubmission, type RequestedFormField } from "./formPlanner.js";
+import { auxiliaryBrowserRequest } from "./auxiliaryActions.js";
 import { webBotAuthConfigurationIssue, webBotAuthConfigurationStatus, webBotAuthKeyId, webBotAuthSandboxEnvironment, webBotAuthSigningEnabled } from "../../webBotAuth.js";
 
 const MAX_OUTPUT = 16_000;
@@ -176,7 +177,8 @@ export class E2BBrowserEngine {
       requestTimeoutMs: config.e2bRequestTimeoutMs,
       allowInternetAccess: config.e2bAllowInternetAccess,
       network: { allowPublicTraffic: true, denyOut: [...E2B_BROWSER_DENY_OUT_CIDRS] },
-      envs: webBotAuthSandboxEnvironment(),
+      lifecycle: { onTimeout: config.e2bAutoPause ? "pause" : "kill", autoResume: config.e2bAutoPause },
+      envs: { ...webBotAuthSandboxEnvironment(), CHUSKY_BROWSER_LOCALE: config.e2bBrowserLocale, CHUSKY_BROWSER_TIMEZONE: config.e2bBrowserTimezone, CHUSKY_BROWSER_GEOLOCATION: config.e2bBrowserGeolocation },
       metadata: { app: "chusky", surface: "browser", owner: String(userId) },
     });
     const next: E2BBrowserRecord = { sandboxId: sandbox.sandboxId, webBotAuthKeyId: webBotAuthSigningEnabled() ? webBotAuthKeyId() : undefined, createdAt: now, updatedAt: now, expiresAt };
@@ -236,9 +238,10 @@ export class E2BBrowserEngine {
 
   private async run(sandbox: Sandbox, request: Record<string, unknown>): Promise<E2BCommandResult> {
     const browserRequest = { ...request, webBotAuthEnabled: webBotAuthSigningEnabled() };
+    const responseFile = `/tmp/chusky-browser-response-${randomUUID()}.json`;
     const result = await sandbox.commands.run("node /app/browser-client.mjs", {
       cwd: "/app",
-      envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(browserRequest) },
+      envs: { CHUSKY_E2B_REQUEST_B64: encodeRequest(browserRequest), CHUSKY_E2B_RESPONSE_FILE: responseFile },
       timeoutMs: Math.min(config.e2bRequestTimeoutMs, 60_000),
       requestTimeoutMs: config.e2bRequestTimeoutMs,
     });
@@ -247,7 +250,12 @@ export class E2BBrowserEngine {
       const code = browserFailureCode(message);
       throw new E2BBrowserError(`E2B browser action failed [${code}]: ${message}${["stale_observation", "control_missing", "control_ambiguous", "frame_missing"].includes(code) ? ". Reinspect the current page before retrying; do not replay the same selector." : ""}`, code);
     }
-    const parsed = parseResult(result.stdout, result.stderr);
+    let parsed = parseResult(result.stdout, result.stderr) as E2BCommandResult & { responseFile?: string };
+    if (typeof parsed.responseFile === "string" && /^\/tmp\/chusky-browser-response-[A-Za-z0-9-]+\.json$/.test(parsed.responseFile)) {
+      const responseBytes = Buffer.from(await sandbox.files.read(parsed.responseFile, { format: "bytes" }));
+      await sandbox.commands.run(`rm -f ${parsed.responseFile}`, { timeoutMs: 5_000, requestTimeoutMs: config.e2bRequestTimeoutMs }).catch(() => undefined);
+      parsed = parseResult(responseBytes.toString("utf8"), result.stderr) as E2BCommandResult & { responseFile?: string };
+    }
     if (parsed.ok !== true) {
       const message = redactBrowserText(parsed.error || "E2B browser action failed", 800);
       const code = browserFailureCode(message);
@@ -358,9 +366,11 @@ export class E2BBrowserEngine {
         ...(result.workflowCheckpoint ? { ...result.workflowCheckpoint, action: result.workflowCheckpoint.action ?? action } : {}),
         updatedAt: now,
       },
+      evidence: [{ action, at: now, ...(typeof result.url === "string" ? { url: result.url } : {}), ...(typeof result.title === "string" ? { title: redactBrowserText(result.title, 160) } : {}), ...(typeof result.observationId === "string" ? { observationId: result.observationId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}), verified: action === "snapshot" || action === "state" || action === "find" || action === "form_inspect" || Boolean(result.formState) }, ...(record.evidence ?? [])].slice(-50),
       nodes: nodes.length ? nodes : record.nodes,
       updatedAt: now,
       expiresAt: record.sessionId ? record.expiresAt : now + config.e2bTimeoutMs,
+      paused: record.paused === true,
     };
     await this.save(userId, next);
     return next;
@@ -398,6 +408,10 @@ export class E2BBrowserEngine {
     return withUserLock(userId, async () => {
       await this.purgeExpiredBrowserFiles(userId);
       const action = safeAction(args.action);
+      if (["clipboard_read", "clipboard_write"].includes(action)) {
+        if (!internal.ownerPrivateRun) throw new E2BBrowserError("Clipboard access is available only in the owner's private conversation");
+        if (!internal.ownerApprovedAction) throw new E2BBrowserError("Clipboard access requires owner approval");
+      }
       if (action === "session_list") {
         const record = await this.record(userId);
         return { provider: "e2b", sandboxId: record?.sandboxId, sessions: record?.sessionId ? [{ id: record.sessionId, expiresAt: record.expiresAt }] : [] };
@@ -417,6 +431,20 @@ export class E2BBrowserEngine {
         if (!record?.sessionId || record.sessionId !== args.sessionId) throw new E2BBrowserError("E2B browser session lease not found or already expired");
         await this.save(userId, { ...record, sessionId: undefined, updatedAt: Date.now() });
         return { provider: "e2b", sandboxId: record.sandboxId, sessionId: record.sessionId, released: true };
+      }
+      if (action === "pause") {
+        const { sandbox, record } = await this.sandbox(userId);
+        await sandbox.pause({ keepMemory: true });
+        const next = { ...record, paused: true, updatedAt: Date.now() };
+        await this.save(userId, next);
+        return { provider: "e2b", sandboxId: record.sandboxId, action, paused: true, resumable: true };
+      }
+      if (action === "fork") {
+        await guardVaultBrowserAction(userId, (await this.record(userId))?.sandboxId ?? "", { ...args, currentUrl: (await this.record(userId))?.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
+        const { record } = await this.sandbox(userId);
+        const count = Math.max(1, Math.min(4, Math.floor(Number(args.count ?? 1))));
+        const forks = await Sandbox.fork(record.sandboxId, { count, timeoutMs: config.e2bTimeoutMs, apiKey: config.e2bApiKey, requestTimeoutMs: config.e2bRequestTimeoutMs });
+        return { provider: "e2b", sandboxId: record.sandboxId, action, forks: forks.map((fork) => fork instanceof Sandbox ? { sandboxId: fork.sandboxId } : { error: redactBrowserText(fork instanceof Error ? fork.message : String(fork), 300) }) };
       }
       if (action === "stop") {
         const record = await this.record(userId);
@@ -478,7 +506,11 @@ export class E2BBrowserEngine {
       const { sandbox } = await this.sandbox(userId);
       let record = (await this.record(userId))!;
       let compositeRequest: Record<string, unknown> | undefined;
-      if (action === "start") return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, expiresAt: record.expiresAt };
+      if (action === "start" || action === "resume") {
+        const next = { ...record, paused: false, updatedAt: Date.now() };
+        await this.save(userId, next);
+        return { provider: "e2b", sandboxId: record.sandboxId, action, started: true, resumed: action === "resume", expiresAt: record.expiresAt };
+      }
       if (action === "form_plan" || action === "form_fill") {
         const inspected = await this.run(sandbox, { action: "form_inspect", currentUrl: record.lastUrl, includePageContent: internal.ownerPrivateRun === true });
         const forms = Array.isArray(inspected.forms) ? inspected.forms : [];
@@ -497,7 +529,7 @@ export class E2BBrowserEngine {
       if (record.sessionId && !["state", "snapshot", "find", "form_inspect", "form_plan"].includes(action) && args.sessionId !== record.sessionId) throw new E2BBrowserError("Acquire the active E2B browser session lease before steering this browser");
       if (!internal.vaultLoginFlow) assertE2BBrowserHandoffAllowsAction(action, (await getSession(userId)).browserHandoffs ?? [], record.lastUrl, record.sandboxId);
       if (!internal.vaultLoginFlow) await guardVaultBrowserAction(userId, record.sandboxId, { ...args, currentUrl: record.lastUrl }, internal.ownerPrivateRun, internal.ownerApprovedAction);
-      const request: Record<string, unknown> = compositeRequest ?? { action };
+      const request: Record<string, unknown> = compositeRequest ?? auxiliaryBrowserRequest(action, args);
       if (action === "open") request.url = (await assertSafeBrowserUrl(args.url)).toString();
       if (action === "find") Object.assign(request, { role: args.role, name: args.name, nameMatch: args.nameMatch, limit: args.limit });
       if (action !== "open" && record.lastUrl) request.currentUrl = record.lastUrl;
@@ -563,6 +595,11 @@ export class E2BBrowserEngine {
       }
       let importedFiles: E2BBrowserFileRecord[] = [];
       if (["wait_download"].includes(action)) importedFiles = await this.syncRuntimeFiles(userId, sandbox, record, "download");
+      if (action === "pdf" && result.pdf?.filePath && result.pdf.size) {
+        const pdf = result.pdf;
+        const file = await this.persistRuntimeFile(userId, sandbox, record, { id: `pdf_${createHash("sha256").update(pdf.filePath).digest("hex").slice(0, 24)}`, kind: "download", name: pdf.name, size: pdf.size, createdAt: Date.now(), filePath: pdf.filePath });
+        importedFiles = [file];
+      }
       if (action === "recording_stop" && result.runtimeFilePath && result.recording?.id && result.recording.size) {
         const file = await this.persistRuntimeFile(userId, sandbox, record, { id: result.recording.id, kind: "recording", name: result.recording.name ?? `${result.recording.id}.mp4`, size: result.recording.size, createdAt: result.recording.createdAt ?? Date.now(), filePath: result.runtimeFilePath });
         importedFiles = [file];
@@ -573,8 +610,8 @@ export class E2BBrowserEngine {
       const nodes = normalizeMatches(result, url, Date.now());
       const next = await this.persistResult(userId, record, result, nodes, action);
       if (nodes.length) await rememberVaultBrowserNodes(userId, next.sandboxId, nodes, next.lastUrl);
-      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
-      Object.assign(safe, result.forms ? { forms: result.forms } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
+      const safe = { provider: "e2b", sandboxId: next.sandboxId, action, ...(result.observationId ? { observationId: result.observationId } : {}), ...(typeof result.pageGeneration === "number" ? { pageGeneration: result.pageGeneration } : {}), ...(result.accessibilityHash ? { accessibilityHash: result.accessibilityHash } : {}), ...(result.health ? { health: result.health } : {}), ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}), ...(result.events ? { events: result.events } : {}), ...(result.url ? { observedUrl: result.url, observationMethod: "playwright_page_url" } : {}), ...(result.title ? { title: redactBrowserText(result.title, 160) } : {}), ...(result.loadState ? { loadState: result.loadState } : {}), ...(nodes.length ? { matches: nodes } : {}), ...(result.formState ? { formState: result.formState } : {}), ...(result.actionVerification ? { actionVerification: result.actionVerification } : {}), ...(result.validationErrors ? { validationErrors: result.validationErrors } : {}), ...(typeof result.submitted === "boolean" ? { submitted: result.submitted } : {}), ...(result.workflowCheckpoint ? { workflowCheckpoint: result.workflowCheckpoint } : {}), ...(internal.ownerPrivateRun === true && typeof result.pageContent === "string" ? { pageContent: normalizeE2BPageContent(result.pageContent).text, pageContentTruncated: result.pageContentTruncated === true } : {}), ...(result.download ? { download: result.download } : {}), ...(result.pdf ? { pdf: { name: result.pdf.name, size: result.pdf.size, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(importedFiles.length ? { files: importedFiles.map((file) => ({ fileId: file.id, name: file.name, kind: file.kind, size: file.size, contentType: file.contentType, expiresAt: file.expiresAt })) } : {}), ...(result.recording ? { recording: { id: result.recording.id, name: result.recording.name, state: result.recording.state, size: result.recording.size, createdAt: result.recording.createdAt, ...(importedFiles[0] ? { fileId: importedFiles[0].id } : {}) } } : {}), ...(result.screenshot ? { __browserScreenshot: true, base64: result.screenshot, mediaType: "image/jpeg", sizeBytes: Math.floor(result.screenshot.length * 0.75), ...(typeof result.screenshotId === "string" ? { screenshotId: result.screenshotId } : {}), ...(typeof result.screenshotHash === "string" ? { screenshotHash: result.screenshotHash } : {}) } : {}) };
+      Object.assign(safe, result.forms ? { forms: result.forms } : {}, result.desktopAction ? { desktopAction: result.desktopAction } : {}, result.clipboard ? { clipboard: result.clipboard, ...(typeof result.text === "string" ? { text: result.text } : {}) } : {}, next.checkpoint ? { checkpoint: next.checkpoint } : {});
       const challenge = result.challenge && typeof result.challenge === "object" ? result.challenge : undefined;
       const safeWithChallenge = { ...safe, ...(result.needsUserInteraction ? { needsUserInteraction: true } : {}), ...(challenge ? { challenge } : {}), ...(Array.isArray(result.tabs) ? { tabs: result.tabs } : {}) };
       if (action === "state" || action === "snapshot" || action === "form_inspect" || action === "open" || action === "back" || action === "forward" || action === "refresh") {

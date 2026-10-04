@@ -8,6 +8,8 @@ export const E2B_BROWSER_ACTIONS = [
   "back", "forward", "refresh", "scroll", "upload_files", "upload", "downloads", "wait_download",
   "download_register", "download_get", "download_delete", "recording_start", "recording_stop",
   "recording_list", "recording_get", "recording_delete", "recording_download",
+  "desktop_click", "desktop_type", "desktop_press", "clipboard_read", "clipboard_write",
+  "dialog_list", "dialog_dismiss", "diagnostics", "events", "pdf", "pause", "resume", "fork",
 ] as const;
 
 export type E2BBrowserAction = typeof E2B_BROWSER_ACTIONS[number];
@@ -46,6 +48,8 @@ export type E2BBrowserRecord = {
   pageGeneration?: number;
   health?: Record<string, unknown>;
   checkpoint?: E2BBrowserCheckpoint;
+  paused?: boolean;
+  evidence?: Array<{ action: string; at: number; url?: string; title?: string; observationId?: string; screenshotHash?: string; verified?: boolean }>;
 };
 
 export type E2BBrowserFormControl = {
@@ -140,5 +144,9 @@ export type E2BCommandResult = {
   tabs?: Array<{ index: number; url: string; title: string; active: boolean }>;
   activeIndex?: number;
   error?: string;
+  diagnostics?: { console?: Array<Record<string, unknown>>; errors?: Array<Record<string, unknown>>; dialogs?: Array<Record<string, unknown>>; pages?: Array<Record<string, unknown>> };
+  events?: Array<Record<string, unknown>>;
+  pdf?: { filePath: string; name: string; size: number };
+  forks?: Array<{ sandboxId?: string; error?: string }>;
   [key: string]: unknown;
 };

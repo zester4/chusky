@@ -6,12 +6,31 @@ import { assertE2BBrowserHandoffAllowsAction, isTrustedBrowserUrlObservation, no
 import { shouldUseE2BBrowser } from "../src/nativeTools.js";
 import { chuckTools } from "../src/agentTools.js";
 import { pendingVaultInspectionOrigins } from "../src/vault/browserGuard.js";
+import { auxiliaryBrowserRequest } from "../src/lib/e2b/auxiliaryActions.js";
 
 test("the model schema and dispatcher expose exactly the supported E2B browser actions", () => {
   const schema = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER")?.function.parameters as { properties?: { action?: { enum?: string[] } } } | undefined;
   assert.deepEqual(schema?.properties?.action?.enum, [...E2B_BROWSER_ACTIONS]);
   for (const action of E2B_BROWSER_ACTIONS) assert.equal(shouldUseE2BBrowser(action, true, true), true, action);
   assert.equal(shouldUseE2BBrowser("not-an-action", true, true), false);
+});
+
+test("new E2B auxiliary actions forward bounded arguments and require fresh visual grounding", () => {
+  assert.deepEqual(auxiliaryBrowserRequest("desktop_click", {
+    x: 1440, y: 900, button: "right", double: true, screenshotHash: "a".repeat(32), visualFallback: true,
+  }), {
+    action: "desktop_click", x: 1440, y: 900, button: "right", double: true,
+    screenshotHash: "a".repeat(32), visualFallback: true,
+  });
+  assert.deepEqual(auxiliaryBrowserRequest("desktop_type", { text: "hello", delayMs: 500 }), { action: "desktop_type", text: "hello", delayMs: 250 });
+  assert.deepEqual(auxiliaryBrowserRequest("desktop_press", { key: "Escape" }), { action: "desktop_press", key: "Escape" });
+  assert.deepEqual(auxiliaryBrowserRequest("clipboard_write", { text: "copy" }), { action: "clipboard_write", text: "copy" });
+  assert.deepEqual(auxiliaryBrowserRequest("clipboard_read", {}), { action: "clipboard_read" });
+  assert.throws(() => auxiliaryBrowserRequest("desktop_click", { x: 1, y: 1 }), /fresh screenshotHash/);
+  assert.throws(() => auxiliaryBrowserRequest("desktop_click", {
+    x: 1441, y: 1, screenshotHash: "a".repeat(32), visualFallback: true,
+  }), /inside the 1440x900/);
+  assert.throws(() => auxiliaryBrowserRequest("clipboard_write", { text: "x".repeat(8_001) }), /at most 8000/);
 });
 
 test("form inspection is a structured, safe browser capability", () => {
@@ -109,4 +128,11 @@ test("E2B template and runtime contract include the bounded file and recording p
   assert.match(agent, /setInputFiles/);
   assert.match(agent, /ffmpeg/);
   assert.match(docker, /ffmpeg/);
+});
+
+test("E2B template exposes the advanced desktop, lifecycle, diagnostics, and PDF paths", () => {
+  const agent = readFileSync("e2b/browser-template/browser-agent.mjs", "utf8");
+  const client = readFileSync("e2b/browser-template/browser-client.mjs", "utf8");
+  for (const marker of ["desktop_click", "desktop_type", "clipboard_read", "diagnostics", "dialog_list", "Page.printToPDF", "CHUSKY_BROWSER_LOCALE", "permissions: [\"clipboard-read\", \"clipboard-write\"]"]) assert.match(agent, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), marker);
+  assert.match(client, /CHUSKY_E2B_RESPONSE_FILE/);
 });
