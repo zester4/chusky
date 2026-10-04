@@ -221,6 +221,9 @@ export const config = {
   // `full` preserves the legacy all-native-schema surface. `bundle` exposes
   // core tools plus keyword/Jev-matched bundles and progressive discovery.
   nativeToolLoading: oneOf("NATIVE_TOOL_LOADING", "full", ["full", "bundle"] as const),
+  // Compact conversational turns are opt-out so operators can immediately
+  // restore the full capability surface during rollout.
+  conversationalFastPath: oneOf("CONVERSATIONAL_FAST_PATH", "on", ["on", "off"] as const) === "on",
   jevNativeToolMaxCandidates: boundedInt("JEV_NATIVE_TOOL_MAX_CANDIDATES", 16, 4, 32),
   jevNativeToolMinConfidence: unitInterval("JEV_NATIVE_TOOL_MIN_CONFIDENCE", 0.6),
   jevNativeToolMinProbability: unitInterval("JEV_NATIVE_TOOL_MIN_PROBABILITY", 0.12),

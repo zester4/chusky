@@ -1,6 +1,6 @@
 import { logger } from "../logger.js";
 
-export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "native_tool";
+export type DecisionSurface = "skills" | "composio_toolkit" | "composio_action" | "treg_tool" | "treg_endpoint" | "autonomy" | "browser" | "native_tool" | "turn_mode";
 
 type SurfaceStats = { decisions: number; applied: number; fallbacks: number; agreements: number; comparisons: number; latencyMsTotal: number; costUsdTotal: number };
 
@@ -31,6 +31,7 @@ export function recordDecision(input: {
   baselineTools?: number;
   loading?: "full" | "bundle";
   noTool?: boolean;
+  noNativeTool?: boolean;
 }): void {
   const current = bucket(input.surface);
   current.decisions += 1;
@@ -63,7 +64,33 @@ export function recordDecision(input: {
     ...(input.baselineTools === undefined ? {} : { baselineTools: input.baselineTools }),
     ...(input.loading ? { loading: input.loading } : {}),
     ...(input.noTool === undefined ? {} : { noTool: input.noTool }),
+    ...(input.noNativeTool === undefined ? {} : { noNativeTool: input.noNativeTool }),
   }, "Jev routing decision");
+}
+
+export function recordTurnMode(input: {
+  mode: "conversational" | "action";
+  reason: string;
+  noNativeTool: boolean;
+  skillsRouted: boolean;
+  tregRouted: boolean;
+  composioRouted: boolean;
+  promptTokens?: number;
+  findToolsCalled?: boolean;
+  capabilityFailureReply?: boolean;
+}): void {
+  logger.info({
+    event: "turn.mode",
+    mode: input.mode,
+    reason: input.reason,
+    noNativeTool: input.noNativeTool,
+    skillsRouted: input.skillsRouted,
+    tregRouted: input.tregRouted,
+    composioRouted: input.composioRouted,
+    ...(input.promptTokens === undefined ? {} : { promptTokens: input.promptTokens }),
+    ...(input.findToolsCalled === undefined ? {} : { findToolsCalled: input.findToolsCalled }),
+    ...(input.capabilityFailureReply === undefined ? {} : { capabilityFailureReply: input.capabilityFailureReply }),
+  }, "Turn mode telemetry");
 }
 
 export function jevRoutingStats(): Record<string, SurfaceStats & { meanAgreement?: number; meanLatencyMs?: number }> {

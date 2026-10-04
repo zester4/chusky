@@ -246,7 +246,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
              ? "This is a post-wake continuation. The timer has already completed. Execute the saved active-step action now; do not narrate, repeat the pre-wait checkpoint, or call CHUCK_TASK_WAIT."
              : undefined;
            const instructions = [task.sdkInstructions, skillInstructions, wakeInstructions].filter(Boolean).join("\n\n").slice(0, 24000) || undefined;
-           return runAgent(task.userId, turnPrompt, agentHistory, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: missionWorkerToolAllowlist(task.missionAllowedTools, task.sdkTools?.allow), toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId, enqueueMissionTask });
+           return runAgent(task.userId, turnPrompt, agentHistory, task.sdkModel ?? session.model, undefined, budgetAbort.signal, undefined, task.approvedApprovalId, undefined, { toolAllow: missionWorkerToolAllowlist(task.missionAllowedTools, task.sdkTools?.allow), toolDeny: task.sdkTools?.deny, toolRequireApproval: task.sdkTools?.requireApproval, maxToolCalls: mission ? Math.min(task.sdkBudget?.maxToolCalls ?? mission.budget.maxToolCalls, Math.max(1, missionRemainingTools ?? 1)) : task.sdkBudget?.maxToolCalls, maxCost: mission ? Math.min(task.sdkBudget?.maxCost ?? mission.budget.maxCost, Math.max(0.0001, missionRemainingCost ?? 0.0001)) : task.sdkBudget?.maxCost, instructions, runId: task.sdkRunId, parentRunId: task.sdkThreadId, taskId: task.id, missionId: task.missionId, missionStepId: task.missionStepId, missionStepObjective: currentMissionStep?.objective, missionTimerResumed, missionWakeCheckpoint, missionWakeNextAction, ownerPrivateRun: task.sdkOwnerPrivateRun === true, organizationId: task.sdkOrganizationId, missionRoutingCache: task.attempt > 0 ? undefined : task.missionRoutingCache, enqueueMissionTask });
          }
   
         const followUp = task.meetingFollowUp;
@@ -352,6 +352,7 @@ export async function executeTaskSlice(task: TaskRecord, leaseSignal: AbortSigna
       }
       if (quotaReservationId) await releaseExecutionQuota(task.userId, quotaReservationId).catch((error) => logger.warn({ err: error, taskId: task.id }, "Execution quota reservation release failed"));
     }
+    if (result.missionRoutingCache && task.missionStepId) await updateTask(task.userId, task.id, { missionRoutingCache: result.missionRoutingCache });
     if (task.approvedApprovalId) await updateTask(task.userId, task.id, { approvedApprovalId: undefined });
     if (result.taskWait) {
       const postWakeNextAction = mission

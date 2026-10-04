@@ -66,7 +66,7 @@ import { runDueAutonomyWatches } from "./autonomy/reconciliation.js";
 import { planBusinessGapPlaybook } from "./autonomy/playbooks.js";
 import type { BusinessGap } from "./autonomy/gapDetectors.js";
 import { canonicalNativeToolSlug, validateNativeToolArguments } from "./agentTools.js";
-import { searchNativeToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
+import { searchComposioGatewayManifest, searchNativeToolManifest, type NativeToolBundle } from "./decisions/nativeToolRouter.js";
 import { externalArgumentsHash } from "./autonomy/actions.js";
 import { inspectToolRecovery, preflightToolCall, summarizeIntegrationHealth } from "./toolDiagnostics.js";
 import { isSharedChannelToolDenied } from "./sharedChannelPolicy.js";
@@ -1134,7 +1134,10 @@ export async function nativeTool(userId: number, slug: string, args: Record<stri
       const allowed = (runtime.availableToolCatalog ?? runtime.toolCatalog)
         ? new Set((runtime.availableToolCatalog ?? runtime.toolCatalog)!.map((tool: any) => String(tool?.function?.name ?? "").trim().toUpperCase()).filter(Boolean))
         : undefined;
-      return { tools: searchNativeToolManifest(text(args.query, 500), args.bundle as NativeToolBundle | undefined, args.maxResults === undefined ? 5 : Number(args.maxResults), allowed), next: "The returned tools can be called on the next agent round if they are exposed by this run." };
+      const query = text(args.query, 500);
+      const native = searchNativeToolManifest(query, args.bundle as NativeToolBundle | undefined, args.maxResults === undefined ? 5 : Number(args.maxResults), allowed);
+      const gateway = searchComposioGatewayManifest(query, allowed);
+      return { tools: [...native, ...gateway].slice(0, 10), next: "The returned tools can be called on the next agent round if they are exposed by this run." };
     }
     case "CHUCK_SEARCH_SKILLS": return searchSkills(text(args.query), args.limit === undefined ? 5 : Number(args.limit));
     case "CHUCK_TINYFISH_SEARCH": {
