@@ -2528,7 +2528,23 @@ export async function runAgent(
     logger.debug({ err: error, userId }, "Composio routing unavailable for this run");
     return undefined;
   });
-  const [skillRoute, tregRoute, routedAccounts, composioDecision] = await Promise.all([skillRoutePromise, tregRoutePromise, accountsPromise, composioRoutePromise]);
+  // Start native routing at the same time as the other Jev surfaces. It used
+  // to start only after these calls completed, reusing their already-expired
+  // deadline and turning a healthy native route into a timeout fallback.
+  const nativeToolRoutePromise = routeNativeToolsForTurn(availableTools, routingQuery, {
+    signal,
+    deadline: routingDeadline,
+    recentContext: routingRecentContext,
+    sessionId: durableRunId,
+    preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
+  });
+  const [skillRoute, tregRoute, routedAccounts, composioDecision, nativeToolRoute] = await Promise.all([
+    skillRoutePromise,
+    tregRoutePromise,
+    accountsPromise,
+    composioRoutePromise,
+    nativeToolRoutePromise,
+  ]);
   if (missionRoutingKey && !persistedMissionRouting && !reusableMissionRouting) {
     missionRoutingCache.set(missionRoutingKey, { at: Date.now(), skillRoute, tregRoute, routedAccounts, composioDecision });
     while (missionRoutingCache.size > 128) missionRoutingCache.delete(missionRoutingCache.keys().next().value as string);
@@ -2569,20 +2585,6 @@ export async function runAgent(
       composioRouteContext = `Cached connected-app route for this mission step: ${[...persistedMissionRouting.composioToolkits, ...persistedMissionRouting.composioActions].join(", ")}. Use the gateway and verify the exact schema before execution.`;
     }
   }
-  // Native schemas are routed after Composio's direct actions have been added
-  // so the model receives the right local tools plus any exact connected-app
-  // actions. The same deadline is reused; native routing can never add another
-  // full Jev budget to the turn.
-  const nativeToolRoute = await routeNativeToolsForTurn(availableTools, routingQuery, {
-    signal,
-    deadline: routingDeadline,
-    recentContext: routingRecentContext,
-    sessionId: durableRunId,
-    // Mission workers keep their lifecycle closure, but must still use bundle
-    // loading for the rest of the catalog. Explicit non-mission allowlists
-    // retain the exact historical full-surface behavior.
-    preserveAll: Boolean(options?.toolAllow?.length && !options?.taskId && !options?.missionId),
-  });
   const noToolTurn = Boolean(
     config.conversationalFastPath
     && clearlyConversational
@@ -2754,12 +2756,16 @@ export async function runAgent(
     }
     const revealed = availableTools.filter((tool) => revealedNativeTools.has(toolSchemaName(tool)));
     const composioGateway = new Set(["COMPOSIO_SEARCH_TOOL", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]);
+    const routedComposioNames = new Set((composioDecision?.directTools ?? []).map((tool) => toolName(tool)).filter(Boolean));
+    const routedComposioTools = routedComposioNames.size
+      ? availableTools.filter((tool) => routedComposioNames.has(toolSchemaName(tool)))
+      : [];
     const requiredWorkerTools = (options?.taskId || options?.missionId) && options.toolAllow?.length
       ? availableTools.filter((tool) => options.toolAllow!.includes(toolSchemaName(tool)))
       : [];
     const routedTools = (noToolTurn
       ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
-      : [...nativeToolRoute.tools, ...requiredWorkerTools, ...revealed])
+      : [...nativeToolRoute.tools, ...routedComposioTools, ...requiredWorkerTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
