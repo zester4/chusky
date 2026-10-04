@@ -206,10 +206,12 @@ test("mission creation and replanning reject supervisor-owned step tools at the 
     steps: [{ title: "Bad step", objective: "Attempt to widen authority", allowedTools: ["CHUCK_MISSION_COMPLETE"] }],
   }), /supervisor-owned allowed tool/i);
 
-  const mission = await createMission(userId, { title: "Replan fence", objective: "Reject invalid replans", definitionOfDone: "The original step remains", steps: [{ id: "only", title: "Only", objective: "Run" }] });
+  const mission = await createMission(userId, { title: "Replan fence", objective: "Reject invalid replans", definitionOfDone: "The original step remains", steps: [{ id: "only", title: "Only", objective: "Research current competitors" }] });
   await startMission(userId, mission.id);
-  await assert.rejects(() => replanMission(userId, mission.id, [{ id: "only", title: "Only", objective: "Run", allowedTools: ["CHUCK_TASK_WAIT"] }], "Invalid supervisor fence"), /supervisor-owned allowed tool/i);
-  assert.deepEqual((await getMission(userId, mission.id))?.steps[0]?.allowedTools, ["CHUCK_FIND_TOOLS"]);
+  await assert.rejects(() => replanMission(userId, mission.id, [{ id: "only", title: "Only", objective: "Research current competitors", allowedTools: ["CHUCK_TASK_WAIT"] }], "Invalid supervisor fence"), /supervisor-owned allowed tool/i);
+  const unchanged = (await getMission(userId, mission.id))?.steps[0];
+  assert.equal(unchanged?.allowedTools, undefined, "planner hints must not become executable step fences");
+  assert.deepEqual(unchanged?.toolHints, ["CHUCK_FIND_TOOLS", "CHUCK_TREG_SEARCH", "COMPOSIO_SEARCH_WEB", "COMPOSIO_SEARCH_FETCH_URL_CONTENT"]);
 });
 
 test("resuming an already-running mission repairs missing task scheduling without duplicating it", async () => {
