@@ -9,15 +9,17 @@ if (!connectionString) throw new Error("Set a direct migration URL (DURABLE_MEMO
 const parsedUrl = new URL(connectionString);
 if (parsedUrl.hostname.includes("-pooler")) throw new Error("Durable memory migrations require a direct, non-pooler Neon connection URL");
 const pool = new Pool({ connectionString, max: 1, connectionTimeoutMillis: 10_000 });
-readFile(join(process.cwd(), "migrations", "0007_durable_memory.sql"), "utf8")
-  .then((sql) => pool.query(sql))
+Promise.all([
+  readFile(join(process.cwd(), "migrations", "0007_durable_memory.sql"), "utf8"),
+  readFile(join(process.cwd(), "migrations", "0013_durable_memory_reflection.sql"), "utf8"),
+]).then(([base, reflection]) => pool.query(`${base}\n${reflection}`))
   .then(async () => {
     const expectedTables = [
       "chusky_memory_scopes", "chusky_memory_grants", "chusky_memory_sources",
       "chusky_memory_entities", "chusky_memory_items", "chusky_memory_edges",
-      "chusky_memory_profiles", "chusky_memory_outbox",
+      "chusky_memory_profiles", "chusky_memory_outbox", "chusky_memory_reflections",
     ];
-    const expectedIndexes = ["chusky_memory_items_one_active_key_idx", "chusky_memory_outbox_ready_idx"];
+    const expectedIndexes = ["chusky_memory_items_one_active_key_idx", "chusky_memory_outbox_ready_idx", "chusky_memory_reflections_ready_idx"];
     const [tables, indexes] = await Promise.all([
       pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name = ANY($1::text[])", [expectedTables]),
       pool.query("SELECT indexname FROM pg_indexes WHERE schemaname='public' AND indexname = ANY($1::text[])", [expectedIndexes]),

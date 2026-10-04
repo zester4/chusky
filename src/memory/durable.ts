@@ -29,6 +29,11 @@ function pool(): Pool {
   return existing;
 }
 
+/** Internal shared pool for the reflection worker; callers still enforce owner/scope checks. */
+export function poolForDurableMemory(): Pool {
+  return pool();
+}
+
 const hash = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 40);
 export const memoryScopeId = (kind: MemoryScopeKind, externalId: string): string => `scope_${hash(`${kind}:${externalId}`)}`;
 const bounded = (value: string, max: number) => value.trim().slice(0, max);

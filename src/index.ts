@@ -242,6 +242,7 @@ import { processSendblueEvent, processSendblueWorkflow } from "./sendblueWorkflo
 import { posthog } from "./posthog.js";
 import { recoverAllMissions } from "./missionRecovery.js";
 import { drainMemoryVectorOutbox } from "./memory/durable.js";
+import { drainMemoryReflectionQueue } from "./memory/reflection.js";
 
 async function main(): Promise<void> {
   await initStore();
@@ -249,6 +250,7 @@ async function main(): Promise<void> {
   let sdkWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let missionRecovery: ReturnType<typeof setInterval> | undefined;
   let memoryProjectionRecovery: ReturnType<typeof setInterval> | undefined;
+  let memoryReflectionRecovery: ReturnType<typeof setInterval> | undefined;
   let telegramWebhookRecovery: ReturnType<typeof setInterval> | undefined;
   let httpServer: ServerType | undefined;
   let shuttingDown = false;
@@ -263,6 +265,8 @@ async function main(): Promise<void> {
   if (config.durableMemoryEnabled) {
     memoryProjectionRecovery = setInterval(() => { void drainMemoryVectorOutbox(50).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryProjectionError" }, "Memory Vector projection sweep failed")); }, 60_000);
     if (typeof memoryProjectionRecovery === "object" && "unref" in memoryProjectionRecovery) memoryProjectionRecovery.unref();
+    memoryReflectionRecovery = setInterval(() => { void drainMemoryReflectionQueue(20).catch((error) => logger.warn({ errorType: error instanceof Error ? error.name : "MemoryReflectionError" }, "Memory reflection sweep failed")); }, 60_000);
+    if (typeof memoryReflectionRecovery === "object" && "unref" in memoryReflectionRecovery) memoryReflectionRecovery.unref();
   }
   // Webhook updates are dispatched in the background, so initialize grammY
   // before the HTTP server can accept one. Without this, handleUpdate throws

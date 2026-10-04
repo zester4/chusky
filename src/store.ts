@@ -17,6 +17,7 @@ import type { ChannelProvider, InboundMessage, ChannelTemplate } from "./channel
 import type { ApprovalPolicy, HandoffRecord, WorkerDuration } from "./subagents/contracts.js";
 import type { CapabilityWorkerName } from "./memory/types.js";
 import { durableMemoryConfigured, forgetDurableMemory, saveDurableMemory, saveMemoryEntity, searchDurableMemory } from "./memory/durable.js";
+import { queueConversationReflection } from "./memory/reflection.js";
 import { UpstashKnowledgeStore, vectorConfigured } from "./lib/knowledge/vector.js";
 import { deleteR2Object, inspectR2Object, putR2Object, r2Configured, readR2ObjectBounded, signR2Download } from "./lib/storage/r2.js";
 import { deleteDurableImageAsset, durableImageObjectId, isAuthorizedDurableImage, registerDurableImageAsset } from "./durableImageCatalog.js";
@@ -5924,6 +5925,10 @@ export async function appendRecallMeetingMessages(uid: number, id: string, messa
   meeting.history = [...meeting.history, ...bounded].slice(-20);
   meeting.updatedAt = Date.now();
   await backend.saveRecallMeeting(meeting);
+  if (durableMemoryConfigured()) {
+    const ownerText = bounded.filter((message) => message.role === "user").map((message) => message.content).join("\n").trim();
+    if (ownerText) void queueConversationReflection({ ownerUserId: uid, text: ownerText, sourceType: "meeting", sourceRef: id, scope: { kind: "meeting", externalId: id } }).catch(() => undefined);
+  }
   return meeting;
 }
 
@@ -6096,6 +6101,12 @@ export async function appendMessages(uid: number, msgs: Message[]): Promise<void
   const s = await getSession(uid);
   appendSessionHistory(s, msgs);
   await saveSession(uid, s);
+  // Reflection is best-effort and asynchronous: a database outage must never
+  // turn a successful chat turn into a failed response.
+  if (durableMemoryConfigured()) {
+    const ownerText = msgs.filter((message) => message.role === "user").map((message) => message.content).join("\n").trim();
+    if (ownerText) void queueConversationReflection({ ownerUserId: uid, text: ownerText, sourceType: /^\[(Voice call|Meeting)/i.test(ownerText) ? (/^\[Voice call/i.test(ownerText) ? "call" : "meeting") : "conversation", sourceRef: `turn:${createHash("sha256").update(ownerText).digest("hex").slice(0, 40)}` }).catch(() => undefined);
+  }
 }
 
 export async function addUsage(uid: number, cost: number): Promise<void> {
