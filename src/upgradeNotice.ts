@@ -138,9 +138,9 @@ export const AGENT_UPGRADE_PRESETS = {
     "Outcome verification supports bounded polling plus positive and negative URL, title, and text detectors; screenshot fallback exposes a fresh visual fingerprint and rejects stale coordinate clicks.",
   ],
   browserFrontier: [
-    "Added E2B browser primitives for fresh observation, bounded semantic action, schema-bounded extraction, ordered model-driven execution, desktop fallback, clipboard, dialogs, diagnostics, and PDF export.",
+    "Added E2B browser primitives for fresh observation, bounded semantic action, schema-bounded extraction, ordered model-driven execution with a per-step trace, desktop fallback, clipboard, dialogs, diagnostics, and PDF export.",
     "E2B now combines accessibility and form controls with bounded screenshot evidence, deterministic visual-target ranking, stale-observation recovery guidance, durable pause/resume, sandbox forks, and owner-scoped browser-session concurrency limits.",
-    "Added structured browser evidence and event traces for dynamic pages, popups, console errors, failed requests, and verified outcomes; business completion still requires explicit verification or a trusted site receipt.",
+    "The internal E2B runtime contract records structured browser evidence and event traces for dynamic pages, popups, console errors, failed requests, and verified outcomes; business completion still requires explicit verification or a trusted site receipt.",
   ],
   webBotAuth: [
     "Added an opt-in Cloudflare Web Bot Auth identity with a signed public-key directory and a separate RFC 9421 Ed25519 request-signing switch for Chusky's E2B browser.",
