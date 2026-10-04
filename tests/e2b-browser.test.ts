@@ -82,6 +82,10 @@ test("E2B browser configuration is opt-in and exposes the backend-neutral browse
   assert.match(envExample, /E2B_API_KEY=/);
   assert.match(envExample, /E2B_BROWSER_TEMPLATE=chusky-browser-playwright/);
   assert.match(envExample, /E2B_ALLOW_INTERNET=true/);
+  assert.match(envExample, /E2B_AUTO_PAUSE=true/);
+  assert.match(envExample, /E2B_BROWSER_LOCALE=en-GB/);
+  assert.match(envExample, /E2B_BROWSER_TIMEZONE=Europe\/London/);
+  assert.match(envExample, /E2B_BROWSER_GEOLOCATION=/);
   assert.ok(chuckTools.some((tool) => tool.function.name === "CHUCK_BROWSER"));
   const browserTool = chuckTools.find((tool) => tool.function.name === "CHUCK_BROWSER");
   assert.ok(browserTool);
