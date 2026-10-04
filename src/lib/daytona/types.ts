@@ -1,6 +1,6 @@
 export type DaytonaWorkspaceAction = "get" | "create" | "status" | "pause" | "archive" | "delete";
 
-export type DaytonaSandboxAction = "status" | "health" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle" | "wait_started" | "wait_stopped";
+export type DaytonaSandboxAction = "status" | "health" | "preflight" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle" | "wait_started" | "wait_stopped";
 
 export interface DaytonaWorkspaceInfo {
   id: string;
@@ -25,6 +25,16 @@ export interface DaytonaWorkspaceInfo {
     lsp: boolean;
     streamingFiles: boolean;
     volumes: boolean;
+  };
+  lifecycle?: {
+    sandboxClass?: string;
+    canPause: boolean;
+    canArchive: boolean;
+    supportsAutoStop: boolean;
+    supportsAutoPause: boolean;
+    supportsAutoArchive: boolean;
+    supportsAutoDelete: boolean;
+    supportsTtl: boolean;
   };
 }
 
@@ -96,6 +106,13 @@ export interface DaytonaScreenshotResult {
   mediaType: "image/png" | "image/jpeg";
   base64: string;
   sizeBytes?: number;
+}
+
+export interface DaytonaComputerLease {
+  leaseId: string;
+  sandboxId: string;
+  acquiredAt: number;
+  expiresAt: number;
 }
 
 export interface DaytonaPtyResult {

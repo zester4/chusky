@@ -1387,7 +1387,7 @@ reports `degraded` or `blocked`; local unit and integration tests do not overrid
 | `LINK_TEST_MODE` | Stripe Link | `false` | Ask Link for test-mode spend behavior when the account supports it |
 | `LINK_MAX_SPEND_CENTS` | Stripe Link | `50000` | Per-request ceiling in the currency minor unit |
 | `LINK_REQUEST_TIMEOUT_MS` | Stripe Link | `20000` | Link API/OAuth request timeout |
-| `DAYTONA_NETWORK_BLOCK_ALL` | — | `true` | Blocks outbound sandbox network by default; set false only deliberately |
+| `DAYTONA_NETWORK_BLOCK_ALL` | — | `false` | Allows outbound sandbox network by default for package installs and builds; set true deliberately for a blocked workspace |
 | `DAYTONA_DOMAIN_ALLOW_LIST` | — | — | Comma-separated domains for a restricted browser/network allowlist on new workspaces |
 | `DAYTONA_AUTO_PAUSE_INTERVAL` | — | `0` | Pause interval in minutes; use only with a pausable Daytona target such as `linux-vm` |
 | `MAX_TOOL_ROUNDS` | — | `70` | Max model/tool cycles per run (bounded to 1-100; durable tool-call and cost budgets still apply) |
