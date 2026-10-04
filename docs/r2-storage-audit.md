@@ -88,6 +88,30 @@ verified rollback path.
 
 ## Current status
 
+Explicitly retained Recall transcript segments now have an opt-in archival path
+on `codex/neon-durable-state`. Migration `0012_recall_transcript_archive_index.sql`
+adds an owner/meeting/object lookup index. The path uploads the existing
+AES-GCM ciphertext as immutable owner-scoped R2 objects, records only bounded
+metadata/checksum/expiry in Neon, verifies R2 read-back before marking an object
+available, merges cache and archive with size/count limits, and tombstones
+catalog rows before deletion. It is gated by
+`DURABLE_RECALL_TRANSCRIPT_ARCHIVE_ENABLED` (default `false`) and requires the
+durable-state catalog, R2, and a stable transcript encryption key. The additive
+`0012` migration was applied to the configured local migration database and
+the runtime URL's index was verified; the feature flag remains off. Focused
+tests cover idempotency, pending-write recovery, owner-scoped deletion, expiry,
+truncation, and checksum failure. A separate synthetic-only live canary is
+available as `npm run r2:live-smoke -- --apply --confirm-synthetic-r2-canary`.
+It requires durable Neon state, the object
+catalog, Redis, and R2 to be explicitly configured. It creates a generated
+high-range owner and unique object key, verifies object size/type and bounded
+checksum read-back, checks owner-scoped metadata and persisted expiry, then
+tombstones and deletes only that exact object. Unit tests cover successful
+cleanup, read-back failure, and metadata identity mismatch. The live canary has
+passed against the configured local R2/Neon/Redis services and confirmed
+cleanup. It does not verify deployed-service configuration or real-user data;
+there is still no scheduled cleanup/recovery worker.
+
 The metadata foundation and the first integrated path are implemented on the
 `codex/neon-durable-state` branch: migration `0008_neon_object_metadata.sql`
 adds the owner-scoped catalog, and the SDK file upload/complete/download/delete
@@ -109,10 +133,13 @@ so an expiry/orphan sweeper is required before broad rollout.
 
 This is not the R2 phase completion: the image integration is opt-in and does
 not backfill existing images; channel/Telegram document attachments and other
-asset flows do not all write the catalog. Encrypted transcript/run-trace
-archival, retention/orphan-cleanup workers, complete inventory/backfill
-tooling, production migration, and a live R2 canary remain outstanding. No
-lifecycle expiry rules are configured for user object prefixes.
+asset flows do not all write the catalog. Retained Recall transcript archival
+is now implemented and remains opt-in. Its synthetic live canary passed against
+the configured local R2/Neon/Redis services and confirmed cleanup; deployed
+service configuration and real-user archival remain unverified. Agent-run/tool-
+trace archival, retention/orphan-cleanup workers, complete inventory/backfill
+tooling, production rollout verification, and safe retry monitoring remain
+outstanding. No lifecycle expiry rules are configured for user object prefixes.
 
 The bounded `npm run r2:retention` utility now scans only Neon catalog rows
 whose explicit `retention_expires_at` is due. It is read-only by default. The
@@ -120,5 +147,5 @@ apply mode requires both `--apply` and `--confirm-expired-objects`, atomically
 rechecks the deadline while setting a Neon deletion tombstone, deletes only the
 cataloged owner-scoped R2 key, then confirms the tombstone. It does not list or
 delete bucket prefixes. This is an operator-run primitive, not an automated
-schedule; production inventory, retry monitoring, cron wiring, and a live
-synthetic canary remain outstanding.
+schedule; production inventory, retry monitoring, and cron wiring remain
+outstanding.

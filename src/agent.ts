@@ -98,6 +98,10 @@ const MAX_TOOL_RESULT_CHARS = 20_000;
 const MAX_IMAGE_TRANSFER_BYTES = 25 * 1024 * 1024;
 const MAX_BROWSER_FILE_TRANSFER_BYTES = 100 * 1024 * 1024;
 
+function likelyNeedsActionRouting(query: string): boolean {
+  return /\b(?:call|send|email|message|post|publish|create|make|build|generate|edit|upload|download|search|find|look up|research|check|review|open|visit|browse|click|fill|book|schedule|remind|remember|save|update|delete|cancel|run|execute|deploy|push|commit|meeting|calendar|invoice|order|buy|purchase|image|video|file|pdf|spreadsheet|presentation|code|github|slack|gmail|notion|crm|browser|website|company|person|seo|mission|task|accounts?)\b/i.test(query);
+}
+
 type MissionRoutingSnapshot = {
   at: number;
   skillRoute: Awaited<ReturnType<typeof routeSkillsForTurn>> | undefined;
@@ -2455,9 +2459,11 @@ export async function runAgent(
   // at most JEV_TURN_BUDGET_MS to the critical path. Jev only proposes
   // routes; every tool call still passes allowlists, account scope, and
   // approval policy.
-  const routingQuery = typeof userMessage === "string"
-    ? userMessage
-    : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
+  const routingQuery = imageRetryRequest || savedImageRetry
+    ? mediaActionRequestText
+    : typeof userMessage === "string"
+      ? userMessage
+      : userMessage.filter((part): part is Extract<ContentPart, { type: "text" }> => part.type === "text").map((part) => part.text).join(" ");
   const mediaRequest = isMediaGenerationRequest(routingQuery);
   const routingRecentContext = sharedScope ? undefined : history.slice(-4)
     .map((message) => `${message.role}: ${typeof message.content === "string" ? message.content.slice(0, 400) : ""}`)

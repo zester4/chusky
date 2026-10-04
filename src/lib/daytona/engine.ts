@@ -7,7 +7,7 @@ import JSZip from "jszip";
 import PptxGenJS from "pptxgenjs";
 import { config } from "../../config.js";
 import { guardVaultWorkspaceAccess } from "../../vault/browserGuard.js";
-import { clearDaytonaWorkspace, getDaytonaWorkspace, getSession, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
+import { acquireDaytonaComputerLeaseLock, clearDaytonaWorkspace, getDaytonaWorkspace, getSession, releaseDaytonaComputerLeaseLock, saveDaytonaWorkspace, saveSession, type ArtifactRecord, type ArtifactType, type DaytonaAppCheck, type DaytonaAppFramework, type DaytonaAppRecord, type DaytonaAppVerification } from "../../store.js";
 import { buildAppTemplateFiles, DAYTONA_APP_ARCHETYPES, DAYTONA_APP_STYLES, resolveAppDesign, type DaytonaAppArchetype, type DaytonaAppStyle } from "./appTemplates.js";
 import { DaytonaInputError } from "./errors.js";
 import { artifactVisualQaScript } from "./artifactQa.js";
@@ -15,7 +15,7 @@ import { artifactRendererImage } from "./renderer.js";
 import { getDaytonaClient } from "./client.js";
 import { CancellationError, throwIfAborted } from "../../cancellation.js";
 import { e2bBrowserEngine } from "../e2b/browser.js";
-import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, DaytonaCommandResult, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
+import type { DaytonaAppResult, DaytonaArtifactDelivery, DaytonaCodeResult, DaytonaCommandResult, DaytonaComputerLease, DaytonaFileInfo, DaytonaGitResult, DaytonaPreviewResult, DaytonaPtyResult, DaytonaSandboxMetrics, DaytonaSessionResult, DaytonaScreenshotResult, DaytonaSnapshotResult, DaytonaVolumeResult, DaytonaWorkspaceInfo } from "./types.js";
 
 const createPromises = new Map<number, Promise<Sandbox>>();
 const rendererDependencyInstallPromises = new Map<string, Promise<void>>();
@@ -139,6 +139,9 @@ export function safeDaytonaPath(value: unknown, label = "path"): string {
 }
 
 function workspaceInfo(sandbox: Sandbox): DaytonaWorkspaceInfo {
+  const sandboxClass = typeof sandbox.sandboxClass === "string" ? sandbox.sandboxClass : undefined;
+  const isVm = Boolean(sandboxClass && /(?:vm|windows)/i.test(sandboxClass));
+  const isContainer = Boolean(sandboxClass && /container|gpu/i.test(sandboxClass));
   return {
     id: sandbox.id,
     name: sandbox.name,
@@ -165,7 +168,26 @@ function workspaceInfo(sandbox: Sandbox): DaytonaWorkspaceInfo {
       // mounts when the provider accepted them.
       volumes: Array.isArray(sandbox.volumes),
     },
+    lifecycle: {
+      sandboxClass,
+      canPause: isVm || !sandboxClass,
+      canArchive: !isVm,
+      supportsAutoStop: isContainer || !sandboxClass,
+      supportsAutoPause: isVm || !sandboxClass,
+      supportsAutoArchive: !isVm,
+      supportsAutoDelete: true,
+      supportsTtl: true,
+    },
   };
+}
+
+function requireLifecycleCapability(sandbox: Sandbox, capability: "pause" | "archive" | "autoStop" | "autoPause" | "autoArchive"): void {
+  const sandboxClass = typeof sandbox.sandboxClass === "string" ? sandbox.sandboxClass : undefined;
+  if (!sandboxClass) return;
+  const isVm = /(?:vm|windows)/i.test(sandboxClass);
+  const isContainer = /container|gpu/i.test(sandboxClass);
+  const supported = capability === "pause" || capability === "autoPause" ? isVm : capability === "archive" || capability === "autoArchive" ? !isVm : isContainer;
+  if (!supported) throw new DaytonaInputError(`Daytona sandbox class '${sandboxClass}' does not support ${capability}; inspect sandbox health for supported lifecycle actions.`);
 }
 
 function workspaceRecord(sandbox: Sandbox) {
@@ -1704,7 +1726,7 @@ export class DaytonaEngine {
   }
 
   async sandbox(userId: number, args: Record<string, unknown>): Promise<unknown> {
-    const action = boundedText(args.action, "action", 30) as "status" | "health" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle" | "wait_started" | "wait_stopped";
+    const action = boundedText(args.action, "action", 30) as "status" | "health" | "preflight" | "metrics" | "paths" | "fork" | "start" | "stop" | "pause" | "resize" | "lifecycle" | "wait_started" | "wait_stopped";
     const sandbox = await this.getOwnedSandbox(userId, args.sandboxId, { ensureStarted: !["status", "metrics", "health"].includes(action) });
     const stored = await getDaytonaWorkspace(userId);
     if (action === "status" || action === "health") {
@@ -1714,6 +1736,20 @@ export class DaytonaEngine {
     }
     if (action === "metrics") return safeMetrics(sandbox.id, await sandbox.getMetricsLatest());
     if (action === "paths") return { sandboxId: sandbox.id, home: await sandbox.getUserHomeDir(), workDir: await sandbox.getWorkDir() };
+    if (action === "preflight") {
+      const checks = await sandbox.process.executeCommand(
+        "if command -v python3 >/dev/null 2>&1; then python3 -c \"import importlib.util,shutil,json; names=['reportlab','PIL','pptx','openpyxl']; bins=['Xvfb','xfce4-session','x11vnc','novnc_proxy','dbus-run-session','soffice','pdftoppm','pdftotext','unzip']; print(json.dumps({'python':{n:bool(importlib.util.find_spec(n)) for n in names},'binaries':{n:bool(shutil.which(n)) for n in bins}}))\"; else echo '{\"python\":{},\"binaries\":{}}'; fi",
+        undefined,
+        undefined,
+        30,
+      );
+      if (checks.exitCode !== 0) throw new DaytonaInputError(`Daytona capability preflight failed: ${String(checks.result ?? "unknown error").slice(-800)}`);
+      try {
+        return { sandboxId: sandbox.id, sandboxClass: sandbox.sandboxClass, capabilities: workspaceInfo(sandbox).capabilities, dependencies: JSON.parse(String(checks.result ?? "")) };
+      } catch {
+        throw new DaytonaInputError("Daytona capability preflight returned invalid JSON");
+      }
+    }
     if (action === "fork") {
       const name = args.name ? boundedIdentifier(args.name, "name", 80) : `chusky-${userId}-fork-${Date.now()}`;
       const child = await this.clientFactory().fork(sandbox, { name }, 120);
@@ -1728,7 +1764,7 @@ export class DaytonaEngine {
     }
     if (action === "start") { await sandbox.start(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
     if (action === "stop") { await sandbox.stop(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
-    if (action === "pause") { await sandbox.pause(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
+    if (action === "pause") { requireLifecycleCapability(sandbox, "pause"); await sandbox.pause(90); await sandbox.refreshData(); return workspaceInfo(sandbox); }
     if (action === "wait_started") { await sandbox.waitUntilStarted(boundedInt(args.timeoutSeconds, 90, 900)); await sandbox.refreshData(); return workspaceInfo(sandbox); }
     if (action === "wait_stopped") { await sandbox.waitUntilStopped(boundedInt(args.timeoutSeconds, 90, 900)); await sandbox.refreshData(); return workspaceInfo(sandbox); }
     if (action === "resize") {
@@ -1760,10 +1796,10 @@ export class DaytonaEngine {
         if (!Number.isInteger(value) || value < -1 || value > 525600) throw new DaytonaInputError(`${key} must be an integer from -1 to 525600 minutes`);
         return value;
       };
-      if (args.autoStopMinutes !== undefined) await sandbox.setAutostopInterval(interval("autoStopMinutes", 0));
-      if (args.autoPauseMinutes !== undefined) await sandbox.setAutoPauseInterval(interval("autoPauseMinutes", 0));
+      if (args.autoStopMinutes !== undefined) { requireLifecycleCapability(sandbox, "autoStop"); await sandbox.setAutostopInterval(interval("autoStopMinutes", 0)); }
+      if (args.autoPauseMinutes !== undefined) { requireLifecycleCapability(sandbox, "autoPause"); await sandbox.setAutoPauseInterval(interval("autoPauseMinutes", 0)); }
       if (args.ttlMinutes !== undefined) await sandbox.setTtl(interval("ttlMinutes", 0));
-      if (args.autoArchiveMinutes !== undefined) await sandbox.setAutoArchiveInterval(interval("autoArchiveMinutes", 0));
+      if (args.autoArchiveMinutes !== undefined) { requireLifecycleCapability(sandbox, "autoArchive"); await sandbox.setAutoArchiveInterval(interval("autoArchiveMinutes", 0)); }
       if (args.autoDeleteMinutes !== undefined) await sandbox.setAutoDeleteInterval(interval("autoDeleteMinutes", -1));
       await sandbox.refreshData();
       return workspaceInfo(sandbox);
@@ -1945,6 +1981,7 @@ export class DaytonaEngine {
     }
     if (action === "status") await sandbox.refreshData();
     if (action === "archive") {
+      requireLifecycleCapability(sandbox, "archive");
       await sandbox.stop(60);
       await sandbox.archive();
       await saveDaytonaWorkspace(userId, { ...(await getDaytonaWorkspace(userId))!, updatedAt: Date.now(), lastKnownState: "archived" });
@@ -2491,6 +2528,34 @@ export class DaytonaEngine {
     };
     const mutation = <T>(operation: () => Promise<T>, description: string, timeoutMs = DAYTONA_COMPUTER_MUTATION_TIMEOUT_MS): Promise<T> =>
       boundedPromise(operation(), timeoutMs, `Daytona ${description} timed out; retry after the desktop reconnects.`);
+    if (action === "lease_acquire") {
+      const current = await getDaytonaWorkspace(userId);
+      const now = Date.now();
+      if (current?.computerLease && current.computerLease.expiresAt > now && current.computerLease.leaseId !== String(args.leaseId ?? "")) {
+        throw new DaytonaInputError("Daytona desktop is leased by another active run; retry after it releases or expires.");
+      }
+      if (current?.computerLease && current.computerLease.expiresAt > now && current.computerLease.leaseId === String(args.leaseId ?? "")) {
+        return { leaseId: current.computerLease.leaseId, sandboxId: sandbox.id, acquiredAt: current.computerLease.acquiredAt, expiresAt: current.computerLease.expiresAt } satisfies DaytonaComputerLease;
+      }
+      const ttlSeconds = Math.min(Math.max(Number(args.ttlSeconds ?? 120), 30), 15 * 60);
+      const lease: DaytonaComputerLease = { leaseId: `desktop_${randomUUID()}`, sandboxId: sandbox.id, acquiredAt: now, expiresAt: now + ttlSeconds * 1000 };
+      if (!await acquireDaytonaComputerLeaseLock(userId, lease.leaseId, ttlSeconds)) throw new DaytonaInputError("Daytona desktop is leased by another active run; retry after it releases or expires.");
+      try {
+        if (current) await saveDaytonaWorkspace(userId, { ...current, computerLease: { ...lease, runId: args.runId ? boundedText(args.runId, "runId", 160) : undefined }, updatedAt: now });
+      } catch (error) {
+        await releaseDaytonaComputerLeaseLock(userId, lease.leaseId);
+        throw error;
+      }
+      return lease;
+    }
+    if (action === "lease_release") {
+      const leaseId = boundedText(args.leaseId, "leaseId", 200);
+      const current = await getDaytonaWorkspace(userId);
+      if (!current?.computerLease || current.computerLease.leaseId !== leaseId) throw new DaytonaInputError("Daytona desktop lease not found or not owned by this run.");
+      await releaseDaytonaComputerLeaseLock(userId, leaseId);
+      await saveDaytonaWorkspace(userId, { ...current, computerLease: undefined, updatedAt: Date.now() });
+      return { leaseId, released: true };
+    }
     if (action === "status") return readOnly(() => computer.getStatus());
     if (action === "stop") {
       const result = await mutation(() => computer.stop(), "desktop stop");
@@ -3080,6 +3145,23 @@ export class DaytonaEngine {
     const session = await getSession(userId);
     const artifacts = session.artifacts ?? [];
     if (action === "list") return artifacts.slice(-100).reverse();
+    if (action === "reconcile") {
+      const missing: string[] = [];
+      const retained: ArtifactRecord[] = [];
+      for (const artifact of artifacts) {
+        try {
+          const sandbox = await this.clientFactory().get(artifact.sandboxId);
+          const details = await sandbox.fs.getFileDetails(artifact.path) as { isDir?: boolean; size?: number };
+          if (details.isDir || Number(details.size ?? artifact.size) < 1) missing.push(artifact.id);
+          else retained.push(artifact);
+        } catch (error) {
+          if (isMissingDaytonaFile(error) || /not found|404|destroyed/i.test(String(error))) missing.push(artifact.id);
+          else throw error;
+        }
+      }
+      if (missing.length) { session.artifacts = retained; await saveSession(userId, session); }
+      return { checked: artifacts.length, retained: retained.length, removedMissing: missing };
+    }
     if (action === "download_url") {
       const id = boundedText(args.id, "id", 120);
       const existing = artifacts.find((item) => item.id === id);
@@ -3291,6 +3373,10 @@ export class DaytonaEngine {
     if (!stored) throw new DaytonaInputError("No Daytona workspace exists.");
     const sandbox = await this.clientFactory().get(stored.sandboxId);
     await sandbox.delete(60, true);
+    const forkIds = new Set((stored.forks ?? []).map((fork) => fork.id));
+    const session = await getSession(userId);
+    session.artifacts = (session.artifacts ?? []).filter((artifact) => artifact.sandboxId !== stored.sandboxId && !forkIds.has(artifact.sandboxId));
+    await saveSession(userId, session);
     await clearDaytonaWorkspace(userId);
     return { sandboxId: stored.sandboxId, deleted: true };
   }
@@ -3298,6 +3384,7 @@ export class DaytonaEngine {
   async pause(userId: number): Promise<{ paused: boolean; sandboxId: string }> {
     const sandbox = await this.getSandbox(userId);
     if (!sandbox) throw new DaytonaInputError("No Daytona workspace exists.");
+    requireLifecycleCapability(sandbox, "pause");
     await sandbox.pause(60);
     return { paused: true, sandboxId: sandbox.id };
   }

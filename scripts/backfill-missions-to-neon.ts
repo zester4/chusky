@@ -1,21 +1,14 @@
 import { closeStore, getMission, listMissionEvents, listMissionOwnerIds, listMissions, migrateMissionOwnerToNeon, initStore } from "../src/store.js";
+import { parseMissionBackfillCommand } from "../src/missionBackfillCommand.js";
 
 const args = process.argv.slice(2);
-const apply = args.includes("--apply");
-const confirmedQuiesced = args.includes("--confirm-quiesced");
-const ownerIndex = args.indexOf("--user-id");
-const ownerArg = ownerIndex >= 0 ? args[ownerIndex + 1] : undefined;
+const options = parseMissionBackfillCommand(args);
+const { apply, userId } = options;
 
-if (args.includes("--help")) {
+if (options.help) {
   console.log("Usage: npm run durable-missions:backfill [--user-id <numeric-owner>] [--apply --confirm-quiesced]");
-  console.log("Default mode is read-only. Apply requires all Chusky API, worker, and webhook processes to be stopped.");
+  console.log("Default mode is read-only. Apply requires one explicit owner and all Chusky API, worker, and webhook processes to be stopped.");
   process.exit(0);
-}
-if (ownerIndex >= 0 && (!ownerArg || !/^\d+$/.test(ownerArg) || !Number.isSafeInteger(Number(ownerArg)))) {
-  throw new Error("--user-id must be a non-negative safe integer.");
-}
-if (apply !== confirmedQuiesced) {
-  throw new Error("Migration writes require both --apply and --confirm-quiesced; omit both for a read-only dry run.");
 }
 if (process.env.DURABLE_STATE_ENABLED !== "true" || process.env.DURABLE_STATE_MISSIONS_ENABLED !== "true") {
   throw new Error("Set DURABLE_STATE_ENABLED=true and DURABLE_STATE_MISSIONS_ENABLED=true after migrations 0009 and 0010 are applied.");
@@ -25,8 +18,8 @@ async function main(): Promise<void> {
   await initStore();
   try {
     const allOwners = await listMissionOwnerIds();
-    const owners = ownerArg === undefined ? allOwners : allOwners.filter((ownerId) => ownerId === Number(ownerArg));
-    if (ownerArg !== undefined && !owners.length) throw new Error("The selected owner has no indexed mission records.");
+    const owners = userId === undefined ? allOwners : allOwners.filter((ownerId) => ownerId === userId);
+    if (userId !== undefined && !owners.length) throw new Error("The selected owner has no indexed mission records.");
 
     if (!apply) {
       let missions = 0;

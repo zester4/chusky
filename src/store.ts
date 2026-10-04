@@ -5,9 +5,11 @@
 import Redis from "ioredis";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { config } from "./config.js";
+import { withDistributedLease } from "./distributedLease.js";
 import { createNeonDurableState, durableSdkRunHash, type DurableConversationMessage, type DurableMissionEvent, type DurableMissionRecord, type DurableObjectMetadata, type DurableSessionDocument, type DurableSessionDomain, type DurableStateStatus, type NeonDurableState } from "./neonDurableState.js";
+import { archiveRecallTranscriptSegment, deleteRecallTranscriptArchive, getArchivedRecallTranscriptSegment, listArchivedRecallTranscriptSegments, recallTranscriptMeetingHash, updateRecallTranscriptArchiveExpiry as updateArchivedRecallExpiry, type RecallTranscriptArchiveDependencies } from "./recallTranscriptArchive.js";
 import { backfillMissionSnapshotToNeon } from "./missionBackfill.js";
-import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
+import { HOT_CONVERSATION_MESSAGES, joinSessionDomains, mergeDurableSessionDomain, sessionUsesNeonDomains, splitSessionDomains } from "./sessionDomains.js";
 import { normalizeVoiceCallProfile, type VoiceCallProfile } from "./calls/voiceProfile.js";
 import { logger } from "./logger.js";
 import { instrumentRedisClient, RedisCommandMetrics } from "./redisMetrics.js";
@@ -843,6 +845,7 @@ export interface DaytonaWorkspaceRecord {
   apps?: DaytonaAppRecord[];
   /** Safe browser evidence only; never persist page bodies, cookies, or credentials. */
   browser?: { lastUrl?: string; requestedUrl?: string; sessionId?: string; observedAt?: number; observationMethod?: "address_bar" | "requested_only"; updatedAt: number };
+  computerLease?: { leaseId: string; runId?: string; acquiredAt: number; expiresAt: number };
 }
 
 export type DaytonaAppFramework = "vite-react" | "nextjs";
@@ -1651,8 +1654,12 @@ interface Backend {
   getDurableStateHealth(): Promise<DurableStateStatus>;
   getDurableStorageMetrics(): Promise<Record<string, number>>;
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined>;
+  listRecallTranscriptObjects(userId: number, meetingHash: string, includeUnavailable: boolean): Promise<DurableObjectMetadata[]>;
+  updateRecallTranscriptObjectExpiry(userId: number, meetingHash: string, expiresAt: number): Promise<void>;
+  markRecallTranscriptArchiveTruncated(userId: number, meetingHash: string): Promise<void>;
   listExpiredObjectMetadata(nowMs: number, limit: number): Promise<DurableObjectMetadata[]>;
   createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata>;
+  markObjectAvailableAtKey(userId: number, objectId: string, objectKey: string, sizeBytes: number, sha256: string, encryptionVersion: string): Promise<boolean>;
   markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean>;
   markObjectDeleting(userId: number, objectId: string): Promise<boolean>;
   markExpiredObjectDeleting(userId: number, objectId: string, nowMs: number): Promise<boolean>;
@@ -2011,6 +2018,18 @@ class RedisBackend implements Backend {
   getObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
     return this.durableState?.getObjectMetadata(userId, objectId) ?? Promise.resolve(undefined);
   }
+  listRecallTranscriptObjects(userId: number, meetingHash: string, includeUnavailable: boolean): Promise<DurableObjectMetadata[]> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.listRecallTranscriptObjects(userId, meetingHash, includeUnavailable);
+  }
+  updateRecallTranscriptObjectExpiry(userId: number, meetingHash: string, expiresAt: number): Promise<void> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.updateRecallTranscriptObjectExpiry(userId, meetingHash, expiresAt);
+  }
+  markRecallTranscriptArchiveTruncated(userId: number, meetingHash: string): Promise<void> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markRecallTranscriptArchiveTruncated(userId, meetingHash);
+  }
   listExpiredObjectMetadata(nowMs: number, limit: number): Promise<DurableObjectMetadata[]> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
     return this.durableState.listExpiredObjectMetadata(nowMs, limit);
@@ -2018,6 +2037,10 @@ class RedisBackend implements Backend {
   createObjectMetadata(record: DurableObjectMetadata): Promise<DurableObjectMetadata> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
     return this.durableState.createObjectMetadata(record);
+  }
+  markObjectAvailableAtKey(userId: number, objectId: string, objectKey: string, sizeBytes: number, sha256: string, encryptionVersion: string): Promise<boolean> {
+    if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
+    return this.durableState.markObjectAvailableAtKey(userId, objectId, objectKey, sizeBytes, sha256, encryptionVersion);
   }
   markObjectAvailable(userId: number, objectId: string, expectedUploadKey: string, finalObjectKey: string, sizeBytes: number, sha256: string): Promise<boolean> {
     if (!this.durableState) throw new Error("Neon object catalog is unavailable.");
@@ -2153,8 +2176,14 @@ class RedisBackend implements Backend {
           const metadata = session as UserSession & DurableSessionMetadata;
           metadata.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
           metadata.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
+          metadata.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
           if (!hadProfileDomain) metadata.durableDomainHashes = { ...metadata.durableDomainHashes, profile: "profile-needs-backfill" };
           if (Array.isArray(conversation?.history) && conversation.history.length) metadata.durableDomainHashes = { ...metadata.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
+        }
+        if (this.durableState && userId !== 0 && !(session as UserSession & DurableSessionMetadata).durableDomainSnapshots) {
+          (session as UserSession & DurableSessionMetadata).durableDomainSnapshots = Object.fromEntries(
+            [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
+          ) as DurableSessionMetadata["durableDomainSnapshots"];
         }
         session.approvals = await this.listApprovals(userId, 20);
         return session;
@@ -2191,16 +2220,42 @@ class RedisBackend implements Backend {
         const session = joinSessionDomains(recovered, payloads) as UserSession & DurableSessionMetadata;
         session.durableDomainVersions = Object.fromEntries([...documents].flatMap(([domain, document]) => document.version > 0 ? [[domain, document.version]] : [])) as DurableSessionMetadata["durableDomainVersions"];
         session.durableDomainHashes = Object.fromEntries([...documents].map(([domain, document]) => [domain, durableDomainHash(payloads.get(domain))])) as DurableSessionMetadata["durableDomainHashes"];
+        session.durableDomainSnapshots = Object.fromEntries([...payloads].map(([domain, payload]) => [domain, structuredClone(payload)])) as DurableSessionMetadata["durableDomainSnapshots"];
         if (!hadProfileDomain) session.durableDomainHashes = { ...session.durableDomainHashes, profile: "profile-needs-backfill" };
         if (Array.isArray(conversation?.history) && conversation.history.length) session.durableDomainHashes = { ...session.durableDomainHashes, conversation: "legacy-history-needs-compaction" };
         session.approvals = await this.listApprovals(userId, 20);
         return session;
       }
     }
-    const session = fresh(); session.approvals = await this.listApprovals(userId, 20); return session;
+    const session = fresh();
+    if (this.durableState && userId !== 0) {
+      (session as UserSession & DurableSessionMetadata).durableDomainSnapshots = Object.fromEntries(
+        [...splitSessionDomains(session).domains].map(([domain, payload]) => [domain, structuredClone(payload)]),
+      ) as DurableSessionMetadata["durableDomainSnapshots"];
+    }
+    session.approvals = await this.listApprovals(userId, 20);
+    return session;
   }
 
   async saveSession(userId: number, s: UserSession): Promise<void> {
+    if (!this.durableState || userId === 0) return this.saveSessionUnlocked(userId, s);
+
+    // Session backfills and live writers must not interleave their Neon domain
+    // writes and Redis promotion. The Redis lease is owner-scoped so unrelated
+    // calls remain independent; bounded acquisition keeps overload visible.
+    const lockKey = `session-domain:${userId}`;
+    const lockToken = randomUUID();
+    return withDistributedLease({
+      acquire: async () => this.acquireKeyLock(lockKey, lockToken, 30),
+      renew: async () => this.renewKeyLock(lockKey, lockToken, 30),
+      release: async () => this.releaseKeyLock(lockKey, lockToken),
+    }, () => this.saveSessionUnlocked(userId, s), {
+      busyMessage: "Owner session is being migrated or saved concurrently; retry shortly.",
+      lostMessage: "Owner session write lost its coordination lease; verify the session before retrying.",
+    });
+  }
+
+  private async saveSessionUnlocked(userId: number, s: UserSession): Promise<void> {
     let persisted = s;
     if (this.durableState && userId !== 0) {
       const withMessageIds = { ...s, history: (s.history ?? []).map((message) => ({ ...message, id: message.id ?? (message.sourceId ? `msg_${createHash("sha256").update(message.sourceId).digest("hex").slice(0, 48)}` : `msg_${randomUUID()}`) })) } as UserSession & DurableSessionMetadata;
@@ -2214,9 +2269,10 @@ class RedisBackend implements Backend {
         return compacted ? [{ id: compacted.id!, role: compacted.role, content: compacted.content, createdAt: compacted.createdAt ?? Date.now(), ...(compacted.sourceId ? { sourceId: compacted.sourceId } : {}) }] : [];
       });
       if (pendingMessages.length) await this.durableState.appendConversationMessages(userId, pendingMessages);
-      const { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
+      let { core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled);
       const metadata = withMessageIds as UserSession & DurableSessionMetadata;
       const oldHashes = metadata.durableDomainHashes ?? {};
+      const oldSnapshots = metadata.durableDomainSnapshots;
       const changedDomains = new Map([...domains].filter(([domain, payload]) => oldHashes[domain] !== durableDomainHash(payload)));
       const expectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, metadata.durableDomainVersions?.[domain]] as const));
       (core as UserSession & DurableSessionMetadata).durableConversationHeadId = withMessageIds.history.at(-1)?.id;
@@ -2224,11 +2280,9 @@ class RedisBackend implements Backend {
       // the old Redis session remains canonical and can be retried safely.
       const changedSdkRuns = this.durableSdkRunsEnabled ? sdkRuns.filter(({ run }) => run.durablePayloadHash !== durableSdkRunHash(run)) : sdkRuns;
       // Telegram, web, SDK, audit, and proactive handlers can all save the
-      // same owner session concurrently. A stale optimistic version is a
-      // normal race, not a user-visible failure. Refresh the domain versions
-      // and retry a bounded number of times before surfacing a real database
-      // error. Conversation messages have already been appended idempotently
-      // above, so this retry only repairs the durable domain metadata.
+      // same owner session concurrently. On a version race, merge only edits
+      // that are independent relative to the caller's loaded snapshot. Never
+      // retry a stale payload against a refreshed version.
       let writtenVersions: Map<DurableSessionDomain, number>;
       let writeExpectedVersions = expectedVersions;
       let writeAttempts = 0;
@@ -2242,6 +2296,18 @@ class RedisBackend implements Backend {
           writeAttempts += 1;
           await new Promise((resolve) => setTimeout(resolve, Math.min(500, 10 * (2 ** (writeAttempts - 1)))));
           const latest = await this.durableState.readSessionDomains(userId);
+          const latestPayloads = new Map<DurableSessionDomain, unknown>([...domains].map(([domain, payload]) => [domain, latest.get(domain)?.payload ?? payload]));
+          for (const [domain, desired] of changedDomains) {
+            const current = latest.get(domain)?.payload;
+            if (current === undefined) throw new Error(`Durable session domain disappeared during a concurrent write: ${domain}.`);
+            if (!oldSnapshots || !Object.hasOwn(oldSnapshots, domain)) throw new Error(`Durable session domain cannot be safely merged without its loaded baseline: ${domain}.`);
+            const merged = mergeDurableSessionDomain(oldSnapshots?.[domain], current, desired, domain);
+            changedDomains.set(domain, merged);
+            latestPayloads.set(domain, merged);
+            domains.set(domain, merged);
+          }
+          Object.assign(withMessageIds, joinSessionDomains(core, latestPayloads));
+          ({ core, domains, sdkRuns } = splitSessionDomains(withMessageIds, this.durableSdkRunsEnabled));
           writeExpectedVersions = new Map([...changedDomains.keys()].map((domain) => [domain, latest.get(domain)?.version] as const));
         }
       }
@@ -2251,9 +2317,10 @@ class RedisBackend implements Backend {
       }
       const nextVersions = { ...(metadata.durableDomainVersions ?? {}), ...Object.fromEntries(writtenVersions) };
       const nextHashes = { ...oldHashes, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, durableDomainHash(payload)])) };
+      const nextSnapshots = { ...oldSnapshots, ...Object.fromEntries([...changedDomains].map(([domain, payload]) => [domain, structuredClone(payload)])) };
       const nextHeadId = withMessageIds.history.at(-1)?.id;
-      Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableConversationHeadId: nextHeadId });
-      Object.assign(s as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableConversationHeadId: nextHeadId });
+      Object.assign(core as UserSession & DurableSessionMetadata, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableConversationHeadId: nextHeadId });
+      Object.assign(s as UserSession & DurableSessionMetadata, withMessageIds, { durableDomainVersions: nextVersions, durableDomainHashes: nextHashes, durableDomainSnapshots: nextSnapshots, durableConversationHeadId: nextHeadId });
       await this.writeSessionDomainCache(userId, domains, nextVersions);
       persisted = core;
     }
@@ -3691,8 +3758,12 @@ class MemoryBackend implements Backend {
   async getDurableStateHealth(): Promise<DurableStateStatus> { return { enabled: false, reachable: false }; }
   async getDurableStorageMetrics(): Promise<Record<string, number>> { return { ...new RedisCommandMetrics().flatten(), redisSessionCommands: 0, redisSessionBytesRead: 0, redisSessionBytesWritten: 0, redisDomainCacheHits: 0, redisDomainCacheMisses: 0, redisDomainCacheHitRatio: 0, redisSessionCoreBytes: 0, redisDomainCacheBytes: 0 }; }
   async getObjectMetadata(_userId: number, _objectId: string): Promise<DurableObjectMetadata | undefined> { return undefined; }
+  async listRecallTranscriptObjects(_userId: number, _meetingHash: string, _includeUnavailable: boolean): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
+  async updateRecallTranscriptObjectExpiry(_userId: number, _meetingHash: string, _expiresAt: number): Promise<void> { throw new Error("Neon object catalog is unavailable."); }
+  async markRecallTranscriptArchiveTruncated(_userId: number, _meetingHash: string): Promise<void> { throw new Error("Neon object catalog is unavailable."); }
   async listExpiredObjectMetadata(_nowMs: number, _limit: number): Promise<DurableObjectMetadata[]> { throw new Error("Neon object catalog is unavailable."); }
   async createObjectMetadata(_record: DurableObjectMetadata): Promise<DurableObjectMetadata> { throw new Error("Neon object catalog is unavailable."); }
+  async markObjectAvailableAtKey(_userId: number, _objectId: string, _objectKey: string, _sizeBytes: number, _sha256: string, _encryptionVersion: string): Promise<boolean> { return false; }
   async markObjectAvailable(_userId: number, _objectId: string, _expectedUploadKey: string, _finalObjectKey: string, _sizeBytes: number, _sha256: string): Promise<boolean> { return false; }
   async markObjectDeleting(_userId: number, _objectId: string): Promise<boolean> { return false; }
   async markExpiredObjectDeleting(_userId: number, _objectId: string, _nowMs: number): Promise<boolean> { return false; }
@@ -4495,6 +4566,16 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableObjectCatalogEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_OBJECT_CATALOG_ENABLED=true.");
   }
+  if (config.durableRecallTranscriptArchiveEnabled && (!config.durableStateEnabled || !config.durableObjectCatalogEnabled)) {
+    throw new Error("DURABLE_STATE_ENABLED and DURABLE_OBJECT_CATALOG_ENABLED are required when DURABLE_RECALL_TRANSCRIPT_ARCHIVE_ENABLED=true.");
+  }
+  if (config.durableRecallTranscriptArchiveEnabled && !r2Configured()) {
+    throw new Error("R2 storage must be configured when DURABLE_RECALL_TRANSCRIPT_ARCHIVE_ENABLED=true.");
+  }
+  const transcriptEncryptionSecret = config.recallTranscriptEncryptionKey || config.recallMediaBridgeSecret;
+  if (config.durableRecallTranscriptArchiveEnabled && (!transcriptEncryptionSecret || Buffer.byteLength(transcriptEncryptionSecret, "utf8") < 32)) {
+    throw new Error("A stable Recall transcript encryption key of at least 32 bytes is required for R2 archival.");
+  }
   if (!options.memoryOnly && config.durableStateMissionsEnabled && !config.durableStateEnabled) {
     throw new Error("DURABLE_STATE_ENABLED=true is required when DURABLE_STATE_MISSIONS_ENABLED=true.");
   }
@@ -4507,6 +4588,7 @@ export async function initStore(options: { memoryOnly?: boolean } = {}): Promise
   if (!options.memoryOnly && config.durableStateEnabled) await durableState!.assertSessionSchema();
   if (!options.memoryOnly && config.durableStateSdkRunsEnabled) await durableState!.assertSdkRunSchema();
   if (!options.memoryOnly && config.durableObjectCatalogEnabled) await durableState!.assertObjectMetadataSchema();
+  if (!options.memoryOnly && config.durableRecallTranscriptArchiveEnabled) await durableState!.assertRecallTranscriptArchiveSchema();
   if (!options.memoryOnly && config.durableStateMissionsEnabled) await durableState!.assertMissionSchema();
   if (!options.memoryOnly && config.durableStorageMetricsEnabled) await durableState!.assertStorageMetricsSchema();
   if (config.redisUrl && !options.memoryOnly) {
@@ -4977,7 +5059,7 @@ export async function getSession(uid: number): Promise<UserSession> {
   return { ...fresh(), ...s, providerProofs: uid === 0 && Array.isArray(s.providerProofs) ? s.providerProofs.filter((item): item is ProviderProof => Boolean(item) && typeof item.surface === "string" && typeof item.correlationId === "string" && Number.isFinite(item.verifiedAt) && Number.isFinite(item.expiresAt)).slice(-100) : [], voicePreferences: normalizeLiveVoicePreferences(s.voicePreferences), triggerIds: s.triggerIds ?? [], reminders: s.reminders ?? [], jobs: s.jobs ?? [], autonomyRuns: Array.isArray(s.autonomyRuns) ? s.autonomyRuns.flatMap((item) => { const normalized = normalizeAutonomyRun(item, uid); return normalized ? [normalized] : []; }).slice(-200) : [], jobOccurrences: Array.isArray(s.jobOccurrences) ? s.jobOccurrences.flatMap((item) => { const normalized = normalizeJobOccurrence(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], externalActions: Array.isArray(s.externalActions) ? s.externalActions.flatMap((item) => { const normalized = normalizeExternalAction(item, uid); return normalized ? [normalized] : []; }).slice(-400) : [], reliabilitySamples: Array.isArray(s.reliabilitySamples) ? s.reliabilitySamples.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.operation === "string" && Number.isFinite(item.at) && ["success", "failure", "uncertain", "timeout"].includes(item.status)).slice(-2000) : [], outcomeVerifications: Array.isArray(s.outcomeVerifications) ? s.outcomeVerifications.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.status === "string").slice(-200) : [], compensations: Array.isArray(s.compensations) ? s.compensations.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.originalActionId === "string" && typeof item.objective === "string").slice(-500) : [], reliabilityTrace: Array.isArray(s.reliabilityTrace) ? s.reliabilityTrace.filter((item) => item && item.ownerId === uid && typeof item.id === "string" && typeof item.kind === "string" && typeof item.type === "string" && typeof item.summary === "string" && Number.isFinite(item.at)).slice(-5000) : [], scratchpad: s.scratchpad ?? {}, memories: (s.memories ?? []).map(normalizeMemory), imageAssets: s.imageAssets ?? [], summaries: s.summaries ?? [], approvals, handoffRecords: s.handoffRecords ?? [], sdkProjects: s.sdkProjects ?? [], sdkFiles: s.sdkFiles ?? [], artifacts: s.artifacts ?? [], phoneCalls, mcpConnections: Array.isArray(s.mcpConnections) ? s.mcpConnections.flatMap((item) => { const normalized = normalizeMcpConnectionRecord(item); return normalized ? [normalized] : []; }).slice(0, 50) : [], browserPlaybooks, browserAudit, browserHandoffs, meetingRooms: uid === 0 && Array.isArray(s.meetingRooms) ? s.meetingRooms.map(normalizeMeetingRoom).filter((item): item is MeetingRoomRecord => Boolean(item)).slice(0, 100) : [], meetingRepresentativeProfile: s.meetingRepresentativeProfile ? normalizeMeetingRepresentativeProfile(s.meetingRepresentativeProfile) : defaultMeetingRepresentativeProfile(), recallMeetings: Array.isArray(s.recallMeetings) ? s.recallMeetings.slice(0, 20).map((meeting) => ({ ...meeting, ...(typeof meeting.roomId === "string" && /^room_[A-Za-z0-9_-]{1,96}$/.test(meeting.roomId) ? { roomId: meeting.roomId } : { roomId: undefined }), ...(typeof meeting.organizationId === "string" && /^[A-Za-z0-9_-]{1,160}$/.test(meeting.organizationId) ? { organizationId: meeting.organizationId } : { organizationId: undefined }), ...(typeof meeting.teamId === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(meeting.teamId) ? { teamId: meeting.teamId } : { teamId: undefined }), ...(typeof meeting.projectId === "string" && /^proj_[A-Za-z0-9_-]{1,120}$/.test(meeting.projectId) ? { projectId: meeting.projectId } : { projectId: undefined }), ...(Array.isArray(meeting.roomAllowedComposioTools) ? { roomAllowedComposioTools: meeting.roomAllowedComposioTools.filter((tool): tool is string => typeof tool === "string").slice(0, 100) } : {}), ...(Array.isArray(meeting.roomAllowedNativeTools) ? { roomAllowedNativeTools: meeting.roomAllowedNativeTools.filter((tool): tool is string => typeof tool === "string").slice(0, 50) } : {}), visibility: meeting.visibility === "team" || meeting.visibility === "organization" ? meeting.visibility : undefined, interactionMode: meeting.interactionMode === "copilot" || meeting.interactionMode === "representative" ? meeting.interactionMode : "addressed" as const, visualContextEnabled: meeting.visualContextEnabled === true, transcriptRetentionDays: [1, 7, 30].includes(meeting.transcriptRetentionDays as number) ? meeting.transcriptRetentionDays as 1 | 7 | 30 : undefined, transcriptExpiresAt: Number.isSafeInteger(meeting.transcriptExpiresAt) && Number(meeting.transcriptExpiresAt) > 0 ? Number(meeting.transcriptExpiresAt) : undefined, transcriptStatus: ["processing", "ready", "failed"].includes(meeting.transcriptStatus as string) ? meeting.transcriptStatus as "processing" | "ready" | "failed" : undefined, transcriptErrorCode: typeof meeting.transcriptErrorCode === "string" && /^[A-Za-z0-9_-]{1,80}$/.test(meeting.transcriptErrorCode) ? meeting.transcriptErrorCode : undefined, mission: normalizeMeetingMission(meeting.mission), participantRoster: normalizeMeetingRoster(meeting.participantRoster), speakerEvents: ["ended", "failed"].includes(meeting.status) ? [] : normalizeRecallSpeakerEvents(meeting.speakerEvents), history: Array.isArray(meeting.history) ? meeting.history.slice(-20) : [] })) : [], calendarMeetingPreparations: Array.isArray(s.calendarMeetingPreparations) ? s.calendarMeetingPreparations.slice(0, 30).filter((item) => item && Number.isSafeInteger(item.userId) && item.userId === uid && /^cmp_[A-Za-z0-9_-]{1,96}$/.test(item.id) && typeof item.sourceTriggerEventId === "string").map((item) => ({ ...item, lifecycle: ["created", "updated", "sync", "starting_soon", "attendee_response", "cancelled"].includes(item.lifecycle) ? item.lifecycle : "sync" as const, status: ["prepared", "cancelled", "joined", "expired"].includes(item.status) ? item.status : "expired" as const, title: typeof item.title === "string" ? item.title.slice(0, 180) : undefined, startAt: typeof item.startAt === "string" ? item.startAt.slice(0, 180) : undefined, endAt: typeof item.endAt === "string" ? item.endAt.slice(0, 80) : undefined, participants: Array.isArray(item.participants) ? item.participants.filter((name): name is string => typeof name === "string").slice(0, 30).map((name) => name.slice(0, 160)) : [], sealedMeetingUrl: typeof item.sealedMeetingUrl === "string" && item.sealedMeetingUrl.length <= 4096 ? item.sealedMeetingUrl : undefined })) : [], videoJobs: s.videoJobs ?? [], shoppingRuns: Array.isArray(s.shoppingRuns) ? s.shoppingRuns.slice(0, 50) : [], sdkIdempotency: s.sdkIdempotency ?? {}, sdkAudit: s.sdkAudit ?? [], sdkWebhooks: s.sdkWebhooks ?? [], sdkThreads: (s.sdkThreads ?? []).map((thread) => ({ ...thread, history: thread.history ?? [], runs: (thread.runs ?? []).map((run) => ({ ...run, events: run.events ?? [] })) })) };
 }
 
-type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableConversationHeadId?: string };
+type DurableSessionMetadata = { durableDomainVersions?: Partial<Record<DurableSessionDomain, number>>; durableDomainHashes?: Partial<Record<DurableSessionDomain, string>>; durableDomainSnapshots?: Partial<Record<DurableSessionDomain, unknown>>; durableConversationHeadId?: string };
 
 function durableDomainHash(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -5045,6 +5127,38 @@ export async function durableStorageMetrics(): Promise<Record<string, number>> {
 export async function getDurableObjectMetadata(userId: number, objectId: string): Promise<DurableObjectMetadata | undefined> {
   if (!Number.isSafeInteger(userId) || userId <= 0) return undefined;
   return backend.getObjectMetadata(userId, objectId);
+}
+
+function recallTranscriptArchiveDependencies(): RecallTranscriptArchiveDependencies {
+  return {
+    getObjectMetadata: (userId, objectId) => backend.getObjectMetadata(userId, objectId),
+    listRecallTranscriptObjects: (userId, meetingHash, includeUnavailable) => backend.listRecallTranscriptObjects(userId, meetingHash, includeUnavailable),
+    createObjectMetadata: (record) => backend.createObjectMetadata(record),
+    markObjectAvailableAtKey: (userId, objectId, objectKey, sizeBytes, sha256, encryptionVersion) => backend.markObjectAvailableAtKey(userId, objectId, objectKey, sizeBytes, sha256, encryptionVersion),
+    updateRecallTranscriptObjectExpiry: (userId, meetingHash, expiresAt) => backend.updateRecallTranscriptObjectExpiry(userId, meetingHash, expiresAt),
+    markRecallTranscriptArchiveTruncated: (userId, meetingHash) => backend.markRecallTranscriptArchiveTruncated(userId, meetingHash),
+    markObjectDeleting: (userId, objectId) => backend.markObjectDeleting(userId, objectId),
+    markObjectDeleted: (userId, objectId) => backend.markObjectDeleted(userId, objectId),
+    putObject: putR2Object,
+    readObjectBounded: readR2ObjectBounded,
+    deleteObject: deleteR2Object,
+  };
+}
+
+async function archiveRetainedRecallTranscriptSegment(userId: number, meetingId: string, segment: StoredRecallTranscriptSegment, expiresAt: number | undefined): Promise<void> {
+  await archiveRecallTranscriptSegment(userId, meetingId, segment, expiresAt, recallTranscriptArchiveDependencies());
+}
+
+async function getArchivedRetainedRecallTranscriptSegment(userId: number, meetingId: string, segmentId: string): Promise<StoredRecallTranscriptSegment | undefined> {
+  return getArchivedRecallTranscriptSegment(userId, meetingId, segmentId, recallTranscriptArchiveDependencies());
+}
+
+async function deleteArchivedRecallTranscript(userId: number, meetingId: string): Promise<void> {
+  await deleteRecallTranscriptArchive(userId, meetingId, recallTranscriptArchiveDependencies());
+}
+
+async function updateArchivedRecallTranscriptExpiry(userId: number, meetingId: string, expiresAt: number): Promise<void> {
+  await updateArchivedRecallExpiry(userId, meetingId, expiresAt, recallTranscriptArchiveDependencies());
 }
 
 export async function listExpiredDurableObjectMetadata(nowMs: number, limit = 100): Promise<DurableObjectMetadata[]> {
@@ -5729,7 +5843,28 @@ export async function appendRecallTranscriptSegment(
     if (meeting.status !== "ended" || Date.now() - endedAt > 15 * 60_000) return "expired";
   }
   const ttlSeconds = recallTranscriptRetentionSeconds(meeting);
-  return backend.appendRecallTranscriptSegment(uid, id, sealRecallTranscriptSegment(uid, id, segment), ttlSeconds);
+  let encrypted = sealRecallTranscriptSegment(uid, id, segment);
+  if (config.durableRecallTranscriptArchiveEnabled && meeting.transcriptRetentionDays) {
+    const archived = await getArchivedRetainedRecallTranscriptSegment(uid, id, segment.id);
+    if (archived) {
+      const prior = openRecallTranscriptSegment(uid, id, archived);
+      if (!prior || prior.id !== segment.id || prior.startMs !== segment.startMs || prior.endMs !== segment.endMs || prior.text !== segment.text
+        || prior.speakerId !== segment.speakerId || prior.speakerName !== segment.speakerName) {
+        throw new Error("Recall transcript retry does not match its previously archived content.");
+      }
+      encrypted = archived;
+    }
+  }
+  const outcome = await backend.appendRecallTranscriptSegment(uid, id, encrypted, ttlSeconds);
+  if (config.durableRecallTranscriptArchiveEnabled && meeting.transcriptRetentionDays && outcome !== "full") {
+    const persisted = await backend.readRecallTranscript(uid, id);
+    const encrypted = persisted?.segments.find((candidate) => candidate.id === segment.id);
+    if (!encrypted) throw new Error("Recall transcript segment was accepted but its encrypted durable cache record could not be read back.");
+    await archiveRetainedRecallTranscriptSegment(uid, id, encrypted, meeting.transcriptExpiresAt ?? meeting.createdAt + RECALL_MEETING_TTL_SECONDS * 1000);
+  } else if (config.durableRecallTranscriptArchiveEnabled && meeting.transcriptRetentionDays && outcome === "full") {
+    await backend.markRecallTranscriptArchiveTruncated(uid, recallTranscriptMeetingHash(uid, id));
+  }
+  return outcome;
 }
 
 /** Read an owner-scoped transient transcript for end-of-meeting analysis. */
@@ -5737,13 +5872,29 @@ export async function readRecallTranscript(uid: number, id: string): Promise<Rec
   if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return undefined;
   const meeting = await getRecallMeeting(uid, id);
   if (!meeting || !meeting.providerBotId) return undefined;
+  if (meeting.transcriptRetentionDays && meeting.transcriptExpiresAt && meeting.transcriptExpiresAt <= Date.now()) return undefined;
   const stored = await backend.readRecallTranscript(uid, id);
-  if (!stored) return undefined;
-  const segments = stored.segments.flatMap((segment) => {
+  const archived = config.durableRecallTranscriptArchiveEnabled && meeting.transcriptRetentionDays
+    ? await listArchivedRecallTranscriptSegments(uid, id, recallTranscriptArchiveDependencies(), stored?.segments ?? [])
+    : undefined;
+  if (!stored && !archived) return undefined;
+  const encryptedById = new Map<string, StoredRecallTranscriptSegment>();
+  for (const candidate of [...(archived?.segments ?? []), ...(stored?.segments ?? [])]) {
+    const prior = encryptedById.get(candidate.id);
+    if (prior && (prior.startMs !== candidate.startMs || prior.sealed !== candidate.sealed)) {
+      throw new Error("Recall transcript cache and archive disagree for the same immutable segment.");
+    }
+    encryptedById.set(candidate.id, candidate);
+  }
+  const mergedBytes = [...encryptedById.values()].reduce((total, candidate) => total + Buffer.byteLength(JSON.stringify(candidate), "utf8"), 0);
+  if (encryptedById.size > RECALL_TRANSCRIPT_MAX_SEGMENTS || mergedBytes > RECALL_TRANSCRIPT_MAX_BYTES) {
+    throw new Error("Recall transcript cache and archive exceed the configured read bounds.");
+  }
+  const openedSegments = [...encryptedById.values()].flatMap((segment) => {
     const opened = openRecallTranscriptSegment(uid, id, segment);
     return opened ? [opened] : [];
   }).sort((a, b) => a.startMs - b.startMs || a.id.localeCompare(b.id));
-  return segments.length ? { segments, truncated: stored.truncated } : undefined;
+  return openedSegments.length ? { segments: openedSegments, truncated: Boolean(stored?.truncated || archived?.truncated) } : undefined;
 }
 
 /** Delete a transcript for the authenticated owner and disable further retention/search access. */
@@ -5751,6 +5902,7 @@ export async function deleteRecallMeetingTranscript(uid: number, id: string): Pr
   if (!Number.isSafeInteger(uid) || uid <= 0 || !/^mtg_[A-Za-z0-9_-]{1,80}$/.test(id)) return false;
   const meeting = await getRecallMeeting(uid, id);
   if (!meeting || meeting.status !== "ended" || !meeting.transcriptRetentionDays) return false;
+  if (config.durableRecallTranscriptArchiveEnabled) await deleteArchivedRecallTranscript(uid, id);
   await backend.deleteRecallTranscript(uid, id);
   await updateRecallMeeting(uid, id, { transcriptRetentionDays: undefined, transcriptExpiresAt: undefined });
   return true;
@@ -5856,7 +6008,9 @@ export async function updateRecallMeeting(uid: number, id: string, patch: Partia
   await backend.saveRecallMeeting(current);
   if (current.status === "ended" && current.transcriptRetentionDays && current.transcriptExpiresAt) {
     await backend.setRecallTranscriptTtl(uid, id, Math.max(1, Math.ceil((current.transcriptExpiresAt - Date.now()) / 1000)));
+    if (config.durableRecallTranscriptArchiveEnabled) await updateArchivedRecallTranscriptExpiry(uid, id, current.transcriptExpiresAt);
   } else if (current.status === "failed") {
+    if (config.durableRecallTranscriptArchiveEnabled) await deleteArchivedRecallTranscript(uid, id);
     await backend.deleteRecallTranscript(uid, id);
   }
   return current;
@@ -7829,6 +7983,14 @@ export async function renewUserLock(uid: number, token: string, leaseSeconds = 1
 
 export async function releaseUserLock(uid: number, token: string): Promise<void> {
   return backend.releaseLock(uid, token);
+}
+
+export async function acquireDaytonaComputerLeaseLock(uid: number, token: string, leaseSeconds: number): Promise<boolean> {
+  return backend.acquireKeyLock(`daytona-computer:${uid}`, token, leaseSeconds);
+}
+
+export async function releaseDaytonaComputerLeaseLock(uid: number, token: string): Promise<void> {
+  return backend.releaseKeyLock(`daytona-computer:${uid}`, token);
 }
 
 export async function acquireMcpCredentialRefreshLock(userId: number, serverId: string, token: string, leaseSeconds = 30): Promise<boolean> {

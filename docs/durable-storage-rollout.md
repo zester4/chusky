@@ -23,35 +23,46 @@ Updated: 2026-10-04
 
 | Requirement | Current evidence | Status |
 | --- | --- | --- |
-| Recoverable bounded session hybrid | Migrations 0004 and 0006 add owner-scoped append-only conversation messages and the curated profile domain. Redis keeps 20 recent messages plus a five-minute, 512 KiB-capped version-aware domain cache. Neon domain and SDK run writes use optimistic versions; unchanged domains/runs are skipped. | Local full test/typecheck/build checks passed. Live configured Neon+Redis smoke wrote/read all five domains and one per-run SDK row, deleted both cache keys and recovered history/profile/run from Neon, then cleaned its synthetic rows/keys. Metrics export and deployed real-user parity remain pending; keep cutover flags off. |
-| Backfill and retire legacy Redis session domains | Lazy migration occurs on session writes. `npm run durable-state:backfill` scans and reports aggregate dry-run counts only. Bulk apply is deliberately disabled: Neon write followed by Redis CAS is not atomic across stores and can race with a live session write. | Dry-run tooling only; safe bulk backfill protocol and production retirement pending. |
+| Recoverable bounded session hybrid | Migrations 0004 and 0006 add owner-scoped append-only conversation messages and the curated profile domain. Redis keeps 20 recent messages plus a five-minute, 512 KiB-capped version-aware domain cache. Neon domain and SDK run writes use optimistic versions; unchanged domains/runs are skipped. | Local Neon+Redis smoke recovered all five domains and one synthetic SDK run after cache-key deletion and cleaned up its test data. Railway production `/health` currently reports durable state enabled and reachable. This is health evidence, not a deployed write/read parity test. The base session switch is enabled; call-turn text appended to the normal owner conversation therefore uses this same durable conversation store. The voice bridge/audio service is separate and was not redeployed. |
+| Backfill and retire legacy Redis session domains | `npm run durable-state:backfill` defaults to aggregate dry-run counts. Apply is opt-in and bounded (`--apply --max-sessions=N`, 1-100). It acquires the same owner-scoped renewable Redis lease as durable session writers before reading a snapshot, writes all five domains in one Neon transaction, appends history idempotently, then atomically promotes the exact Redis snapshot while preserving its remaining TTL. A busy/lost lease fails closed; divergent pre-existing Neon state is not overwritten. | Local tests cover lease serialization/loss, promotion, interrupted-history repair, concurrent Redis change, divergent/partial Neon state, owner-zero rejection, and already-migrated sessions. This protects online batches when every serving instance uses the coordinated build; it does not establish production parity, verify all users, or retire Redis. Inactive sessions remain Redis-only until backfilled and can still expire under the existing TTL; preserve Redis and run only explicitly bounded batches with post-migration parity checks. |
 | Store SDK runs as per-run Neon rows | With `DURABLE_STATE_SDK_RUNS_ENABLED=true`, API, CLI, quota, and task-worker paths hydrate runs from owner/thread-scoped rows. Session writes transactionally import embedded legacy runs and store only thread metadata in the `sdk` domain. Migrations 0002, 0003, and 0005 are applied to the configured Neon database. The live smoke confirmed one run row, zero embedded run entries, cache-expiry recovery, and cleanup without logging payloads. | Local code against configured live Neon/Redis passed; deployed-service canary and real-user parity are not verified. The flag remains default-off. |
-| Store missions, steps, evidence, and event history in Neon | Migrations 0009-0010 define owner-scoped mission/event rows and per-owner cutover markers. The local runtime can route marked owners through version-CAS mission writes and transactional event inserts; unmarked owners stay on Redis. `npm run durable-missions:backfill` defaults to count-only read mode and only applies after `--apply --confirm-quiesced`; it verifies complete mission/event read-backs before writing the marker. | Focused backfill/repository tests and the full local suite pass. No production backfill or deployed verification was run. All writers and workers must be stopped before apply; Redis copies are preserved. Keep the mission flag enabled after cutover because disabling it after Neon writes would expose stale Redis data. Reminders, recurring jobs, and task definitions/results still need durable Neon ownership. |
+| Store missions, steps, evidence, and event history in Neon | Migrations 0009-0010 define owner-scoped mission/event rows and per-owner cutover markers. The local runtime can route marked owners through version-CAS mission writes and transactional event inserts; unmarked owners stay on Redis. `npm run durable-missions:backfill` defaults to count-only read mode. Apply requires `--user-id <numeric-owner> --apply --confirm-quiesced`, migrates one owner per invocation, and verifies complete mission/event read-backs before writing the marker. | Focused backfill/repository tests and the full local suite pass. No production backfill or deployed verification was run. All writers and workers must be stopped before apply; Redis copies are preserved. Keep the mission flag enabled after cutover because disabling it after Neon writes would expose stale Redis data. Reminders, recurring jobs, and task definitions/results still need durable Neon ownership. |
 | Measure Redis commands, bytes, key sizes, cache hit ratio, and Neon query latency | Added process-local Redis command instrumentation by bounded key family and a root-only `GET /v1/admin/storage/metrics` endpoint. With `DURABLE_STORAGE_METRICS_ENABLED=true`, aggregate family samples are transactionally persisted to Neon migration 0011 every 60 seconds and combined with live process counters by the endpoint. Shutdown and store reinitialization attempt a final flush. | The exporter is implemented but opt-in; production enablement and multi-replica observation are not verified. A hard process crash can lose up to one flush interval of in-memory samples. Byte and maximum-value figures are payload estimates (not RESP wire bytes or Redis `MEMORY USAGE`), and unclassified key families appear as `other`; compare estimates with provider billing and Redis-native measurements before using them for capacity decisions. |
-| Archive large transcripts, tool outputs, files, images, and videos to R2 | Migration 0008 and owner-scoped Neon metadata now back an opt-in SDK upload path: presigned uploads land in staging, bounded bytes are hashed and promoted to unique final keys, and Neon atomically records the winning key before download authorization. See the [R2 audit](r2-storage-audit.md). Other image/attachment flows, retained Recall transcripts, and agent run/tool traces are not fully catalogued or archived; encryption and retention/orphan workers are not implemented. | One guarded SDK file path is implemented locally; remaining consumers, backfill, cleanup, live migration, and production verification remain. |
-| Add retention and safe archival jobs | `npm run r2:retention` is a bounded operator-run cleanup primitive over explicitly expired Neon object-catalog rows. Dry-run is default; apply requires two explicit flags, rechecks expiry in the Neon tombstone update, and deletes only the cataloged owner-scoped R2 key. | Local unit/store coverage is being added. No automated schedule, production inventory, retry monitoring, R2 archival for retained transcripts/traces, or live canary yet. |
-| Full CI and production verification | Current Windows local run: 1,343 tests (1,339 pass, 0 fail, 4 skipped); typecheck, app build, SDK build, and 25 SDK tests pass. Configured Neon+Redis session smoke evidence is recorded above. | The exact hosted CI workflow still needs Ubuntu/Node 22 plus FFmpeg. Deployed-service verification remains outstanding; this retention runner was not applied to live objects or deployed. |
+| Archive large transcripts, tool outputs, files, images, and videos to R2 | Migration 0008 and owner-scoped Neon metadata back an opt-in SDK upload path. Migration 0012 adds the owner/meeting lookup index for explicitly retained Recall transcripts. Retained transcript segments archive existing encrypted bytes to immutable owner-scoped R2 objects, verify checksum/read-back before marking metadata available, and merge with the bounded Redis cache on read. See the [R2 audit](r2-storage-audit.md). Agent run/tool traces and several image/attachment flows are not fully catalogued or archived. | Focused archive/store tests and typecheck pass. Migration 0012 was applied to the configured local migration database and verified through the runtime URL. A synthetic live canary against the configured R2/Neon/Redis services passed and cleaned up its generated object and row; this does not verify the deployed service or real-user archival. The archive flag remains off. Automated retry/retention, complete inventory/backfill, and production feature verification remain outstanding. |
+| Add retention and safe archival jobs | `npm run r2:retention` is a bounded operator-run cleanup primitive over explicitly expired Neon object-catalog rows. Dry-run is default; apply requires two explicit flags, rechecks expiry in the Neon tombstone update, and deletes only the cataloged owner-scoped R2 key. `npm run r2:live-smoke` is a separate synthetic-only canary requiring two confirmation flags and both durable-storage feature flags; it verifies R2 HEAD and bounded checksum read-back, Neon owner denial and expiry metadata, then tombstones and removes only its generated object. | Unit tests cover successful canary cleanup, checksum-failure cleanup, and refusal to touch mismatched metadata. The synthetic live canary passed and confirmed cleanup. No automated retention schedule, production inventory, or retry monitoring exists. |
+| Full CI and production verification | Hosted CI run 37177213563 passed on `main` SHA `5208c7df2cd42cdc4db8726d78eed736e964ba5d`: typecheck, 1,375 tests (1,371 pass, 0 fail, 4 skipped), app build, SDK build, 25 SDK tests, and `git diff --check`. | Railway production reports `chusky` and the separate `chusky-voice` service online with one running replica each and no recent failures. The deployed base durable-state health check is enabled/reachable. No production synthetic read/write canary or populated-data parity verification was run; retention has not been applied to live catalog objects. |
 
 ## Operational safeguards
 
 - The live smoke uses an isolated synthetic high-range owner ID and removes only
   its own Neon rows and Redis session/domain-cache keys. It prints domain names/counts, never
   payloads, connection strings, or owner IDs.
-- The session-domain backfill remains dry-run only. Mission backfill is
+- Session-domain backfill now supports bounded opt-in apply using an
+  owner-scoped renewable Redis lease, Neon transaction, and exact-value Redis
+  CAS; all app instances must run the coordinated build before apply. Only
+  explicitly selected batches should be run.
+  Mission backfill is
   operator-gated and requires stopping every Chusky API, worker, and webhook
   process; its Redis key lock serializes migration processes but cannot stop
   application writers. It logs aggregate counts only, preserves Redis copies,
   and marks an owner only after count/digest and row/event read-back checks.
-- `DURABLE_STATE_ENABLED` must remain opt-in until the deployed service has the
-  correct database URL, successful health/read/write evidence, and a rollback
-  plan. A table's existence alone does not establish runtime use.
-- Railway production configuration lists `DURABLE_STATE_ENABLED`,
-  `DURABLE_STATE_DATABASE_URL`, and `DURABLE_STATE_MIGRATION_DATABASE_URL`,
-  but the connected Railway view withheld their values. The live `/health`
-  response was operational for Redis but did not contain durable-state health
-  fields, and the latest Chusky deployment was still building during inspection.
-  Therefore deployed Neon enablement/reachability and real-user writes are not
-  verified by this rollout.
+- Production currently has `DURABLE_STATE_ENABLED=true`; do not turn it off
+  after any Neon writes without a compatible rollback/reconciliation plan.
+  Keep the independent SDK-run, mission, metrics, object-catalog, and transcript
+  archive switches off until their own schema, parity, and recovery gates pass.
+  A table's existence or a health probe alone does not establish data parity.
+- Railway's connected view withholds variable values. On 2026-10-04, the live
+  `/health` endpoint reported `durableState.enabled=true` and
+  `durableState.reachable=true`; the production Chusky deployment was healthy.
+  `DURABLE_STATE_ENABLED=true` was explicitly written to the Chusky production
+  service with redeploys skipped, so the running deployment was not restarted.
+  Do not infer user-data parity or a verified write from this health response.
+- The Twilio voice bridge/audio service is a separate Railway service and was
+  not changed or redeployed. Voice-call text saved through the normal private
+  conversation history shares the base session durability path; this changes
+  its persistence destination, not the bridge/audio path. The optional Recall
+  transcript archive remains off, and meeting transcript retention behavior is
+  unchanged.
 
 ## 2026-10-04 local live verification
 
@@ -87,19 +98,27 @@ Using the configured local `.env` without printing connection values:
   missing-file protection.
 
 This is local-process verification against the configured Neon/Redis URLs, not
-proof that Railway's deployed process uses those same URLs or feature flags.
-There is still no live R2 object canary, and the zero-record mission/retention
-dry runs do not prove those paths against populated production data.
+proof of real-user data parity. Railway production separately reports durable
+state enabled/reachable, but that health signal is not a deployed read/write
+canary.
+The synthetic R2 canary ran successfully against the configured local
+R2/Neon/Redis services and cleaned up its generated object and metadata row.
+This does not prove that the deployed service uses the same configuration or
+that real-user archival works. The zero-record mission/retention dry runs do
+not prove those paths against populated production data. Hosted CI run
+37177213563 passed on the merged `main` SHA recorded above.
 
 ## Next implementation slices
 
-1. Run the exact CI command sequence on a recursive-submodule checkout in
-   Ubuntu/Node 22 (CI also installs FFmpeg).
+1. Open/update a pull request for the current feature tip to run the exact CI
+   command sequence on a recursive-submodule checkout in Ubuntu/Node 22 (CI
+   also installs FFmpeg).
 2. Verify the deployed Chusky service's Neon health and observe actual user
    session-domain writes by aggregate domain/count/timestamp only.
-3. Keep the guarded backfill in dry-run until stable reads/writes are observed;
-   then apply in bounded batches with post-migration parity checks and rollback
-   evidence before removing legacy payloads.
+3. Keep the session backfill in dry-run until stable reads/writes are observed;
+   then run small `--apply --max-sessions=N` batches with post-migration parity
+   checks and rollback evidence before removing legacy payloads. The script
+   preserves Redis copies and does not delete data.
 4. Complete the ordered durable-record cutover: observe stable session-domain
    writes; canary per-run SDK persistence and verify list/get/events/cancel/
    resume parity across SDK, CLI, and workers; then migrate mission owners only
@@ -109,7 +128,9 @@ dry runs do not prove those paths against populated production data.
    recurring jobs, and task definitions/results still need Neon ownership.
    Keep each domain opt-in until schema, backfill, parity, restart, and rollback
    checks pass.
-5. Follow [the R2 storage audit](r2-storage-audit.md): complete inventory and
+5. Run `npm run r2:live-smoke -- --apply --confirm-synthetic-r2-canary` only
+   with explicit durable Neon, object-catalog, Redis, and R2 configuration;
+   then follow [the R2 storage audit](r2-storage-audit.md): complete inventory and
    backfill for existing images/files, wire every attachment flow into the
    Neon catalog, then add encrypted R2 archival for retained transcript
    segments and eligible large run/tool payloads. Turn the guarded manual

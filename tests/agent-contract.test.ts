@@ -1590,7 +1590,7 @@ test("agent executes a safe tool and feeds its result into the next model round"
     toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: 7 })),
     chatResponse({ role: "assistant", content: "tool complete" }),
   ], async (slug, args) => { executed.push({ slug, args }); return { ok: true }; }, async () => {
-    const result = await runAgent(830002, "do it", [], "test/model");
+    const result = await runAgent(830002, "Execute the test action.", [], "test/model");
     assert.equal(result.text, "tool complete");
     assert.deepEqual(executed, [{ slug: "TEST_SAFE_TOOL", args: { value: 7 } }]);
     assert.deepEqual(result.toolsUsed, ["TEST_SAFE_TOOL"]);
@@ -1851,7 +1851,7 @@ test("a malformed tool call is discarded without consuming the next valid tool-c
     toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: "recovered" })),
     chatResponse({ role: "assistant", content: "recovered" }),
   ], async () => { executions++; return { ok: true }; }, async () => {
-    const result = await runAgent(830004, "recover", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
+    const result = await runAgent(830004, "Execute the test action to recover.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
     assert.equal(result.text, "recovered");
     assert.equal(executions, 1);
   });
@@ -1939,7 +1939,7 @@ test("schema-invalid Composio arguments are rejected before execution and correc
     toolResponse("TEST_SAFE_TOOL", JSON.stringify({ value: "  Café 🧪  " })),
     chatResponse({ role: "assistant", content: "The exact value was accepted and processed." }),
   ], async (_slug, args) => { executed.push(args); return { ok: true }; }, async () => {
-    const result = await runAgent(830016, "use the connected action", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
+    const result = await runAgent(830016, "Execute the connected test action.", [], "test/model", undefined, undefined, undefined, undefined, undefined, { maxToolCalls: 1 });
     assert.match(result.text, /exact value was accepted/);
   }, false, schema);
   assert.deepEqual(executed, [{ value: "  Café 🧪  " }]);
@@ -1968,7 +1968,7 @@ test("repeated provider tool-call IDs execute only once", async () => {
     toolResponse("TEST_SAFE_TOOL", '{"value":"one"}'),
     chatResponse({ role: "assistant", content: "done" }),
   ], async () => { executions++; return { ok: true }; }, async () => {
-    const result = await runAgent(830009, "repeat", [], "test/model");
+    const result = await runAgent(830009, "Execute the test action twice.", [], "test/model");
     assert.equal(result.text, "done");
     assert.equal(executions, 1);
   });

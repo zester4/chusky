@@ -27,6 +27,23 @@ test("Redis telemetry aggregates bounded command, transfer, latency, value, and 
   assert.equal(JSON.stringify(metrics.snapshot()).includes("private conversation text"), false);
 });
 
+test("Redis telemetry estimates object replies without retaining payloads and bounds traversal", () => {
+  const metrics = new RedisCommandMetrics();
+  const cyclic: Record<string, unknown> = { subject: "private subject", count: 42 };
+  cyclic.self = cyclic;
+  metrics.record({ name: "hgetall", args: ["chuck:memory:12345"] }, { result: cyclic });
+
+  const measured = metrics.snapshot().memory;
+  assert.equal(measured.commands, 1);
+  assert.equal(measured.responseBytes, Buffer.byteLength("subject", "utf8") + Buffer.byteLength("private subject", "utf8") + Buffer.byteLength("count", "utf8") + Buffer.byteLength("42", "utf8") + Buffer.byteLength("self", "utf8"));
+  assert.equal(measured.maxValueBytes, measured.responseBytes);
+  assert.equal(JSON.stringify(metrics.snapshot()).includes("private subject"), false);
+
+  const manyFields = Object.fromEntries(Array.from({ length: 12_000 }, (_, index) => [`field-${index}`, "x"]));
+  metrics.record({ name: "hgetall", args: ["chuck:memory:12345"] }, { result: manyFields });
+  assert.ok(metrics.snapshot().memory.responseBytes < 12_000 * Buffer.byteLength("field-11999x", "utf8"));
+});
+
 test("instrumentation observes commands without changing command outcomes", async () => {
   const metrics = new RedisCommandMetrics();
   const client = {
