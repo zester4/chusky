@@ -79,6 +79,7 @@ import { createComposioOutcomeReadAdapter } from "./reliability/composioReadAdap
 import { executeOutcomeVerification, type OutcomeReadAdapter } from "./reliability/outcomeEngine.js";
 import type { OutcomeCheck } from "./reliability/contracts.js";
 import { buildComposioBatchActions, collectComposioToolPresentations, composioToolkitSlugsNeedingMetadata, enrichComposioToolPresentationsFromToolkits, settleComposioBatchActions, successfulComposioBatchActions, type ComposioBatchAction, type ComposioToolPresentation } from "./toolActivity.js";
+import { MISSION_WORKER_CONTROL_TOOLS } from "./missionWorker.js";
 
 // ── Composio client singleton ─────────────────────────────────────────────────
 let composio: any = new Composio({ apiKey: config.composioApiKey });
@@ -2778,9 +2779,12 @@ export async function runAgent(
     const requiredWorkerTools = (options?.taskId || options?.missionId) && options.toolAllow?.length
       ? availableTools.filter((tool) => options.toolAllow!.includes(toolSchemaName(tool)))
       : [];
+    const missionControlTools = options?.missionId
+      ? availableTools.filter((tool) => MISSION_WORKER_CONTROL_TOOLS.includes(toolSchemaName(tool) as typeof MISSION_WORKER_CONTROL_TOOLS[number]))
+      : [];
     const routedTools = (noToolTurn
       ? availableTools.filter((tool) => toolSchemaName(tool) === "CHUCK_FIND_TOOLS" || composioGateway.has(toolSchemaName(tool)) || revealedNativeTools.has(toolSchemaName(tool)))
-      : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...revealed])
+      : [...nativeToolRoute.tools, ...preloadedMissionTools, ...routedComposioTools, ...requiredWorkerTools, ...missionControlTools, ...revealed])
       .filter((tool, index, all) => all.findIndex((candidate) => toolSchemaName(candidate) === toolSchemaName(tool)) === index);
     const imageSafeTools = roundMediaSelection
       ? routedTools.filter((tool) => toolSchemaName(tool) !== "COMPOSIO_MULTI_EXECUTE_TOOL")
