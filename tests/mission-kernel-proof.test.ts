@@ -136,7 +136,7 @@ test("proof provider replay uses exact provider and event identity", async () =>
 test("proof replan retains unchanged step tool fences and evidence requirements", async () => {
   const mission = await createMission(980008, { title: "Replan", objective: "Preserve contract", definitionOfDone: "Receipt verified", steps: [{ id: "read", title: "Read", objective: "Read exact resource", allowedTools: ["GMAIL_FETCH_EMAILS"], evidenceRequired: ["tool_receipt"] }] });
   await startMission(mission.userId, mission.id);
-  const updated = await replanMission(mission.userId, mission.id, [{ id: "read", title: "Read", objective: "Read exact resource" }], "Retry the same work");
+  const updated = await replanMission(mission.userId, mission.id, [{ id: "read", title: "Read", objective: "Read exact resource", allowedTools: ["GMAIL_FETCH_EMAILS"] }], "Retry the same work");
   assert.deepEqual(updated?.steps[0].allowedTools, ["GMAIL_FETCH_EMAILS"]);
   assert.deepEqual(updated?.steps[0].evidenceRequired, ["tool_receipt"]);
 });

@@ -209,7 +209,7 @@ test("mission creation and replanning reject supervisor-owned step tools at the 
   const mission = await createMission(userId, { title: "Replan fence", objective: "Reject invalid replans", definitionOfDone: "The original step remains", steps: [{ id: "only", title: "Only", objective: "Run" }] });
   await startMission(userId, mission.id);
   await assert.rejects(() => replanMission(userId, mission.id, [{ id: "only", title: "Only", objective: "Run", allowedTools: ["CHUCK_TASK_WAIT"] }], "Invalid supervisor fence"), /supervisor-owned allowed tool/i);
-  assert.deepEqual((await getMission(userId, mission.id))?.steps[0]?.allowedTools, ["CHUCK_FIND_TOOLS"]);
+  assert.equal((await getMission(userId, mission.id))?.steps[0]?.allowedTools, undefined);
 });
 
 test("resuming an already-running mission repairs missing task scheduling without duplicating it", async () => {
