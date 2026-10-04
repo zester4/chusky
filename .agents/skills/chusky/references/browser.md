@@ -120,8 +120,11 @@ confirms the outcome.
 The runtime contracts in `src/lib/browser-runtime/` are internal E2B execution
 contracts; they are not a second browser backend. E2B owns the retained
 Playwright process, screenshots, semantic actions, extraction, bounded runs,
-and session lifecycle. Session pooling is owner-scoped and refuses concurrency
-above the configured limit. The benchmark manifest in
+and session lifecycle. It also exposes bounded desktop-style mouse/keyboard
+fallback, clipboard, dialog reporting, console/request diagnostics, PDF export,
+pause/resume, and bounded sandbox forks. Desktop fallback and forking are
+disabled while a saved authenticated website identity is active. Session
+pooling is owner-scoped and refuses concurrency above the configured limit. The benchmark manifest in
 `benchmarks/browser-cases.ts` covers forms, custom controls, extraction, visual
 fallback, tabs, frames, handoffs, checkpoints, and redesign recovery; live E2B
 coverage remains a separate release gate.

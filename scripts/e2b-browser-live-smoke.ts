@@ -34,9 +34,10 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
 
     const requestBrowser = async (request: Record<string, unknown>) => {
+      const responseFile = `/tmp/chusky-browser-smoke-response-${randomUUID()}.json`;
       const result = await run("browser client", "node /app/browser-client.mjs", {
         cwd: "/app",
-        envs: { ...displayEnv, CHUSKY_E2B_REQUEST_B64: Buffer.from(JSON.stringify(request), "utf8").toString("base64url") },
+        envs: { ...displayEnv, CHUSKY_E2B_REQUEST_B64: Buffer.from(JSON.stringify(request), "utf8").toString("base64url"), CHUSKY_E2B_RESPONSE_FILE: responseFile },
         timeoutMs: 60_000,
         requestTimeoutMs: 120_000,
       });
@@ -44,7 +45,10 @@ async function main() {
         const diagnostics = await sandbox.commands.run("tail -100 /tmp/chusky-browser-agent.log 2>/dev/null || true").catch(() => ({ stdout: "" }));
         throw new Error([result.stderr, result.stdout, diagnostics.stdout].filter(Boolean).join("\n").slice(0, 4_000));
       }
-      const parsed = JSON.parse(result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || "{}") as Record<string, any>;
+      const wrapper = JSON.parse(result.stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || "{}") as Record<string, any>;
+      const responseText = typeof wrapper.responseFile === "string" ? Buffer.from(await sandbox.files.read(wrapper.responseFile, { format: "bytes" })).toString("utf8") : result.stdout;
+      if (typeof wrapper.responseFile === "string") await sandbox.commands.run(`rm -f ${wrapper.responseFile}`, { timeoutMs: 5_000 }).catch(() => undefined);
+      const parsed = JSON.parse(responseText.trim().split(/\r?\n/).filter(Boolean).at(-1) || "{}") as Record<string, any>;
       if (parsed.ok !== true) throw new Error(`Unexpected browser result: ${JSON.stringify(parsed).slice(0, 500)}`);
       return parsed;
     };

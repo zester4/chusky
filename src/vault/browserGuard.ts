@@ -60,6 +60,9 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
   const workspaceSessions = sessions.filter((session) => session.workspaceId === workspaceId);
   const activeSessions = workspaceSessions.filter((session) => session.status === "authenticated" && (!session.expiresAt || session.expiresAt > Date.now()));
   const active = activeSessions.length > 0;
+  if (active && ["fork", "desktop_click", "desktop_type", "desktop_press", "clipboard_read", "clipboard_write"].includes(action)) {
+    throw new Error("Desktop fallback, clipboard, and sandbox forking are disabled while a saved website identity is authenticated; use fresh semantic controls through the approved browser path.");
+  }
   const pendingSessions = workspaceSessions.filter((session) => session.status === "awaiting_user_interaction");
   if (!active) {
     if (pendingSessions.length) {
@@ -95,7 +98,7 @@ export async function guardVaultBrowserAction(userId: number, workspaceId: strin
     throw new Error("The current browser page is outside every active saved website origin. Open the intended authorised origin before continuing.");
   }
   if (["screenshot", "screenshot_region", "screenshot_region_full", "recording_start", "recording_stop", "recording_list", "recording_get", "recording_delete", "recording_download", "process_logs", "process_errors"].includes(action)) throw new Error("Screenshots, recordings, and raw desktop logs are disabled while a saved website identity is authenticated. Use the private browser handoff when a human must inspect the page.");
-  if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
+  if (["click", "type", "mouse_click", "mouse_move", "mouse_drag", "keyboard_type", "keyboard_hotkey", "desktop_click", "desktop_type", "desktop_press"].includes(action)) throw new Error("Coordinate and keyboard typing are disabled in an authenticated vault session. Find the accessible control first, then invoke or fill it with a declared vaultAction.");
   if (action === "accessibility_invoke") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "invoke" }, ownerPrivateRun, ownerApprovedAction);
   if (action === "accessibility_set_value") return guardVaultBrowserAction(userId, workspaceId, { ...args, action: "fill" }, ownerPrivateRun, ownerApprovedAction);
   if (!(["invoke", "fill", "press", "open"].includes(action))) return;

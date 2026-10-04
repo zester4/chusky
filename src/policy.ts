@@ -183,7 +183,7 @@ export function toolApprovalPolicy(slug: string, args: Record<string, unknown> =
     // claim into a generic approval card; risky controls must declare their
     // exact action and then pass the matching approval boundary.
     if (["checkout", "place_order", "purchase", "change_address", "add_payment_method", "download_sensitive"].includes(String(args.vaultAction ?? ""))) return "approval_required";
-    if (["upload", "upload_files", "download_delete", "recording_delete"].includes(String(args.action ?? ""))) return "approval_required";
+    if (["upload", "upload_files", "download_delete", "recording_delete", "clipboard_read", "clipboard_write"].includes(String(args.action ?? ""))) return "approval_required";
     return "private";
   }
   if (slug === "CHUCK_BROWSER_NEXT") return "private";
