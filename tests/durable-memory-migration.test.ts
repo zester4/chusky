@@ -20,3 +20,12 @@ test("durable memory migration command targets the numbered migration using a di
   assert.match(script, /hostname\.includes\("-pooler"\)/);
   assert.doesNotMatch(script, /durableMemoryDatabaseUrl\s*\|\|\s*config\.betterAuthDatabaseUrl/);
 });
+
+test("reflection migration is a reviewable staging queue, not an active fact table", async () => {
+  const sql = await readFile(new URL("../migrations/0013_durable_memory_reflection.sql", import.meta.url), "utf8");
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS chusky_memory_reflections/);
+  assert.match(sql, /status IN \('queued','processing','needs_review','accepted','rejected','consolidated','duplicate','failed'\)/);
+  assert.match(sql, /REFERENCES chusky_memory_sources/);
+  assert.match(sql, /UNIQUE \(owner_user_id, idempotency_key\)/);
+  assert.match(sql, /chusky_memory_reflections_review_idx/);
+});

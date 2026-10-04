@@ -64,12 +64,28 @@ The following capabilities were added:
   shared-channel briefs.
 - Periodic Vector outbox draining from the application runtime.
 
+### Automatic reflection and consolidation
+
+Migration `migrations/0013_durable_memory_reflection.sql` adds a separate,
+owner-scoped reflection queue. Completed owner-authored conversation turns are
+checked for a small set of explicit, explainable statements. Normal explicit
+statements can be consolidated through the canonical Neon writer with a source
+receipt and reflection ID in their metadata. Uncertain observations and
+sensitive candidates remain in `needs_review`; they are never silently written
+as active durable facts. Duplicate candidates are idempotently suppressed,
+and scope grants are checked before queueing and again before consolidation.
+
+The queue worker runs alongside the Vector outbox sweep. A future review UI or
+owner-facing tool can call the review operation to accept or reject staged
+candidates before they become durable memory.
+
 ## Verification completed
 
 - TypeScript typecheck passes.
 - Production build passes.
 - Focused memory, context, routing, and native-tool tests pass.
 - Migration filename references were updated to `0007_durable_memory.sql` after combining with the durable-session migrations.
+- Reflection candidate extraction and review gating tests pass.
 - No external memory provider was introduced.
 
 ## Production activation checklist
@@ -79,7 +95,9 @@ Still required before calling this fully production-complete:
 - Run the Neon migration in your environment.
 - Enable `DURABLE_MEMORY_ENABLED=true`.
 - Backfill existing Redis/session memories into Neon.
-- Build automatic reflection/consolidation from conversations and meetings.
+- Apply migration `0013_durable_memory_reflection.sql` (the migration command
+  now applies it after the durable-memory base schema).
+- Enable the reflection sweep with the durable-memory runtime.
 - Run production leakage, authorization, and retrieval evaluations.
 
 The core system is built, but production activation and historical migration
@@ -94,5 +112,6 @@ are still outstanding.
 4. Monitor Neon writes, Redis brief usage, Vector outbox latency, retrieval
    correctness, and authorization failures.
 5. Enable durable reads after the migration checks pass.
-6. Add reflection/consolidation workers and remove the legacy fallback only
-   after an observation period.
+6. Review staged uncertain/sensitive candidates and tune extraction against
+   real conversations; remove the legacy fallback only after an observation
+   period.
