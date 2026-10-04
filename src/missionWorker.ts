@@ -46,20 +46,31 @@ export const MISSION_WORKER_CONTROL_TOOLS = [
   "CHUCK_MISSION_CONTROL",
 ] as const;
 
-/** Persist a small capability fence when a planner did not provide exact tools. */
-export function deriveMissionAllowedTools(objective: string): string[] {
+/** Derive preload hints when a planner did not provide an exact tool fence. */
+export function deriveMissionToolHints(objective: string): string[] {
   const text = objective.toLowerCase();
-  const selected = new Set<string>(["CHUCK_FIND_TOOLS"]);
-  if (/email|gmail|outlook|slack|notion|calendar|github|crm|message|post|send|publish|app|connected/.test(text)) {
-    for (const tool of ["COMPOSIO_SEARCH_TOOL", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]) selected.add(tool);
+  const selected = new Set<string>();
+  if (/email|gmail|outlook|slack|notion|calendar|github|crm|stripe|invoice|ticket|message|post|send|publish|supplier|call|phone|app|connected/.test(text)) {
+    for (const tool of ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_EXECUTE_TOOL", "COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS"]) selected.add(tool);
   }
   if (/browser|website|web page|click|form|login/.test(text)) selected.add("CHUCK_BROWSER");
+  if (/build|code|develop|deploy|landing page|test suite|run tests|run the tests|repository|repo/.test(text)) {
+    selected.add("CHUCK_DAYTONA_EXECUTE");
+    selected.add("CHUCK_DAYTONA_WORKSPACE");
+  }
   if (/image|photo|logo|poster|flyer|illustration/.test(text)) selected.add("CHUCK_GENERATE_IMAGE");
   if (/video|clip|film|animation/.test(text)) selected.add("CHUCK_GENERATE_VIDEO");
-  if (/pdf|report|document|spreadsheet|presentation|slide/.test(text)) selected.add("CHUCK_CREATE_PDF");
+  if (/spreadsheet|workbook|excel/.test(text)) selected.add("CHUCK_CREATE_SPREADSHEET");
+  if (/presentation|powerpoint|slide|deck/.test(text)) selected.add("CHUCK_CREATE_PRESENTATION");
+  if (/document|docx/.test(text)) selected.add("CHUCK_CREATE_DOCUMENT");
+  if (/pdf|report/.test(text)) selected.add("CHUCK_CREATE_PDF");
   if (/memory|remember|profile|preference/.test(text)) selected.add("CHUCK_MEMORY_BRIEF");
-  if (/research|search|latest|current|company|person|seo/.test(text)) selected.add("CHUCK_TREG_SEARCH");
-  return [...selected];
+  if (/research|search|latest|current|competitor|company|person|seo/.test(text)) {
+    selected.add("CHUCK_TREG_SEARCH");
+    selected.add("COMPOSIO_SEARCH_WEB");
+    selected.add("COMPOSIO_SEARCH_FETCH_URL_CONTENT");
+  }
+  return selected.size ? ["CHUCK_FIND_TOOLS", ...selected] : [];
 }
 
 export function missionWorkerToolAllowlist(stepTools?: string[], inheritedTools?: string[]): string[] | undefined {
